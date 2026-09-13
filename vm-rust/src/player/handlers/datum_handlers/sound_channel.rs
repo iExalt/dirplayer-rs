@@ -290,7 +290,7 @@ impl SoundChannelDatumHandlers {
             Some(BuiltInSymbol::CurrentTime) => {
                 let ct = if channel.status == SoundStatus::Playing {
                     let elapsed = channel.audio_context.as_ref().map_or(0.0, |ctx| ctx.current_time()) - channel.playback_start_context_time;
-                    (channel.start_time + elapsed * 1000.0).min(channel.get_duration() as f64)
+                    channel.source_position_ms(elapsed).min(channel.get_duration() * 1000.0)
                 } else {
                     channel.elapsed_time
                 };
@@ -540,6 +540,7 @@ impl SoundChannelDatumHandlers {
             _ => member.clone(),
         };
         let channel = Self::get_sound_channel_mut(player, datum)?;
+        SoundChannel::entry_playback_rate(player, player.get_datum(&entry))?;
         channel.borrow_mut().queue(entry, player);
         Ok(())
     }
@@ -627,6 +628,7 @@ impl SoundChannelDatumHandlers {
 
         for (idx, segment_ref) in lingo_list.iter().enumerate() {
             let segment_datum = player.get_datum(segment_ref).clone();
+            SoundChannel::entry_playback_rate(player, &segment_datum)?;
 
             if let Datum::PropList(props, _) = segment_datum {
                 let mut member_value: Option<Datum> = None;
@@ -1135,6 +1137,9 @@ pub struct SoundChannel {
     pub sample_count: u32,
     pub channel_count: u16,
     pub elapsed_time: f64,
+    // note: Snapshot the current entry; queueing another entry must not retune it.
+    pub playback_rate: f32,
+    pub playback_member_name: String,
 
     // Fade state
     pub is_fading: bool,
@@ -1175,6 +1180,42 @@ pub struct SoundChannel {
 }
 
 impl SoundChannel {
+    fn rate_shift_to_playback_rate(semitones: f64) -> Result<f32, ScriptError> {
+        let rate = 2.0_f64.powf(semitones / 12.0) as f32;
+        if !semitones.is_finite() || !rate.is_finite() || rate <= 0.0 {
+            return Err(ScriptError::new("rateShift must produce a finite positive playback rate".into()));
+        }
+        Ok(rate)
+    }
+
+    fn entry_playback_rate(player: &DirPlayer, datum: &Datum) -> Result<f32, ScriptError> {
+        let shift = Self::get_proplist_prop(player, datum, Symbol::from_str("rateShift"));
+        let semitones = match shift {
+            None => 0.0,
+            Some(Datum::Int(n)) => n as f64,
+            Some(Datum::Float(n)) => n,
+            Some(_) => return Err(ScriptError::new("rateShift must be numeric".into())),
+        };
+        Self::rate_shift_to_playback_rate(semitones)
+    }
+
+    fn source_position_ms(&self, elapsed_seconds: f64) -> f64 {
+        self.start_time + elapsed_seconds.max(0.0) * 1000.0 * self.playback_rate as f64
+    }
+
+    fn report_playback_started(&self, buffer_duration: f64) {
+        // note: Emit after source.start succeeds; decodes and queue requests are not playback.
+        #[cfg(target_arch = "wasm32")]
+        crate::js_api::JsApi::dispatch_debug_message(&serde_json::json!({
+            "event": "sound-playback-started", "schema_version": 1,
+            "channel": self.channel_num + 1, "member": self.playback_member_name,
+            "playback_rate": self.playback_rate, "buffer_duration": buffer_duration,
+            "loop_count": self.loop_count,
+        }).to_string());
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = buffer_duration;
+    }
+
     fn audio_context(&self) -> &AudioContext {
         self.audio_context.as_ref().expect("AudioContext not available (non-wasm target?)")
     }
@@ -1427,6 +1468,8 @@ impl SoundChannel {
             sample_count: 0,
             channel_count: 0,
             elapsed_time: 0.0,
+            playback_rate: 1.0,
+            playback_member_name: String::new(),
             is_fading: false,
             stop_after_fade: false,
             fade_start_volume: 0.0,
@@ -1879,10 +1922,25 @@ impl SoundChannel {
 
         // Retrieve datum
         let datum = player.get_datum(&member_ref);
-        let member_name = match &datum {
+        let inner_member = Self::get_proplist_prop(player, datum, Symbol::builtin(BuiltInSymbol::Member));
+        let resolved_datum = inner_member.as_ref().unwrap_or(datum);
+        let member_name = match resolved_datum {
             Datum::CastMember(r) => player.movie.cast_manager.find_member_by_ref(r).map(|m| m.name.clone()).unwrap_or_default(),
-            _ => String::new(),
+            _ => resolved_datum.string_value().unwrap_or_default(),
         };
+        let playback_rate = match Self::entry_playback_rate(player, datum) {
+            Ok(rate) => rate,
+            Err(e) => {
+                self_rc.borrow_mut().status = SoundStatus::Idle;
+                error!("sound channel {}: invalid rateShift: {:?}", channel_num + 1, e);
+                return;
+            }
+        };
+        {
+            let mut ch = self_rc.borrow_mut();
+            ch.playback_rate = playback_rate;
+            ch.playback_member_name = member_name.clone();
+        }
 
         if let Some(sound_member) = Self::resolve_sound_member(player, &datum) {
             // Update expected sample rate
@@ -2087,6 +2145,7 @@ impl SoundChannel {
                     }
                 };
                 source.set_buffer(Some(&resampled_buffer));
+                source.playback_rate().set_value(ch.playback_rate);
                 source.set_loop(loop_count == 0); 
 
                 // Create gain node
@@ -2196,8 +2255,13 @@ impl SoundChannel {
                 let _ = source.add_event_listener_with_callback("ended", closure.as_ref().unchecked_ref());
                 closure.forget();
 
-                // Start playback (ONLY ONCE)
-                let _ = source.start();
+                // note: Report scheduling only after the browser accepts the source.
+                if let Err(err) = source.start() {
+                    self_rc_clone.borrow_mut().status = SoundStatus::Idle;
+                    error!("sound channel {}: source start failed: {:?}", channel_num + 1, err);
+                    return;
+                }
+                self_rc_clone.borrow().report_playback_started(resampled_buffer.duration());
 
                 debug!(
                         "✅ Channel {} started playback: {} samples @ {} Hz",
@@ -2211,8 +2275,10 @@ impl SoundChannel {
             let mut this = self_rc.borrow_mut();
             this.status = SoundStatus::Idle;
             error!(
-                "❌ start_sound failed - couldn't get sound member (datum type: {})",
-                datum.type_str()
+                "sound channel {}: cannot resolve sound member {} (member type: {}, entry type: {})",
+                channel_num + 1,
+                resolved_datum.string_value().unwrap_or_else(|_| "<unresolved>".into()),
+                resolved_datum.type_str(), datum.type_str()
             );
         }
     }
@@ -2452,6 +2518,7 @@ impl SoundChannel {
         let _ = gain.connect_with_audio_node(&ctx.destination());
 
         source.set_buffer(Some(&final_buffer));
+        source.playback_rate().set_value(self_rc.borrow().playback_rate);
 
         // CRITICAL: Check if decoding was cancelled before we start playback
         {
@@ -2574,6 +2641,7 @@ impl SoundChannel {
         // Store nodes in channel state AFTER starting (only once!)
         let (anchor_channel_num, anchor_ctx_time) = {
             let mut ch = self_rc.borrow_mut();
+            ch.report_playback_started(final_buffer.duration());
             ch.source_node = Some(Rc::new(source));
             ch.gain_node = Some(Rc::new(gain));
             ch.status = SoundStatus::Playing;
@@ -3788,9 +3856,9 @@ impl SoundChannel {
         if let Some(member) = self.sound_member.as_ref() {
             if self.next_cue_index < member.cue_point_times.len() {
                 let playhead_ms = if let Some(ctx) = self.audio_context.as_ref() {
-                    self.start_time + (ctx.current_time() - self.playback_start_context_time) * 1000.0
+                    self.source_position_ms(ctx.current_time() - self.playback_start_context_time)
                 } else {
-                    self.start_time + self.elapsed_time * 1000.0
+                    self.source_position_ms(self.elapsed_time)
                 };
                 while self.next_cue_index < member.cue_point_times.len()
                     && (member.cue_point_times[self.next_cue_index] as f64) <= playhead_ms
@@ -4333,8 +4401,8 @@ impl SoundChannel {
                 debug!("🎵 Found {} queued sounds", self.playlist_segments.len());
                 self.current_segment_index = Some(0);
 
-                // Try gapless replay from cached buffer first
-                if !self.replay_cached_buffer() {
+                // note: A new entry can change both the sound and rateShift.
+                {
                     let member_ref = self.playlist_segments[0].member_ref.clone();
                     let channel_num = self.channel_num;
                     crate::player::spawn_player_local(async move {
@@ -4415,9 +4483,8 @@ impl SoundChannel {
 
             debug!("⏭️ Playing next segment at index {}", index);
 
-            // Try gapless replay from cached buffer first
-            if !self.replay_cached_buffer() {
-                // Fall back to full decode path
+            // note: Resolve the new entry rather than replaying the previous buffer/rate.
+            {
                 let channel_num = self.channel_num;
                 crate::player::spawn_player_local(async move {
                     if let Some(player) = unsafe { crate::PLAYER_OPT.as_mut() } {
@@ -4456,6 +4523,7 @@ impl SoundChannel {
             Err(_) => return false,
         };
         source.set_buffer(Some(&*buffer));
+        source.playback_rate().set_value(self.playback_rate);
 
         let gain = match ctx.create_gain() {
             Ok(g) => g,
@@ -4475,7 +4543,10 @@ impl SoundChannel {
         let _ = source.add_event_listener_with_callback("ended", closure.as_ref().unchecked_ref());
         closure.forget();
 
-        let _ = source.start();
+        if source.start().is_err() {
+            return false;
+        }
+        self.report_playback_started(buffer.duration());
 
         self.source_node = Some(Rc::new(source));
         self.gain_node = Some(Rc::new(gain));
@@ -4641,5 +4712,29 @@ mod fade_tests {
         assert!((ch.fade_duration - 1.0).abs() < 1e-9);
         ch.fade_in(250, 1.0);
         assert!((ch.fade_duration - 0.25).abs() < 1e-9);
+    }
+}
+
+#[cfg(test)]
+mod rate_shift_tests {
+    use super::SoundChannel;
+
+    #[test]
+    fn rate_shift_is_in_semitones_and_rejects_invalid_rates() {
+        for (shift, expected) in [(0.0, 1.0), (12.0, 2.0), (-12.0, 0.5), (-2.0, 0.8908987)] {
+            assert!((SoundChannel::rate_shift_to_playback_rate(shift).unwrap() - expected).abs() < 1e-6);
+        }
+        for shift in [f64::NAN, f64::INFINITY, -f64::INFINITY, 1e10, -1e10] {
+            assert!(SoundChannel::rate_shift_to_playback_rate(shift).is_err());
+        }
+    }
+
+    #[test]
+    fn cue_clock_tracks_source_time_at_shifted_rate() {
+        let mut channel = SoundChannel::new(0, None);
+        channel.start_time = 250.0;
+        channel.playback_rate = 0.5;
+        assert_eq!(channel.source_position_ms(2.0), 1250.0);
+        assert_eq!(channel.source_position_ms(-1.0), 250.0);
     }
 }
