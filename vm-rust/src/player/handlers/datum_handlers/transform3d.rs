@@ -381,7 +381,7 @@ impl Transform3dDatumHandlers {
 
     fn identity(player: &mut DirPlayer, datum: &DatumRef) -> Result<DatumRef, ScriptError> {
         mark_transform_dirty(player, datum)?;
-        *player.get_datum_mut(datum) = Datum::transform3d(IDENTITY);
+        player.allocator.replace_transform3d(datum, IDENTITY)?;
         Ok(DatumRef::Void)
     }
 
@@ -401,7 +401,7 @@ impl Transform3dDatumHandlers {
             ];
     
             let result = if pre { mat4_mul(&t, &m) } else { mat4_mul(&m, &t) };
-            *player.get_datum_mut(datum) = Datum::transform3d(result);
+            player.allocator.replace_transform3d(datum, result)?;
             Ok(DatumRef::Void)
     }
     
@@ -441,7 +441,7 @@ impl Transform3dDatumHandlers {
                 }
             };
     
-            *player.get_datum_mut(datum) = Datum::transform3d(result);
+            player.allocator.replace_transform3d(datum, result)?;
             Ok(DatumRef::Void)
     }
     
@@ -461,7 +461,7 @@ impl Transform3dDatumHandlers {
             ];
     
             let result = if pre { mat4_mul(&s, &m) } else { mat4_mul(&m, &s) };
-            *player.get_datum_mut(datum) = Datum::transform3d(result);
+            player.allocator.replace_transform3d(datum, result)?;
             Ok(DatumRef::Void)
     }
     
@@ -483,7 +483,7 @@ impl Transform3dDatumHandlers {
                 _ => return Err(ScriptError::new("Expected Transform3d".into())),
             };
             let inv = mat4_invert_affine(&m);
-            *player.get_datum_mut(datum) = Datum::Transform3d(Box::new(inv));
+            player.allocator.replace_transform3d(datum, inv)?;
             Ok(DatumRef::Void)
     }
     
@@ -531,7 +531,7 @@ impl Transform3dDatumHandlers {
         let (m, (target, t)) = mark_after_prepare(player, datum, prepared)?;
             // interpolateTo modifies transform1 in place (Director 11.5).
             let result = interpolate_transform(&m, &target, t);
-            *player.get_datum_mut(datum) = Datum::Transform3d(Box::new(result));
+            player.allocator.replace_transform3d(datum, result)?;
             Ok(DatumRef::Void)
     }
     

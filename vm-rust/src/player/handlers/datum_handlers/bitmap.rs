@@ -5,11 +5,16 @@ use fxhash::FxHashMap;
 use crate::{
     director::lingo::datum::{Datum, datum_bool},
     player::{
-        ColorRef, DatumRef, DirPlayer, ScriptError, ScriptErrorCode, bitmap::{
+        ColorRef, DatumRef, DirPlayer, ScriptError, ScriptErrorCode,
+        bitmap::{
             bitmap::{Bitmap, BuiltInPalette, PaletteRef, resolve_color_ref},
-            manager::BitmapRef,
+            manager::{BitmapHandle, BitmapId},
             mask::BitmapMask,
-        }, geometry::IntRect, handlers::types::TypeUtils, player_duplicate_datum, symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable}
+        },
+        geometry::IntRect,
+        handlers::types::TypeUtils,
+        player_duplicate_datum,
+        symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable},
     },
 };
 
@@ -38,15 +43,14 @@ fn checked_bitmap_ref(
     player: &DirPlayer,
     datum_ref: &DatumRef,
     symbols: &SymbolTable,
-) -> Result<BitmapRef, ScriptError> {
-    let bitmap_ref = *checked_datum(player, datum_ref, symbols)?.to_bitmap_ref()?;
-    if player.bitmap_manager.get_bitmap(bitmap_ref).is_none() {
-        return Err(ScriptError::new_code(
+) -> Result<BitmapId, ScriptError> {
+    let bitmap_ref = checked_datum(player, datum_ref, symbols)?.to_bitmap_ref()?;
+    player.bitmap_manager.local_id(bitmap_ref).ok_or_else(|| {
+        ScriptError::new_code(
             ScriptErrorCode::InvalidReference,
             "Invalid bitmap reference".to_string(),
-        ));
-    }
-    Ok(bitmap_ref)
+        )
+    })
 }
 
 impl BitmapDatumHandlers {
@@ -68,7 +72,7 @@ impl BitmapDatumHandlers {
         ) {
             with_bitmap_context(player, |player| {
                 if let Datum::BitmapRef(bref) = checked_datum(player, datum, symbols)? {
-                    if player.stage_image == Some(*bref) {
+                    if player.bitmap_manager.local_id(bref) == player.stage_image {
                         player.stage_image_dirty = true;
                     }
                 }
@@ -345,7 +349,8 @@ impl BitmapDatumHandlers {
             // Ephemeral: `bitmap.duplicate(rect)` produces a fresh bitmap not
             // owned by any cast member. Free when the wrapping DatumRef drops.
             let new_bitmap_ref = player.bitmap_manager.add_ephemeral_bitmap(cropped_bitmap);
-            Ok(player.alloc_datum(Datum::BitmapRef(new_bitmap_ref)))
+            let handle = player.bitmap_handle_for_id(new_bitmap_ref)?;
+            Ok(player.alloc_datum(Datum::BitmapRef(handle)))
         })
     }
 
@@ -396,7 +401,8 @@ impl BitmapDatumHandlers {
             // Ephemeral: `bitmap.extractAlpha()` returns a fresh derived bitmap
             // not owned by a cast member. Free when the wrapping DatumRef drops.
             let new_ref = player.bitmap_manager.add_ephemeral_bitmap(alpha_bitmap);
-            Ok(player.alloc_datum(Datum::BitmapRef(new_ref)))
+            let handle = player.bitmap_handle_for_id(new_ref)?;
+            Ok(player.alloc_datum(Datum::BitmapRef(handle)))
         })
     }
 
@@ -448,8 +454,10 @@ impl BitmapDatumHandlers {
                     // Set alpha from an 8-bit grayscale image
                     let alpha_bitmap = player
                         .bitmap_manager
-                        .get_bitmap(*alpha_bitmap_ref)
-                        .ok_or_else(|| ScriptError::new("Invalid alpha bitmap reference".to_string()))?;
+                        .get_bitmap_handle(alpha_bitmap_ref)
+                        .ok_or_else(|| {
+                            ScriptError::new("Invalid alpha bitmap reference".to_string())
+                        })?;
 
                     // Alpha image must be 8-bit
                     if alpha_bitmap.bit_depth != 8 {
@@ -767,10 +775,15 @@ impl BitmapDatumHandlers {
         })
     }
 
-    pub fn fill(player: &mut DirPlayer, symbols: &mut SymbolTable, datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn fill(
+        player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
         with_bitmap_context(player, |player| {
             // Check the receiver before looking at the argument list, as the
-            // original handler did, while postponing BitmapRef conversion
+            // original handler did, while postponing BitmapId conversion
             // until after the argument forms have been parsed.
             let receiver = checked_datum(player, datum, symbols)?;
             if args.is_empty() {
@@ -891,13 +904,13 @@ impl BitmapDatumHandlers {
             let rect_i32 = (x1, y1, x2, y2);
             let bitmap_ref = match receiver {
                 Datum::BitmapRef(bitmap_ref) => {
-                    if player.bitmap_manager.get_bitmap(*bitmap_ref).is_none() {
+                    let Some(bitmap_id) = player.bitmap_manager.local_id(bitmap_ref) else {
                         return Err(ScriptError::new_code(
                             ScriptErrorCode::InvalidReference,
                             "Invalid bitmap reference".to_string(),
                         ));
-                    }
-                    *bitmap_ref
+                    };
+                    bitmap_id
                 }
                 _ => return Err(ScriptError::new("Cannot fill non-bitmap".to_string())),
             };
@@ -935,22 +948,32 @@ impl BitmapDatumHandlers {
             {
                 return Ok(datum.clone());
             } else {
-                let bitmap_ref = *src_bitmap_ref.to_bitmap_ref()?;
-                if player.bitmap_manager.get_bitmap(bitmap_ref).is_none() {
+                let bitmap_ref = src_bitmap_ref.to_bitmap_ref()?;
+                let bitmap_id = player.bitmap_manager.local_id(bitmap_ref).ok_or_else(|| {
+                    ScriptError::new_code(
+                        ScriptErrorCode::InvalidReference,
+                        "Invalid bitmap reference".to_string(),
+                    )
+                })?;
+                if player.bitmap_manager.get_bitmap(bitmap_id).is_none() {
                     return Err(ScriptError::new_code(
                         ScriptErrorCode::InvalidReference,
                         "Invalid bitmap reference".to_string(),
                     ));
                 }
-                bitmap_ref
+                bitmap_id
             };
             let dest_rect_or_quad = checked_datum(player, &args[1], symbols)?;
-            let (src_rect_vals, _flags) = checked_datum(player, &args[2], symbols)?.to_rect_inline()?;
+            let (src_rect_vals, _flags) =
+                checked_datum(player, &args[2], symbols)?.to_rect_inline()?;
             let sx1 = src_rect_vals[0] as i32;
             let sy1 = src_rect_vals[1] as i32;
             let sx2 = src_rect_vals[2] as i32;
             let sy2 = src_rect_vals[3] as i32;
-            let param_list = args.get(3).map(|x| checked_datum(player, x, symbols)).transpose()?;
+            let param_list = args
+                .get(3)
+                .map(|x| checked_datum(player, x, symbols))
+                .transpose()?;
             let mut param_list_concrete = HashMap::new();
             if let Some(param_list) = param_list {
                 if let Datum::PropList(param_list, ..) = param_list {
@@ -962,16 +985,18 @@ impl BitmapDatumHandlers {
                 }
             }
 
-            // Pre-convert BitmapRef maskImage to BitmapMask
+            // Pre-convert BitmapId maskImage to BitmapMask
             // Director's #maskImage param accepts a bitmap where white=transparent, black=opaque
             if let Some(Datum::BitmapRef(mask_ref)) = param_list_concrete.get("maskImage") {
-                let mask_ref = *mask_ref;
-                let mask_bitmap = player.bitmap_manager.get_bitmap(mask_ref).ok_or_else(|| {
-                    ScriptError::new_code(
-                        ScriptErrorCode::InvalidReference,
-                        "Invalid mask bitmap reference".to_string(),
-                    )
-                })?;
+                let mask_bitmap = player
+                    .bitmap_manager
+                    .get_bitmap_handle(mask_ref)
+                    .ok_or_else(|| {
+                        ScriptError::new_code(
+                            ScriptErrorCode::InvalidReference,
+                            "Invalid mask bitmap reference".to_string(),
+                        )
+                    })?;
                 let palettes = player.movie.cast_manager.palettes();
                 let w = mask_bitmap.width;
                 let h = mask_bitmap.height;
@@ -1263,12 +1288,12 @@ impl BitmapDatumHandlers {
     pub fn set_bitmap_ref_prop(
         player: &mut DirPlayer,
         symbols: &mut SymbolTable,
-        bitmap_ref: BitmapRef,
+        bitmap_ref: &BitmapHandle,
         prop: Symbol,
         value: &DatumRef,
     ) -> Result<(), ScriptError> {
         symbols.display(&prop).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
-        if player.bitmap_manager.get_bitmap(bitmap_ref).is_none() {
+        if player.bitmap_manager.get_bitmap_handle(bitmap_ref).is_none() {
             return Err(ScriptError::new_code(ScriptErrorCode::InvalidReference, "Invalid bitmap reference".to_string()));
         }
         let value = checked_datum(player, value, symbols)?;
@@ -1278,19 +1303,19 @@ impl BitmapDatumHandlers {
                     let palette = BuiltInPalette::from_symbol(symbol.clone(), symbols)?.ok_or_else(|| {
                         ScriptError::new("Invalid built-in palette symbol".to_string())
                     })?;
-                    let bitmap = player.bitmap_manager.get_bitmap_mut(bitmap_ref).ok_or_else(|| ScriptError::new_code(ScriptErrorCode::InvalidReference, "Invalid bitmap reference".to_string()))?;
+                    let bitmap = player.bitmap_manager.get_bitmap_handle_mut(bitmap_ref).ok_or_else(|| ScriptError::new_code(ScriptErrorCode::InvalidReference, "Invalid bitmap reference".to_string()))?;
                     bitmap.palette_ref = PaletteRef::BuiltIn(palette);
                     Ok(())
                 }
                 Datum::CastMember(member_ref) => {
                     let member_ref = member_ref.to_owned();
-                    let bitmap = player.bitmap_manager.get_bitmap_mut(bitmap_ref).ok_or_else(|| ScriptError::new_code(ScriptErrorCode::InvalidReference, "Invalid bitmap reference".to_string()))?;
+                    let bitmap = player.bitmap_manager.get_bitmap_handle_mut(bitmap_ref).ok_or_else(|| ScriptError::new_code(ScriptErrorCode::InvalidReference, "Invalid bitmap reference".to_string()))?;
                     bitmap.palette_ref = PaletteRef::Member(member_ref);
                     Ok(())
                 }
                 Datum::PaletteRef(palette_ref) => {
                     let palette_ref = palette_ref.to_owned();
-                    let bitmap = player.bitmap_manager.get_bitmap_mut(bitmap_ref).ok_or_else(|| ScriptError::new_code(ScriptErrorCode::InvalidReference, "Invalid bitmap reference".to_string()))?;
+                    let bitmap = player.bitmap_manager.get_bitmap_handle_mut(bitmap_ref).ok_or_else(|| ScriptError::new_code(ScriptErrorCode::InvalidReference, "Invalid bitmap reference".to_string()))?;
                     bitmap.palette_ref = palette_ref;
                     Ok(())
                 }
@@ -1301,7 +1326,7 @@ impl BitmapDatumHandlers {
             },
             Some(BuiltInSymbol::UseAlpha) => {
                 let use_alpha = value.to_bool()?;
-                let bitmap = player.bitmap_manager.get_bitmap_mut(bitmap_ref).ok_or_else(|| ScriptError::new_code(ScriptErrorCode::InvalidReference, "Invalid bitmap reference".to_string()))?;
+                let bitmap = player.bitmap_manager.get_bitmap_handle_mut(bitmap_ref).ok_or_else(|| ScriptError::new_code(ScriptErrorCode::InvalidReference, "Invalid bitmap reference".to_string()))?;
                 bitmap.use_alpha = use_alpha;
                 Ok(())
             }
@@ -1559,4 +1584,116 @@ fn apply_adjust_color_filter(
     }
 
     bitmap.matte = saved_matte;
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use crate::player::bitmap::bitmap::PaletteRef;
+    use crate::player::ownership::OwnerToken;
+    use async_std::channel;
+
+    fn test_player() -> DirPlayer {
+        let (tx, _rx) = channel::unbounded();
+        DirPlayer::new_with_owner(tx, OwnerToken::transitional())
+    }
+
+    #[test]
+    fn direct_bitmap_handlers_produce_duplicate_copy_and_reject_stale_or_foreign_handles() {
+        let mut player = test_player();
+        let mut symbols = SymbolTable::new();
+        let source_handle = player
+            .bitmap_manager
+            .add_ephemeral_bitmap_handle(Bitmap::new(1, 1, 32, 32, 8, PaletteRef::Default))
+            .unwrap();
+        player
+            .bitmap_manager
+            .get_bitmap_handle_mut(&source_handle)
+            .unwrap()
+            .data
+            .copy_from_slice(&[10, 20, 30, 255]);
+        let source = player.alloc_datum(Datum::BitmapRef(source_handle.clone()));
+
+        let x = player.alloc_datum(Datum::Int(0));
+        let y = player.alloc_datum(Datum::Int(0));
+        let pixel = BitmapDatumHandlers::get_pixel(&mut player, &mut symbols, &source, &vec![x, y])
+            .expect("valid bitmap getPixel should produce a color");
+        assert!(matches!(player.get_datum(&pixel), Datum::ColorRef(_)));
+
+        let duplicate = BitmapDatumHandlers::duplicate(&mut player, &mut symbols, &source, &vec![])
+            .expect("valid bitmap duplicate should produce a bitmap");
+        assert!(matches!(player.get_datum(&duplicate), Datum::BitmapRef(_)));
+
+        let destination_handle = player
+            .bitmap_manager
+            .add_ephemeral_bitmap_handle(Bitmap::new(1, 1, 32, 32, 8, PaletteRef::Default))
+            .unwrap();
+        let destination = player.alloc_datum(Datum::BitmapRef(destination_handle.clone()));
+        let destination_rect = player.alloc_datum(Datum::Rect([0.0, 0.0, 1.0, 1.0], 0));
+        let source_rect = player.alloc_datum(Datum::Rect([0.0, 0.0, 1.0, 1.0], 0));
+        BitmapDatumHandlers::copy_pixels(
+            &mut player,
+            &mut symbols,
+            &destination,
+            &vec![source.clone(), destination_rect, source_rect],
+        )
+        .expect("valid bitmap copyPixels should succeed");
+        assert_eq!(
+            player
+                .bitmap_manager
+                .get_bitmap_handle(&destination_handle)
+                .unwrap()
+                .data,
+            vec![10, 20, 30, 255]
+        );
+
+        let use_alpha = player.alloc_datum(Datum::Int(1));
+        BitmapDatumHandlers::set_bitmap_ref_prop(
+            &mut player,
+            &mut symbols,
+            &destination_handle,
+            Symbol::builtin(BuiltInSymbol::UseAlpha),
+            &use_alpha,
+        )
+        .expect("valid bitmap property setter should succeed");
+        assert!(player
+            .bitmap_manager
+            .get_bitmap_handle(&destination_handle)
+            .unwrap()
+            .use_alpha);
+
+        let stale = source_handle.clone();
+        player.bitmap_manager.rotate_handles().unwrap();
+        let stale_x = player.alloc_datum(Datum::Int(0));
+        let stale_y = player.alloc_datum(Datum::Int(0));
+        assert!(BitmapDatumHandlers::get_pixel(
+            &mut player,
+            &mut symbols,
+            &source,
+            &vec![stale_x, stale_y],
+        )
+        .is_err());
+        assert!(BitmapDatumHandlers::set_bitmap_ref_prop(
+            &mut player,
+            &mut symbols,
+            &stale,
+            Symbol::builtin(BuiltInSymbol::UseAlpha),
+            &use_alpha,
+        )
+        .is_err());
+
+        let mut foreign_player = test_player();
+        let foreign = foreign_player
+            .bitmap_manager
+            .add_bitmap_handle(Bitmap::new(1, 1, 32, 32, 8, PaletteRef::Default))
+            .unwrap();
+        assert!(BitmapDatumHandlers::set_bitmap_ref_prop(
+            &mut player,
+            &mut symbols,
+            &foreign,
+            Symbol::builtin(BuiltInSymbol::UseAlpha),
+            &use_alpha,
+        )
+        .is_err());
+    }
 }

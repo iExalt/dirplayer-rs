@@ -2218,7 +2218,7 @@ impl TextMemberHandlers {
                 // Text `.image` snapshots are produced per-call and not owned
                 // by any cast member; let the DatumRef refcount free them.
                 let bitmap_ref = player.bitmap_manager.add_ephemeral_bitmap(bitmap);
-                Ok(Datum::BitmapRef(bitmap_ref))
+                Ok(Datum::BitmapRef(player.bitmap_handle_for_id(bitmap_ref)?))
             }
             "rtf" => {
                 // Return stored RTF source, or generate minimal RTF from plain text

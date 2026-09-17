@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use crate::director::enums::FontInfo;
 
 use super::{
-    bitmap::{drawing::CopyPixelsParams, manager::BitmapRef, palette_map::PaletteMap},
+    bitmap::{drawing::CopyPixelsParams, manager::BitmapId, palette_map::PaletteMap},
     geometry::IntRect,
 };
 
@@ -64,7 +64,7 @@ pub struct FontManager {
 
 #[derive(Clone, Debug)]
 pub struct BitmapFont {
-    pub bitmap_ref: BitmapRef,
+    pub bitmap_ref: BitmapId,
     pub char_width: u16,
     pub char_height: u16,
     pub grid_columns: u8,
@@ -1100,7 +1100,7 @@ mod owned_system_font_tests {
     fn font_snapshot(
         handle: &RuntimeSessionHandle,
         player_id: PlayerId,
-    ) -> (FontRef, usize, usize, Option<BitmapRef>) {
+    ) -> (FontRef, usize, usize, Option<BitmapId>) {
         handle
             .borrow_mut()
             .with_player(player_id, |context| {

@@ -543,7 +543,7 @@ impl FieldMemberHandlers {
                         // bitmap isn't anchored — let the DatumRef refcount
                         // free it when the script drops the value.
                         let bitmap_ref = player.bitmap_manager.add_ephemeral_bitmap(bitmap);
-                        Ok(Datum::BitmapRef(bitmap_ref))
+                        Ok(Datum::BitmapRef(player.bitmap_handle_for_id(bitmap_ref)?))
                     }
                     _ => unreachable!(),
                 }

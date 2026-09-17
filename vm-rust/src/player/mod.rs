@@ -276,7 +276,7 @@ use crate::{
 use url::Url;
 
 use self::{
-    bitmap::manager::BitmapRef,
+    bitmap::manager::{BitmapHandle, BitmapId},
     bytecode::handler_manager::StaticBytecodeHandlerManager,
     cast_lib::{CastMemberRef, PlayerNotification, PlayerNotificationKind},
     cast_manager::CastManager,
@@ -433,9 +433,9 @@ pub struct DirPlayer {
     /// Host-side composited stage image of each active nested `#movie` sub-player,
     /// keyed by the Linked Movie member. Each host frame the sub-player's stage is
     /// rendered (headless, CPU) and copied here into the HOST's bitmap_manager so
-    /// the WebGL2 `Movie` sprite arm can blit it at the sprite rect. One BitmapRef
+    /// the WebGL2 `Movie` sprite arm can blit it at the sprite rect. One BitmapId
     /// per member, overwritten in place.
-    pub nested_movie_images: HashMap<CastMemberRef, BitmapRef>,
+    pub nested_movie_images: HashMap<CastMemberRef, BitmapId>,
     pub is_playing: bool,
     pub is_script_paused: bool,
     pub next_frame: Option<u32>,
@@ -462,9 +462,9 @@ pub struct DirPlayer {
     /// Persistent script-owned stage framebuffer for "imaging Lingo" movies
     /// that draw directly into `(the stage).image` (e.g. spectral-wizard).
     /// Created lazily on first `(the stage).image` access and returned as the
-    /// same BitmapRef every call, so a cached `theStage = (the stage).image`
+    /// same BitmapId every call, so a cached `theStage = (the stage).image`
     /// keeps accumulating draws. `None` until first access.
-    pub stage_image: Option<bitmap::manager::BitmapRef>,
+    pub stage_image: Option<bitmap::manager::BitmapId>,
     /// Set true once a draw op (copyPixels/fill/etc.) targets `stage_image`.
     /// Only then does the renderer composite it over the sprite output —
     /// this keeps read-only camera-capture movies (which never draw) on the
@@ -603,7 +603,7 @@ pub struct DirPlayer {
     /// story tiles share one Flash member but display different poster
     /// frames simultaneously). Keyed by sprite number; the renderer reads
     /// `flash_frame_buffers[channel_num]` when drawing a Flash sprite.
-    pub flash_frame_buffers: HashMap<i16, bitmap::manager::BitmapRef>,
+    pub flash_frame_buffers: HashMap<i16, bitmap::manager::BitmapId>,
     /// Whether the lazy-load dispatch has fired for a given (sprite,
     /// cast_lib, cast_member). Prevents the renderer from triggering
     /// duplicate `createFlashInstance` calls every frame before the
@@ -664,7 +664,7 @@ pub struct DirPlayer {
     /// instead of `flash_frame_buffers`. See `flash_texture_synthetic_id`.
     pub flash_texture_targets: HashMap<i16, (cast_lib::CastMemberRef, String)>,
     /// Cached rendered 3D scene bitmaps (populated during sprite rendering, read by world.image)
-    pub w3d_frame_buffers: HashMap<(i32, i32), bitmap::manager::BitmapRef>,
+    pub w3d_frame_buffers: HashMap<(i32, i32), bitmap::manager::BitmapId>,
     /// Members whose `.image` a script has actually asked for. The per-frame FBO
     /// readback that fills `w3d_frame_buffers` is a synchronous GPU->CPU stall
     /// (22.9% of frame time in a profile) plus two full-size buffer allocations,
@@ -2299,17 +2299,20 @@ impl DirPlayer {
         self.allocator.get_datum(id)
     }
 
-    pub fn get_datum_mut(&mut self, id: &DatumRef) -> &mut Datum {
+    pub(crate) fn get_datum_mut(&mut self, id: &DatumRef) -> &mut Datum {
         self.allocator.get_datum_mut(id)
     }
 
-    /// Resolve a datum to a BitmapRef.  Accepts:
+    /// Resolve a datum to a BitmapId.  Accepts:
     ///  - `Datum::BitmapRef(n)` → direct handle
     ///  - `Datum::Int(n)` where n > 0 → treated as a member slot number;
     ///    the member is looked up and its bitmap image_ref is returned.
-    pub fn resolve_bitmap_ref(&self, datum: &Datum) -> Result<BitmapRef, ScriptError> {
+    pub fn resolve_bitmap_ref(&self, datum: &Datum) -> Result<BitmapId, ScriptError> {
         match datum {
-            Datum::BitmapRef(br) => Ok(*br),
+            Datum::BitmapRef(br) => self
+                .bitmap_manager
+                .local_id(br)
+                .ok_or_else(|| ScriptError::new("stale or foreign bitmap handle".to_string())),
             Datum::Int(n) if *n > 0 => {
                 let member_ref = handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers
                     ::member_ref_from_slot_number(*n as u32);
@@ -2329,8 +2332,21 @@ impl DirPlayer {
                     )))
                 }
             }
-            _ => datum.to_bitmap_ref().map(|br| *br),
+            _ => datum.to_bitmap_ref().and_then(|br| {
+                self.bitmap_manager
+                    .local_id(br)
+                    .ok_or_else(|| ScriptError::new("stale or foreign bitmap handle".to_string()))
+            }),
         }
+    }
+
+    pub(crate) fn bitmap_handle_for_id(
+        &self,
+        bitmap_id: BitmapId,
+    ) -> Result<BitmapHandle, ScriptError> {
+        self.bitmap_manager
+            .local_handle(bitmap_id)
+            .ok_or_else(|| ScriptError::new(format!("missing bitmap {bitmap_id}")))
     }
 
     pub fn get_fps(&self) -> u32 {
@@ -2499,6 +2515,14 @@ impl DirPlayer {
     }
 
     fn reset_core(&mut self, global_resources: bool) {
+        let transient_bitmap_ids = self
+            .flash_frame_buffers
+            .values()
+            .chain(self.nested_movie_images.values())
+            .chain(self.w3d_frame_buffers.values())
+            .copied()
+            .chain(self.stage_image)
+            .collect::<Vec<_>>();
         self.bump_scope_invalidation_epoch();
         self.stop();
         self.pending_player_notifications.clear();
@@ -2510,6 +2534,10 @@ impl DirPlayer {
         // so switching movies doesn't leave old sounds looping or leak players.
         self.sound_manager.stop_all();
         self.flash_frame_buffers.clear();
+        self.nested_movie_images.clear();
+        self.w3d_frame_buffers.clear();
+        self.stage_image = None;
+        self.stage_image_dirty = false;
         self.flash_scripted_access_pending.set(false);
         JsApi::dispatch_flash_reset_all(&owner_key_string(&self.owner));
         self.scene3d_store.reset();
@@ -2555,6 +2583,9 @@ impl DirPlayer {
         debug!("Resetting allocator");
         // Now it's safe to reset the allocator
         self.owner = self.allocator.reset(&mut self.bitmap_manager);
+        for bitmap_id in transient_bitmap_ids {
+            self.bitmap_manager.remove_ephemeral_bitmap(bitmap_id);
+        }
         // A reset rotates the owner generation.  Retain the old cell only for
         // stale capabilities; the replacement generation receives a distinct
         // cell so an old capability can never change the new player state.
@@ -6076,39 +6107,6 @@ pub fn with_active_player<F: std::future::Future>(
     fut: F,
 ) -> impl std::future::Future<Output = F::Output> {
     WithActivePlayer { id, inner: fut }
-}
-
-/// Deep-copy a datum's VALUE from one player's allocator into another's (for
-/// `tellcall` arg/result marshaling across the `#movie` boundary). Simple,
-/// self-contained datums (Int/Float/String/Symbol/bool/etc.) copy by value;
-/// List/PropList recurse. Player-specific refs (script instances, member refs)
-/// are copied verbatim — meaningful only for the value types that cross a tell,
-/// which in practice are the simple ones (`sendAllSprites(#sym, k)`).
-pub fn marshal_datum(
-    from: &DirPlayer,
-    to: &mut DirPlayer,
-    r: &crate::player::DatumRef,
-) -> crate::player::DatumRef {
-    use crate::director::lingo::datum::{Datum, DatumType};
-    let value = from.get_datum(r).clone();
-    match value {
-        Datum::List(t, items, sorted) => {
-            let new_items: std::collections::VecDeque<_> =
-                items.iter().map(|i| marshal_datum(from, to, i)).collect();
-            to.alloc_datum(Datum::List(t, new_items, sorted))
-        }
-        Datum::PropList(pairs, sorted) => {
-            let new_pairs = pairs
-                .iter()
-                .map(|(k, v)| (marshal_datum(from, to, k), marshal_datum(from, to, v)))
-                .collect();
-            to.alloc_datum(Datum::PropList(new_pairs, sorted))
-        }
-        other => {
-            let _ = DatumType::Void;
-            to.alloc_datum(other)
-        }
-    }
 }
 
 /// Spawn a local task bound to the *currently active* player, so its async work
@@ -11636,13 +11634,7 @@ fn player_duplicate_datum(
     symbols: &crate::player::symbols::symbol_table::SymbolTable,
     datum: &DatumRef,
 ) -> Result<DatumRef, ScriptError> {
-    let mut visited = std::collections::HashSet::new();
-    crate::player::compare::validate_reachable_symbols(
-        datum,
-        &player.allocator,
-        symbols,
-        &mut visited,
-    )?;
+    crate::player::driver::validate_owned_datum_graph(player, symbols, datum)?;
     player_duplicate_datum_inner(player, datum)
 }
 
@@ -11678,16 +11670,21 @@ fn player_duplicate_datum_inner(
             Datum::List(list_type.clone(), new_list, sorted)
         }
         DatumType::BitmapRef => {
-            let bitmap_ref = player.get_datum(datum).to_bitmap_ref()?;
+            let bitmap_ref = player.get_datum(datum).to_bitmap_ref()?.clone();
             let bitmap = player
                 .bitmap_manager
-                .get_bitmap(*bitmap_ref)
+                .get_bitmap_handle(&bitmap_ref)
                 .ok_or_else(|| ScriptError::new("bitmap not found".to_owned()))?;
             let new_bitmap = bitmap.clone();
             // `duplicate(...)` on a Datum::BitmapRef produces an unowned copy.
             // It is freed once the wrapping DatumRef goes away (or persists
             // for as long as something holds it via refcount).
-            let new_bitmap_ref = player.bitmap_manager.add_ephemeral_bitmap(new_bitmap);
+            let new_bitmap_ref = player
+                .bitmap_manager
+                .add_ephemeral_bitmap_handle(new_bitmap)
+                .map_err(|error| {
+                    ScriptError::new(format!("bitmap allocation failed: {error:?}"))
+                })?;
             Datum::BitmapRef(new_bitmap_ref)
         }
         _ => player.get_datum(datum).clone(),
@@ -13036,6 +13033,7 @@ mod scope_token_tests {
     use crate::director::lingo::opcode::OpCode;
     use crate::player::cast_lib::{CastLib, CastMemberRef};
     use crate::player::cast_member::{CastMember, CastMemberType, FilmLoopMember};
+    use crate::player::bitmap::bitmap::{Bitmap, PaletteRef};
     use crate::player::geometry::IntRect;
     use crate::player::score::{Score, ScoreSpriteSpan, SpriteChannel};
     use crate::player::script::Script;
@@ -13046,6 +13044,47 @@ mod scope_token_tests {
     fn make_player(owner: OwnerToken) -> DirPlayer {
         let (tx, _rx) = channel::unbounded();
         DirPlayer::new_with_owner(tx, owner)
+    }
+
+    #[test]
+    fn reset_core_clears_transient_bitmap_records_after_allocator_sweep() {
+        let mut player = make_player(OwnerToken::transitional());
+        let mut anchored = Bitmap::new(1, 1, 32, 32, 8, PaletteRef::Default);
+        anchored.data[..4].copy_from_slice(&[1, 2, 3, 4]);
+        let anchored_id = player.bitmap_manager.add_bitmap(anchored);
+        let anchored_handle = player.bitmap_manager.local_handle(anchored_id).unwrap();
+
+        let ephemeral_id = player
+            .bitmap_manager
+            .add_ephemeral_bitmap(Bitmap::new(1, 1, 32, 32, 8, PaletteRef::Default));
+        let ephemeral_handle = player.bitmap_manager.local_handle(ephemeral_id).unwrap();
+        let retained = player.alloc_datum(Datum::BitmapRef(ephemeral_handle.clone()));
+        player.stage_image = Some(ephemeral_id);
+        player.flash_frame_buffers.insert(1, ephemeral_id);
+        player.nested_movie_images.insert(
+            CastMemberRef { cast_lib: 1, cast_member: 1 },
+            ephemeral_id,
+        );
+        player.w3d_frame_buffers.insert((1, 1), ephemeral_id);
+
+        player.reset_owned_core();
+
+        assert!(player.stage_image.is_none());
+        assert!(player.flash_frame_buffers.is_empty());
+        assert!(player.nested_movie_images.is_empty());
+        assert!(player.w3d_frame_buffers.is_empty());
+        assert!(player.bitmap_manager.get_bitmap(ephemeral_id).is_none());
+        assert!(player
+            .bitmap_manager
+            .get_bitmap_handle(&ephemeral_handle)
+            .is_none());
+        let fresh_anchor = player.bitmap_manager.local_handle(anchored_id).unwrap();
+        assert_eq!(
+            player.bitmap_manager.get_bitmap_handle(&fresh_anchor).unwrap().data,
+            vec![1, 2, 3, 4]
+        );
+
+        drop(retained);
     }
 
     #[test]

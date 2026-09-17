@@ -1,11 +1,23 @@
-use std::collections::VecDeque;
 use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use num_derive::FromPrimitive;
 
 use crate::player::{
-    DirPlayer, ScriptError, bitmap::{bitmap::PaletteRef, manager::BitmapRef, mask::BitmapMask}, cast_lib::CastMemberRef, cast_member::Media, datum_ref::DatumRef, handlers::types::TypeHandlers, script_ref::ScriptInstanceRef, sprite::{ColorRef, CursorRef}, symbols::{builtin::BuiltInSymbol, symbol::{Symbol, SymbolError}, symbol_table::SymbolTable}
+    DirPlayer, ScriptError,
+    bitmap::{bitmap::PaletteRef, manager::BitmapHandle, mask::BitmapMask},
+    cast_lib::CastMemberRef,
+    cast_member::Media,
+    datum_ref::DatumRef,
+    handlers::types::TypeHandlers,
+    script_ref::ScriptInstanceRef,
+    sprite::{ColorRef, CursorRef},
+    symbols::{
+        builtin::BuiltInSymbol,
+        symbol::{Symbol, SymbolError},
+        symbol_table::SymbolTable,
+    },
 };
 
 #[allow(dead_code)]
@@ -315,7 +327,7 @@ pub enum Datum {
     /// Boxed (~100B of fields) to keep `Datum` small.
     TimeoutInstance(Box<TimeoutInstanceData>),
     ColorRef(ColorRef),
-    BitmapRef(BitmapRef),
+    BitmapRef(BitmapHandle),
     PaletteRef(PaletteRef),
     SoundRef(u16),
     Xtra(String),
@@ -791,7 +803,7 @@ impl Datum {
         }
     }
 
-    pub fn to_bitmap_ref(&self) -> Result<&BitmapRef, ScriptError> {
+    pub fn to_bitmap_ref(&self) -> Result<&BitmapHandle, ScriptError> {
         match self {
             Datum::BitmapRef(bitmap_ref) => Ok(bitmap_ref),
             _ => {

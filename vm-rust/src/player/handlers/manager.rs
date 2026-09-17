@@ -887,7 +887,7 @@ impl BuiltInHandlerManager {
                 Datum::BitmapRef(bitmap_ref) => {
                     let src = player
                         .bitmap_manager
-                        .get_bitmap(*bitmap_ref)
+                        .get_bitmap_handle(bitmap_ref)
                         .ok_or_else(|| ScriptError::new("Invalid bitmap reference".to_string()))?;
 
                     let w = src.width;
@@ -1627,18 +1627,25 @@ impl BuiltInHandlerManager {
                         // the caller's DatumRef drops.
                         let new_bitmap = player
                             .bitmap_manager
-                            .get_bitmap(*bitmap_ref)
-                            .ok_or_else(|| ScriptError::new(
-                                "duplicate(): source bitmap not found".to_string(),
-                            ))?
+                            .get_bitmap_handle(bitmap_ref)
+                            .ok_or_else(|| {
+                                ScriptError::new("duplicate(): source bitmap not found".to_string())
+                            })?
                             .clone();
                         let new_ref = player.bitmap_manager.add_ephemeral_bitmap(new_bitmap);
-                        Ok(player.alloc_datum(Datum::BitmapRef(new_ref)))
+                        let handle = player.bitmap_handle_for_id(new_ref)?;
+                        Ok(player.alloc_datum(Datum::BitmapRef(handle)))
                     }
-                    _ => Err(ScriptError::new(format!("duplicate() not implemented for type {}", player.get_datum(item).type_str()))),
+                    _ => Err(ScriptError::new(format!(
+                        "duplicate() not implemented for type {}",
+                        player.get_datum(item).type_str()
+                    ))),
                 })
             }
-            Some(BuiltInSymbol::GetProp) => Self::try_collection_call(runtime, name, args, false, true)?.ok_or_else(|| ScriptError::new("Cannot getProp on non-prop list".to_string())),
+            Some(BuiltInSymbol::GetProp) => {
+                Self::try_collection_call(runtime, name, args, false, true)?
+                    .ok_or_else(|| ScriptError::new("Cannot getProp on non-prop list".to_string()))
+            }
             Some(BuiltInSymbol::Min) => TypeHandlers::min(runtime, args),
             Some(BuiltInSymbol::Max) => TypeHandlers::max(runtime, args),
             Some(BuiltInSymbol::Sort) => TypeHandlers::sort(runtime, args),

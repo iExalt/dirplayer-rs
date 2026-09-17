@@ -2240,7 +2240,7 @@ impl Shockwave3dObjectDatumHandlers {
                     // texture("name").image = bitmapObject
                     // Convert bitmap to RGBA and store in scene.texture_images
                     let bitmap_ref = match value {
-                        Datum::BitmapRef(r) => Some(*r),
+                        Datum::BitmapRef(r) => player.bitmap_manager.local_id(r),
                         _ => None,
                     };
                     if let Some(bmp_ref) = bitmap_ref {
@@ -9007,7 +9007,9 @@ pub fn set_node_transform(
     // Update the persistent datum if it exists
     if let Some(datum_ref) = &persistent_ref {
         let m64: [f64; 16] = m.map(|v| v as f64);
-        *player.get_datum_mut(datum_ref) = Datum::transform3d(m64);
+        if player.allocator.replace_transform3d(datum_ref, m64).is_err() {
+            return;
+        }
     }
 
     // Update node_transforms using canonical key

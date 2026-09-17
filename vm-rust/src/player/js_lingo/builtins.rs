@@ -127,25 +127,90 @@ fn install_math(rt: &JsRuntime) {
             for v in a { let n = v.to_number(); if n.is_nan() { return Ok(JsValue::Number(f64::NAN)); } if n > r { r = n; } }
             Ok(JsValue::Number(r))
         }));
-        // Math.random is deterministic via a xorshift seeded by process state;
-        // tests that need reproducibility can seed it themselves.
-        m.set_own("random", native("random", |_| {
-            // A small xorshift seeded by std::time::Instant::now elapsed.
-            use std::cell::Cell;
-            thread_local! { static SEED: Cell<u64> = Cell::new(0x9E37_79B9_7F4A_7C15); }
-            let v = SEED.with(|s| {
-                let mut x = s.get();
-                x ^= x << 13;
-                x ^= x >> 7;
-                x ^= x << 17;
-                s.set(x);
-                x
-            });
+        // Math.random owns state per JsRuntime, so two runtimes can be
+        // interleaved without consuming one another's deterministic stream.
+        let random_state = rt.random_state();
+        m.set_own("random", native("random", move |_| {
+            let mut x = random_state.get();
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            random_state.set(x);
             // Convert to [0, 1).
-            Ok(JsValue::Number((v >> 11) as f64 / ((1u64 << 53) as f64)))
+            Ok(JsValue::Number((x >> 11) as f64 / ((1u64 << 53) as f64)))
         }));
     }
     rt.global.borrow_mut().set_own("Math", JsValue::Object(math));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn random(rt: &JsRuntime) -> f64 {
+        let math = rt.global.borrow().get_own("Math").cloned().expect("Math");
+        let random = match math {
+            JsValue::Object(object) => object.borrow().get_own("random").cloned(),
+            _ => None,
+        }
+        .expect("Math.random");
+        match random {
+            JsValue::Native(native) => (native.call)(&[]).expect("random call").to_number(),
+            _ => panic!("Math.random is not native"),
+        }
+    }
+
+    #[test]
+    fn default_seed_preserves_xorshift_sequence() {
+        let rt = JsRuntime::with_stdlib();
+        assert_eq!(random(&rt), 0.8597941207808165);
+        assert_eq!(random(&rt), 0.39430133835633674);
+        assert_eq!(random(&rt), 0.48058787404949177);
+    }
+
+    #[test]
+    fn same_seed_replays_and_different_seeds_diverge() {
+        let a = JsRuntime::with_stdlib_seed(7).expect("seed");
+        let b = JsRuntime::with_stdlib_seed(7).expect("seed");
+        let c = JsRuntime::with_stdlib_seed(8).expect("seed");
+        for _ in 0..4 {
+            assert_eq!(random(&a), random(&b));
+        }
+        assert_ne!(random(&JsRuntime::with_stdlib_seed(7).expect("seed")), random(&c));
+    }
+
+    #[test]
+    fn interleaved_runtimes_keep_independent_sequences() {
+        let expected_a = JsRuntime::with_stdlib_seed(11).expect("seed");
+        let expected_b = JsRuntime::with_stdlib_seed(22).expect("seed");
+        let a = JsRuntime::with_stdlib_seed(11).expect("seed");
+        let b = JsRuntime::with_stdlib_seed(22).expect("seed");
+        for _ in 0..4 {
+            assert_eq!(random(&a), random(&expected_a));
+            assert_eq!(random(&b), random(&expected_b));
+        }
+    }
+
+    #[test]
+    fn zero_seed_is_rejected_without_mutating_state() {
+        assert!(JsRuntime::new_with_seed(0).is_err());
+        let rt = JsRuntime::with_stdlib_seed(31).expect("seed");
+        let expected = JsRuntime::with_stdlib_seed(31).expect("seed");
+        assert!(rt.reseed_random(0).is_err());
+        assert_eq!(random(&rt), random(&expected));
+    }
+
+    #[test]
+    fn reseed_replays_and_values_stay_in_range() {
+        let rt = JsRuntime::with_stdlib_seed(41).expect("seed");
+        rt.reseed_random(99).expect("reseed");
+        let expected = JsRuntime::with_stdlib_seed(99).expect("seed");
+        for _ in 0..4 {
+            let value = random(&rt);
+            assert!((0.0..1.0).contains(&value));
+            assert_eq!(value, random(&expected));
+        }
+    }
 }
 
 fn install_number(rt: &JsRuntime) {

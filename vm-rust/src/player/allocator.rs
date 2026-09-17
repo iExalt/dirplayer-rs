@@ -10,7 +10,7 @@ use super::{
     ownership::{OwnerKey, OwnerToken, ReclaimKind},
     script::{ScriptInstance, ScriptInstanceId},
     script_ref::ScriptInstanceRef,
-    ScriptError,
+    ScriptError, ScriptErrorCode,
 };
 
 const ARENA_CHUNK_SIZE: usize = 4096;
@@ -307,26 +307,30 @@ impl DatumAllocator {
                 break;
             }
             for item in pending {
-            if item.owner != self.owner.key() {
-                continue;
-            }
+                if item.owner != self.owner.key() {
+                    continue;
+                }
                 match item.kind {
-                ReclaimKind::Datum(id) => {
-                    if self.datums.get(id).map_or(false, |entry| unsafe {
-                        *entry.ref_count.get() == 0
-                    }) {
-                        if let Some(bitmap) = self.dealloc_datum(id) {
-                            bitmap_manager.decref_ephemeral(bitmap);
+                    ReclaimKind::Datum(id) => {
+                        if self
+                            .datums
+                            .get(id)
+                            .map_or(false, |entry| unsafe { *entry.ref_count.get() == 0 })
+                        {
+                            if let Some(bitmap) = self.dealloc_datum(id) {
+                                let _ = bitmap_manager.decref_ephemeral_handle(&bitmap);
+                            }
                         }
                     }
-                }
-                ReclaimKind::ScriptInstance(id) => {
-                    if self.script_instances.get(id as usize).map_or(false, |entry| unsafe {
-                        *entry.ref_count.get() == 0
-                    }) {
-                        self.dealloc_script_instance(id);
+                    ReclaimKind::ScriptInstance(id) => {
+                        if self
+                            .script_instances
+                            .get(id as usize)
+                            .map_or(false, |entry| unsafe { *entry.ref_count.get() == 0 })
+                        {
+                            self.dealloc_script_instance(id);
+                        }
                     }
-                }
                 }
             }
         }
@@ -338,7 +342,7 @@ impl DatumAllocator {
     ) {
         for (_, entry) in self.datums.iter() {
             if let Datum::BitmapRef(bitmap) = &entry.datum {
-                bitmap_manager.decref_ephemeral(*bitmap);
+                let _ = bitmap_manager.decref_ephemeral_handle(bitmap);
             }
         }
     }
@@ -366,6 +370,92 @@ impl DatumAllocator {
     pub(crate) fn try_get_datum_mut(&mut self, reference: &DatumRef) -> Option<&mut Datum> {
         let id = self.valid_datum_ref(reference)?;
         Some(&mut self.datums.get_mut(id)?.datum)
+    }
+
+    /// Replace a live, non-pooled vector without exposing a mutable Datum to
+    /// callers that could install a resource-bearing variant.
+    pub(crate) fn replace_vector(
+        &mut self,
+        reference: &DatumRef,
+        values: [f64; 3],
+    ) -> Result<(), ScriptError> {
+        let id = self.valid_datum_ref(reference).ok_or_else(|| {
+            ScriptError::new_code(
+                ScriptErrorCode::InvalidReference,
+                "foreign or stale datum reference".to_string(),
+            )
+        })?;
+        let entry = self.datums.get(id).ok_or_else(|| {
+            ScriptError::new_code(
+                ScriptErrorCode::InvalidReference,
+                "validated datum disappeared".to_string(),
+            )
+        })?;
+        if unsafe { *entry.ref_count.get() == u32::MAX } {
+            return Err(ScriptError::new_code(
+                ScriptErrorCode::InvalidReference,
+                "cannot replace pooled datum".to_string(),
+            ));
+        }
+        if !matches!(entry.datum, Datum::Vector(_)) {
+            return Err(ScriptError::new_code(
+                ScriptErrorCode::InvalidReference,
+                "expected Vector datum".to_string(),
+            ));
+        }
+        self.datums
+            .get_mut(id)
+            .ok_or_else(|| {
+                ScriptError::new_code(
+                    ScriptErrorCode::InvalidReference,
+                    "validated datum disappeared".to_string(),
+                )
+            })?
+            .datum = Datum::Vector(values);
+        Ok(())
+    }
+
+    /// Replace a live, non-pooled transform without exposing a mutable Datum
+    /// to callers that could install a resource-bearing variant.
+    pub(crate) fn replace_transform3d(
+        &mut self,
+        reference: &DatumRef,
+        matrix: [f64; 16],
+    ) -> Result<(), ScriptError> {
+        let id = self.valid_datum_ref(reference).ok_or_else(|| {
+            ScriptError::new_code(
+                ScriptErrorCode::InvalidReference,
+                "foreign or stale datum reference".to_string(),
+            )
+        })?;
+        let entry = self.datums.get(id).ok_or_else(|| {
+            ScriptError::new_code(
+                ScriptErrorCode::InvalidReference,
+                "validated datum disappeared".to_string(),
+            )
+        })?;
+        if unsafe { *entry.ref_count.get() == u32::MAX } {
+            return Err(ScriptError::new_code(
+                ScriptErrorCode::InvalidReference,
+                "cannot replace pooled datum".to_string(),
+            ));
+        }
+        if !matches!(entry.datum, Datum::Transform3d(_)) {
+            return Err(ScriptError::new_code(
+                ScriptErrorCode::InvalidReference,
+                "expected Transform3d datum".to_string(),
+            ));
+        }
+        self.datums
+            .get_mut(id)
+            .ok_or_else(|| {
+                ScriptError::new_code(
+                    ScriptErrorCode::InvalidReference,
+                    "validated datum disappeared".to_string(),
+                )
+            })?
+            .datum = Datum::Transform3d(Box::new(matrix));
+        Ok(())
     }
 
     fn valid_script_ref(&self, reference: &ScriptInstanceRef) -> Option<ScriptInstanceId> {
@@ -570,14 +660,14 @@ impl DatumAllocator {
         self.int_dealloc_count = 0;
     }
 
-    /// Free arena slot `id`. Returns the ephemeral `BitmapRef` (if any) that
+    /// Free arena slot `id`. Returns the ephemeral `BitmapId` (if any) that
     /// the freed entry was holding, so the caller can run
     /// `bitmap_manager.decref_ephemeral` after returning — keeps the bitmap
     /// manager hop outside of the allocator's own borrow.
     fn dealloc_datum(
         &mut self,
         id: DatumId,
-    ) -> Option<crate::player::bitmap::manager::BitmapRef> {
+    ) -> Option<crate::player::bitmap::manager::BitmapHandle> {
         let mut bitmap_to_decref = None;
         if let Some(entry) = self.datums.get(id) {
             if unsafe { *entry.ref_count.get() } == u32::MAX {
@@ -588,7 +678,7 @@ impl DatumAllocator {
                     self.int_dealloc_count += 1;
                 }
                 Datum::BitmapRef(bm_ref) => {
-                    bitmap_to_decref = Some(*bm_ref);
+                    bitmap_to_decref = Some(bm_ref.clone());
                 }
                 _ => {}
             }
@@ -713,14 +803,33 @@ impl DatumAllocatorTrait for DatumAllocator {
         bitmap_manager: &mut crate::player::bitmap::manager::BitmapManager,
     ) -> Result<DatumRef, ScriptError> {
         let bitmap_to_incref = match &datum {
-            Datum::BitmapRef(bitmap) => Some(*bitmap),
+            Datum::BitmapRef(bitmap) => Some(bitmap.clone()),
             _ => None,
         };
-        let reference = self.alloc_datum_core(datum)?;
-        if let Some(bitmap) = bitmap_to_incref {
-            bitmap_manager.incref_ephemeral(bitmap);
+        if let Some(bitmap) = &bitmap_to_incref {
+            bitmap_manager
+                .get_bitmap_handle(bitmap)
+                .ok_or_else(|| {
+                    ScriptError::new_code(
+                        ScriptErrorCode::InvalidReference,
+                        "invalid bitmap handle".to_string(),
+                    )
+                })?;
         }
-        Ok(reference)
+        if let Some(bitmap) = &bitmap_to_incref {
+            bitmap_manager
+                .incref_ephemeral_handle(bitmap)
+                .map_err(|error| ScriptError::new(format!("invalid bitmap handle: {error:?}")))?;
+        }
+        match self.alloc_datum_core(datum) {
+            Ok(reference) => Ok(reference),
+            Err(error) => {
+                if let Some(bitmap) = &bitmap_to_incref {
+                    let _ = bitmap_manager.decref_ephemeral_handle(bitmap);
+                }
+                Err(error)
+            }
+        }
     }
 
     #[inline]
@@ -812,9 +921,15 @@ impl ResetableAllocator for DatumAllocator {
         &mut self,
         bitmap_manager: &mut crate::player::bitmap::manager::BitmapManager,
     ) -> OwnerToken {
+        let mut bitmap_guard = bitmap_manager
+            .prepare_reset()
+            .expect("bitmap generation exhausted before allocator reset");
         let old_owner = self.owner.clone();
         old_owner.begin_reset();
-        let mut reset_guard = ResetGuard { owner: old_owner.clone(), armed: true };
+        let mut reset_guard = ResetGuard {
+            owner: old_owner.clone(),
+            armed: true,
+        };
 
         // Entries whose final external handle was dropped before reset are
         // reclaimed while the old arena is still addressable. Drops caused by
@@ -845,8 +960,12 @@ impl ResetableAllocator for DatumAllocator {
 
         // Re-create pools after clearing
         self.symbol_pool.clear();
+        bitmap_manager
+            .rotate_handles()
+            .expect("bitmap generation must be available after reset precheck");
         self.owner = OwnerToken::new(old_owner.key().next_generation());
         self.init_int_pool();
+        bitmap_guard.commit();
         reset_guard.armed = false;
         self.owner.clone()
     }
@@ -904,6 +1023,231 @@ mod ownership_tests {
         assert!(second.try_get_datum_mut(&reference).is_none());
         second.drain_reclaims(&mut second_bitmaps);
         drop(reference);
+    }
+
+    #[test]
+    fn typed_replacement_requires_exact_live_non_pooled_target() {
+        let mut alloc = allocator();
+        let mut bitmaps = crate::player::bitmap::manager::BitmapManager::new();
+        let vector = alloc
+            .alloc_datum(Datum::Vector([1.0, 2.0, 3.0]), &mut bitmaps)
+            .unwrap();
+        let transform = alloc
+            .alloc_datum(Datum::transform3d([0.0; 16]), &mut bitmaps)
+            .unwrap();
+
+        alloc
+            .replace_vector(&vector, [4.0, 5.0, 6.0])
+            .unwrap();
+        assert!(matches!(
+            alloc.try_get_datum(&vector),
+            Some(Datum::Vector(values)) if *values == [4.0, 5.0, 6.0]
+        ));
+        alloc
+            .replace_transform3d(&transform, [1.0; 16])
+            .unwrap();
+        assert!(matches!(
+            alloc.try_get_datum(&transform),
+            Some(Datum::Transform3d(values)) if **values == [1.0; 16]
+        ));
+
+        assert!(alloc.replace_vector(&transform, [7.0; 3]).is_err());
+        assert!(matches!(
+            alloc.try_get_datum(&transform),
+            Some(Datum::Transform3d(values)) if **values == [1.0; 16]
+        ));
+        assert!(alloc.replace_transform3d(&vector, [2.0; 16]).is_err());
+        assert!(matches!(
+            alloc.try_get_datum(&vector),
+            Some(Datum::Vector(values)) if *values == [4.0, 5.0, 6.0]
+        ));
+
+        let symbol = local_test_symbol();
+        let pooled_symbol = alloc.alloc_symbol(symbol.clone());
+        let same_pooled_symbol = alloc.alloc_symbol(symbol);
+        assert_eq!(same_pooled_symbol, pooled_symbol);
+        assert!(matches!(
+            alloc.try_get_datum(&same_pooled_symbol),
+            Some(Datum::Symbol(value)) if *value == local_test_symbol()
+        ));
+        assert!(alloc.replace_vector(&pooled_symbol, [8.0; 3]).is_err());
+        assert!(alloc
+            .replace_transform3d(&same_pooled_symbol, [9.0; 16])
+            .is_err());
+        assert!(matches!(
+            alloc.try_get_datum(&pooled_symbol),
+            Some(Datum::Symbol(_))
+        ));
+        let post_rejection_symbol = alloc.alloc_symbol(local_test_symbol());
+        assert_eq!(post_rejection_symbol, pooled_symbol);
+        assert!(matches!(
+            alloc.try_get_datum(&post_rejection_symbol),
+            Some(Datum::Symbol(value)) if *value == local_test_symbol()
+        ));
+    }
+
+    #[test]
+    fn typed_replacement_rejects_foreign_stale_and_bitmap_targets() {
+        let mut alloc = allocator();
+        let mut foreign = allocator();
+        let mut bitmaps = crate::player::bitmap::manager::BitmapManager::new();
+        let mut foreign_bitmaps = crate::player::bitmap::manager::BitmapManager::new();
+        let local_vector = alloc
+            .alloc_datum(Datum::Vector([7.0, 8.0, 9.0]), &mut bitmaps)
+            .unwrap();
+        let local_transform = alloc
+            .alloc_datum(Datum::transform3d([10.0; 16]), &mut bitmaps)
+            .unwrap();
+        let foreign_vector = foreign
+            .alloc_datum(Datum::Vector([1.0, 2.0, 3.0]), &mut foreign_bitmaps)
+            .unwrap();
+        let foreign_transform = foreign
+            .alloc_datum(Datum::transform3d([11.0; 16]), &mut foreign_bitmaps)
+            .unwrap();
+        assert_eq!(foreign_vector.unwrap(), local_vector.unwrap());
+        assert_eq!(foreign_transform.unwrap(), local_transform.unwrap());
+        assert!(alloc
+            .replace_vector(&foreign_vector, [4.0, 5.0, 6.0])
+            .is_err());
+        assert!(alloc
+            .replace_transform3d(&foreign_transform, [12.0; 16])
+            .is_err());
+        assert!(matches!(
+            alloc.try_get_datum(&local_vector),
+            Some(Datum::Vector(values)) if *values == [7.0, 8.0, 9.0]
+        ));
+        assert!(matches!(
+            alloc.try_get_datum(&local_transform),
+            Some(Datum::Transform3d(values)) if **values == [10.0; 16]
+        ));
+        assert!(matches!(
+            foreign.try_get_datum(&foreign_vector),
+            Some(Datum::Vector(values)) if *values == [1.0, 2.0, 3.0]
+        ));
+
+        let stale_vector = local_vector.clone();
+        let stale_transform = local_transform.clone();
+        alloc.reset(&mut bitmaps);
+        let fresh_vector = alloc
+            .alloc_datum(Datum::Vector([13.0, 14.0, 15.0]), &mut bitmaps)
+            .unwrap();
+        let fresh_transform = alloc
+            .alloc_datum(Datum::transform3d([16.0; 16]), &mut bitmaps)
+            .unwrap();
+        assert_eq!(stale_vector.unwrap(), fresh_vector.unwrap());
+        assert_eq!(stale_transform.unwrap(), fresh_transform.unwrap());
+        assert!(alloc
+            .replace_vector(&stale_vector, [17.0; 3])
+            .is_err());
+        assert!(alloc
+            .replace_transform3d(&stale_transform, [18.0; 16])
+            .is_err());
+        assert!(matches!(
+            alloc.try_get_datum(&fresh_vector),
+            Some(Datum::Vector(values)) if *values == [13.0, 14.0, 15.0]
+        ));
+        assert!(matches!(
+            alloc.try_get_datum(&fresh_transform),
+            Some(Datum::Transform3d(values)) if **values == [16.0; 16]
+        ));
+
+        let bitmap = crate::player::bitmap::bitmap::Bitmap::new(
+            1,
+            1,
+            32,
+            32,
+            8,
+            crate::player::bitmap::bitmap::PaletteRef::Default,
+        );
+        let bitmap_id = bitmaps.add_ephemeral_bitmap(bitmap);
+        let bitmap_handle = bitmaps.local_handle(bitmap_id).unwrap();
+        let bitmap_ref = alloc
+            .alloc_datum(Datum::BitmapRef(bitmap_handle.clone()), &mut bitmaps)
+            .unwrap();
+        assert_eq!(
+            bitmaps
+                .ephemeral_refcount_for_test(&bitmap_handle)
+                .unwrap(),
+            1
+        );
+        assert!(alloc.replace_vector(&bitmap_ref, [13.0; 3]).is_err());
+        assert!(alloc.replace_transform3d(&bitmap_ref, [14.0; 16]).is_err());
+        assert!(matches!(
+            alloc.try_get_datum(&bitmap_ref),
+            Some(Datum::BitmapRef(handle)) if handle == &bitmap_handle
+        ));
+        assert_eq!(
+            bitmaps
+                .ephemeral_refcount_for_test(&bitmap_handle)
+                .unwrap(),
+            1
+        );
+        assert!(bitmaps.get_bitmap_handle(&bitmap_handle).is_some());
+    }
+
+    #[test]
+    fn foreign_and_stale_bitmap_allocation_reject_without_mutation() {
+        let mut alloc = allocator();
+        let mut bitmaps = crate::player::bitmap::manager::BitmapManager::new();
+        let mut foreign_bitmaps = crate::player::bitmap::manager::BitmapManager::new();
+        let bitmap = crate::player::bitmap::bitmap::Bitmap::new(
+            1,
+            1,
+            32,
+            32,
+            8,
+            crate::player::bitmap::bitmap::PaletteRef::Default,
+        );
+        let local_id = bitmaps.add_ephemeral_bitmap(bitmap.clone());
+        let local_handle = bitmaps.local_handle(local_id).unwrap();
+        let foreign_id = foreign_bitmaps.add_ephemeral_bitmap(bitmap);
+        let foreign_handle = foreign_bitmaps.local_handle(foreign_id).unwrap();
+        let before_count = alloc.datum_count();
+
+        let foreign_error = alloc
+            .alloc_datum(Datum::BitmapRef(foreign_handle), &mut bitmaps)
+            .unwrap_err();
+        assert_eq!(foreign_error.code, ScriptErrorCode::InvalidReference);
+        assert_eq!(alloc.datum_count(), before_count);
+        assert_eq!(bitmaps.ephemeral_refcount_for_test(&local_handle).unwrap(), 0);
+
+        bitmaps.rotate_handles().unwrap();
+        let stale_error = alloc
+            .alloc_datum(Datum::BitmapRef(local_handle), &mut bitmaps)
+            .unwrap_err();
+        assert_eq!(stale_error.code, ScriptErrorCode::InvalidReference);
+        assert_eq!(alloc.datum_count(), before_count);
+        assert_eq!(bitmaps.get_bitmap(local_id).is_some(), true);
+    }
+
+    #[test]
+    fn bitmap_refcount_overflow_rolls_back_without_arena_entry() {
+        let mut alloc = allocator();
+        let mut bitmaps = crate::player::bitmap::manager::BitmapManager::new();
+        let bitmap = crate::player::bitmap::bitmap::Bitmap::new(
+            1,
+            1,
+            32,
+            32,
+            8,
+            crate::player::bitmap::bitmap::PaletteRef::Default,
+        );
+        let bitmap_id = bitmaps.add_ephemeral_bitmap(bitmap);
+        let handle = bitmaps.local_handle(bitmap_id).unwrap();
+        bitmaps
+            .set_ephemeral_refcount_for_test(&handle, u32::MAX)
+            .unwrap();
+        let before_count = alloc.datum_count();
+
+        let overflow_error = alloc
+            .alloc_datum(Datum::BitmapRef(handle.clone()), &mut bitmaps)
+            .unwrap_err();
+        assert_eq!(overflow_error.code, ScriptErrorCode::Generic);
+        assert_eq!(alloc.datum_count(), before_count);
+        assert_eq!(
+            bitmaps.ephemeral_refcount_for_test(&handle).unwrap(),
+            u32::MAX
+        );
     }
 
     #[test]
@@ -983,13 +1327,60 @@ mod ownership_tests {
             crate::player::bitmap::bitmap::PaletteRef::Default,
         );
         let bitmap_id = bitmaps.add_ephemeral_bitmap(bitmap);
+        let bitmap_handle = bitmaps.local_handle(bitmap_id).unwrap();
         let reference = alloc
-            .alloc_datum(Datum::BitmapRef(bitmap_id), &mut bitmaps)
+            .alloc_datum(Datum::BitmapRef(bitmap_handle), &mut bitmaps)
             .unwrap();
         assert!(bitmaps.get_bitmap(bitmap_id).is_some());
         drop(reference);
         alloc.drain_reclaims(&mut bitmaps);
         assert!(bitmaps.get_bitmap(bitmap_id).is_none());
+    }
+
+    #[test]
+    fn nested_list_and_proplist_reclaim_bitmap_once() {
+        let mut alloc = allocator();
+        let mut bitmaps = crate::player::bitmap::manager::BitmapManager::new();
+        let bitmap = crate::player::bitmap::bitmap::Bitmap::new(
+            1,
+            1,
+            32,
+            32,
+            8,
+            crate::player::bitmap::bitmap::PaletteRef::Default,
+        );
+        let bitmap_id = bitmaps.add_ephemeral_bitmap(bitmap);
+        let handle = bitmaps.local_handle(bitmap_id).unwrap();
+        let bitmap_ref = alloc
+            .alloc_datum(Datum::BitmapRef(handle.clone()), &mut bitmaps)
+            .unwrap();
+        let nested_list = alloc
+            .alloc_datum(
+                Datum::List(DatumType::List, VecDeque::from([bitmap_ref.clone()]), false),
+                &mut bitmaps,
+            )
+            .unwrap();
+        let nested_props = alloc
+            .alloc_datum(
+                Datum::PropList(
+                    VecDeque::from([(bitmap_ref.clone(), nested_list.clone())]),
+                    false,
+                ),
+                &mut bitmaps,
+            )
+            .unwrap();
+        assert_eq!(bitmaps.ephemeral_refcount_for_test(&handle).unwrap(), 1);
+
+        drop(bitmap_ref);
+        drop(nested_list);
+        drop(nested_props);
+        alloc.drain_reclaims(&mut bitmaps);
+
+        assert!(bitmaps.get_bitmap(bitmap_id).is_none());
+        assert!(matches!(
+            bitmaps.ephemeral_refcount_for_test(&handle),
+            Err(crate::player::bitmap::manager::BitmapHandleError::MissingBitmap)
+        ));
     }
 
     #[test]
@@ -1005,12 +1396,41 @@ mod ownership_tests {
             crate::player::bitmap::bitmap::PaletteRef::Default,
         );
         let bitmap_id = bitmaps.add_ephemeral_bitmap(bitmap);
+        let bitmap_handle = bitmaps.local_handle(bitmap_id).unwrap();
         let reference = alloc
-            .alloc_datum(Datum::BitmapRef(bitmap_id), &mut bitmaps)
+            .alloc_datum(Datum::BitmapRef(bitmap_handle.clone()), &mut bitmaps)
             .unwrap();
         let _new_owner = alloc.reset(&mut bitmaps);
+        assert!(bitmaps.get_bitmap_handle(&bitmap_handle).is_none());
         assert!(bitmaps.get_bitmap(bitmap_id).is_none());
         drop(reference);
+    }
+
+    #[test]
+    fn reset_preserves_anchored_pixels_and_invalidates_old_bitmap_handle() {
+        let mut alloc = allocator();
+        let mut bitmaps = crate::player::bitmap::manager::BitmapManager::new();
+        let mut anchored = crate::player::bitmap::bitmap::Bitmap::new(
+            1,
+            1,
+            32,
+            32,
+            8,
+            crate::player::bitmap::bitmap::PaletteRef::Default,
+        );
+        anchored.data[0] = 91;
+        let bitmap_id = bitmaps.add_bitmap(anchored);
+        let old_handle = bitmaps.local_handle(bitmap_id).unwrap();
+        let retained = alloc
+            .alloc_datum(Datum::BitmapRef(old_handle.clone()), &mut bitmaps)
+            .unwrap();
+
+        alloc.reset(&mut bitmaps);
+
+        assert!(bitmaps.get_bitmap_handle(&old_handle).is_none());
+        let fresh = bitmaps.local_handle(bitmap_id).unwrap();
+        assert_eq!(bitmaps.get_bitmap_handle(&fresh).unwrap().data[0], 91);
+        drop(retained);
     }
 
     #[test]
@@ -1111,12 +1531,23 @@ mod ownership_tests {
         let retained = alloc
             .alloc_datum(Datum::String("before-unwind".into()), &mut bitmaps)
             .unwrap();
+        let bitmap = crate::player::bitmap::bitmap::Bitmap::new(
+            1,
+            1,
+            32,
+            32,
+            8,
+            crate::player::bitmap::bitmap::PaletteRef::Default,
+        );
+        let bitmap_id = bitmaps.add_bitmap(bitmap);
+        let bitmap_handle = bitmaps.local_handle(bitmap_id).unwrap();
         let old_owner = alloc.owner_token();
         alloc.inject_reset_unwind();
 
         let result = catch_unwind(AssertUnwindSafe(|| alloc.reset(&mut bitmaps)));
         assert!(result.is_err());
         assert!(!old_owner.is_arena_live());
+        assert!(bitmaps.get_bitmap_handle(&bitmap_handle).is_none());
         assert!(alloc
             .alloc_datum(Datum::String("rejected".into()), &mut bitmaps)
             .is_err());

@@ -75,6 +75,31 @@ campaign. Ruffle callback-origin work remains an isolated, uncompiled nine-file
 proposal. JS-Lingo legacy TLS and global player/renderer paths remain. Passing
 native library tests is not a working native player.
 
+### Accepted bitmap capability component
+
+The subsequent [bitmap capability checkpoint](checkpoints/bitmap-capabilities-20260917/README.md)
+is integrated and accepted in the working tree: retained bitmap handles reject
+foreign/stale ownership; allocation, recursive reclamation and reset preserve
+refcount/liveness invariants; explicit copies own resolved RGBA pixels. Nested
+datum graphs are checked at deferred-access and duplication boundaries.
+Corrected source passed **501 native tests** and WASM test compilation. The
+receipt records the applicable **13 browser**, **34 frontend** and TypeScript
+checks, including their precise source-reuse boundary.
+
+The subsequent [typed mutation checkpoint](checkpoints/typed-mutation-20260917/README.md)
+is also accepted in the working tree: vector/transform replacement requires a
+live, same-owner, non-pooled target of the exact type. All ten whole-value writes
+use that boundary, and the raw player mutation accessor is crate-private.
+Definitive verification passed **503 native tests**, WASM compilation and source
+drift checks. The full Stage 2.1 exit gate is not accepted; remaining reference
+kinds and transfer boundaries still require audit.
+
+The [JS RNG checkpoint](checkpoints/js-rng-20260917/README.md) is also accepted:
+`Math.random` state is per runtime, with explicit seeded construction/reseeding
+and no thread-local seed. **508 native tests** and WASM test compilation pass.
+Generic JS object ownership and get/set/call routing remain open; session-level
+seed selection is not claimed by this component.
+
 ## Current remaining sequence
 
 Milestone IDs refer to the governing roadmap. Each milestone tracks implementation,
@@ -84,7 +109,19 @@ verification and integration separately; its complete exit gate controls accepta
   reconcile current bases, integrate the reviewed combined batch and verify live source.
 - [ ] **2.10 remaining consolidation:** finish residual owner cutovers and
   remove temporary adapters in one verified checkout.
+- [x] **2.1 bitmap/reference component:** accept retained bitmap capabilities
+  and nested reference checks in the working tree; this follows the published
+  integration checkpoint above.
+- [x] **2.1 typed mutation component:** checked vector/transform replacement,
+  pooled/resource-value preservation and owner-collision tests.
+- [ ] **2.1 remaining work:** audit all remaining reference kinds and
+  transfer/reclamation boundaries.
+- [ ] **2.2–2.5:** remove legacy execution/browser routes, audit every async
+  producer and extension completion, and verify dispatch precedence, cancellation,
+  reentry and teardown through production entrypoints.
 - [ ] **2.6–2.8:** close initial Flash access before reservation, actual Ruffle callback-origin routing, and JS-Lingo runtime/object/RNG ownership.
+- [x] **2.8 RNG component:** runtime-owned `Math.random` state with explicit
+  seeding and interleaving/replay tests.
 - [ ] **2.9–2.10:** finish player graph, render/audio effects, loading/cache ownership and remove temporary adapters in one verified checkout.
 - [ ] **3.1–3.2:** accept interleaved/separate-thread isolation, lifecycle/panic cleanup, static audit and applicable Miri.
 - [ ] **4.1–4.5:** implement native services, exact advancement, RGBA, PCM and the Director-only executable slice.

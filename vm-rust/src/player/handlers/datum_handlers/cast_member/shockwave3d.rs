@@ -909,7 +909,7 @@ impl Shockwave3dMemberHandlers {
                 // a script asks, the renderer skips that readback entirely.
                 player.w3d_image_requested.insert(key);
                 if let Some(&bitmap_ref) = player.w3d_frame_buffers.get(&key) {
-                    return Ok(Datum::BitmapRef(bitmap_ref));
+                    return Ok(Datum::BitmapRef(player.bitmap_handle_for_id(bitmap_ref)?));
                 }
 
                 // No cached frame — render offscreen
@@ -937,43 +937,75 @@ impl Shockwave3dMemberHandlers {
                 // path above (w3d_frame_buffers) returns an anchored bitmap
                 // and bypasses this branch.
                 let bitmap_ref = player.bitmap_manager.add_ephemeral_bitmap(bitmap);
-                Ok(Datum::BitmapRef(bitmap_ref))
+                Ok(Datum::BitmapRef(player.bitmap_handle_for_id(bitmap_ref)?))
             }
-            BuiltInSymbol::BackgroundColor => {
-                Ok(Datum::ColorRef(crate::player::sprite::ColorRef::Rgb(50, 50, 50)))
+            BuiltInSymbol::BackgroundColor => Ok(Datum::ColorRef(
+                crate::player::sprite::ColorRef::Rgb(50, 50, 50),
+            )),
+            BuiltInSymbol::AmbientColor => Ok(Datum::ColorRef(
+                crate::player::sprite::ColorRef::Rgb(25, 25, 25),
+            )),
+            BuiltInSymbol::Renderer | BuiltInSymbol::RendererDeviceList => {
+                Ok(Datum::Symbol(BuiltInSymbol::OpenGL.into()))
             }
-            BuiltInSymbol::AmbientColor => {
-                Ok(Datum::ColorRef(crate::player::sprite::ColorRef::Rgb(25, 25, 25)))
-            }
-            BuiltInSymbol::Renderer | BuiltInSymbol::RendererDeviceList => Ok(Datum::Symbol(BuiltInSymbol::OpenGL.into())),
             BuiltInSymbol::ColorBufferDepth => Ok(Datum::Int(32)),
             BuiltInSymbol::DepthBufferDepth => Ok(Datum::Int(24)),
             BuiltInSymbol::AntiAliasingEnabled => Ok(Datum::Int(0)),
             BuiltInSymbol::StreamSize => Ok(Datum::Int(0)),
             // Text3D properties (stub values after Text→Shockwave3d conversion)
-            BuiltInSymbol::Smoothness => Ok(Datum::Int(text3d_state.as_ref().map(|s| s.smoothness as i32).unwrap_or(10))),
-            BuiltInSymbol::TunnelDepth => Ok(Datum::Float(text3d_state.as_ref().map(|s| s.tunnel_depth as f64).unwrap_or(10.0))),
-            BuiltInSymbol::BevelDepth => Ok(Datum::Float(text3d_state.as_ref().map(|s| s.bevel_depth as f64).unwrap_or(1.0))),
-            BuiltInSymbol::BevelType => Ok(Datum::Symbol(match text3d_state.as_ref().map(|s| s.bevel_type).unwrap_or(0) {
-                1 => BuiltInSymbol::Miter.into(),
-                2 => BuiltInSymbol::Round.into(),
-                _ => BuiltInSymbol::None.into(),
-            })),
-            BuiltInSymbol::DisplayFace => Ok(Datum::Int(text3d_state.as_ref().map(|s| s.display_face).unwrap_or(-1))),
-            BuiltInSymbol::DisplayMode => Ok(Datum::Symbol(if text3d_state.as_ref().map(|s| s.display_mode).unwrap_or(1) == 1 {
-                BuiltInSymbol::Mode3d.into()
-            } else {
-                BuiltInSymbol::Normal.into()
-            })),
+            BuiltInSymbol::Smoothness => Ok(Datum::Int(
+                text3d_state
+                    .as_ref()
+                    .map(|s| s.smoothness as i32)
+                    .unwrap_or(10),
+            )),
+            BuiltInSymbol::TunnelDepth => Ok(Datum::Float(
+                text3d_state
+                    .as_ref()
+                    .map(|s| s.tunnel_depth as f64)
+                    .unwrap_or(10.0),
+            )),
+            BuiltInSymbol::BevelDepth => Ok(Datum::Float(
+                text3d_state
+                    .as_ref()
+                    .map(|s| s.bevel_depth as f64)
+                    .unwrap_or(1.0),
+            )),
+            BuiltInSymbol::BevelType => Ok(Datum::Symbol(
+                match text3d_state.as_ref().map(|s| s.bevel_type).unwrap_or(0) {
+                    1 => BuiltInSymbol::Miter.into(),
+                    2 => BuiltInSymbol::Round.into(),
+                    _ => BuiltInSymbol::None.into(),
+                },
+            )),
+            BuiltInSymbol::DisplayFace => Ok(Datum::Int(
+                text3d_state.as_ref().map(|s| s.display_face).unwrap_or(-1),
+            )),
+            BuiltInSymbol::DisplayMode => Ok(Datum::Symbol(
+                if text3d_state.as_ref().map(|s| s.display_mode).unwrap_or(1) == 1 {
+                    BuiltInSymbol::Mode3d.into()
+                } else {
+                    BuiltInSymbol::Normal.into()
+                },
+            )),
             BuiltInSymbol::DiffuseColor => {
-                let (r, g, b) = text3d_state.as_ref().map(|s| s.diffuse_color).unwrap_or((0, 0, 0));
-                Ok(Datum::ColorRef(crate::player::sprite::ColorRef::Rgb(r, g, b)))
+                let (r, g, b) = text3d_state
+                    .as_ref()
+                    .map(|s| s.diffuse_color)
+                    .unwrap_or((0, 0, 0));
+                Ok(Datum::ColorRef(crate::player::sprite::ColorRef::Rgb(
+                    r, g, b,
+                )))
             }
             BuiltInSymbol::DirectionalPreset => {
                 // Read current preset from runtime state (default 2 = #topCenter)
                 let preset = {
-                    let member = player.movie.cast_manager.find_member_by_ref(cast_member_ref);
-                    member.and_then(|m| m.member_type.as_shockwave3d())
+                    let member = player
+                        .movie
+                        .cast_manager
+                        .find_member_by_ref(cast_member_ref);
+                    member
+                        .and_then(|m| m.member_type.as_shockwave3d())
                         .map(|w3d| w3d.runtime_state.directional_preset)
                         .unwrap_or(2)
                 };
@@ -2753,7 +2785,7 @@ impl Shockwave3dMemberHandlers {
                             } else if tex_type == "fromImageObject" {
                                 if let Some(source) = new_texture_source.as_ref() {
                                     if let Ok(bitmap_ref) = source.to_bitmap_ref() {
-                                        let rgba_data = if let Some(bmp) = player.bitmap_manager.get_bitmap(*bitmap_ref) {
+                                        let rgba_data = if let Some(bmp) = player.bitmap_manager.get_bitmap_handle(bitmap_ref) {
                                         let w = bmp.width;
                                         let h = bmp.height;
                                         let palettes = player.movie.cast_manager.palettes();

@@ -5,10 +5,13 @@ use log::{debug, warn};
 use crate::{
     director::lingo::datum::Datum,
     player::{
-        DatumRef, DirPlayer, HandlerExecutionResult, ScriptError, bitmap::{manager::BitmapRef, mask::BitmapMask}, datum_formatting::format_concrete_datum, score::sprite_get_prop, symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable}
+        DatumRef, DirPlayer, HandlerExecutionResult, ScriptError,
+        bitmap::{manager::BitmapId, mask::BitmapMask},
+        datum_formatting::format_concrete_datum,
+        score::sprite_get_prop,
+        symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable},
     },
 };
-
 
 use super::handler_manager::BytecodeHandlerContext;
 
@@ -44,9 +47,15 @@ fn checked_sprite_operand<'a>(
 
 /// Get the bitmap image_ref for a sprite's cast member (if it's a bitmap).
 /// Returns (image_ref, bitmap_width, bitmap_height).
-fn get_sprite_image_ref(player: &DirPlayer, sprite_num: i16) -> Option<(BitmapRef, u16, u16)> {
-    let member_ref = player.movie.score.get_channel(sprite_num)
-        .sprite.member.as_ref()?.clone();
+fn get_sprite_image_ref(player: &DirPlayer, sprite_num: i16) -> Option<(BitmapId, u16, u16)> {
+    let member_ref = player
+        .movie
+        .score
+        .get_channel(sprite_num)
+        .sprite
+        .member
+        .as_ref()?
+        .clone();
     let member = player.movie.cast_manager.find_member_by_ref(&member_ref)?;
     let bmp = member.member_type.as_bitmap()?;
     let bitmap = player.bitmap_manager.get_bitmap(bmp.image_ref)?;

@@ -1,15 +1,14 @@
 use log::warn;
 use std::collections::HashSet;
 
-use crate::director::lingo::datum::Datum;
-use crate::director::lingo::datum;
-use crate::player::bitmap::manager::INVALID_BITMAP_REF;
 use super::{
+    DatumRef, ScriptError, ScriptErrorCode,
     allocator::{DatumAllocator, DatumAllocatorTrait},
     handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers,
     symbols::symbol_table::SymbolTable,
-    DatumRef, ScriptError, ScriptErrorCode,
 };
+use crate::director::lingo::datum;
+use crate::director::lingo::datum::Datum;
 
 #[inline]
 fn invalid_reference(datum_ref: &DatumRef) -> ScriptError {
@@ -111,7 +110,7 @@ pub fn datum_equals(
             Void | Null => true,
             VarRef(datum::VarRef::Script(var_ref)) => !var_ref.is_valid(),
             CastMember(member_ref) => !member_ref.is_valid(), // TODO return true if member is empty?
-            BitmapRef(b) => *b == INVALID_BITMAP_REF,
+            BitmapRef(b) => false,
             _ => false,
         }),
 

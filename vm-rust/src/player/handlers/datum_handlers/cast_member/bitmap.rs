@@ -40,7 +40,9 @@ impl BitmapMemberHandlers {
         match prop.into_builtin() {
             Some(BuiltInSymbol::Width) => Ok(Datum::Int(bitmap.width as i32)),
             Some(BuiltInSymbol::Height) => Ok(Datum::Int(bitmap.height as i32)),
-            Some(BuiltInSymbol::Image | BuiltInSymbol::Picture) => Ok(Datum::BitmapRef(bitmap_ref)),
+            Some(BuiltInSymbol::Image | BuiltInSymbol::Picture) => {
+                Ok(Datum::BitmapRef(player.bitmap_handle_for_id(bitmap_ref)?))
+            }
             Some(BuiltInSymbol::Media) => Ok(Datum::media(Media::Bitmap {
                 bitmap: bitmap.clone(),
                 reg_point: bitmap_member.reg_point,
@@ -415,5 +417,116 @@ impl BitmapMemberHandlers {
                 symbols.display(&prop).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
             ))),
         }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use crate::player::{
+        bitmap::{bitmap::{Bitmap, PaletteRef}, manager::BitmapManager},
+        cast_member::{BitmapMember, CastMember, CastMemberType},
+        ownership::OwnerToken,
+    };
+    use async_std::channel;
+
+    fn test_player() -> DirPlayer {
+        let (tx, _rx) = channel::unbounded();
+        DirPlayer::new_with_owner(tx, OwnerToken::transitional())
+    }
+
+    #[test]
+    fn bitmap_member_image_get_set_rejects_stale_and_foreign_handles() {
+        let mut player = test_player();
+        let mut symbols = SymbolTable::new();
+        let member_ref = CastMemberRef { cast_lib: 1, cast_member: 1 };
+        let member_bitmap = player.bitmap_manager.add_bitmap(Bitmap::new(
+            1, 1, 32, 32, 8, PaletteRef::Default,
+        ));
+        let mut cast = crate::player::cast_lib::CastLib::test_external(1, 0);
+        cast.members.insert(
+            1,
+            CastMember::new(
+                1,
+                CastMemberType::Bitmap(BitmapMember {
+                    image_ref: member_bitmap,
+                    ..BitmapMember::default()
+                }),
+            ),
+        );
+        player.movie.cast_manager.casts.push(cast);
+
+        let image = BitmapMemberHandlers::get_prop(
+            &mut player,
+            &symbols,
+            &member_ref,
+            Symbol::builtin(BuiltInSymbol::Image),
+        )
+        .expect("bitmap member image getter should return a capability");
+        let current_handle = match image {
+            Datum::BitmapRef(handle) => handle,
+            _ => panic!("expected BitmapRef from bitmap member image getter"),
+        };
+        assert!(player.bitmap_manager.get_bitmap_handle(&current_handle).is_some());
+
+        let source_handle = player
+            .bitmap_manager
+            .add_ephemeral_bitmap_handle(Bitmap::new(
+                2, 3, 32, 32, 8, PaletteRef::Default,
+            ))
+            .unwrap();
+        player
+            .bitmap_manager
+            .get_bitmap_handle_mut(&source_handle)
+            .unwrap()
+            .data
+            .fill(23);
+        BitmapMemberHandlers::set_prop(
+            &mut player,
+            &mut symbols,
+            &member_ref,
+            Symbol::builtin(BuiltInSymbol::Image),
+            Datum::BitmapRef(source_handle.clone()),
+        )
+        .expect("bitmap member image setter should copy source pixels");
+        let replaced = player.bitmap_manager.get_bitmap(member_bitmap).unwrap();
+        assert_eq!((replaced.width, replaced.height), (2, 3));
+        assert_eq!(replaced.data, vec![23; 2 * 3 * 4]);
+        assert_eq!(
+            player
+                .movie
+                .cast_manager
+                .find_member_by_ref(&member_ref)
+                .unwrap()
+                .reg_point,
+            (1, 1)
+        );
+
+        let before_rejected = replaced.data.clone();
+        let stale_handle = source_handle.clone();
+        player.bitmap_manager.rotate_handles().unwrap();
+        assert!(BitmapMemberHandlers::set_prop(
+            &mut player,
+            &mut symbols,
+            &member_ref,
+            Symbol::builtin(BuiltInSymbol::Image),
+            Datum::BitmapRef(stale_handle),
+        )
+        .is_err());
+        assert_eq!(player.bitmap_manager.get_bitmap(member_bitmap).unwrap().data, before_rejected);
+
+        let mut foreign_manager = BitmapManager::new();
+        let foreign_handle = foreign_manager
+            .add_bitmap_handle(Bitmap::new(4, 4, 32, 32, 8, PaletteRef::Default))
+            .unwrap();
+        assert!(BitmapMemberHandlers::set_prop(
+            &mut player,
+            &mut symbols,
+            &member_ref,
+            Symbol::builtin(BuiltInSymbol::Image),
+            Datum::BitmapRef(foreign_handle),
+        )
+        .is_err());
+        assert_eq!(player.bitmap_manager.get_bitmap(member_bitmap).unwrap().data, before_rejected);
     }
 }

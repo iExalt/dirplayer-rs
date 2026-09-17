@@ -4672,7 +4672,7 @@ fn concrete_datum_to_js_bridge(datum: &Datum, symbols: &SymbolTable, player: &Di
         }
         Datum::BitmapRef(bitmap_ref) => {
             map.str_set("type", &safe_js_string("bitmapRef"));
-            if let Some(bitmap) = player.bitmap_manager.get_bitmap(*bitmap_ref) {
+            if let Some(bitmap) = player.bitmap_manager.get_bitmap_handle(bitmap_ref) {
                 map.str_set("width", &JsValue::from(bitmap.width));
                 map.str_set("height", &JsValue::from(bitmap.height));
                 map.str_set("bitDepth", &JsValue::from(bitmap.bit_depth));

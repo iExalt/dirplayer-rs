@@ -25,7 +25,7 @@ use super::{
     allocator::DatumAllocator,
     bitmap::{
         bitmap::PaletteRef,
-        manager::{BitmapManager, BitmapRef},
+        manager::{BitmapId, BitmapManager},
         palette_map::PaletteMap,
     },
     cast_lib::{
@@ -237,7 +237,7 @@ impl CastManager {
     /// to point to the correct castLib.
     fn resolve_unresolved_palette_refs(&self, bitmap_manager: &mut BitmapManager) {
         // Collect all (bitmap_ref, target_cast_member, current_cast_lib) that need resolution
-        let mut to_resolve: Vec<(BitmapRef, i32, i32)> = Vec::new();
+        let mut to_resolve: Vec<(BitmapId, i32, i32)> = Vec::new();
 
         for cast in &self.casts {
             for member in cast.members.values() {

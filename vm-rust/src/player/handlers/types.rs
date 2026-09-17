@@ -1595,7 +1595,7 @@ impl TypeHandlers {
             // `image(w, h, depth)` builds a fresh bitmap not yet owned by any
             // cast member; release it when the wrapping DatumRef drops.
             let bitmap_ref = player.bitmap_manager.add_ephemeral_bitmap(bitmap);
-            Ok(player.alloc_datum(Datum::BitmapRef(bitmap_ref)))
+            Ok(player.alloc_datum(Datum::BitmapRef(player.bitmap_handle_for_id(bitmap_ref)?)))
         })
     }
 

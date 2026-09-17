@@ -15,13 +15,13 @@
 
 use crate::director::enums::BitmapInfo;
 use crate::player::bitmap::bitmap::{Bitmap, BuiltInPalette, PaletteRef};
-use crate::player::bitmap::manager::BitmapRef;
+use crate::player::bitmap::manager::BitmapId;
 use crate::player::bitmap::manager::BitmapManager;
 
 /// One decoded GIF: its frames as bitmaps, and how long each is shown.
 #[derive(Clone, Debug)]
 pub struct GifAnimation {
-    pub frames: Vec<BitmapRef>,
+    pub frames: Vec<BitmapId>,
     /// Milliseconds per frame, same length as `frames`.
     pub delays_ms: Vec<u32>,
     pub width: u16,
@@ -68,7 +68,7 @@ impl GifAnimation {
         changed
     }
 
-    pub fn current_ref(&self) -> BitmapRef {
+    pub fn current_ref(&self) -> BitmapId {
         self.frames[self.current.min(self.frames.len() - 1)]
     }
 }
@@ -224,7 +224,7 @@ pub fn tick_gif_animations() {
         if player.gif_animations.is_empty() {
             return;
         }
-        let mut moved: Vec<((u32, u32), BitmapRef)> = Vec::new();
+        let mut moved: Vec<((u32, u32), BitmapId)> = Vec::new();
         for (key, anim) in player.gif_animations.iter_mut() {
             if anim.advance(now) {
                 moved.push((*key, anim.current_ref()));

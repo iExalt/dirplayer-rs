@@ -448,7 +448,7 @@ impl PropListUtils {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
-    use crate::director::lingo::datum::DatumType;
+    use crate::director::lingo::datum::{DatumType, TimeoutInstanceData, VarRef};
     use crate::player::ownership::OwnerToken;
     use crate::player::script::ScriptInstance;
     use crate::player::cast_lib::CastMemberRef;
@@ -773,6 +773,92 @@ mod tests {
             false,
         ));
         assert!(super::player_duplicate_datum(&mut player, &symbols, &foreign_root).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_rejects_nested_foreign_script_var_and_timeout_handles() -> Result<(), ScriptError> {
+        let mut player = test_player();
+        let mut foreign_player = test_player();
+        let symbols = SymbolTable::new();
+        let foreign_instance = foreign_player.allocator.alloc_script_instance(ScriptInstance {
+            instance_id: 1,
+            script: CastMemberRef { cast_lib: 1, cast_member: 1 },
+            ancestor: None,
+            properties: FxHashMap::default(),
+            begin_sprite_called: false,
+        });
+        let foreign_script = player.alloc_datum(Datum::ScriptInstanceRef(foreign_instance.clone()));
+        let foreign_var = player.alloc_datum(Datum::VarRef(VarRef::ScriptInstance(
+            foreign_instance.clone(),
+        )));
+        let foreign_timeout = player.alloc_datum(Datum::TimeoutInstance(Box::new(
+            TimeoutInstanceData {
+                name: "foreign".to_owned(),
+                duration: 1,
+                callback: foreign_script.clone(),
+                target: DatumRef::Void,
+                script_instance: Some(foreign_script.clone()),
+            },
+        )));
+
+        for child in [foreign_script, foreign_var, foreign_timeout] {
+            let nested = player.alloc_datum(Datum::List(
+                DatumType::List,
+                VecDeque::from([child]),
+                false,
+            ));
+            assert_eq!(
+                super::player_duplicate_datum(&mut player, &symbols, &nested)
+                    .err()
+                    .map(|error| error.code),
+                Some(crate::player::ScriptErrorCode::InvalidReference)
+            );
+        }
+        drop(foreign_player);
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_rejects_formerly_local_stale_script_var_and_timeout_handles() -> Result<(), ScriptError> {
+        let mut player = test_player();
+        let symbols = SymbolTable::new();
+        let stale_instance = player.allocator.alloc_script_instance(ScriptInstance {
+            instance_id: 1,
+            script: CastMemberRef { cast_lib: 1, cast_member: 1 },
+            ancestor: None,
+            properties: FxHashMap::default(),
+            begin_sprite_called: false,
+        });
+        player.reset_owned_core();
+
+        let stale_script = player.alloc_datum(Datum::ScriptInstanceRef(stale_instance.clone()));
+        let stale_var = player.alloc_datum(Datum::VarRef(VarRef::ScriptInstance(
+            stale_instance.clone(),
+        )));
+        let stale_timeout = player.alloc_datum(Datum::TimeoutInstance(Box::new(
+            TimeoutInstanceData {
+                name: "stale".to_owned(),
+                duration: 1,
+                callback: stale_script.clone(),
+                target: DatumRef::Void,
+                script_instance: Some(stale_script.clone()),
+            },
+        )));
+
+        for child in [stale_script, stale_var, stale_timeout] {
+            let nested = player.alloc_datum(Datum::List(
+                DatumType::List,
+                VecDeque::from([child]),
+                false,
+            ));
+            assert_eq!(
+                super::player_duplicate_datum(&mut player, &symbols, &nested)
+                    .err()
+                    .map(|error| error.code),
+                Some(crate::player::ScriptErrorCode::InvalidReference)
+            );
+        }
         Ok(())
     }
 

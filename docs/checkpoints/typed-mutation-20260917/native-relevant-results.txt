@@ -1,0 +1,4 @@
+test player::allocator::ownership_tests::typed_replacement_rejects_foreign_stale_and_bitmap_targets ... ok
+test player::allocator::ownership_tests::typed_replacement_requires_exact_live_non_pooled_target ... ok
+test player::handlers::datum_handlers::vector::tests::parent_writeback_marks_the_parent_transform ... ok
+test result: ok. 503 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s

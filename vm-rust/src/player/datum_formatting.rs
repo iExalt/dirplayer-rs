@@ -130,14 +130,22 @@ pub fn format_concrete_datum_with_depth(
         Datum::BitmapRef(bitmap_ref) => {
             let bitmap = player
                 .bitmap_manager
-                .get_bitmap(*bitmap_ref)
-                .ok_or_else(|| invalid_reference(format!("stale bitmap reference {bitmap_ref:?}")))?;
-            format!("<bitmap {}x{}x{}>", bitmap.width, bitmap.height, bitmap.bit_depth)
+                .get_bitmap_handle(bitmap_ref)
+                .ok_or_else(|| {
+                    invalid_reference(format!("stale bitmap reference {bitmap_ref:?}"))
+                })?;
+            format!(
+                "<bitmap {}x{}x{}>",
+                bitmap.width, bitmap.height, bitmap.bit_depth
+            )
         }
         Datum::PaletteRef(palette_ref) => match palette_ref {
             PaletteRef::BuiltIn(builtin) => format!("{builtin:?}").to_lowercase(),
             PaletteRef::Member(member_ref) => {
-                format!("(member {} of castLib {})", member_ref.cast_member, member_ref.cast_lib)
+                format!(
+                    "(member {} of castLib {})",
+                    member_ref.cast_member, member_ref.cast_lib
+                )
             }
             PaletteRef::Default => "#default".to_string(),
         },

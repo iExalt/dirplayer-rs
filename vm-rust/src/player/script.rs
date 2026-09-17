@@ -733,7 +733,7 @@ pub fn set_obj_prop_sync(
         Datum::BitmapRef(bitmap_ref) => {
             checked_set_value(player, symbols, value_ref)?;
             applied(BitmapDatumHandlers::set_bitmap_ref_prop(
-                player, symbols, bitmap_ref, prop_name, value_ref,
+                player, symbols, &bitmap_ref, prop_name, value_ref,
             ))
         }
         Datum::Point(..) => {

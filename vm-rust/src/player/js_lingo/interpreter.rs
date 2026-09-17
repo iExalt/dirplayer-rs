@@ -9,7 +9,7 @@
 // incremental — anything we haven't implemented yet falls through to an
 // `Unimplemented(op)` error rather than silent miscalculation.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use super::host_bridge::JsHostBridge;
@@ -87,6 +87,10 @@ pub struct JsRuntime {
     /// (run_program or call_function). When zero, the dispatch loop bails
     /// out with an error rather than freezing the browser.
     instruction_budget: std::cell::Cell<u64>,
+    /// Per-runtime xorshift state for Math.random. Keeping this behind an Rc
+    /// lets the native Math.random closure own the same state without
+    /// borrowing the runtime during a call.
+    random_state: Rc<Cell<u64>>,
 }
 
 /// Hard limits that mirror Director's runtime constraints loosely. Big-enough
@@ -99,6 +103,7 @@ const MAX_CALL_DEPTH: u32 = 256;
 // runaway loops (~50s on a typical browser before bailing) while letting
 // real crypto handshakes complete.
 const MAX_INSTRUCTIONS_PER_INVOCATION: u64 = 500_000_000;
+const DEFAULT_RANDOM_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
 
 impl JsRuntime {
     /// New runtime with the ECMA-262 stdlib (Math, parseInt, etc.) installed.
@@ -109,11 +114,22 @@ impl JsRuntime {
     }
 
     pub fn new() -> Self {
+        Self::new_with_seed(DEFAULT_RANDOM_SEED)
+            .expect("the built-in nonzero Math.random seed must be valid")
+    }
+
+    /// Construct a runtime with an explicit deterministic Math.random seed.
+    /// Zero is rejected because xorshift has an absorbing all-zero state.
+    pub fn new_with_seed(seed: u64) -> Result<Self, JsError> {
+        if seed == 0 {
+            return Err(JsError::new("Math.random seed must be nonzero"));
+        }
         let rt = JsRuntime {
             global: Rc::new(RefCell::new(JsObject::new())),
             bridge: std::rc::Rc::new(std::cell::RefCell::new(super::host_bridge::StubBridge)),
             call_depth: std::cell::Cell::new(0),
             instruction_budget: std::cell::Cell::new(MAX_INSTRUCTIONS_PER_INVOCATION),
+            random_state: Rc::new(Cell::new(seed)),
         };
         // Built-in constructors: NAME "Array"/"Object" needs to resolve to
         // something at script load. The values themselves don't need to be
@@ -145,7 +161,27 @@ impl JsRuntime {
         rt.define_native("Object", |_args| {
             Ok(JsValue::Object(Rc::new(RefCell::new(JsObject::new()))))
         });
-        rt
+        Ok(rt)
+    }
+
+    /// Construct a runtime with stdlib installed and an explicit RNG seed.
+    pub fn with_stdlib_seed(seed: u64) -> Result<Self, JsError> {
+        let rt = Self::new_with_seed(seed)?;
+        super::builtins::install(&rt);
+        Ok(rt)
+    }
+
+    /// Reseed Math.random without changing any other runtime state.
+    pub fn reseed_random(&self, seed: u64) -> Result<(), JsError> {
+        if seed == 0 {
+            return Err(JsError::new("Math.random seed must be nonzero"));
+        }
+        self.random_state.set(seed);
+        Ok(())
+    }
+
+    pub(super) fn random_state(&self) -> Rc<Cell<u64>> {
+        self.random_state.clone()
     }
 
     /// Install a native callable as a global property.
@@ -2348,4 +2384,3 @@ fn build_atom_slot_map(atoms: &[JsAtom], bindings: &[JsFunctionBinding]) -> Vec<
     }
     map
 }
-

@@ -106,11 +106,9 @@ impl VectorDatumHandlers {
                 let [x, y, z] = Self::checked_datum_to_vec(player, symbols, &datum)?;
                 let len = (x*x + y*y + z*z).sqrt();
                 if len > 1e-10 {
-                    *player
+                    player
                         .allocator
-                        .try_get_datum_mut(&datum)
-                        .ok_or_else(|| ScriptError::new(format!("invalid datum reference {datum}")))? =
-                        Datum::Vector([x/len, y/len, z/len]);
+                        .replace_vector(&datum, [x/len, y/len, z/len])?;
                 }
                 Ok(DatumRef::Void)
             }
@@ -194,11 +192,7 @@ impl VectorDatumHandlers {
         let value = checked_datum(player, &args[1], symbols)?.float_value()? as f64;
         vec[(index - 1) as usize] = value;
 
-        *player
-            .allocator
-            .try_get_datum_mut(datum)
-            .ok_or_else(|| ScriptError::new(format!("invalid datum reference {datum}")))? =
-            Datum::Vector(vec);
+        player.allocator.replace_vector(datum, vec)?;
         Ok(DatumRef::Void)
     }
 
@@ -321,7 +315,7 @@ impl VectorDatumHandlers {
             }
         }
 
-        *player.get_datum_mut(datum) = Datum::Vector(vec);
+        player.allocator.replace_vector(datum, vec)?;
 
         // Write back to parent transform if this vector came from transform.position/rotation.
         // Mark the parent transform dirty so sync_persistent_transforms propagates the

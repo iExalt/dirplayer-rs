@@ -243,7 +243,9 @@ pub fn get_stage_prop(
             // (capture_stage_bitmap runs a full draw_frame, so skip it when
             // possible.)
             if has_clean_existing {
-                return Ok(Datum::BitmapRef(player.stage_image.unwrap()));
+                return Ok(Datum::BitmapRef(
+                    player.bitmap_handle_for_id(player.stage_image.unwrap())?,
+                ));
             }
 
             let mut snapshot = None;
@@ -288,13 +290,13 @@ pub fn get_stage_prop(
                     if let Some(dst) = player.bitmap_manager.get_bitmap_mut(existing) {
                         *dst = snapshot;
                     }
-                    Ok(Datum::BitmapRef(existing))
+                    Ok(Datum::BitmapRef(player.bitmap_handle_for_id(existing)?))
                 }
                 _ => {
                     let bitmap_id = player.bitmap_manager.add_bitmap(snapshot);
                     player.stage_image = Some(bitmap_id);
                     player.stage_image_dirty = false;
-                    Ok(Datum::BitmapRef(bitmap_id))
+                    Ok(Datum::BitmapRef(player.bitmap_handle_for_id(bitmap_id)?))
                 }
             }
         }

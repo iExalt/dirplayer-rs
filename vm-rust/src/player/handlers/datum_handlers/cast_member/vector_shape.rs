@@ -1048,7 +1048,7 @@ impl VectorShapeMemberHandlers {
         }
 
         let bitmap_id = player.bitmap_manager.add_ephemeral_bitmap(bitmap);
-        Ok(Datum::BitmapRef(bitmap_id))
+        Ok(Datum::BitmapRef(player.bitmap_handle_for_id(bitmap_id)?))
     }
 }
 

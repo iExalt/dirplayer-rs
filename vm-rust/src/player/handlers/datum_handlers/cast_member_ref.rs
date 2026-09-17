@@ -280,7 +280,7 @@ impl CastMemberRefHandlers {
         request: &crate::player::driver::CastMemberAsyncRequest,
     ) -> Result<DatumRef, ScriptError> {
         enum ImportTarget {
-            Bitmap(crate::player::bitmap::manager::BitmapRef),
+            Bitmap(crate::player::bitmap::manager::BitmapId),
             Sound,
             Unsupported,
         }
@@ -556,14 +556,29 @@ impl CastMemberRefHandlers {
                 let image_datum = {
                     let member_ref = match checked_datum(player, datum, symbols)? {
                         Datum::CastMember(r) => r.to_owned(),
-                        _ => return Err(ScriptError::new(format!("{}: not a cast member", handler_name_str))),
+                        _ => {
+                            return Err(ScriptError::new(format!(
+                                "{}: not a cast member",
+                                handler_name_str
+                            )));
+                        }
                     };
-                    let member = player.movie.cast_manager.find_member_by_ref(&member_ref)
-                        .ok_or_else(|| ScriptError::new(format!("{}: member not found", handler_name_str)))?;
+                    let member = player
+                        .movie
+                        .cast_manager
+                        .find_member_by_ref(&member_ref)
+                        .ok_or_else(|| {
+                            ScriptError::new(format!("{}: member not found", handler_name_str))
+                        })?;
                     match &member.member_type {
-                        CastMemberType::Bitmap(b) => Ok(player.alloc_datum(Datum::BitmapRef(b.image_ref))),
+                        CastMemberType::Bitmap(b) => Ok(player.alloc_datum(Datum::BitmapRef(
+                            player.bitmap_handle_for_id(b.image_ref)?,
+                        ))),
                         other => Err(ScriptError::new(format!(
-                            "{}: member type {:?} has no image", handler_name_str, other.member_type_id()))),
+                            "{}: member type {:?} has no image",
+                            handler_name_str,
+                            other.member_type_id()
+                        ))),
                     }
                 }?;
                 if handler_name == BuiltInSymbol::GetPixel {
@@ -1453,12 +1468,12 @@ impl CastMemberRefHandlers {
                                 }
                             }
 
-                            let bitmap_ref =
-                                player.bitmap_manager.add_ephemeral_bitmap(bitmap);
-                            Ok(Datum::BitmapRef(bitmap_ref))
+                            let bitmap_ref = player.bitmap_manager.add_ephemeral_bitmap(bitmap);
+                            Ok(Datum::BitmapRef(player.bitmap_handle_for_id(bitmap_ref)?))
                         }
                         _ => Err(ScriptError::new(format!(
-                            "Shape members don't support property {}", prop_str
+                            "Shape members don't support property {}",
+                            prop_str
                         ))),
                     }
                 } else {

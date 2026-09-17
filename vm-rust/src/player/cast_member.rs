@@ -11,18 +11,30 @@ use crate::{
 };
 
 use super::{
+    ScriptError,
     bitmap::{
-        bitmap::{decode_jpeg_bitmap, decompress_alpha_rle, decompress_bitmap, Bitmap, BuiltInPalette, PaletteRef},
-        manager::{BitmapManager, BitmapRef},
+        bitmap::{
+            Bitmap, BuiltInPalette, PaletteRef, decode_jpeg_bitmap, decompress_alpha_rle,
+            decompress_bitmap,
+        },
+        manager::{BitmapId, BitmapManager},
     },
     score::Score,
     sprite::ColorRef,
-    ScriptError,
 };
 use crate::director::{
-    chunks::{cast_member::CastMemberDef, score::{ScoreChunk, ScoreChunkHeader, ScoreFrameData}, xmedia::PfrFont, xmedia::XMediaChunk, sound::SoundChunk, Chunk, cast_member::CastMemberChunk},
+    chunks::{
+        Chunk,
+        cast_member::CastMemberChunk,
+        cast_member::CastMemberDef,
+        score::{ScoreChunk, ScoreChunkHeader, ScoreFrameData},
+        sound::SoundChunk,
+        xmedia::PfrFont,
+        xmedia::XMediaChunk,
+    },
     enums::{
-        BitmapInfo, FilmLoopInfo, FontInfo, MemberType, ScriptType, ShapeInfo, Shockwave3dInfo, TextMemberData, SoundInfo, FieldInfo, TextInfo,
+        BitmapInfo, FieldInfo, FilmLoopInfo, FontInfo, MemberType, ScriptType, ShapeInfo,
+        Shockwave3dInfo, SoundInfo, TextInfo, TextMemberData,
     },
     lingo::script::ScriptContext,
 };
@@ -229,7 +241,7 @@ pub struct TextMember {
 }
 
 pub struct PfrBitmap {
-    pub bitmap_ref: BitmapRef,
+    pub bitmap_ref: BitmapId,
     pub char_width: u16,
     pub char_height: u16,
     pub grid_columns: u8,
@@ -761,7 +773,7 @@ pub struct ScriptMember {
 
 #[derive(Clone, Default)]
 pub struct BitmapMember {
-    pub image_ref: BitmapRef,
+    pub image_ref: BitmapId,
     pub reg_point: (i16, i16),
     pub script_id: u32,
     pub member_script_ref: Option<CastMemberRef>,
@@ -2025,7 +2037,7 @@ pub struct FontMember {
     pub preview_html_spans: Vec<StyledSpan>,
     pub fixed_line_space: u16,
     pub top_spacing: i16,
-    pub bitmap_ref: Option<BitmapRef>,
+    pub bitmap_ref: Option<BitmapId>,
     pub char_width: Option<u16>,
     pub char_height: Option<u16>,
     pub grid_columns: Option<u8>,
@@ -3604,10 +3616,12 @@ impl CastMember {
         cast_lib: u32,
         number: u32,
         bitmap_manager: &mut BitmapManager,
-    ) -> BitmapRef {
+    ) -> BitmapId {
         // Search all children for the first Bitmap(BITD) chunk
         // (it may not be at index 0 — other slots can be None or other chunk types)
-        let bitd_chunk = member_def.children.iter()
+        let bitd_chunk = member_def
+            .children
+            .iter()
             .find_map(|c| c.as_ref().and_then(|chunk| chunk.as_bitmap()));
 
         if let Some(bitd_chunk) = bitd_chunk {
@@ -5283,16 +5297,16 @@ impl CastMember {
         bitmap_manager: &mut BitmapManager,
     ) -> (
         FontInfo,
-        Option<BitmapRef>,
-        Option<u16>, // char width
-        Option<u16>, // char height
-        Option<u8>, // grid columns
-        Option<u8>, // grid rows
+        Option<BitmapId>,
+        Option<u16>,      // char width
+        Option<u16>,      // char height
+        Option<u8>,       // grid columns
+        Option<u8>,       // grid rows
         Option<Vec<u16>>, // char widths
-        Option<u8>, // first_char_num
+        Option<u8>,       // first_char_num
         Option<crate::director::chunks::pfr1::types::Pfr1ParsedFont>,
         Option<Vec<u8>>,
-        ) {
+    ) {
         let specific_bytes = chunk.specific_data_raw.clone();
 
         if let Some(pfr) = pfr {

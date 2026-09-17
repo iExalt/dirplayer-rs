@@ -5,7 +5,7 @@
 //! queued or awaited. No pending action contains a VM borrow or a future that
 //! executes against the ambient player.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::{HashMap, HashSet}, sync::Arc};
 use manual_future::ManualFutureCompleter;
 use log::warn;
 
@@ -3815,21 +3815,133 @@ pub(crate) fn checked_internal_datum<'a>(
                 )
             })?,
     };
-    super::compare::validate_direct_symbol_fields(datum, symbols)?;
-    if let Datum::ScriptInstanceRef(instance_ref) = datum {
-        if !instance_ref.owner().same_identity(&player.owner)
-            || player
+    validate_owned_datum_graph(player, symbols, datum_ref)?;
+    Ok(datum)
+}
+
+/// Validate all owner-bound handles retained by one datum graph.
+///
+/// This runs at transfer and deferred-access boundaries, rather than during
+/// every allocation. Each child reference is checked against the allocator
+/// before the visited set is consulted, so a colliding numeric ID cannot make
+/// a foreign or stale handle appear valid. The worklist keeps deeply cyclic
+/// Lingo lists off the Rust call stack; script-instance property graphs remain
+/// opaque and are validated when their handles are reached.
+pub(crate) fn validate_owned_datum_graph(
+    player: &super::DirPlayer,
+    symbols: &super::symbols::symbol_table::SymbolTable,
+    root: &DatumRef,
+) -> Result<(), ScriptError> {
+    let root_datum = match root {
+        DatumRef::Void => return Ok(()),
+        _ => player
+            .allocator
+            .try_get_datum(root)
+            .ok_or_else(|| {
+                ScriptError::new_code(
+                    super::ScriptErrorCode::InvalidReference,
+                    format!("invalid datum reference {root}"),
+                )
+            })?,
+    };
+    super::compare::validate_direct_symbol_fields(root_datum, symbols)?;
+    if !datum_has_owned_children(root_datum) {
+        validate_owned_datum_leaf(player, root_datum)?;
+        return Ok(());
+    }
+
+    let mut pending = vec![root];
+    let mut visited = HashSet::new();
+    while let Some(reference) = pending.pop() {
+        let datum = match reference {
+            DatumRef::Void => continue,
+            _ => player
                 .allocator
-                .get_script_instance_opt(instance_ref)
-                .is_none()
-        {
-            return Err(ScriptError::new_code(
-                super::ScriptErrorCode::InvalidReference,
-                "foreign or stale ScriptInstanceRef".to_owned(),
-            ));
+                .try_get_datum(reference)
+                .ok_or_else(|| {
+                    ScriptError::new_code(
+                        super::ScriptErrorCode::InvalidReference,
+                        format!("invalid datum reference {reference}"),
+                    )
+                })?,
+        };
+        let id = reference.unwrap();
+        if !visited.insert(id) {
+            continue;
+        }
+
+        super::compare::validate_direct_symbol_fields(datum, symbols)?;
+        validate_owned_datum_leaf(player, datum)?;
+        match datum {
+            Datum::List(_, items, _) => pending.extend(items.iter()),
+            Datum::PropList(entries, _) => {
+                for (key, value) in entries {
+                    pending.push(key);
+                    pending.push(value);
+                }
+            }
+            Datum::StringChunk(
+                crate::director::lingo::datum::StringChunkSource::Datum(child),
+                _,
+                _,
+            ) => pending.push(child),
+            Datum::TimeoutInstance(data) => {
+                pending.push(&data.callback);
+                pending.push(&data.target);
+                if let Some(script_instance) = &data.script_instance {
+                    pending.push(script_instance);
+                }
+            }
+            _ => {}
         }
     }
-    Ok(datum)
+    Ok(())
+}
+
+fn datum_has_owned_children(datum: &Datum) -> bool {
+    matches!(
+        datum,
+        Datum::List(..)
+            | Datum::PropList(..)
+            | Datum::StringChunk(
+                crate::director::lingo::datum::StringChunkSource::Datum(..),
+                _,
+                _,
+            )
+            | Datum::TimeoutInstance(..)
+    )
+}
+
+fn validate_owned_datum_leaf(
+    player: &super::DirPlayer,
+    datum: &Datum,
+) -> Result<(), ScriptError> {
+    match datum {
+        Datum::ScriptInstanceRef(instance_ref)
+        | Datum::VarRef(VarRef::ScriptInstance(instance_ref)) => {
+            if !instance_ref.owner().same_identity(&player.owner)
+                || player
+                    .allocator
+                    .get_script_instance_opt(instance_ref)
+                    .is_none()
+            {
+                return Err(ScriptError::new_code(
+                    super::ScriptErrorCode::InvalidReference,
+                    "foreign or stale ScriptInstanceRef".to_owned(),
+                ));
+            }
+        }
+        Datum::BitmapRef(handle) => {
+            if player.bitmap_manager.get_bitmap_handle(handle).is_none() {
+                return Err(ScriptError::new_code(
+                    super::ScriptErrorCode::InvalidReference,
+                    "foreign or stale BitmapHandle".to_owned(),
+                ));
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn global_handler_exists(
@@ -4044,6 +4156,7 @@ mod tests {
     use crate::director::enums::ScriptType;
     use crate::director::lingo::datum::Datum;
     use crate::director::lingo::opcode::OpCode;
+    use crate::player::allocator::ScriptInstanceAllocatorTrait;
     use crate::player::cast_lib::{CastLib, CastMemberRef};
     use crate::player::handlers::datum_handlers::string::StringDatumUtils;
     use crate::player::handlers::string::StringHandlers;
@@ -4236,6 +4349,228 @@ mod tests {
             setup_expectation: None,
         };
         (session, driver)
+    }
+
+    #[test]
+    fn checked_internal_datum_rejects_nested_foreign_and_stale_script_refs() {
+        let mut session = RuntimeSession::new(SymbolOwner { session: 7, generation: 1 });
+        assert!(session.add_player(1, channel::unbounded().0));
+        assert!(session.add_player(2, channel::unbounded().0));
+
+        let local_instance = session
+            .with_player(1, |ctx| {
+                ctx.player.allocator.alloc_script_instance(crate::player::script::ScriptInstance {
+                    instance_id: 7,
+                    script: CastMemberRef { cast_lib: 1, cast_member: 1 },
+                    ancestor: None,
+                    properties: fxhash::FxHashMap::default(),
+                    begin_sprite_called: false,
+                })
+            })
+            .unwrap();
+        let foreign_instance = session
+            .with_player(2, |ctx| {
+                ctx.player.allocator.alloc_script_instance(crate::player::script::ScriptInstance {
+                    instance_id: 7,
+                    script: CastMemberRef { cast_lib: 1, cast_member: 1 },
+                    ancestor: None,
+                    properties: fxhash::FxHashMap::default(),
+                    begin_sprite_called: false,
+                })
+            })
+            .unwrap();
+        assert_eq!(local_instance.id(), foreign_instance.id());
+        let foreign_datum = session
+            .with_player(2, |ctx| ctx.player.alloc_datum(Datum::Int(1)))
+            .unwrap();
+
+        let (local_prop, foreign_cases, collision_prop, cycle, local_collision) = session
+            .with_player(1, |ctx| {
+                let local_item = ctx
+                    .player
+                    .alloc_datum(Datum::ScriptInstanceRef(local_instance.clone()));
+                let local_list = ctx.player.alloc_datum(Datum::List(
+                    crate::director::lingo::datum::DatumType::List,
+                    VecDeque::from([local_item]),
+                    false,
+                ));
+                let local_key = ctx.player.alloc_datum(Datum::String("local".to_owned()));
+                let local_prop = ctx.player.alloc_datum(Datum::PropList(
+                    VecDeque::from([(local_key, local_list)]),
+                    false,
+                ));
+
+                let foreign_item = ctx
+                    .player
+                    .alloc_datum(Datum::ScriptInstanceRef(foreign_instance.clone()));
+                let foreign_list = ctx.player.alloc_datum(Datum::List(
+                    crate::director::lingo::datum::DatumType::List,
+                    VecDeque::from([foreign_item.clone()]),
+                    false,
+                ));
+                let foreign_key = ctx.player.alloc_datum(Datum::String("foreign".to_owned()));
+                let foreign_prop = ctx.player.alloc_datum(Datum::PropList(
+                    VecDeque::from([(foreign_key, foreign_list)]),
+                    false,
+                ));
+                let foreign_chunk = ctx.player.alloc_datum(Datum::StringChunk(
+                    crate::director::lingo::datum::StringChunkSource::Datum(foreign_item.clone()),
+                    crate::director::lingo::datum::StringChunkExpr {
+                        chunk_type: crate::director::lingo::datum::StringChunkType::Char,
+                        start: 1,
+                        end: 1,
+                        item_delimiter: ',',
+                    },
+                    "foreign".to_owned(),
+                ));
+                let foreign_timeout = ctx.player.alloc_datum(Datum::TimeoutInstance(Box::new(
+                    crate::director::lingo::datum::TimeoutInstanceData {
+                        name: "foreign".to_owned(),
+                        duration: 1,
+                        callback: foreign_item.clone(),
+                        target: DatumRef::Void,
+                        script_instance: Some(foreign_item.clone()),
+                    },
+                )));
+                let foreign_var = ctx.player.alloc_datum(Datum::VarRef(
+                    VarRef::ScriptInstance(foreign_instance.clone()),
+                ));
+                let local_collision = ctx.player.alloc_datum(Datum::Int(1));
+                let collision_key = ctx.player.alloc_datum(Datum::String("collision".to_owned()));
+                let collision_list = ctx.player.alloc_datum(Datum::List(
+                    crate::director::lingo::datum::DatumType::List,
+                    // The validator's worklist is LIFO: visit the local ID
+                    // first, then prove the foreign same-ID child is checked
+                    // before the visited set can suppress it.
+                    VecDeque::from([foreign_datum.clone(), local_collision.clone()]),
+                    false,
+                ));
+                let collision_prop = ctx.player.alloc_datum(Datum::PropList(
+                    VecDeque::from([(collision_key, collision_list)]),
+                    false,
+                ));
+
+                let cycle = ctx.player.alloc_datum(Datum::List(
+                    crate::director::lingo::datum::DatumType::List,
+                    VecDeque::new(),
+                    false,
+                ));
+                if let Datum::List(_, items, _) = ctx.player.get_datum_mut(&cycle) {
+                    items.push_back(cycle.clone());
+                } else {
+                    panic!("cycle fixture was not a list");
+                }
+                (
+                    local_prop,
+                    vec![foreign_prop, foreign_chunk, foreign_timeout, foreign_var],
+                    collision_prop,
+                    cycle,
+                    local_collision,
+                )
+            })
+            .unwrap();
+        assert_eq!(local_collision.unwrap(), foreign_datum.unwrap());
+
+        let local_result = session
+            .with_player(1, |ctx| {
+                super::checked_internal_datum(ctx.player, ctx.symbols, &local_prop).map(|_| ())
+            })
+        .unwrap();
+        assert!(local_result.is_ok());
+
+        for foreign_case in &foreign_cases {
+            let foreign_result = session
+                .with_player(1, |ctx| {
+                    super::checked_internal_datum(ctx.player, ctx.symbols, foreign_case)
+                        .map(|_| ())
+                })
+                .unwrap();
+            assert_eq!(
+                foreign_result.err().map(|error| error.code),
+                Some(ScriptErrorCode::InvalidReference)
+            );
+        }
+
+        let collision_result = session
+            .with_player(1, |ctx| {
+                super::checked_internal_datum(ctx.player, ctx.symbols, &collision_prop)
+                    .map(|_| ())
+            })
+            .unwrap();
+        assert_eq!(
+            collision_result.err().map(|error| error.code),
+            Some(ScriptErrorCode::InvalidReference)
+        );
+
+        let cycle_result = session
+            .with_player(1, |ctx| {
+                super::checked_internal_datum(ctx.player, ctx.symbols, &cycle).map(|_| ())
+            })
+        .unwrap();
+        assert!(cycle_result.is_ok());
+
+        let old_local_owner = session.with_player(1, |ctx| ctx.player.owner.clone()).unwrap();
+        session.reset_player_owned(1, &old_local_owner).unwrap();
+        let (stale_local_prop, fresh_local_prop, fresh_instance) = session
+            .with_player(1, |ctx| {
+                let stale_item = ctx
+                    .player
+                    .alloc_datum(Datum::ScriptInstanceRef(local_instance.clone()));
+                let stale_list = ctx.player.alloc_datum(Datum::List(
+                    crate::director::lingo::datum::DatumType::List,
+                    VecDeque::from([stale_item]),
+                    false,
+                ));
+                let stale_key = ctx.player.alloc_datum(Datum::String("stale".to_owned()));
+                let stale_local_prop = ctx.player.alloc_datum(Datum::PropList(
+                    VecDeque::from([(stale_key, stale_list)]),
+                    false,
+                ));
+
+                let fresh_instance = ctx.player.allocator.alloc_script_instance(
+                    crate::player::script::ScriptInstance {
+                        instance_id: local_instance.id(),
+                        script: CastMemberRef { cast_lib: 1, cast_member: 1 },
+                        ancestor: None,
+                        properties: fxhash::FxHashMap::default(),
+                        begin_sprite_called: false,
+                    },
+                );
+                let fresh_item = ctx
+                    .player
+                    .alloc_datum(Datum::ScriptInstanceRef(fresh_instance.clone()));
+                let fresh_list = ctx.player.alloc_datum(Datum::List(
+                    crate::director::lingo::datum::DatumType::List,
+                    VecDeque::from([fresh_item]),
+                    false,
+                ));
+                let fresh_key = ctx.player.alloc_datum(Datum::String("fresh".to_owned()));
+                let fresh_local_prop = ctx.player.alloc_datum(Datum::PropList(
+                    VecDeque::from([(fresh_key, fresh_list)]),
+                    false,
+                ));
+                (stale_local_prop, fresh_local_prop, fresh_instance)
+            })
+            .unwrap();
+        assert_eq!(fresh_instance.id(), local_instance.id());
+
+        let stale_result = session
+            .with_player(1, |ctx| {
+                super::checked_internal_datum(ctx.player, ctx.symbols, &stale_local_prop)
+                    .map(|_| ())
+            })
+            .unwrap();
+        assert_eq!(
+            stale_result.err().map(|error| error.code),
+            Some(ScriptErrorCode::InvalidReference)
+        );
+        let fresh_result = session
+            .with_player(1, |ctx| {
+                super::checked_internal_datum(ctx.player, ctx.symbols, &fresh_local_prop)
+                    .map(|_| ())
+            })
+            .unwrap();
+        assert!(fresh_result.is_ok());
     }
 
     fn prepared_driver() -> (RuntimeSession, DriverContinuation, CompletionTicket) {
