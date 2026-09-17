@@ -104,3 +104,77 @@ The latest native direct-reset regression failed; the subsequent MouseDown
 repair is incomplete. The last WASM compilation failed; its local mechanical
 repairs have not yet passed a fresh combined build. No child lifecycle acceptance
 or Stage 2 completion is claimed.
+
+### Browser failure-cleanup probe reviewed
+
+The revised local browser candidate exercises failure during synchronous flush
+of a prepared action after the real VM callback registrar publishes the child
+callback table. The injected callback throws, so nested startup must fail.
+Afterward, direct production callback dispatch must not invoke that callback,
+and the generation-aware Flash host route must return `unknown-owner`. The
+other root must still read its authored value `9`.
+
+Earlier assertions checked harness sets populated only after registration
+succeeded. Their absence could not prove cleanup after failed registration;
+those sets are now supplemental bookkeeping, not the failure-cleanup oracle.
+The lead reviewed and froze `testing_browser.rs` at SHA-256
+`8bff577f4dab34bbb1913307140b6a45a7e56ce6bfcff8fd0f88a73e8c47c490`
+and the browser JS template at
+`809df8e9e158bd727543abad07e961b46f2baf5d2ffdd83f5d40f82ab9b873a5`.
+Syntax and whitespace checks passed. Actual WASM compilation and browser
+execution of this candidate remain pending; this is source review only.
+
+The subsequent frontend manager run passes 10 tests (local raw receipt:
+`/private/tmp/dirplayer-child-flash-validation/frontend-1/`). The broader lifecycle
+test initially reported 36 passes and two failures: the same-owner replacement
+and pending-unload setups emitted loads before awaiting owner registration.
+Both now await the real registration promise, matching production startup, and
+the pilot reports 38 passes with `mise exec -- bun test
+scripts/flash-owner-lifecycle.test.mjs`. The reviewed test-only change has SHA-256
+`b332ac162aad2a0c3dea296115358bda1c3ad54599023b262022a025fa436c74`.
+These frontend results do not replace the pending embedded Ruffle browser gate.
+
+## First real child browser run
+
+After native-12 passed all 595 tests and WASM-13 compiled successfully, the
+focused `nested_flash_owned_fixture` browser run built its release WASM and
+bundle, started a fresh server/Playwright runner, and entered the outer Playwright
+test. Entry into the Rust fixture itself was not established. The
+harness then remained pending for the 60-second test limit without publishing
+a result, panic or script error. The run exited 1; it is not acceptance evidence.
+The video and error context are retained locally under
+`test-results/e2e-browser-e2e-tests/`.
+
+The next diagnostic must identify the exact stalled await in owner registration,
+child startup, Flash reads or reset. Bounded test phase logging is approved;
+an unchanged retry or a larger timeout does not resolve the ownership/lifecycle
+gate.
+
+The diagnostic second run also timed out, with no `nested fixture:` markers
+and no forwarded page console output. `log_test_action` writes directly to the
+browser console, so the missing markers do not identify a stalled child await.
+The next diagnostic must capture module/page errors, failed requests and initial
+harness state, and verify console forwarding with a positive control. A module
+startup failure must be distinguished from a runtime continuation stall before
+changing production VM behavior. Raw second-run log:
+`/private/tmp/dirplayer-child-flash-validation/browser-focused-2/run.log`.
+
+Source-to-generated-module inspection found a concrete bootstrap defect:
+`js_api.rs` imports `registerNestedFlashOwner` and `retireNestedFlashOwner` from
+`dirplayer-js-api`, and the generated WASM JS statically imports those names.
+The production API exports both, but the browser adapter template exports
+neither; installing `window.dirplayer_*` hooks does not satisfy ES module named
+imports. The approved repair re-exports the real production functions from the
+adapter. It requires refreshing the generated adapter, not rebuilding Rust.
+Browser diagnostics should confirm bootstrap and fixture entry after this fix
+before drawing conclusions about child runtime awaits.
+
+## Transport probe after bootstrap repair
+
+The adapter now re-exports the real nested-owner functions. A fresh browser
+transport probe using the existing WASM reached the Rust fixture: both root
+registrations and child startups completed. Child A's first Flash read then
+failed with `Flash request cast binding is stale or replaced`. This replaces
+the unexplained timeout with a concrete runtime failure; it does not satisfy
+the child lifecycle gate. No stale-cast repair was attempted before publication.
+The child/input changes remain uncommitted work in progress.

@@ -61,6 +61,7 @@ pub struct CompiledHandler {
 }
 
 /// How a run of the IR ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IrExit {
     /// `Ret`, or the op array ran out.
     Done,
@@ -74,8 +75,21 @@ pub enum IrExit {
     /// Without this the IR would swallow loops whole and never hand control
     /// back, and the driver's cooperative yield — the thing that lets a
     /// `repeat while keyPressed(" ")` ever see the key-up — would never fire,
-    /// hanging the tab. The runaway-loop watchdog counts these too.
+    /// hanging the tab. The per-run count is returned separately in
+    /// `IrRunOutcome` so the driver can account for every jump in the batch.
     BackJump,
+}
+
+/// Result of one validated IR run.
+///
+/// `backjumps` counts every backward jump taken during this invocation,
+/// including runs that finish with `Done` or `Escape`. A `BackJump` exit marks
+/// the cooperative boundary; the count lets the driver preserve accounting
+/// without losing the work done before that boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct IrRunOutcome {
+    pub(crate) exit: IrExit,
+    pub(crate) backjumps: u32,
 }
 
 /// Try to compile a handler to the pure-int IR. Returns `None` (→ interpreter
@@ -386,7 +400,7 @@ pub(crate) fn run_handler(
         return Err(crate::player::cancelled_scope_error());
     }
     player.scopes[token.slot()].ensure_locals(compiled.n_locals);
-    match run_handler_resumable(compiled, token, player, symbols)? {
+    match run_handler_resumable(compiled, token, player, symbols)?.exit {
         IrExit::Done => Ok(()),
         IrExit::Escape | IrExit::BackJump => Err(ScriptError::new(
             "run_handler: handler escaped; use run_handler_resumable".to_string(),
@@ -396,8 +410,9 @@ pub(crate) fn run_handler(
 
 /// Hand a backward jump back to the driver when it needs to see it: an
 /// input-polling iteration (so the cooperative yield can run) or every 4096
-/// iterations (so the runaway watchdog still counts). Returns `None` to stay in
-/// the IR, which is the overwhelmingly common case for compute loops.
+/// iterations (so a long compute loop returns to the driver). Returns `None`
+/// to stay in the IR, which is the overwhelmingly common case for compute
+/// loops.
 #[inline]
 fn back_jump(
     player: &mut DirPlayer,
@@ -429,7 +444,7 @@ pub(crate) fn run_handler_resumable(
     token: &ScopeToken,
     player: &mut DirPlayer,
     symbols: &SymbolTable,
-) -> Result<IrExit, ScriptError> {
+) -> Result<IrRunOutcome, ScriptError> {
     // Sizing the local file is NOT done here. This function is re-entered once
     // per escaped opcode — ~120 M times across the e2e suite — while the file
     // only needs sizing once per handler FRAME, which `setup_handler_frame`
@@ -460,13 +475,19 @@ pub(crate) fn run_handler_resumable(
         Some(IrOp::Escape) => true,
         None => {
             crate::player::interp_stats::record_ir_reentry(true);
-            return Ok(IrExit::Done);
+            return Ok(IrRunOutcome {
+                exit: IrExit::Done,
+                backjumps: 0,
+            });
         }
         _ => false,
     };
     crate::player::interp_stats::record_ir_reentry(escape_first);
     if escape_first {
-        return Ok(IrExit::Escape);
+        return Ok(IrRunOutcome {
+            exit: IrExit::Escape,
+            backjumps: 0,
+        });
     }
 
     run_handler_resumable_inner(compiled, player, symbols, scope_ref)
@@ -495,7 +516,7 @@ fn run_handler_resumable_inner(
     player: &mut DirPlayer,
     symbols: &SymbolTable,
     scope_ref: ScopeRef,
-) -> Result<IrExit, ScriptError> {
+) -> Result<IrRunOutcome, ScriptError> {
     // Each macro evaluates its value before borrowing the stack slot. Nothing
     // borrows across an escape: the Escape arm returns to the interpreter.
     macro_rules! lc_get {
@@ -528,7 +549,10 @@ fn run_handler_resumable_inner(
     loop {
         if pc >= ops.len() {
             player.scopes[scope_ref].bytecode_index = pc;
-            return Ok(IrExit::Done);
+            return Ok(IrRunOutcome {
+                exit: IrExit::Done,
+                backjumps,
+            });
         }
         match &ops[pc] {
             IrOp::Escape => {
@@ -536,7 +560,10 @@ fn run_handler_resumable_inner(
                 // the same number by construction) and let the driver advance
                 // it. No locals handover: both sides read the same storage.
                 player.scopes[scope_ref].bytecode_index = pc;
-                return Ok(IrExit::Escape);
+                return Ok(IrRunOutcome {
+                    exit: IrExit::Escape,
+                    backjumps,
+                });
             }
             _ => {}
         }
@@ -569,13 +596,27 @@ fn run_handler_resumable_inner(
                 let c = st_pop!();
                 if ir_is_zero(player, symbols, &c)? {
                     let t = *t;
-                    if t <= pc { if let Some(e) = back_jump(player, scope_ref, t, &mut backjumps) { return Ok(e); } }
+                    if t <= pc {
+                        if let Some(e) = back_jump(player, scope_ref, t, &mut backjumps) {
+                            return Ok(IrRunOutcome {
+                                exit: e,
+                                backjumps,
+                            });
+                        }
+                    }
                     pc = t;
                 } else { pc += 1; }
             }
             IrOp::Jmp(t) => {
                 let t = *t;
-                if t <= pc { if let Some(e) = back_jump(player, scope_ref, t, &mut backjumps) { return Ok(e); } }
+                if t <= pc {
+                    if let Some(e) = back_jump(player, scope_ref, t, &mut backjumps) {
+                        return Ok(IrRunOutcome {
+                            exit: e,
+                            backjumps,
+                        });
+                    }
+                }
                 pc = t;
             }
             IrOp::Pop(n) => { for _ in 0..*n { let _ = st_pop!(); } pc += 1; }
@@ -597,7 +638,10 @@ fn run_handler_resumable_inner(
                 scope.return_value = DatumRef::Void;
                 scope.stack.clear();
                 scope.bytecode_index = pc;
-                return Ok(IrExit::Done);
+                return Ok(IrRunOutcome {
+                    exit: IrExit::Done,
+                    backjumps,
+                });
             }
         }
     }
@@ -683,6 +727,143 @@ mod tests {
     }
 
     #[test]
+    fn resumable_backjump_reports_input_poll_batch() {
+        let mut player = make_player();
+        let slot = player.push_scope();
+        player.input_polled = true;
+        let compiled = CompiledHandler {
+            ops: vec![IrOp::Jmp(0)],
+            n_locals: 0,
+        };
+        let outcome = run_handler_resumable(
+            &compiled,
+            &token(&player, slot),
+            &mut player,
+            &make_symbols(),
+        )
+        .unwrap();
+        assert_eq!(
+            outcome,
+            IrRunOutcome {
+                exit: IrExit::BackJump,
+                backjumps: 1,
+            }
+        );
+        assert_eq!(player.scopes[slot].bytecode_index, 0);
+        player.pop_scope();
+    }
+
+    #[test]
+    fn resumable_backjump_reports_bounded_batch() {
+        let mut player = make_player();
+        let slot = player.push_scope();
+        let compiled = CompiledHandler {
+            ops: vec![IrOp::Jmp(0)],
+            n_locals: 0,
+        };
+        let outcome = run_handler_resumable(
+            &compiled,
+            &token(&player, slot),
+            &mut player,
+            &make_symbols(),
+        )
+        .unwrap();
+        assert_eq!(
+            outcome,
+            IrRunOutcome {
+                exit: IrExit::BackJump,
+                backjumps: 4096,
+            }
+        );
+        assert_eq!(player.scopes[slot].bytecode_index, 0);
+        player.pop_scope();
+    }
+
+    #[test]
+    fn resumable_done_and_escape_report_prior_backjumps() {
+        let loop_then_ret = CompiledHandler {
+            ops: vec![
+                IrOp::PushInt(0),
+                IrOp::SetLocal(0),
+                IrOp::GetLocal(0),
+                IrOp::PushInt(1),
+                IrOp::Add,
+                IrOp::SetLocal(0),
+                IrOp::GetLocal(0),
+                IrOp::PushInt(2),
+                IrOp::Lt,
+                IrOp::JmpIfZero(11),
+                IrOp::Jmp(2),
+                IrOp::Ret,
+            ],
+            n_locals: 1,
+        };
+        let mut done_player = make_player();
+        let done_slot = done_player.push_scope();
+        let done = run_handler_resumable(
+            &loop_then_ret,
+            &token(&done_player, done_slot),
+            &mut done_player,
+            &make_symbols(),
+        )
+        .unwrap();
+        assert_eq!(
+            done,
+            IrRunOutcome {
+                exit: IrExit::Done,
+                backjumps: 1,
+            }
+        );
+        done_player.pop_scope();
+
+        let mut escape_player = make_player();
+        let escape_slot = escape_player.push_scope();
+        let mut loop_then_escape = loop_then_ret;
+        loop_then_escape.ops[11] = IrOp::Escape;
+        let escaped = run_handler_resumable(
+            &loop_then_escape,
+            &token(&escape_player, escape_slot),
+            &mut escape_player,
+            &make_symbols(),
+        )
+        .unwrap();
+        assert_eq!(
+            escaped,
+            IrRunOutcome {
+                exit: IrExit::Escape,
+                backjumps: 1,
+            }
+        );
+        assert_eq!(escape_player.scopes[escape_slot].bytecode_index, 11);
+        escape_player.pop_scope();
+    }
+
+    #[test]
+    fn resumable_fast_path_reports_zero_backjumps() {
+        let mut player = make_player();
+        let slot = player.push_scope();
+        let compiled = CompiledHandler {
+            ops: vec![],
+            n_locals: 0,
+        };
+        let outcome = run_handler_resumable(
+            &compiled,
+            &token(&player, slot),
+            &mut player,
+            &make_symbols(),
+        )
+        .unwrap();
+        assert_eq!(
+            outcome,
+            IrRunOutcome {
+                exit: IrExit::Done,
+                backjumps: 0,
+            }
+        );
+        player.pop_scope();
+    }
+
+    #[test]
     fn breakpoint_on_ir_native_op_escapes_to_the_interpreter() {
         use crate::player::debug::Breakpoint;
         let mut player = make_player();
@@ -701,7 +882,10 @@ mod tests {
         let slot = player.push_scope();
         let scope_token = token(&player, slot);
         let symbols = make_symbols();
-        assert!(matches!(run_handler_resumable(&compiled, &scope_token, &mut player, &symbols), Ok(IrExit::Escape)));
+        assert!(matches!(
+            run_handler_resumable(&compiled, &scope_token, &mut player, &symbols),
+            Ok(IrRunOutcome { exit: IrExit::Escape, backjumps: 0 })
+        ));
         assert_eq!(player.scopes[slot].bytecode_index, 3);
         player.pop_scope();
     }
@@ -728,12 +912,18 @@ mod tests {
         let slot = player.push_scope();
         let scope_token = token(&player, slot);
         let symbols = make_symbols();
-        assert!(matches!(run_handler_resumable(&compiled, &scope_token, &mut player, &symbols), Ok(IrExit::Escape)));
+        assert!(matches!(
+            run_handler_resumable(&compiled, &scope_token, &mut player, &symbols),
+            Ok(IrRunOutcome { exit: IrExit::Escape, backjumps: 0 })
+        ));
         assert!(matches!(player.scopes[slot].local(0), StackDatum::Int(5)));
         assert!(player.scopes[slot].local_is_assigned(0));
         assert_eq!(player.scopes[slot].bytecode_index, 2);
         player.scopes[slot].bytecode_index = 3;
-        assert!(matches!(run_handler_resumable(&compiled, &scope_token, &mut player, &symbols), Ok(IrExit::Done)));
+        assert!(matches!(
+            run_handler_resumable(&compiled, &scope_token, &mut player, &symbols),
+            Ok(IrRunOutcome { exit: IrExit::Done, backjumps: 0 })
+        ));
         assert_eq!(stack_top_int(&mut player, slot), 5);
         player.pop_scope();
     }

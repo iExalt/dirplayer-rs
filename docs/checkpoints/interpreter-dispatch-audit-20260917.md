@@ -100,3 +100,33 @@ The proposal also needs to examine the owner-specific breakpoint instrumentation
 cached on `Rc<HandlerDef>` under a numeric breakpoint generation: sharing a
 handler between owners must not reuse another owner's breakpoint decisions,
 and changing breakpoints while a frame is suspended must be handled explicitly.
+
+## Production integration proposal review
+
+The reviewed production call chain prepares `HandlerFrame.ir` during handler
+setup, but `DriverContinuation::turn_impl` still does not consume it. Integration
+must enter IR after exact owner/top-scope validation, route escapes through the
+existing opcode/action path, and finish or yield through normal driver handling.
+An IR escape can land on a breakpoint after the batch's starting PC, so debugger
+checks must also run at that escaped PC before executing it.
+
+Owner-qualified shared cache entries alone are insufficient: a suspended frame
+retains its own IR reference. Each active frame must refresh its breakpoint
+instrumentation when the owner's breakpoint generation changes, without
+replacing its live locals, stack or PC. Debugger resume needs a one-shot skip
+marker for the exact scope and PC to execute that opcode once without pausing
+again. `AfterBreakpoint` and `AfterStep` also need a real transition out of the
+current resuming state. Line stepping uses the existing caller-supplied skip
+indices; the proposal must not invent source-line inference.
+
+The first approved implementation batch is limited to the compiled runner's
+per-run backward-jump accounting and focused tests. Accounting must survive
+`Done` and `Escape` as well as the bounded/input-poll jump exit. This does not
+enable production IR execution or close the interpreter gate. Driver/cache/
+debugger integration remains a subsequent implementation batch, including
+settling paused debugger waiters during owner cancellation.
+
+The accounting batch is now implemented and its four named native tests pass.
+The navigator verified the live source hash and actual test output; bounded
+acceptance is recorded in `compiled-accounting-20260917/`. Production IR and
+debugger integration remain open as described above.
