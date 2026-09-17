@@ -1,0 +1,8 @@
+
+running 3 tests
+test player::handlers::manager::ownership_tests::explicit_context_rejects_foreign_consumed_arguments_before_mutation ... ok
+test player::handlers::manager::ownership_tests::explicit_context_routes_sprite_box_transition_and_preload_to_selected_player ... ok
+test player::handlers::manager::ownership_tests::explicit_context_rejects_stale_consumed_arguments_after_owner_reset ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 573 filtered out; finished in 0.00s
+

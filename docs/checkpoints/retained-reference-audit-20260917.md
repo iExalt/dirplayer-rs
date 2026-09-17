@@ -1,6 +1,6 @@
 # Retained reference audit — 2026-09-17
 
-Scoped source review of the accepted `7d9ca56` ownership implementation, supplemented by the bitmap and JS checkpoint test receipts. This records reviewed reference kinds; it does not close Stage 2.1 or add a new test result.
+The initial source review below began at `7d9ca56`. The final acceptance section records Stage 2.1 closure against `d8f868fd` plus three allocator regressions, with a fresh 573-test native result. Earlier pending statements describe their historical checkpoints.
 
 | Kind | Authority and consumer boundary | Finding |
 | --- | --- | --- |
@@ -126,3 +126,19 @@ Flash, JS and residual-service gates, and are not declared complete by this audi
 No additional retained-capability defect was identified in this scoped review.
 Stage 2.1 acceptance remains pending execution of the new tests against a recorded
 coherent checkout; source review alone does not close it.
+
+## Stage 2.1 acceptance
+
+The three reclamation regressions now pass individually and in the fresh
+**573 passed, 0 failed** native suite. The tested source is an isolated export
+of published `d8f868fd` plus only those tests; its allocator hash matches the live
+file. All 419 input-file hashes were checked after execution.
+[The portable receipt](retained-reclamation-20260917/README.md) retains exact
+source, artifact identity, commands and test output.
+
+Combined with the reviewed payload/consumer map above, the suite establishes
+foreign/stale arena rejection, explicit-copy semantics, recursive reclamation
+and scope invalidation with owner/ID collision coverage. Stage 2.1 is accepted
+at this source identity. The three regressions are included in this publication. This does not certify
+the concurrent child Flash implementation or close the separate host/manager,
+interpreter and final ownership-cutover requirements.

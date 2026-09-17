@@ -28,3 +28,34 @@ independent firing/clear, replacement with a delayed old tick, reset/disposal,
 period-zero activation and callback reentry. Include actual child timer delivery
 once child host lifecycle exists. Native behavior requires its own explicit
 scheduler/unsupported-effect accounting; the no-op JS stub is not proof.
+
+## Proposed implementation boundary
+
+The source review traces schedule/clear through `Timeout::schedule/cancel`,
+`JsApi`, ambient JS callbacks, Redux name-only interval storage, and finally
+`BrowserPlayerHandle::trigger_timeout` / `PlayerVMCommand` carrying only a name.
+A delayed interval tick therefore has no timer-incarnation capability to compare
+before looking up a same-name replacement.
+
+The proposed component adds checked per-player timer incarnations and detached
+owner-qualified schedule/clear actions, drained outside the mutable session
+borrow. An owner-local frontend controller retains intervals; tick delivery
+carries the captured owner and incarnation through the command queue and rejects
+stale ticks before firing. Reset and disposal retire old-owner intervals before
+callback rebind. Exact-name lookup, the case-insensitive fallback and dormant
+period-zero behavior remain part of acceptance.
+
+This is a design proposal, not an implemented or tested fix. Integration must
+serialize with the active child Flash work in shared command/reset/host-drain
+files. Native action tests cannot substitute for exported-browser-handle routing
+and callback-reentry fixtures.
+
+The navigator additionally inspected the manual due-timer pump
+`fire_pending_timeouts_owned_at` and the legacy `TimeoutTriggered` command. The
+manual pump snapshots target/handler/name before awaiting each handler and then
+rechecks only the player owner; a preceding handler can replace or forget a
+later same-owner timer. Incarnation validation must cover this retained ready
+list as well as JS ticks. The browser command currently uses ambient accessors
+and dispatches the stored handler with its existing object/non-object argument
+rules; its owned replacement must preserve those rules. Manual test-pump timing
+and system-timeout semantics must not be silently substituted for browser firing.

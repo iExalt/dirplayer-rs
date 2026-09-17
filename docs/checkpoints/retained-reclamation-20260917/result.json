@@ -1,0 +1,37 @@
+{
+  "build_exit": 0,
+  "executable": "/private/tmp/dirplayer-parser-review-build/target/debug/deps/vm_rust-738f7bde2df58d42",
+  "executable_sha256": "b75e9a98dc8928496a1febaafa6f2fcd8f432d7f8284a2117aebba2efdbed86e",
+  "focused": [
+    {
+      "command": [
+        "/private/tmp/dirplayer-parser-review-build/target/debug/deps/vm_rust-738f7bde2df58d42",
+        "player::allocator::ownership_tests::string_chunk_reclaims_unshared_source_but_preserves_retained_child",
+        "--exact",
+        "--nocapture"
+      ],
+      "exit": 0
+    },
+    {
+      "command": [
+        "/private/tmp/dirplayer-parser-review-build/target/debug/deps/vm_rust-738f7bde2df58d42",
+        "player::allocator::ownership_tests::timeout_instance_reclaims_owned_children_but_preserves_retained_script_datum",
+        "--exact",
+        "--nocapture"
+      ],
+      "exit": 0
+    },
+    {
+      "command": [
+        "/private/tmp/dirplayer-parser-review-build/target/debug/deps/vm_rust-738f7bde2df58d42",
+        "player::allocator::ownership_tests::stale_chunk_timeout_drops_cannot_reclaim_replacements_or_neighbor_owner",
+        "--exact",
+        "--nocapture"
+      ],
+      "exit": 0
+    }
+  ],
+  "full_exit": 0,
+  "full_passed": 573,
+  "full_failed": 0
+}

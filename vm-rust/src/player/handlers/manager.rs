@@ -1734,7 +1734,10 @@ impl BuiltInHandlerManager {
                         "spriteBox requires 5 arguments (sprite, left, top, right, bottom)".to_string(),
                     ));
                 }
-                reserve_player_mut(|player| {
+                for argument in args.iter().take(5) {
+                    Self::checked_sync_datum(runtime, argument)?;
+                }
+                runtime.with_player(|player| {
                     let sprite_num = player.get_datum(&args[0]).to_sprite_ref()?;
                     let left = player.get_datum(&args[1]).int_value()?;
                     let top = player.get_datum(&args[2]).int_value()?;
@@ -1764,7 +1767,17 @@ impl BuiltInHandlerManager {
                 // Applies the transition between the current stage and the next frame;
                 // we hand it to the same engine the score transition channel uses.
                 // (Director 11.5 Scripting Dictionary: time is in quarter-seconds.)
-                reserve_player_mut(|player| {
+                let first_is_int = if let Some(argument) = args.first() {
+                    matches!(Self::checked_sync_datum(runtime, argument)?, Datum::Int(_))
+                } else {
+                    false
+                };
+                if first_is_int {
+                    for argument in args.iter().skip(1).take(2) {
+                        Self::checked_sync_datum(runtime, argument)?;
+                    }
+                }
+                runtime.with_player(|player| {
                     let arg0 = args.get(0).map(|d| player.get_datum(d).clone());
                     let info = match arg0 {
                         Some(Datum::Int(code)) => {
@@ -1815,7 +1828,15 @@ impl BuiltInHandlerManager {
                     }
                     d.int_value().unwrap_or(0)
                 }
-                reserve_player_mut(|player| {
+                let consumed_argument = if args.len() >= 2 {
+                    args.get(1)
+                } else {
+                    args.first()
+                };
+                if let Some(argument) = consumed_argument {
+                    Self::checked_sync_datum(runtime, argument)?;
+                }
+                runtime.with_player(|player| {
                     let last = if args.len() >= 2 {
                         resolve_frame(player, &args[1])
                     } else if args.len() == 1 {
@@ -3091,4 +3112,250 @@ fn wraps_in_line_up_to(
         if consumed_chars > target_char_offset { break; }
     }
     wraps
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod ownership_tests {
+    use super::BuiltInHandlerManager;
+    use crate::director::chunks::score::FrameLabel;
+    use crate::director::lingo::datum::Datum;
+    use crate::player::session::RuntimeSession;
+    use crate::player::symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolOwner};
+    use crate::player::ScriptErrorCode;
+    use async_std::channel;
+
+    fn two_player_session() -> RuntimeSession {
+        let mut session = RuntimeSession::new(SymbolOwner {
+            session: 904,
+            generation: 1,
+        });
+        let (tx, _rx) = channel::unbounded();
+        assert!(session.add_player(1, tx));
+        let (tx, _rx) = channel::unbounded();
+        assert!(session.add_player(2, tx));
+        session
+    }
+
+    #[test]
+    fn explicit_context_routes_sprite_box_transition_and_preload_to_selected_player() {
+        let mut session = two_player_session();
+        let ignored_foreign = session
+            .with_player(1, |context| context.player.alloc_datum(Datum::Int(99)))
+            .unwrap();
+        session
+            .with_player(2, |mut context| -> Result<(), crate::player::ScriptError> {
+                context.player.movie.score.set_channel_count(2);
+
+                let sprite = context.player.alloc_datum(Datum::SpriteRef(1));
+                let left = context.player.alloc_datum(Datum::Int(10));
+                let top = context.player.alloc_datum(Datum::Int(20));
+                let right = context.player.alloc_datum(Datum::Int(110));
+                let bottom = context.player.alloc_datum(Datum::Int(220));
+                let sprite_box_args = vec![
+                    sprite,
+                    left,
+                    top,
+                    right,
+                    bottom,
+                    ignored_foreign.clone(),
+                ];
+                BuiltInHandlerManager::call_handler(
+                    &mut context,
+                    Symbol::builtin(BuiltInSymbol::SpriteBox),
+                    &sprite_box_args,
+                )?;
+                let selected_sprite = context.player.movie.score.get_sprite(1).unwrap();
+                assert_eq!(selected_sprite.width, 100);
+                assert_eq!(selected_sprite.height, 200);
+                let selected_rect = crate::player::score::get_concrete_sprite_rect(
+                    context.player,
+                    selected_sprite,
+                );
+                assert_eq!(
+                    (selected_rect.left, selected_rect.top, selected_rect.right, selected_rect.bottom),
+                    (10, 20, 110, 220),
+                );
+
+                let transition_code = context.player.alloc_datum(Datum::Int(7));
+                let transition_time = context.player.alloc_datum(Datum::Int(4));
+                let transition_size = context.player.alloc_datum(Datum::Int(9));
+                let transition_args = vec![transition_code, transition_time, transition_size];
+                BuiltInHandlerManager::call_handler(
+                    &mut context,
+                    Symbol::builtin(BuiltInSymbol::PuppetTransition),
+                    &transition_args,
+                )?;
+                assert_eq!(
+                    context.player.pending_transition,
+                    Some(crate::player::cast_member::TransitionInfo {
+                        transition_type: 7,
+                        chunk_size: 9,
+                        duration_ms: 1_000,
+                    })
+                );
+
+                context.player.movie.score.frame_count = Some(42);
+                context.player.movie.score.frame_labels.push(FrameLabel {
+                    frame_num: 27,
+                    label: "ready".to_owned(),
+                });
+                let label = context
+                    .player
+                    .alloc_datum(Datum::String("READY".to_owned()));
+                let preload_args = vec![ignored_foreign, label];
+                let result = BuiltInHandlerManager::call_handler(
+                    &mut context,
+                    Symbol::builtin(BuiltInSymbol::Preload),
+                    &preload_args,
+                )?;
+                assert!(matches!(context.player.get_datum(&result), Datum::Int(27)));
+                let result = BuiltInHandlerManager::call_handler(
+                    &mut context,
+                    Symbol::builtin(BuiltInSymbol::Preload),
+                    &Vec::new(),
+                )?;
+                assert!(matches!(context.player.get_datum(&result), Datum::Int(42)));
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+
+        assert!(session
+            .with_player(1, |context| context.player.movie.score.channels.is_empty())
+            .unwrap());
+        assert!(session
+            .with_player(1, |context| context.player.pending_transition.is_none())
+            .unwrap());
+    }
+
+    #[test]
+    fn explicit_context_rejects_foreign_consumed_arguments_before_mutation() {
+        let mut session = two_player_session();
+        let foreign_sprite = session
+            .with_player(1, |context| context.player.alloc_datum(Datum::SpriteRef(1)))
+            .unwrap();
+        let foreign_int = session
+            .with_player(1, |context| context.player.alloc_datum(Datum::Int(7)))
+            .unwrap();
+
+        session
+            .with_player(2, |mut context| -> Result<(), crate::player::ScriptError> {
+                context.player.movie.score.set_channel_count(2);
+                let local_int = |context: &mut crate::player::session::ExecutionContext<'_>, value| {
+                    context.player.alloc_datum(Datum::Int(value))
+                };
+                let sprite_box_args = vec![
+                    foreign_sprite.clone(),
+                    local_int(&mut context, 1),
+                    local_int(&mut context, 2),
+                    local_int(&mut context, 3),
+                    local_int(&mut context, 4),
+                ];
+                let error = BuiltInHandlerManager::call_handler(
+                    &mut context,
+                    Symbol::builtin(BuiltInSymbol::SpriteBox),
+                    &sprite_box_args,
+                )
+                .unwrap_err();
+                assert_eq!(error.code, ScriptErrorCode::InvalidReference);
+                let selected_sprite = context.player.movie.score.get_sprite(1).unwrap();
+                assert_eq!((selected_sprite.width, selected_sprite.height), (0, 0));
+
+                let transition_args = vec![foreign_int.clone()];
+                let error = BuiltInHandlerManager::call_handler(
+                    &mut context,
+                    Symbol::builtin(BuiltInSymbol::PuppetTransition),
+                    &transition_args,
+                )
+                .unwrap_err();
+                assert_eq!(error.code, ScriptErrorCode::InvalidReference);
+                assert!(context.player.pending_transition.is_none());
+
+                let local_cast = context.player.alloc_datum(Datum::CastMember(
+                    crate::player::cast_lib::CastMemberRef {
+                        cast_lib: 0,
+                        cast_member: 0,
+                    },
+                ));
+                let ignored_foreign = vec![local_cast, foreign_int.clone(), foreign_int.clone()];
+                assert!(BuiltInHandlerManager::call_handler(
+                    &mut context,
+                    Symbol::builtin(BuiltInSymbol::PuppetTransition),
+                    &ignored_foreign,
+                )
+                .is_ok());
+                assert!(context.player.pending_transition.is_none());
+
+                let preload_args = vec![foreign_int];
+                let error = BuiltInHandlerManager::call_handler(
+                    &mut context,
+                    Symbol::builtin(BuiltInSymbol::Preload),
+                    &preload_args,
+                )
+                .unwrap_err();
+                assert_eq!(error.code, ScriptErrorCode::InvalidReference);
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+    }
+
+    #[test]
+    fn explicit_context_rejects_stale_consumed_arguments_after_owner_reset() {
+        let mut session = two_player_session();
+        let (stale_sprite, stale_int, old_owner) = session
+            .with_player(2, |context| {
+                (
+                    context.player.alloc_datum(Datum::SpriteRef(1)),
+                    context.player.alloc_datum(Datum::Int(7)),
+                    context.player.owner.clone(),
+                )
+            })
+            .unwrap();
+        session.reset_player_owned(2, &old_owner).unwrap();
+
+        session
+            .with_player(2, |mut context| -> Result<(), crate::player::ScriptError> {
+                context.player.movie.score.set_channel_count(2);
+                let local_int = |context: &mut crate::player::session::ExecutionContext<'_>, value| {
+                    context.player.alloc_datum(Datum::Int(value))
+                };
+                let sprite_box_args = vec![
+                    stale_sprite,
+                    local_int(&mut context, 1),
+                    local_int(&mut context, 2),
+                    local_int(&mut context, 3),
+                    local_int(&mut context, 4),
+                ];
+                let error = BuiltInHandlerManager::call_handler(
+                    &mut context,
+                    Symbol::builtin(BuiltInSymbol::SpriteBox),
+                    &sprite_box_args,
+                )
+                .unwrap_err();
+                assert_eq!(error.code, ScriptErrorCode::InvalidReference);
+                let selected_sprite = context.player.movie.score.get_sprite(1).unwrap();
+                assert_eq!((selected_sprite.width, selected_sprite.height), (0, 0));
+
+                let error = BuiltInHandlerManager::call_handler(
+                    &mut context,
+                    Symbol::builtin(BuiltInSymbol::PuppetTransition),
+                    &vec![stale_int.clone()],
+                )
+                .unwrap_err();
+                assert_eq!(error.code, ScriptErrorCode::InvalidReference);
+                assert!(context.player.pending_transition.is_none());
+
+                let error = BuiltInHandlerManager::call_handler(
+                    &mut context,
+                    Symbol::builtin(BuiltInSymbol::Preload),
+                    &vec![stale_int],
+                )
+                .unwrap_err();
+                assert_eq!(error.code, ScriptErrorCode::InvalidReference);
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+    }
 }

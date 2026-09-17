@@ -1611,4 +1611,287 @@ mod ownership_tests {
         drop(stale_clone);
         drop(reference);
     }
+
+    #[test]
+    fn string_chunk_reclaims_unshared_source_but_preserves_retained_child() {
+        let mut alloc = allocator();
+        let mut bitmaps = crate::player::bitmap::manager::BitmapManager::new();
+        let chunk_expr = crate::director::lingo::datum::StringChunkExpr {
+            chunk_type: crate::director::lingo::datum::StringChunkType::Char,
+            start: 1,
+            end: 1,
+            item_delimiter: ',',
+        };
+
+        let unshared_child = alloc
+            .alloc_datum(Datum::String("unshared".to_owned()), &mut bitmaps)
+            .unwrap();
+        let unshared_child_id = unshared_child.unwrap();
+        let unshared_chunk = alloc
+            .alloc_datum(
+                Datum::StringChunk(
+                    crate::director::lingo::datum::StringChunkSource::Datum(
+                        unshared_child.clone(),
+                    ),
+                    chunk_expr.clone(),
+                    "u".to_owned(),
+                ),
+                &mut bitmaps,
+            )
+            .unwrap();
+        let unshared_chunk_id = unshared_chunk.unwrap();
+        drop(unshared_child);
+        drop(unshared_chunk);
+        alloc.drain_reclaims(&mut bitmaps);
+        assert!(!alloc.contains_datum(unshared_chunk_id));
+        assert!(!alloc.contains_datum(unshared_child_id));
+
+        let retained_child = alloc
+            .alloc_datum(Datum::String("retained".to_owned()), &mut bitmaps)
+            .unwrap();
+        let retained_child_id = retained_child.unwrap();
+        let retained_child_clone = retained_child.clone();
+        let retained_chunk = alloc
+            .alloc_datum(
+                Datum::StringChunk(
+                    crate::director::lingo::datum::StringChunkSource::Datum(
+                        retained_child.clone(),
+                    ),
+                    chunk_expr,
+                    "r".to_owned(),
+                ),
+                &mut bitmaps,
+            )
+            .unwrap();
+        let retained_chunk_id = retained_chunk.unwrap();
+        drop(retained_child);
+        drop(retained_chunk);
+        alloc.drain_reclaims(&mut bitmaps);
+        assert!(!alloc.contains_datum(retained_chunk_id));
+        assert!(alloc.contains_datum(retained_child_id));
+
+        drop(retained_child_clone);
+        alloc.drain_reclaims(&mut bitmaps);
+        assert!(!alloc.contains_datum(retained_child_id));
+    }
+
+    #[test]
+    fn timeout_instance_reclaims_owned_children_but_preserves_retained_script_datum() {
+        let mut alloc = allocator();
+        let mut bitmaps = crate::player::bitmap::manager::BitmapManager::new();
+        let callback = alloc
+            .alloc_datum(Datum::String("callback".to_owned()), &mut bitmaps)
+            .unwrap();
+        let callback_id = callback.unwrap();
+        let target = alloc
+            .alloc_datum(Datum::String("target".to_owned()), &mut bitmaps)
+            .unwrap();
+        let target_id = target.unwrap();
+        let script_instance = alloc.alloc_script_instance(ScriptInstance {
+            instance_id: 42,
+            script: crate::player::cast_lib::CastMemberRef {
+                cast_lib: 1,
+                cast_member: 1,
+            },
+            ancestor: None,
+            properties: FxHashMap::default(),
+            begin_sprite_called: false,
+        });
+        let script_datum = alloc
+            .alloc_datum(Datum::ScriptInstanceRef(script_instance), &mut bitmaps)
+            .unwrap();
+        let script_datum_id = script_datum.unwrap();
+        let retained_script_datum = script_datum.clone();
+        let timeout = alloc
+            .alloc_datum(
+                Datum::timeout_instance(
+                    "owned-timeout".to_owned(),
+                    1,
+                    callback.clone(),
+                    target.clone(),
+                    Some(script_datum.clone()),
+                ),
+                &mut bitmaps,
+            )
+            .unwrap();
+        let timeout_id = timeout.unwrap();
+        drop(callback);
+        drop(target);
+        drop(script_datum);
+        drop(timeout);
+
+        alloc.drain_reclaims(&mut bitmaps);
+        assert!(!alloc.contains_datum(callback_id));
+        assert!(!alloc.contains_datum(target_id));
+        assert!(!alloc.contains_datum(timeout_id));
+        assert!(alloc.contains_datum(script_datum_id));
+        assert_eq!(alloc.script_instance_count(), 1);
+
+        drop(retained_script_datum);
+        alloc.drain_reclaims(&mut bitmaps);
+        assert!(!alloc.contains_datum(script_datum_id));
+        assert_eq!(alloc.script_instance_count(), 0);
+    }
+
+    #[test]
+    fn stale_chunk_timeout_drops_cannot_reclaim_replacements_or_neighbor_owner() {
+        let mut alloc = allocator();
+        let mut bitmaps = crate::player::bitmap::manager::BitmapManager::new();
+        let chunk_expr = crate::director::lingo::datum::StringChunkExpr {
+            chunk_type: crate::director::lingo::datum::StringChunkType::Char,
+            start: 1,
+            end: 1,
+            item_delimiter: ',',
+        };
+        let old_child = alloc
+            .alloc_datum(Datum::String("old-child".to_owned()), &mut bitmaps)
+            .unwrap();
+        let old_child_id = old_child.unwrap();
+        let old_chunk = alloc
+            .alloc_datum(
+                Datum::StringChunk(
+                    crate::director::lingo::datum::StringChunkSource::Datum(
+                        old_child.clone(),
+                    ),
+                    chunk_expr.clone(),
+                    "o".to_owned(),
+                ),
+                &mut bitmaps,
+            )
+            .unwrap();
+        let old_chunk_id = old_chunk.unwrap();
+        let old_timeout = alloc
+            .alloc_datum(
+                Datum::timeout_instance(
+                    "old-timeout".to_owned(),
+                    1,
+                    old_chunk.clone(),
+                    DatumRef::Void,
+                    None,
+                ),
+                &mut bitmaps,
+            )
+            .unwrap();
+        let old_timeout_id = old_timeout.unwrap();
+        let stale_child = old_child.clone();
+        let stale_chunk = old_chunk.clone();
+        let stale_timeout = old_timeout.clone();
+        drop(old_child);
+        drop(old_chunk);
+        drop(old_timeout);
+        alloc.reset(&mut bitmaps);
+
+        let fresh_child = alloc
+            .alloc_datum(Datum::String("fresh-child".to_owned()), &mut bitmaps)
+            .unwrap();
+        let fresh_chunk = alloc
+            .alloc_datum(
+                Datum::StringChunk(
+                    crate::director::lingo::datum::StringChunkSource::Datum(
+                        fresh_child.clone(),
+                    ),
+                    chunk_expr.clone(),
+                    "f".to_owned(),
+                ),
+                &mut bitmaps,
+            )
+            .unwrap();
+        let fresh_timeout = alloc
+            .alloc_datum(
+                Datum::timeout_instance(
+                    "fresh-timeout".to_owned(),
+                    1,
+                    fresh_chunk.clone(),
+                    DatumRef::Void,
+                    None,
+                ),
+                &mut bitmaps,
+            )
+            .unwrap();
+        assert_eq!(fresh_child.unwrap(), old_child_id);
+        assert_eq!(fresh_chunk.unwrap(), old_chunk_id);
+        assert_eq!(fresh_timeout.unwrap(), old_timeout_id);
+        drop(stale_child);
+        drop(stale_chunk);
+        drop(stale_timeout);
+        alloc.drain_reclaims(&mut bitmaps);
+        assert!(matches!(
+            alloc.try_get_datum(&fresh_child),
+            Some(Datum::String(value)) if value == "fresh-child"
+        ));
+        assert!(alloc.try_get_datum(&fresh_chunk).is_some());
+        assert!(alloc.try_get_datum(&fresh_timeout).is_some());
+
+        let mut left = allocator();
+        let mut right = allocator();
+        let mut left_bitmaps = crate::player::bitmap::manager::BitmapManager::new();
+        let mut right_bitmaps = crate::player::bitmap::manager::BitmapManager::new();
+        let left_child = left
+            .alloc_datum(Datum::String("left".to_owned()), &mut left_bitmaps)
+            .unwrap();
+        let left_chunk = left
+            .alloc_datum(
+                Datum::StringChunk(
+                    crate::director::lingo::datum::StringChunkSource::Datum(
+                        left_child.clone(),
+                    ),
+                    chunk_expr.clone(),
+                    "l".to_owned(),
+                ),
+                &mut left_bitmaps,
+            )
+            .unwrap();
+        let left_timeout = left
+            .alloc_datum(
+                Datum::timeout_instance(
+                    "left-timeout".to_owned(),
+                    1,
+                    left_chunk.clone(),
+                    DatumRef::Void,
+                    None,
+                ),
+                &mut left_bitmaps,
+            )
+            .unwrap();
+        let right_child = right
+            .alloc_datum(Datum::String("right".to_owned()), &mut right_bitmaps)
+            .unwrap();
+        let right_chunk = right
+            .alloc_datum(
+                Datum::StringChunk(
+                    crate::director::lingo::datum::StringChunkSource::Datum(
+                        right_child.clone(),
+                    ),
+                    chunk_expr,
+                    "r".to_owned(),
+                ),
+                &mut right_bitmaps,
+            )
+            .unwrap();
+        let right_timeout = right
+            .alloc_datum(
+                Datum::timeout_instance(
+                    "right-timeout".to_owned(),
+                    1,
+                    right_chunk.clone(),
+                    DatumRef::Void,
+                    None,
+                ),
+                &mut right_bitmaps,
+            )
+            .unwrap();
+        assert_eq!(left_child.unwrap(), right_child.unwrap());
+        assert_eq!(left_chunk.unwrap(), right_chunk.unwrap());
+        assert_eq!(left_timeout.unwrap(), right_timeout.unwrap());
+        assert_eq!(left.owner_token().key(), right.owner_token().key());
+        assert!(!left.owner_token().same_identity(&right.owner_token()));
+
+        drop(left_child);
+        drop(left_chunk);
+        drop(left_timeout);
+        left.drain_reclaims(&mut left_bitmaps);
+        assert!(right.try_get_datum(&right_child).is_some());
+        assert!(right.try_get_datum(&right_chunk).is_some());
+        assert!(right.try_get_datum(&right_timeout).is_some());
+    }
 }
