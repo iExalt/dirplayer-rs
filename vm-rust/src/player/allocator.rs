@@ -921,10 +921,14 @@ impl ResetableAllocator for DatumAllocator {
         &mut self,
         bitmap_manager: &mut crate::player::bitmap::manager::BitmapManager,
     ) -> OwnerToken {
+        let old_owner = self.owner.clone();
+        let next_owner_key = old_owner
+            .key()
+            .checked_next_generation()
+            .expect("owner generation exhausted before allocator reset");
         let mut bitmap_guard = bitmap_manager
             .prepare_reset()
             .expect("bitmap generation exhausted before allocator reset");
-        let old_owner = self.owner.clone();
         old_owner.begin_reset();
         let mut reset_guard = ResetGuard {
             owner: old_owner.clone(),
@@ -963,7 +967,7 @@ impl ResetableAllocator for DatumAllocator {
         bitmap_manager
             .rotate_handles()
             .expect("bitmap generation must be available after reset precheck");
-        self.owner = OwnerToken::new(old_owner.key().next_generation());
+        self.owner = OwnerToken::new(next_owner_key);
         self.init_int_pool();
         bitmap_guard.commit();
         reset_guard.armed = false;
@@ -1568,6 +1572,29 @@ mod ownership_tests {
             .alloc_datum(Datum::String("recovered".into()), &mut recovered_bitmaps)
             .is_ok());
         drop(retained);
+    }
+
+    #[test]
+    fn reset_owner_generation_exhaustion_fails_before_allocator_mutation() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+
+        let mut alloc = DatumAllocator::new(OwnerKey {
+            session: 47,
+            player: 1,
+            generation: u64::MAX,
+        });
+        let mut bitmaps = crate::player::bitmap::manager::BitmapManager::new();
+        let owner = alloc.owner_token();
+        let datum = alloc
+            .alloc_datum(Datum::String("retained".to_owned()), &mut bitmaps)
+            .unwrap();
+        let datum_count = alloc.datums.len();
+        let result = catch_unwind(AssertUnwindSafe(|| alloc.reset(&mut bitmaps)));
+        assert!(result.is_err());
+        assert!(owner.is_arena_live());
+        assert!(alloc.owner_token().same_identity(&owner));
+        assert_eq!(alloc.datums.len(), datum_count);
+        assert!(alloc.try_get_datum(&datum).is_some());
     }
 
     #[test]

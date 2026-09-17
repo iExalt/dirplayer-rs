@@ -4,7 +4,7 @@
 //! by those players. A context borrow is intentionally synchronous: callers
 //! must finish the borrow before awaiting host I/O or dispatching a callback.
 
-use std::{collections::{HashMap, HashSet, VecDeque}, rc::Rc};
+use std::{cell::{Cell, RefCell}, collections::{HashMap, HashSet, VecDeque}, rc::Rc};
 
 use async_std::channel::{self, Receiver, Sender};
 use log::warn;
@@ -108,6 +108,47 @@ struct InflightEvalRoute {
     sender: Sender<Result<DatumRef, ScriptError>>,
 }
 
+/// Exact evaluator cancellation records are kept outside the session borrow
+/// so a dropped caller can mark its capability dead even while the owner pump
+/// is synchronously borrowing this session. The record contains no session
+/// handle, avoiding a session/mailbox cycle.
+pub(crate) struct EvalCancellationRecord {
+    pub(crate) id: crate::player::eval::EvalId,
+    pub(crate) player_id: PlayerId,
+    pub(crate) owner: OwnerToken,
+    pub(crate) external_load: Option<super::xtra::external::ExternalXtraLoadRequest>,
+}
+
+pub(crate) struct EvalCancellationMailbox {
+    records: RefCell<Vec<EvalCancellationRecord>>,
+    wake_queued: Cell<bool>,
+}
+
+impl EvalCancellationMailbox {
+    fn new() -> Self {
+        Self { records: RefCell::new(Vec::new()), wake_queued: Cell::new(false) }
+    }
+
+    pub(crate) fn defer(&self, record: EvalCancellationRecord, queue_tx: &Sender<PlayerVMExecutionItem>) {
+        self.records.borrow_mut().push(record);
+        if !self.wake_queued.replace(true) {
+            if queue_tx.try_send(PlayerVMExecutionItem {
+                command: super::commands::PlayerVMCommand::PumpPending,
+                completer: None,
+            }).is_err() {
+                // The logical EvalId/request tombstone remains authoritative
+                // when the owner loop has already closed.
+                self.wake_queued.set(false);
+            }
+        }
+    }
+
+    fn take(&self) -> Vec<EvalCancellationRecord> {
+        self.wake_queued.set(false);
+        std::mem::take(&mut *self.records.borrow_mut())
+    }
+}
+
 /// Cancellation for the one frame loop owned by a player generation.
 ///
 /// The sender lives in the session so stop/reset/remove can wake a loop that
@@ -162,6 +203,7 @@ pub struct RuntimeSession {
     players: PlayerGraph,
     owner: SymbolOwner,
     generation: u64,
+    owner_generation_high_water: HashMap<PlayerId, u64>,
     pending_casts: Vec<PendingCastLoad>,
     completed_property_casts: Vec<(PlayerId, CompletionTicket)>,
     drivers: HashMap<PlayerId, DriverContinuation>,
@@ -180,6 +222,7 @@ pub struct RuntimeSession {
     deferred_requests: Vec<DeferredRequest>,
     pending_eval_requests: Vec<PendingEvalRequest>,
     inflight_eval_routes: Vec<InflightEvalRoute>,
+    eval_cancellations: Rc<EvalCancellationMailbox>,
     actions: ActionRegistry,
     js_lingo: JsRuntimeRegistry,
     renderer_bindings: HashMap<PlayerId, std::rc::Weak<crate::rendering::RendererState>>,
@@ -426,6 +469,7 @@ impl RuntimeSession {
             players: PlayerGraph::new(),
             owner,
             generation: owner.generation,
+            owner_generation_high_water: HashMap::new(),
             pending_casts: Vec::new(),
             completed_property_casts: Vec::new(),
             drivers: HashMap::new(),
@@ -441,6 +485,7 @@ impl RuntimeSession {
             deferred_requests: Vec::new(),
             pending_eval_requests: Vec::new(),
             inflight_eval_routes: Vec::new(),
+            eval_cancellations: Rc::new(EvalCancellationMailbox::new()),
             actions: ActionRegistry::new(),
             js_lingo: JsRuntimeRegistry::default(),
             renderer_bindings: HashMap::new(),
@@ -509,7 +554,7 @@ impl RuntimeSession {
 
     /// Register an already-prepared owner-bound VM request as a standalone
     /// evaluator continuation. The returned receiver is completed only by
-    /// `submit_pending_eval_completion`; callers must execute the detached
+    /// the singular pending-route API; callers must execute the detached
     /// request outside the session borrow and preserve its real capability.
     pub(crate) fn start_eval_request(
         &mut self,
@@ -692,6 +737,15 @@ impl RuntimeSession {
         mut child: EvalChildContinuation,
         turn: DriverTurn,
     ) -> EvalRequestTurn {
+        if id.is_cancelled() {
+            self.release_eval_broadcast_guard(&mut child);
+            let _ = child.driver.cancel(self);
+            self.send_owned_callback_result(&id, Err(super::cancelled_scope_error()));
+            self.evals.remove(&id);
+            return EvalRequestTurn::Evaluator(crate::player::eval::EvalTurn::Complete(
+                Err(super::cancelled_scope_error()),
+            ));
+        }
         let player_id = child.driver.player_id;
         self.collect_player_host_teardowns(player_id);
         match turn {
@@ -1304,6 +1358,9 @@ impl RuntimeSession {
         id: &crate::player::eval::EvalId,
         action: &crate::player::eval::EvalAction,
     ) -> Option<(PlayerId, OwnerToken)> {
+        if id.is_cancelled() {
+            return None;
+        }
         let continuation = self.evals.get(id)?;
         if !continuation.waiting_for(action) {
             return None;
@@ -1800,6 +1857,15 @@ impl RuntimeSession {
         &mut self,
         id: crate::player::eval::EvalId,
     ) -> Option<EvalRequestTurn> {
+        if id.is_cancelled() {
+            if let Some(mut child) = self.eval_drivers.remove(&id) {
+                self.release_eval_broadcast_guard(&mut child);
+                let _ = child.driver.cancel(self);
+            }
+            self.send_owned_callback_result(&id, Err(super::cancelled_scope_error()));
+            self.evals.remove(&id);
+            return None;
+        }
         let mut child = self.eval_drivers.remove(&id)?;
         let turn = child.driver.turn(self);
         Some(self.finish_eval_child(id, child, turn))
@@ -1811,6 +1877,15 @@ impl RuntimeSession {
         ticket: CompletionTicket,
         completion: ActionCompletion,
     ) -> Option<EvalRequestTurn> {
+        if id.is_cancelled() {
+            if let Some(mut child) = self.eval_drivers.remove(&id) {
+                self.release_eval_broadcast_guard(&mut child);
+                let _ = child.driver.cancel(self);
+            }
+            self.send_owned_callback_result(&id, Err(super::cancelled_scope_error()));
+            self.evals.remove(&id);
+            return None;
+        }
         let Some(mut child) = self.eval_drivers.remove(&id) else {
             return None;
         };
@@ -1832,6 +1907,10 @@ impl RuntimeSession {
         owner: &OwnerToken,
         result: Result<DatumRef, ScriptError>,
     ) -> bool {
+        if id.is_cancelled() {
+            self.evals.remove(&id);
+            return false;
+        }
         let Some(mut continuation) = self.evals.remove(&id) else { return false };
         let accepted = continuation.complete(self, action, owner, result);
         if !accepted || matches!(continuation.state, crate::player::eval::EvalState::Ready) {
@@ -1853,6 +1932,9 @@ impl RuntimeSession {
         owner: &OwnerToken,
         result: Result<DatumRef, ScriptError>,
     ) -> bool {
+        if id.is_cancelled() {
+            return false;
+        }
         let (player_id, request_owner) = match request {
             super::driver::InternalVmRequest::SpriteAsync(request) => {
                 (request.player_id, &request.owner)
@@ -1977,6 +2059,10 @@ impl RuntimeSession {
         owner: &OwnerToken,
         result: Result<DatumRef, ScriptError>,
     ) -> crate::player::eval::EvalTurn {
+        if id.is_cancelled() {
+            self.evals.remove(&id);
+            return crate::player::eval::EvalTurn::Complete(Err(super::cancelled_scope_error()));
+        }
         let Some(mut continuation) = self.evals.remove(&id) else {
             return crate::player::eval::EvalTurn::Complete(Err(ScriptError::new(
                 "unknown or duplicate evaluator completion".to_owned(),
@@ -2063,22 +2149,49 @@ impl RuntimeSession {
     pub fn players(&self) -> &PlayerGraph {
         &self.players
     }
-    pub fn add_player(&mut self, id: PlayerId, tx: Sender<PlayerVMExecutionItem>) -> bool {
-        if self.players.players.contains_key(&id) {
-            return false;
+
+    fn next_player_owner_generation(&self, id: PlayerId) -> Result<u64, ScriptError> {
+        match self.owner_generation_high_water.get(&id).copied() {
+            Some(generation) => generation.checked_add(1).ok_or_else(|| {
+                ScriptError::new("player owner generation exhausted".to_owned())
+            }),
+            None => Ok(self.generation),
         }
+    }
+
+    fn record_player_owner_generation(&mut self, id: PlayerId, generation: u64) {
+        self.owner_generation_high_water
+            .entry(id)
+            .and_modify(|high_water| *high_water = (*high_water).max(generation))
+            .or_insert(generation);
+    }
+
+    pub(crate) fn try_add_player(
+        &mut self,
+        id: PlayerId,
+        tx: Sender<PlayerVMExecutionItem>,
+    ) -> Result<bool, ScriptError> {
+        if self.players.players.contains_key(&id) {
+            return Ok(false);
+        }
+        let player_generation = self.next_player_owner_generation(id)?;
         let player_owner = OwnerToken::new(OwnerKey {
             session: self.owner.session,
             player: id as u64,
-            generation: self.generation,
+            generation: player_generation,
         });
         let inserted = self
             .players
             .insert(id, DirPlayer::new_with_owner(tx, player_owner.clone()));
         if inserted {
+            self.record_player_owner_generation(id, player_generation);
             self.w3d_clocks.insert(id, W3dClock::new(player_owner));
         }
-        inserted
+        Ok(inserted)
+    }
+
+    pub fn add_player(&mut self, id: PlayerId, tx: Sender<PlayerVMExecutionItem>) -> bool {
+        self.try_add_player(id, tx).unwrap_or(false)
     }
 
     /// Claim the single playback loop for a captured owner. A second `play`
@@ -2294,7 +2407,7 @@ impl RuntimeSession {
         let occupied: std::collections::HashSet<PlayerId> =
             self.players.players.keys().copied().collect();
         let child_id = self.nested.allocate_id(|id| occupied.contains(&id))?;
-        if !self.add_player(child_id, command_tx.clone()) {
+        if !self.try_add_player(child_id, command_tx.clone())? {
             return Err(ScriptError::new("nested player id collision".into()));
         }
         self.with_player(child_id, |context| {
@@ -2511,6 +2624,66 @@ impl RuntimeSession {
         }
     }
 
+    pub(crate) fn eval_cancellation_mailbox(&self) -> Rc<EvalCancellationMailbox> {
+        self.eval_cancellations.clone()
+    }
+
+    /// Confirm that an evaluator capability is currently retained by this
+    /// exact player owner before installing a drop guard. Numeric evaluator
+    /// ids are only lookup hints; a colliding id from another owner cannot
+    /// tombstone a live evaluator.
+    pub(crate) fn eval_id_matches(
+        &self,
+        id: &crate::player::eval::EvalId,
+        player_id: PlayerId,
+        owner: &OwnerToken,
+    ) -> bool {
+        self.evals.get(id).is_some_and(|continuation| {
+            continuation.player_id == player_id && continuation.owner.same_identity(owner)
+        }) || self.eval_drivers.get(id).is_some_and(|child| {
+            child.driver.player_id == player_id && child.owner.same_identity(owner)
+        }) || self.pending_eval_requests.iter().any(|pending| {
+            pending.id == *id
+                && pending.player_id == player_id
+                && pending.owner.same_identity(owner)
+        }) || self.inflight_eval_routes.iter().any(|route| {
+            route.id == *id
+                && route.player_id == player_id
+                && route.owner.same_identity(owner)
+        }) || self.pending_commands.iter().any(|pending| {
+            pending.eval_child.as_ref() == Some(id)
+                && pending.player_id == player_id
+                && pending.owner.same_identity(owner)
+        })
+    }
+
+    pub(crate) fn cancel_eval_record(&mut self, record: EvalCancellationRecord) {
+        self.cancel_eval_callback(&record.id, record.player_id, &record.owner);
+        if let Some(request) = record.external_load {
+            let current_owner = self
+                .with_player(record.player_id, |context| {
+                    record.owner.same_identity(&context.player.owner)
+                        && record.owner.is_arena_live()
+                })
+                .unwrap_or(false);
+            if current_owner {
+                let _ = self.with_player(record.player_id, |context| {
+                    context
+                        .player
+                        .xtra_manager_state
+                        .external
+                        .cancel_load_request(&request)
+                });
+            }
+        }
+    }
+
+    pub(crate) fn drain_eval_cancellations(&mut self) {
+        for record in self.eval_cancellations.take() {
+            self.cancel_eval_record(record);
+        }
+    }
+
     /// Cancel one dropped nested callback without resetting its owner's whole
     /// player. This removes the exact pending command/evaluator child, unwinds
     /// its scopes, and completes the callback receiver with Abort. All other
@@ -2618,6 +2791,20 @@ impl RuntimeSession {
         if !current_owner.same_identity(owner) || !owner.is_arena_live() {
             return Err(super::cancelled_scope_error());
         }
+        let expected_owner_key = current_owner
+            .key()
+            .checked_next_generation()
+            .ok_or_else(|| ScriptError::new("player owner generation exhausted".to_owned()))?;
+        if self
+            .owner_generation_high_water
+            .get(&player_id)
+            .is_some_and(|high_water| expected_owner_key.generation <= *high_water)
+        {
+            return Err(ScriptError::new(
+                "player owner generation high-water invariant violated".to_owned(),
+            ));
+        }
+        self.drain_eval_cancellations();
         let nested_children = self.take_nested_children_for(player_id, &current_owner);
         for child in nested_children {
             child.command_tx.close();
@@ -2640,17 +2827,25 @@ impl RuntimeSession {
         // carried by the separate host-event queue.
         self.native_player_notifications.remove(&player_id);
         self.native_notification_errors.remove(&player_id);
-        let player = self
-            .players
-            .players
-            .get_mut(&player_id)
-            .ok_or_else(super::cancelled_scope_error)?;
-        player.reset_owned_core();
+        let new_owner = {
+            let player = self
+                .players
+                .players
+                .get_mut(&player_id)
+                .ok_or_else(super::cancelled_scope_error)?;
+            player.reset_owned_core();
+            player.owner.clone()
+        };
+        if new_owner.key() != expected_owner_key {
+            return Err(ScriptError::new("player owner generation advanced unexpectedly".to_owned()));
+        }
+        self.record_player_owner_generation(player_id, new_owner.key().generation);
         // Retire the old NetManager shared state when the player generation
         // rotates. Prepared FileIO requests retain the old Arc and therefore
         // cannot wake or satisfy a task in the replacement generation.
-        player.net_manager.reset_owner(player.owner.key());
-        let new_owner = player.owner.clone();
+        self.with_player(player_id, |context| {
+            context.player.net_manager.reset_owner(new_owner.key());
+        });
         self.collect_player_host_teardowns(player_id);
         self.w3d_clocks
             .insert(player_id, W3dClock::new(new_owner.clone()));
@@ -2667,6 +2862,8 @@ impl RuntimeSession {
         self.host_sinks.remove(&id);
         let owner = self.players.players.get(&id).map(|player| player.owner.clone());
         if let Some(owner) = owner {
+            self.drain_eval_cancellations();
+            self.record_player_owner_generation(id, owner.key().generation);
             let nested_children = self.take_nested_children_for(id, &owner);
             for child in nested_children {
                 child.command_tx.close();
@@ -3290,30 +3487,6 @@ impl RuntimeSession {
         }
     }
 
-    pub(crate) fn take_pending_eval_requests_for(
-        &mut self,
-        player_id: PlayerId,
-    ) -> Vec<PendingEvalRequest> {
-        let mut selected = Vec::new();
-        let mut retained = Vec::new();
-        for pending in std::mem::take(&mut self.pending_eval_requests) {
-            if pending.player_id == player_id {
-                self.inflight_eval_routes.push(InflightEvalRoute {
-                    id: pending.id.clone(),
-                    player_id: pending.player_id,
-                    owner: pending.owner.clone(),
-                    action: pending.action.clone(),
-                    sender: pending.sender.clone(),
-                });
-                selected.push(pending);
-            } else {
-                retained.push(pending);
-            }
-        }
-        self.pending_eval_requests = retained;
-        selected
-    }
-
     /// Apply a host result to an evaluator request. Invalid owner/capability
     /// results leave the request queued; accepted pending turns are requeued
     /// with their newly-issued evaluator capability.
@@ -3344,56 +3517,6 @@ impl RuntimeSession {
         })?;
         let route = self.inflight_eval_routes.swap_remove(index);
         Some((route.player_id, route.owner, route.sender))
-    }
-
-    pub(crate) fn submit_pending_eval_completion(
-        &mut self,
-        id: crate::player::eval::EvalId,
-        action: crate::player::eval::EvalAction,
-        owner: OwnerToken,
-        result: Result<DatumRef, ScriptError>,
-    ) -> Option<EvalRequestTurn> {
-        let route = if let Some(index) = self.pending_eval_requests.iter().position(|pending| {
-            pending.id == id && pending.action == action && pending.owner.same_identity(&owner)
-        }) {
-            let pending = self.pending_eval_requests.swap_remove(index);
-            InflightEvalRoute {
-                id: pending.id,
-                player_id: pending.player_id,
-                owner: pending.owner,
-                action: pending.action,
-                sender: pending.sender,
-            }
-        } else if let Some(index) = self.inflight_eval_routes.iter().position(|route| {
-            route.id == id && route.action == action && route.owner.same_identity(&owner)
-        }) {
-            self.inflight_eval_routes.swap_remove(index)
-        } else {
-            return None;
-        };
-        let turn = self.resume_eval(id.clone(), &action, &owner, result);
-        match turn {
-            crate::player::eval::EvalTurn::Complete(result) => {
-                let _ = route.sender.try_send(result);
-                None
-            }
-            crate::player::eval::EvalTurn::Pending { request } => {
-                let next_action = match &request {
-                    crate::player::eval::EvalPending::Global { capability, .. }
-                    | crate::player::eval::EvalPending::Object { capability, .. }
-                    | crate::player::eval::EvalPending::SetProperty { capability, .. } => capability.clone(),
-                };
-                self.pending_eval_requests.push(PendingEvalRequest {
-                    id,
-                    player_id: route.player_id,
-                    owner: route.owner,
-                    action: next_action,
-                    request,
-                    sender: route.sender,
-                });
-                None
-            }
-        }
     }
 
     pub(crate) fn retain_deferred_request(
@@ -3710,6 +3833,26 @@ impl RuntimeSession {
             return super::commands::CommandTurn::Pending(pending);
         }
         if let Some(eval_id) = pending.eval_child.clone() {
+            if eval_id.is_cancelled() {
+                if let Some(action) = pending.action.take() {
+                    self.actions.cancel_ticket(action.ticket());
+                } else if let Some(ticket) = pending.ticket.take() {
+                    self.actions.cancel_ticket(&ticket);
+                }
+                if let Some(mut child) = self.eval_drivers.remove(&eval_id) {
+                    self.release_eval_broadcast_guard(&mut child);
+                    let _ = child.driver.cancel(self);
+                }
+                self.send_owned_callback_result(&eval_id, Err(super::cancelled_scope_error()));
+                self.evals.remove(&eval_id);
+                if let Some(sender) = pending.eval_sender.take() {
+                    let _ = sender.try_send(Err(super::cancelled_scope_error()));
+                }
+                return super::commands::CommandTurn::Complete(
+                    Err(super::cancelled_scope_error()),
+                    pending.completer,
+                );
+            }
             let child_turn = match (completion, pending.ticket.clone()) {
                 (Some(completion), Some(ticket)) => {
                     self.complete_eval_child_action(eval_id.clone(), ticket, completion)
@@ -5543,6 +5686,87 @@ mod tests {
                 })
                 .is_some()
         );
+    }
+
+    #[test]
+    fn player_owner_generation_is_not_reused_after_remove_and_readd() {
+        let mut session = RuntimeSession::new(SymbolOwner { session: 43, generation: 1 });
+        let (tx, _rx) = channel::unbounded();
+        assert!(session.add_player(7, tx.clone()));
+        let first_owner = session.with_player(7, |ctx| ctx.player.owner.clone()).unwrap();
+        let removed = session.remove_player(7).expect("player should be removed");
+        assert!(removed.owner.same_identity(&first_owner));
+        assert!(first_owner.is_arena_live());
+        assert!(session.add_player(7, tx));
+        let replacement_owner = session.with_player(7, |ctx| ctx.player.owner.clone()).unwrap();
+        assert_ne!(first_owner.key(), replacement_owner.key());
+        assert_eq!(replacement_owner.key().generation, 2);
+    }
+
+    #[test]
+    fn player_owner_generation_high_water_survives_reset_remove_and_sibling_reuse() {
+        let mut session = RuntimeSession::new(SymbolOwner { session: 44, generation: 1 });
+        let (first_tx, _first_rx) = channel::unbounded();
+        let (second_tx, _second_rx) = channel::unbounded();
+        assert!(session.add_player(1, first_tx.clone()));
+        assert!(session.add_player(2, second_tx));
+        let first_owner = session.with_player(1, |ctx| ctx.player.owner.clone()).unwrap();
+        let second_owner = session.with_player(2, |ctx| ctx.player.owner.clone()).unwrap();
+        let reset_owner = session.reset_player_owned(1, &first_owner).unwrap();
+        assert_eq!(reset_owner.key().generation, 2);
+        let removed = session.remove_player(1).expect("reset player should be removable");
+        assert!(removed.owner.same_identity(&reset_owner));
+        assert!(session.add_player(1, first_tx));
+        let replacement_owner = session.with_player(1, |ctx| ctx.player.owner.clone()).unwrap();
+        assert_eq!(replacement_owner.key().generation, 3);
+        assert_eq!(second_owner.key().generation, 1);
+        assert!(session
+            .with_player(2, |ctx| ctx.player.owner.same_identity(&second_owner))
+            .unwrap());
+    }
+
+    #[test]
+    fn removal_records_direct_player_reset_before_readd() {
+        let mut session = RuntimeSession::new(SymbolOwner { session: 47, generation: 1 });
+        let (tx, _rx) = channel::unbounded();
+        assert!(session.add_player(1, tx.clone()));
+        let first_owner = session.with_player(1, |ctx| ctx.player.owner.clone()).unwrap();
+        session.with_player(1, |ctx| ctx.player.reset_owned_core());
+        let direct_reset_owner = session.with_player(1, |ctx| ctx.player.owner.clone()).unwrap();
+        assert_eq!(direct_reset_owner.key().generation, 2);
+        let removed = session.remove_player(1).expect("directly reset player should be removable");
+        assert!(removed.owner.same_identity(&direct_reset_owner));
+        assert!(!first_owner.is_arena_live());
+        assert!(session.add_player(1, tx));
+        let replacement_owner = session.with_player(1, |ctx| ctx.player.owner.clone()).unwrap();
+        assert_eq!(replacement_owner.key().generation, 3);
+    }
+
+    #[test]
+    fn player_owner_generation_exhaustion_fails_before_add_or_reset_mutation() {
+        let mut session = RuntimeSession::new(SymbolOwner { session: 45, generation: 1 });
+        session.owner_generation_high_water.insert(7, u64::MAX);
+        let (tx, _rx) = channel::unbounded();
+        assert!(session.try_add_player(7, tx.clone()).is_err());
+        assert!(session.with_player(7, |_| ()).is_none());
+        assert_eq!(session.owner_generation_high_water.get(&7), Some(&u64::MAX));
+        assert!(!session.add_player(7, tx));
+        assert!(session.with_player(7, |_| ()).is_none());
+
+        let mut maxed = RuntimeSession::new(SymbolOwner { session: 46, generation: u64::MAX });
+        let (max_tx, _max_rx) = channel::unbounded();
+        assert!(maxed.add_player(1, max_tx));
+        let owner = maxed.with_player(1, |ctx| ctx.player.owner.clone()).unwrap();
+        assert!(maxed.reset_player_owned(1, &owner).is_err());
+        assert!(maxed
+            .with_player(1, |ctx| ctx.player.owner.same_identity(&owner))
+            .unwrap());
+        let removed = maxed.remove_player(1).expect("maxed player should be removable");
+        assert!(removed.owner.same_identity(&owner));
+        let (readd_tx, _readd_rx) = channel::unbounded();
+        assert!(!maxed.add_player(1, readd_tx));
+        assert!(maxed.with_player(1, |_| ()).is_none());
+        assert_eq!(maxed.owner_generation_high_water.get(&1), Some(&u64::MAX));
     }
 
     #[test]

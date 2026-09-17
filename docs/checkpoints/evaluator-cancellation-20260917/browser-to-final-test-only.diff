@@ -1,0 +1,19 @@
+Browser source eval.rs hash: d30c8716c4c0b257e7232720dc3c5a8cbe0de88a324f197f6e4f191e23b773c7
+Final eval.rs hash:   5bc0e89acedfdfe88185d27e1168fb02ad98d4e56f925109a34a74decc2ab775
+
+The only post-browser source edits were test assertions in
+player::eval::tests::pumped_external_load_drop_cancels_waiter_after_shared_borrow:
+
+- assert!(async_std::task::block_on(pump));
++ assert!(async_std::task::block_on(async_std::future::timeout(
++     std::time::Duration::from_secs(5), pump,
++ )).expect("cancellation pump should wake promptly"));
+
+- assert!(async_std::task::block_on(sibling_receiver).is_ok());
++ assert!(matches!(
++     async_std::task::block_on(sibling_receiver),
++     Ok(Ok(())),
++ ));
+
+The other four authorized Rust file hashes are identical before browser and
+final. No production/runtime control flow changed after the browser build.

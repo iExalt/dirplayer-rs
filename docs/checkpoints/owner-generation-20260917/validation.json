@@ -1,0 +1,17 @@
+{
+  "base_commit": "243647a3b8d4ec4c34a5b1824c1e4ef342e8e4ba",
+  "native": {
+    "passed": 561,
+    "failed": 0,
+    "exit": 0
+  },
+  "wasm_exit_receipt": "0",
+  "browser": {
+    "focused_passed": 2,
+    "focused_failed": 0,
+    "focused_exit": 0,
+    "combined_passed": 15,
+    "combined_failed": 0,
+    "combined_exit": 0
+  }
+}

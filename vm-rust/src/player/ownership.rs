@@ -28,10 +28,17 @@ impl OwnerKey {
         }
     }
 
+    pub const fn checked_next_generation(self) -> Option<Self> {
+        match self.generation.checked_add(1) {
+            Some(generation) => Some(Self { generation, ..self }),
+            None => None,
+        }
+    }
+
     pub const fn next_generation(self) -> Self {
-        Self {
-            generation: self.generation.wrapping_add(1),
-            ..self
+        match self.checked_next_generation() {
+            Some(next) => next,
+            None => panic!("owner generation exhausted"),
         }
     }
 }
@@ -163,5 +170,15 @@ mod tests {
         });
         assert!(first.join().unwrap());
         assert!(second.join().unwrap());
+    }
+
+    #[test]
+    fn checked_owner_generation_rejects_exhaustion_without_wrapping() {
+        let key = OwnerKey {
+            session: 1,
+            player: 2,
+            generation: u64::MAX,
+        };
+        assert!(key.checked_next_generation().is_none());
     }
 }

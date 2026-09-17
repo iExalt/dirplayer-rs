@@ -3121,6 +3121,10 @@ impl DirPlayer {
     }
 
     fn reset_core(&mut self, global_resources: bool) {
+        self.owner
+            .key()
+            .checked_next_generation()
+            .expect("owner generation exhausted before player reset");
         let transient_bitmap_ids = self
             .flash_frame_buffers
             .values()
@@ -5824,9 +5828,24 @@ pub(crate) async fn drive_eval_owned(
     eval_id: crate::player::eval::EvalId,
     mut turn: crate::player::eval::EvalTurn,
 ) -> Result<DatumRef, ScriptError> {
+    let mut cancellation = if matches!(&turn, crate::player::eval::EvalTurn::Complete(_)) {
+        None
+    } else {
+        Some(crate::player::eval::EvalCancellationGuard::new(
+            session.clone(),
+            player_id,
+            owner.clone(),
+            eval_id.clone(),
+        )?)
+    };
     loop {
         match turn {
-            crate::player::eval::EvalTurn::Complete(result) => return result,
+            crate::player::eval::EvalTurn::Complete(result) => {
+                if let Some(cancellation) = cancellation.as_mut() {
+                    cancellation.disarm();
+                }
+                return result;
+            }
             crate::player::eval::EvalTurn::Pending { request } => {
                 let (sender, receiver) = async_std::channel::bounded(1);
                 let action = match &request {
@@ -5911,7 +5930,12 @@ pub(crate) async fn drive_eval_owned(
                         );
                     }
                     crate::player::session::EvalRequestTurn::Evaluator(next) => match next {
-                        crate::player::eval::EvalTurn::Complete(result) => return result,
+                        crate::player::eval::EvalTurn::Complete(result) => {
+                            if let Some(cancellation) = cancellation.as_mut() {
+                                cancellation.disarm();
+                            }
+                            return result;
+                        }
                         crate::player::eval::EvalTurn::Pending { request } => {
                             if let Some((action, internal_request)) =
                                 crate::player::commands::eval_pending_internal_request(&request)
@@ -13685,6 +13709,24 @@ mod scope_token_tests {
         );
 
         drop(retained);
+    }
+
+    #[test]
+    fn reset_owned_core_owner_generation_exhaustion_preserves_player_state() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+
+        let owner = OwnerToken::new(super::ownership::OwnerKey {
+            session: 48,
+            player: 1,
+            generation: u64::MAX,
+        });
+        let mut player = make_player(owner.clone());
+        let retained = player.alloc_datum(Datum::String("retained".to_owned()));
+        let result = catch_unwind(AssertUnwindSafe(|| player.reset_owned_core()));
+        assert!(result.is_err());
+        assert!(owner.is_arena_live());
+        assert!(player.owner.same_identity(&owner));
+        assert!(matches!(player.get_datum(&retained), Datum::String(value) if value == "retained"));
     }
 
     #[test]

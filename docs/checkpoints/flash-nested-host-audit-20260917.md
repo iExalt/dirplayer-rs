@@ -23,3 +23,30 @@ Host sprite keys and local channel numbers are different domains. Legacy nested 
 Required acceptance includes two roots plus actual registered children sharing channel numbers, production embedded Ruffle load and first access, correct child pixel destination, delayed publication across parent reset, failed-startup teardown, and stale callback rejection after replacement. A test of synthetic-key arithmetic alone is not sufficient.
 
 The root initial-access component may be accepted separately. Full Stage 2 completion still requires resolving this lifecycle gap and the remaining callback and rendering ownership gates.
+
+## Active implementation contract
+
+After the accepted root initial-access and evaluator-cancellation components,
+the child lifecycle implementation remains local, unverified work excluded from this publication. This section records its design
+and acceptance boundary, not a passing implementation result.
+
+Owned child startup must publish an exact parent/child capability registration
+after releasing the session borrow and before load or initialization emits Flash
+work. Owned hosts use local channels; only the retained legacy nested path uses
+synthetic host keys. Registration reentry must revalidate the same parent,
+child owner and registry record before activating the child.
+
+Reset must preserve behavior. A direct child reset rotates its owner, refreshes
+the registry/host registration, and installs replacement command and event loops;
+old loops capture retired authority. Parent reset continues to remove children
+and permits later recreation. Failure/removal/disposal retire exact captured
+registrations outside mutable session borrows. An old disposer cannot touch a
+replacement child.
+
+The browser fixture must exercise the production registration controller and
+per-host callbacks, not a parallel harness implementation. Two roots and their
+children share local channel numbers but use distinct authored values/pixels.
+Acceptance requires real Ruffle first access, correct child frame destination,
+continued operation after child reset, failed-startup cleanup, and stale
+publication/callback rejection without affecting the other root. Instance-origin
+callback work beyond this boundary remains the separate Stage 2.7 requirement.

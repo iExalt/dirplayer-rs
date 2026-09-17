@@ -32,11 +32,11 @@ test result: ok. 536 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fi
 
 Raw receipt: `/private/tmp/dirplayer-js-object-validation-20260917/final-freeze-2/native-suite.stdout` and `native-suite.exit`. The JS checkpoint preserves the binary identity, source manifest and command. The navigator also read the scope test: it rejects a token from a distinct owner with identical numeric keys, rejects invalidated epochs and reused scope generations, and keeps the neighboring owner usable.
 
-## Concrete remaining copying work
+## Copying findings and resolved components
 
-The follow-up source audit found no general cross-owner Datum-copy API; existing explicit inter-player copying is bitmap-specific. Same-owner `player_duplicate_datum_inner` recursively walks Lists/PropLists after the iterative graph validator accepts them. A self-referential List can be constructed by the existing `driver.rs` graph-validation fixture, so passing that graph to duplication has no termination condition. This is a source-proven uncontrolled-recursion path; the audit did not execute an intentional process-crashing test.
+The original follow-up audit found no general cross-owner Datum-copy API and an uncontrolled-recursion path in same-owner `player_duplicate_datum_inner`. Those findings describe the earlier checkpoint, not the current implementation: value transfer was introduced in `4e103fdf`, and `243647a3` replaces recursive duplication with iterative preflight and reconstruction.
 
-The explicit `player::value_transfer` module is integrated in checkpoint `4e103fdf`, with source preflight, owned graph snapshots, symbol remapping, alias preservation, iterative traversal and typed cycle rejection. Its eight focused native tests passed against the compiler-4 artifact; the later compiler-5 full suite also passed these tests but failed an unrelated Flash fixture (543 passed, one failed overall). This verifies the bounded value-transfer component, not the complete Stage 2.1 gate. Existing `duplicate` supports bitmap and object cases outside the transferable-value allowlist, so replacing it wholesale with the new API would be a compatibility regression. Its cycle repair must preserve those existing cases and receive a dedicated regression before Stage 2.1 acceptance.
+The explicit `player::value_transfer` module provides source preflight, owned graph snapshots, symbol remapping, alias preservation, iterative traversal and typed cycle rejection. Its eight focused native tests passed. Existing `duplicate` supports bitmap and object cases outside the transferable-value allowlist, so it retains separate semantics: iterative per-occurrence copying preserves ordinary leaf clones and independent bitmap storage. Six focused duplication tests and the 554-test native suite pass; the [duplication receipt](iterative-duplication-20260917/README.md) records source identity and verification limits. These accepted components do not close the remaining reference-consumer, reclamation and scope gates.
 
 
 ## Value-transfer component evidence
@@ -53,7 +53,7 @@ unsupported references, source reset after snapshot and destination owner death.
 Snapshot preflight rejects invalid source graphs before destination mutation.
 Import does not promise rollback of symbol interning or OOM/panic recovery.
 Bitmap/object copying keeps its separate existing semantics; the same-owner
-recursive `duplicate` path still requires the repair described above.
+duplication repair and its evidence are described above.
 
 
 ## Complete Datum payload shape inventory
@@ -78,3 +78,51 @@ BitmapHandle leaves. JS and Flash object capabilities have additional checks at
 their host-operation boundary; the generic graph validator alone is not proof
 of their host liveness. This distinction must be retained in the final Stage 2
 acceptance audit.
+
+## Remaining reclamation verification
+
+At `243647a3`, allocator reclamation removes a datum and drains any child-drop
+records until its owner-local queue is empty. `StringChunkSource::Datum` retains
+one datum reference; `TimeoutInstanceData` retains callback, target and optional
+script-instance datum references. The existing driver fixtures exercise foreign
+references in these payloads, but the allocator's recursive reclamation fixture
+uses a List. Dedicated chunk/timeout reclamation evidence is still missing.
+
+The next scoped tests should drop those parent values, drain the real allocator
+queue, and verify unshared descendants are reclaimed while externally retained
+children survive. Repeat across reset and colliding local IDs in a neighboring
+owner to prove old drops cannot reclaim replacement or foreign allocations.
+This records a verification gap, not a newly demonstrated implementation defect.
+
+## Stage 2.1 closure review
+
+Three additional allocator regressions are preserved as uncommitted work and excluded from the accepted publication:
+`string_chunk_reclaims_unshared_source_but_preserves_retained_child`,
+`timeout_instance_reclaims_owned_children_but_preserves_retained_script_datum`,
+and `stale_chunk_timeout_drops_cannot_reclaim_replacements_or_neighbor_owner`.
+Allocator SHA-256 after integration is
+`91eb904b5a1cefcf61aff06f6bee6b1817dcb905249cd413cf6f2568d3eefd7b`.
+They are not in the accepted 570-test artifact or the published source and remain unverified.
+
+The remaining Stage 2.1 evidence map is concrete:
+
+| Requirement | Source boundary and existing evidence |
+| --- | --- |
+| Datum/script capability rejection | Allocator validates exact owner, liveness, arena ID and refcount identity before returning entries; existing allocator/driver foreign, stale and collision fixtures pass. |
+| Nested retained values | Graph validation checks each reference before numeric-ID deduplication and traverses lists, property lists, datum-backed chunks and timeout fields. Script and bitmap leaves have separate capability checks. |
+| Symbols and bitmaps | Symbol-table display validates direct and embedded symbol ownership; accepted bitmap/typed-mutation checkpoints cover read, mutation, replacement, refcount and reset collisions. |
+| Explicit copying | Accepted value transfer and iterative duplication retain their distinct contracts; eight and six focused tests respectively pass, including aliases, cycles, symbols, unsupported resources and bitmap copying. |
+| Scope invalidation | ScopeToken checks exact owner, liveness, player epoch, slot and scope generation; existing scope owner/epoch/replacement tests pass. |
+| Recursive reclamation | Existing list/property-list/bitmap/script/reset fixtures pass. The three local, unpublished chunk/timeout tests above must still execute. |
+
+The navigator independently checked allocator script-reference validation,
+graph traversal, script property access and scope validation. Script-instance
+property maps are not recursively traversed by the graph validator; production
+property reads validate returned datum references before dereferencing them.
+Local-coordinate variants carry no independent arena capability. Remaining
+manager/host routing migrations belong to the explicit interpreter, extension,
+Flash, JS and residual-service gates, and are not declared complete by this audit.
+
+No additional retained-capability defect was identified in this scoped review.
+Stage 2.1 acceptance remains pending execution of the new tests against a recorded
+coherent checkout; source review alone does not close it.

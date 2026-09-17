@@ -111,3 +111,24 @@ gate and root initial-access acceptance remain open. The latest browser-only
 fixture edits postdate the native/WASM source manifest above. Staged evaluator
 cancellation work under `/private/tmp/dirplayer-eval-cancellation-review/` and
 the existing Ruffle working-tree changes are excluded.
+
+## Owner-generation repair after publication
+
+The follow-up working tree repairs remove/re-add at the production
+`RuntimeSession` boundary. A per-player high-water mark survives removal;
+replacement uses checked generation advancement. Removal also observes direct
+player resets, while session reset updates the mark immediately. Sibling player
+IDs keep independent generations. Owner, allocator and player reset preflights
+reject exhaustion before mutation instead of wrapping the key. No browser
+tombstone is cleared to make replacement succeed.
+
+The fresh native test artifact passes **561 tests, zero failures**. The navigator
+ran the full suite directly from the executable reported by the fresh successful
+Cargo build. Command, output, exit status and artifact hash are retained under
+`/private/tmp/dirplayer-stage2-6-generation/native-final-1/`; the lead's focused
+generation/reset receipt is in the same directory. WASM test compilation then
+passed, followed by both focused Flash tests and the combined 15-fixture browser
+gate (all exit 0). The navigator independently checked the complete fixture list
+and terminal browser results. The [portable receipt](owner-generation-20260917/README.md)
+records this accepted root initial-access component. Child Flash host lifecycle
+and the remaining Stage 2 gates are still open.

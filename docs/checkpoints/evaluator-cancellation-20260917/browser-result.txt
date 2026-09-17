@@ -1,0 +1,19 @@
+Provenance: terminal output from functions.exec session 64420; session ended successfully and was not rerun.
+Result: 15 passed, 0 failed; Playwright reported 1 passed (13.1s); process exit 0.
+Tests:
+- test_generated_browser_player_handle_lifecycle_reentry
+- test_browser_handle_flash_scripted_access_owner_capabilities
+- test_browser_handle_nested_input
+- test_browser_handle_public_play
+- test_browser_host_event_guard_drops_attempted_callback
+- test_browser_host_event_guard_handles_rebound_owner
+- test_browser_player_handle_isolation
+- test_browser_player_host_tail_preservation
+- test_budapi_host_effects
+- test_fileio_open_remote
+- test_flash_initial_access_before_reservation
+- test_flash_owned_evaluator_binding
+- test_js_object_owner_bridge
+- test_multiuser_socket_lifecycle
+- test_sysmenu_host_effects
+Report path: /Users/clliaw/Projects/dirplayer-rs/test-results/snapshot-report

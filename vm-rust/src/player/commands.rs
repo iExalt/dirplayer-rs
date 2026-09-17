@@ -527,6 +527,7 @@ async fn run_command_with_pending_pump(
     let mut work: FuturesUnordered<Pin<Box<dyn Future<Output = OwnerSchedulerEvent>>>> =
         FuturesUnordered::new();
     loop {
+        session_handle.borrow_mut().drain_eval_cancellations();
         if !owner_is_current(&session_handle, player_id, &owner) {
             return CommandTurn::Complete(
                 Err(super::cancelled_scope_error()),
@@ -611,6 +612,7 @@ pub(crate) async fn drive_pending_owner(
     let mut work: FuturesUnordered<Pin<Box<dyn Future<Output = OwnerSchedulerEvent>>>> =
         FuturesUnordered::new();
     loop {
+        session.borrow_mut().drain_eval_cancellations();
         if !owner_is_current(session, player_id, owner) {
             return;
         }
@@ -853,6 +855,9 @@ fn eval_action_is_current(
     player_id: u32,
     owner: &super::ownership::OwnerToken,
 ) -> bool {
+    if id.is_cancelled() {
+        return false;
+    }
     session
         .borrow_mut()
         .eval_action_anchor(id, action)
@@ -1093,7 +1098,83 @@ fn finish_eval_external_request(
 /// consumed only after validating its exact owner and evaluator action; its
 /// retained continuation is then handed back to the ordinary external
 /// request path so create/static/instance completion keeps one finish route.
+fn cancel_prepared_external_load(
+    session: &Rc<RefCell<RuntimeSession>>,
+    player_id: u32,
+    request: &super::xtra::external::ExternalXtraLoadRequest,
+) {
+    request.cancel_logically();
+    let _ = session.borrow_mut().with_player(player_id, |context| {
+        if request.owner.same_identity(&context.player.owner) {
+            context
+                .player
+                .xtra_manager_state
+                .external
+                .cancel_load_request(request)
+        } else {
+            false
+        }
+    });
+}
+
+/// Register the exact prepared load on the shared evaluator capability before
+/// taking its waiter or starting host work. This is shared by direct and
+/// pumped evaluator execution, so a dropped caller cannot strand a waiter.
 pub(crate) async fn execute_eval_external_load_request(
+    session: &Rc<RefCell<RuntimeSession>>,
+    id: crate::player::eval::EvalId,
+    action: crate::player::eval::EvalAction,
+    player_id: u32,
+    owner: super::ownership::OwnerToken,
+    request: super::xtra::external::ExternalXtraLoadRequest,
+) -> super::session::EvalRequestTurn {
+    if !owner_is_current(session, player_id, &owner)
+        || !request.owner.same_identity(&owner)
+        || !request.owner.is_arena_live()
+    {
+        cancel_prepared_external_load(session, player_id, &request);
+        return finish_eval_external_error(
+            session,
+            id,
+            &action,
+            &owner,
+            super::cancelled_scope_error(),
+        );
+    }
+    if !eval_action_is_current(session, &id, &action, player_id, &owner) {
+        cancel_prepared_external_load(session, player_id, &request);
+        return finish_eval_external_error(
+            session,
+            id,
+            &action,
+            &owner,
+            super::cancelled_scope_error(),
+        );
+    }
+    if !id.register_external_load(request.clone()) {
+        cancel_prepared_external_load(session, player_id, &request);
+        return finish_eval_external_error(
+            session,
+            id,
+            &action,
+            &owner,
+            super::cancelled_scope_error(),
+        );
+    }
+    let result = execute_registered_eval_external_load_request(
+        session,
+        id.clone(),
+        action,
+        player_id,
+        owner,
+        request.clone(),
+    )
+    .await;
+    id.clear_external_load(&request);
+    result
+}
+
+async fn execute_registered_eval_external_load_request(
     session: &Rc<RefCell<RuntimeSession>>,
     id: crate::player::eval::EvalId,
     action: crate::player::eval::EvalAction,
@@ -1106,6 +1187,7 @@ pub(crate) async fn execute_eval_external_load_request(
         || !request.owner.is_arena_live()
         || !eval_action_is_current(session, &id, &action, player_id, &owner)
     {
+        cancel_prepared_external_load(session, player_id, &request);
         return finish_eval_external_error(
             session,
             id,
@@ -1123,6 +1205,7 @@ pub(crate) async fn execute_eval_external_load_request(
         context.player.xtra_manager_state.external.take_load_waiter(&request)
     });
     let Some(Some(receiver)) = receiver else {
+        cancel_prepared_external_load(session, player_id, &request);
         return finish_eval_external_error(
             session,
             id,
@@ -1137,11 +1220,13 @@ pub(crate) async fn execute_eval_external_load_request(
     if let Err(error) = receiver.await.unwrap_or_else(|_| {
         Err(ScriptError::new("external Xtra load waiter was cancelled".to_owned()))
     }) {
+        cancel_prepared_external_load(session, player_id, &request);
         return finish_eval_external_error(session, id, &action, &owner, error);
     }
     if !owner_is_current(session, player_id, &owner)
         || !eval_action_is_current(session, &id, &action, player_id, &owner)
     {
+        cancel_prepared_external_load(session, player_id, &request);
         return finish_eval_external_error(
             session,
             id,
@@ -1159,6 +1244,7 @@ pub(crate) async fn execute_eval_external_load_request(
         context.player.xtra_manager_state.external.take_load_continuation(&request)
     });
     let Some(Some(continuation)) = continuation else {
+        cancel_prepared_external_load(session, player_id, &request);
         return finish_eval_external_error(
             session,
             id,
@@ -2850,28 +2936,6 @@ pub(crate) fn take_pending_commands(
     session: &Rc<RefCell<RuntimeSession>>,
 ) -> Vec<crate::player::driver::PendingCommand> {
     session.borrow_mut().take_pending_commands()
-}
-
-/// Host boundary for evaluator-owned external work. The request carries its
-/// real `EvalAction` capability and sender; callers must execute the owned
-/// request and submit the result through `submit_pending_eval_completion`.
-pub(crate) fn take_pending_eval_requests(
-    session: &Rc<RefCell<RuntimeSession>>,
-    player_id: u32,
-) -> Vec<crate::player::session::PendingEvalRequest> {
-    session.borrow_mut().take_pending_eval_requests_for(player_id)
-}
-
-pub(crate) fn submit_pending_eval_completion(
-    session: &Rc<RefCell<RuntimeSession>>,
-    id: crate::player::eval::EvalId,
-    action: crate::player::eval::EvalAction,
-    owner: super::ownership::OwnerToken,
-    result: Result<DatumRef, ScriptError>,
-) {
-    let _ = session
-        .borrow_mut()
-        .submit_pending_eval_completion(id, action, owner, result);
 }
 
 pub(crate) fn resume_pending_command(

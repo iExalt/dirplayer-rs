@@ -1,4 +1,4 @@
-use std::{collections::VecDeque, hash::{Hash, Hasher}, rc::Rc};
+use std::{cell::{Cell, RefCell}, collections::VecDeque, hash::{Hash, Hasher}, rc::{Rc, Weak}};
 use log::error;
 use pest::{
     iterators::{Pair, Pairs},
@@ -28,7 +28,10 @@ fn tokenize_lingo(_expr: &str) -> Vec<String> {
 /// lookup hint; accepting a completion also requires this exact capability
 /// allocation, so a fabricated numeric value cannot target a live evaluator.
 #[derive(Debug)]
-struct EvalCapability;
+struct EvalCapability {
+    cancelled: Cell<bool>,
+    external_load: RefCell<Option<crate::player::xtra::external::ExternalXtraLoadRequest>>,
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct EvalId {
@@ -38,7 +41,54 @@ pub(crate) struct EvalId {
 
 impl EvalId {
     pub(crate) fn new(serial: u64) -> Self {
-        Self { serial, capability: Rc::new(EvalCapability) }
+        Self {
+            serial,
+            capability: Rc::new(EvalCapability {
+                cancelled: Cell::new(false),
+                external_load: RefCell::new(None),
+            }),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn cancel(&self) {
+        self.capability.cancelled.set(true);
+    }
+
+    #[inline]
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.capability.cancelled.get()
+    }
+
+    pub(crate) fn register_external_load(
+        &self,
+        request: crate::player::xtra::external::ExternalXtraLoadRequest,
+    ) -> bool {
+        if self.is_cancelled() {
+            return false;
+        }
+        let mut slot = self.capability.external_load.borrow_mut();
+        if slot.as_ref().is_some_and(|current| !current.same_token(&request)) {
+            return false;
+        }
+        *slot = Some(request);
+        true
+    }
+
+    pub(crate) fn take_external_load(
+        &self,
+    ) -> Option<crate::player::xtra::external::ExternalXtraLoadRequest> {
+        self.capability.external_load.borrow_mut().take()
+    }
+
+    pub(crate) fn clear_external_load(
+        &self,
+        request: &crate::player::xtra::external::ExternalXtraLoadRequest,
+    ) {
+        let mut slot = self.capability.external_load.borrow_mut();
+        if slot.as_ref().is_some_and(|current| current.same_token(request)) {
+            slot.take();
+        }
     }
 }
 
@@ -256,6 +306,12 @@ impl EvalContinuation {
             crate::player::driver::InternalVmRequest::SetProperty { receiver, name, value } => EvalPending::SetProperty {
                 capability,
                 request: crate::player::driver::InternalVmRequest::SetProperty { receiver, name, value },
+            },
+            crate::player::driver::InternalVmRequest::ExternalXtraLoad(request) => EvalPending::Global {
+                capability,
+                request: crate::player::driver::InternalVmRequest::ExternalXtraLoad(request),
+                reason: None,
+                prepared_child: None,
             },
             _ => return Err(ScriptError::new("standalone evaluator request is not a global, object, or property operation".to_owned())),
         };
@@ -2255,7 +2311,7 @@ pub(crate) fn complete_eval_lingo_expr(
 /// Queue one already-classified owner-bound VM request and await its actual
 /// completion. The request is retained in the session before this future
 /// yields; the owner pump executes it outside the borrow and routes the exact
-/// result back through `submit_pending_eval_completion`.
+/// result through the singular owner-bound route APIs.
 pub(crate) async fn invoke_request_owned(
     session: crate::player::session::RuntimeSessionHandle,
     player_id: crate::player::session::PlayerId,
@@ -2271,14 +2327,22 @@ pub(crate) async fn invoke_request_owned(
     if !owner_valid {
         return Err(crate::player::cancelled_scope_error());
     }
-    let (_id, _action, receiver) = session
+    let (id, _action, receiver) = session
         .borrow_mut()
         .start_eval_request(player_id, request)?;
-    receiver
+    let mut cancellation = EvalCancellationGuard::new(
+        session.clone(),
+        player_id,
+        owner,
+        id,
+    )?;
+    let result = receiver
         .recv()
         .await
         .map_err(|_| crate::player::cancelled_scope_error())
-        .and_then(|result| result)
+        .and_then(|result| result);
+    cancellation.disarm();
+    result
 }
 
 pub(crate) async fn invoke_value_request_owned(
@@ -2316,13 +2380,12 @@ pub(crate) async fn invoke_script_callback_owned(
         args,
         use_raw_arg_list,
     )?;
-    let mut cancellation = CallbackCancellation {
-        session: session.clone(),
+    let mut cancellation = EvalCancellationGuard::new(
+        session.clone(),
         player_id,
-        owner: owner.clone(),
-        id: id.clone(),
-        armed: true,
-    };
+        owner.clone(),
+        id.clone(),
+    )?;
     match turn {
         crate::player::session::EvalRequestTurn::Child(
             crate::player::driver::DriverTurn::Waiting,
@@ -2394,25 +2457,83 @@ pub(crate) async fn invoke_script_callback_owned(
         .recv()
         .await
         .map_err(|_| crate::player::cancelled_scope_error())?;
-    cancellation.armed = false;
+    cancellation.disarm();
     result
 }
 
-struct CallbackCancellation {
-    session: crate::player::session::RuntimeSessionHandle,
+pub(crate) struct EvalCancellationGuard {
+    session: Weak<std::cell::RefCell<crate::player::session::RuntimeSession>>,
+    mailbox: Rc<crate::player::session::EvalCancellationMailbox>,
+    queue_tx: async_std::channel::Sender<crate::player::PlayerVMExecutionItem>,
     player_id: crate::player::session::PlayerId,
     owner: crate::player::ownership::OwnerToken,
     id: EvalId,
     armed: bool,
 }
 
-impl Drop for CallbackCancellation {
-    fn drop(&mut self) {
-        if self.armed {
-            self.session
-                .borrow_mut()
-                .cancel_eval_callback(&self.id, self.player_id, &self.owner);
+impl EvalCancellationGuard {
+    pub(crate) fn new(
+        session: crate::player::session::RuntimeSessionHandle,
+        player_id: crate::player::session::PlayerId,
+        owner: crate::player::ownership::OwnerToken,
+        id: EvalId,
+    ) -> Result<Self, ScriptError> {
+        let (queue_tx, owner_valid) = session
+            .borrow_mut()
+            .with_player(player_id, |context| {
+                (
+                    context.player.queue_tx.clone(),
+                    owner.same_identity(&context.player.owner) && owner.is_arena_live(),
+                )
+            })
+            .ok_or_else(crate::player::cancelled_scope_error)?;
+        if !owner_valid {
+            return Err(crate::player::cancelled_scope_error());
         }
+        // A synchronous child can complete and remove its EvalId before the
+        // caller installs this guard. Treat that terminal path as an inert
+        // guard; only an exact retained capability is armed for cleanup.
+        let active = session.borrow().eval_id_matches(&id, player_id, &owner);
+        let mailbox = session.borrow().eval_cancellation_mailbox();
+        Ok(Self {
+            session: Rc::downgrade(&session),
+            mailbox,
+            queue_tx,
+            player_id,
+            owner,
+            id,
+            armed: active,
+        })
+    }
+
+    pub(crate) fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for EvalCancellationGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.id.cancel();
+        let external_load = self.id.take_external_load();
+        if let Some(request) = external_load.as_ref() {
+            request.cancel_logically();
+        }
+        let record = crate::player::session::EvalCancellationRecord {
+            id: self.id.clone(),
+            player_id: self.player_id,
+            owner: self.owner.clone(),
+            external_load,
+        };
+        let Some(session) = self.session.upgrade() else {
+            return;
+        };
+        match session.try_borrow_mut() {
+            Ok(mut runtime) => runtime.cancel_eval_record(record),
+            Err(_) => self.mailbox.defer(record, &self.queue_tx),
+        };
     }
 }
 
@@ -3749,6 +3870,9 @@ mod tests {
     use super::*;
     use crate::player::ownership::OwnerToken;
     use async_std::channel;
+    use fxhash::FxHashMap;
+    use std::{cell::RefCell, collections::HashMap};
+    use std::future::Future;
 
     fn test_session() -> crate::player::session::RuntimeSession {
         let mut session = crate::player::session::RuntimeSession::new(
@@ -3765,6 +3889,435 @@ mod tests {
     fn test_player() -> DirPlayer {
         let (tx, _rx) = channel::unbounded();
         DirPlayer::new_with_owner(tx, OwnerToken::transitional())
+    }
+
+    fn callback_fixture() -> (
+        crate::player::session::RuntimeSession,
+        crate::player::script::ScriptHandlerRef,
+        crate::player::script::ScriptHandlerRef,
+    ) {
+        use crate::director::{
+            chunks::{handler::{Bytecode, HandlerDef}, script::ScriptChunk},
+            enums::ScriptType,
+            lingo::opcode::OpCode,
+        };
+        use crate::player::{
+            cast_lib::{CastLib, CastMemberRef},
+            script::Script,
+        };
+
+        let mut session = crate::player::session::RuntimeSession::new(
+            crate::player::symbols::symbol_table::SymbolOwner {
+                session: 902,
+                generation: 1,
+            },
+        );
+        assert!(session.add_player(1, channel::unbounded().0));
+        let (success_name, error_name) = session
+            .with_player(1, |context| {
+                (
+                    context.symbols.intern("successCallback"),
+                    context.symbols.intern("errorCallback"),
+                )
+            })
+            .expect("callback fixture player exists");
+        let member_ref = CastMemberRef {
+            cast_lib: 1,
+            cast_member: 1,
+        };
+        let success = Rc::new(HandlerDef {
+            name_id: 0,
+            bytecode_array: vec![Bytecode::new(OpCode::Ret, 0, 0)],
+            bytecode_index_map: FxHashMap::default(),
+            argument_name_ids: vec![],
+            local_name_ids: vec![],
+            global_name_ids: vec![],
+            compiled_ir: RefCell::new(None),
+        });
+        let error = Rc::new(HandlerDef {
+            name_id: 1,
+            bytecode_array: vec![Bytecode::new(OpCode::Invalid, 0, 0)],
+            bytecode_index_map: FxHashMap::default(),
+            argument_name_ids: vec![],
+            local_name_ids: vec![],
+            global_name_ids: vec![],
+            compiled_ir: RefCell::new(None),
+        });
+        let script = Rc::new(Script {
+            member_ref: member_ref.clone(),
+            name: "cancellation-callback-fixture".to_owned(),
+            chunk: ScriptChunk {
+                script_number: 1,
+                literals: vec![],
+                handlers: vec![],
+                property_name_ids: vec![],
+                property_defaults: HashMap::new(),
+            },
+            script_type: ScriptType::Movie,
+            handlers: FxHashMap::from_iter([
+                (success_name.clone(), success),
+                (error_name.clone(), error),
+            ]),
+            handler_names_raw: vec!["successCallback".to_owned(), "errorCallback".to_owned()],
+            handler_names: vec![success_name.clone(), error_name.clone()],
+            properties: RefCell::new(FxHashMap::default()),
+        });
+        session
+            .with_player(1, |context| {
+                let mut cast = CastLib::test_external(1, 0);
+                cast.name_symbols = Rc::from(vec![success_name.clone(), error_name.clone()]);
+                cast.scripts.insert(1, script);
+                context.player.movie.cast_manager.casts.push(cast);
+            })
+            .expect("callback fixture player exists");
+        (
+            session,
+            (member_ref.clone(), success_name),
+            (member_ref, error_name),
+        )
+    }
+
+    #[test]
+    fn cancelled_eval_capability_is_shared_without_numeric_aliasing() {
+        let first = EvalId::new(7);
+        let first_clone = first.clone();
+        let colliding_serial = EvalId::new(7);
+        first.cancel();
+        assert!(first_clone.is_cancelled());
+        assert!(!colliding_serial.is_cancelled());
+    }
+
+    #[test]
+    fn cancellation_guard_rejects_foreign_owner_and_colliding_id() {
+        let mut session = test_session();
+        let (id, _action, _receiver) = session
+            .start_eval_request(
+                1,
+                crate::player::driver::InternalVmRequest::ObjectProperty {
+                    receiver: DatumRef::Void,
+                    name: Symbol::builtin(BuiltInSymbol::Value),
+                },
+            )
+            .expect("request should be retained");
+        let owner = session
+            .with_player(1, |context| context.player.owner.clone())
+            .expect("test player exists");
+        let handle = Rc::new(std::cell::RefCell::new(session));
+        let foreign_owner = OwnerToken::transitional();
+        assert!(EvalCancellationGuard::new(
+            handle.clone(),
+            1,
+            foreign_owner,
+            id.clone(),
+        )
+        .is_err());
+        let colliding_id = EvalId::new(id.serial);
+        let terminal_guard = EvalCancellationGuard::new(
+            handle,
+            1,
+            owner,
+            colliding_id,
+        )
+        .expect("owner-valid terminal guard should be inert");
+        drop(terminal_guard);
+        assert!(!id.is_cancelled());
+    }
+
+    #[test]
+    fn polled_request_drop_defers_exact_cleanup_until_borrow_release() {
+        let mut session = crate::player::session::RuntimeSession::new(
+            crate::player::symbols::symbol_table::SymbolOwner {
+                session: 901,
+                generation: 1,
+            },
+        );
+        let (tx, rx) = channel::unbounded();
+        assert!(session.add_player(1, tx));
+        let handle = Rc::new(std::cell::RefCell::new(session));
+        let owner = handle
+            .borrow_mut()
+            .with_player(1, |context| context.player.owner.clone())
+            .expect("test player exists");
+        let (neighbor_id, neighbor_action, neighbor_receiver) = handle
+            .borrow_mut()
+            .start_eval_request(
+                1,
+                crate::player::driver::InternalVmRequest::ObjectProperty {
+                    receiver: DatumRef::Void,
+                    name: Symbol::builtin(BuiltInSymbol::Value),
+                },
+            )
+            .expect("neighbor request should be retained");
+        while rx.try_recv().is_ok() {}
+        let mut request = Box::pin(invoke_request_owned(
+            handle.clone(),
+            1,
+            owner.clone(),
+            crate::player::driver::InternalVmRequest::ObjectProperty {
+                receiver: DatumRef::Void,
+                name: Symbol::builtin(BuiltInSymbol::Value),
+            },
+        ));
+        let waker = futures::task::noop_waker();
+        let mut context = std::task::Context::from_waker(&waker);
+        assert!(matches!(request.as_mut().poll(&mut context), std::task::Poll::Pending));
+        let first_route = handle
+            .borrow_mut()
+            .take_pending_eval_request_for(1)
+            .expect("first evaluator route");
+        let second_route = handle
+            .borrow_mut()
+            .take_pending_eval_request_for(1)
+            .expect("neighbor evaluator route");
+        let (target_id, target_action, target_owner, neighbor_action, neighbor_owner) =
+            if first_route.id != neighbor_id {
+                (
+                    first_route.id,
+                    first_route.action,
+                    first_route.owner,
+                    second_route.action,
+                    second_route.owner,
+                )
+            } else {
+                (
+                    second_route.id,
+                    second_route.action,
+                    second_route.owner,
+                    first_route.action,
+                    first_route.owner,
+                )
+            };
+        let borrowed = handle.borrow_mut();
+        drop(request);
+        drop(borrowed);
+        let wake = rx.try_recv().expect("drop should enqueue owner pump wake");
+        assert!(matches!(wake.command, crate::player::commands::PlayerVMCommand::PumpPending));
+        async_std::task::block_on(crate::player::commands::drive_pending_owner(
+            &handle,
+            1,
+            &owner,
+        ));
+        assert!(handle
+            .borrow_mut()
+            .detach_pending_eval_route(&target_id, &target_action)
+            .is_none());
+        assert!(matches!(
+            handle.borrow_mut().resume_eval(
+                target_id,
+                &target_action,
+                &target_owner,
+                Ok(DatumRef::Void),
+            ),
+            EvalTurn::Complete(Err(_))
+        ));
+        let (_, _, neighbor_sender) = handle
+            .borrow_mut()
+            .detach_pending_eval_route(&neighbor_id, &neighbor_action)
+            .expect("neighbor route survives target cancellation");
+        let neighbor_turn = handle.borrow_mut().resume_eval(
+            neighbor_id,
+            &neighbor_action,
+            &neighbor_owner,
+            Ok(DatumRef::Void),
+        );
+        if let EvalTurn::Complete(result) = neighbor_turn {
+            let _ = neighbor_sender.try_send(result);
+        } else {
+            panic!("neighbor completion should be synchronous");
+        }
+        assert!(matches!(neighbor_receiver.try_recv(), Ok(Ok(DatumRef::Void))));
+    }
+
+    #[test]
+    fn pumped_external_load_drop_cancels_waiter_after_shared_borrow() {
+        let mut session = crate::player::session::RuntimeSession::new(
+            crate::player::symbols::symbol_table::SymbolOwner {
+                session: 903,
+                generation: 1,
+            },
+        );
+        let (tx, rx) = channel::unbounded();
+        assert!(session.add_player(1, tx));
+        let handle = Rc::new(std::cell::RefCell::new(session));
+        let owner = handle
+            .borrow_mut()
+            .with_player(1, |context| context.player.owner.clone())
+            .expect("test player exists");
+        let mut load = handle
+            .borrow_mut()
+            .with_player(1, |context| {
+                let request = context.player.xtra_manager_state.external.begin_load(
+                    owner.clone(),
+                    "drop-load".to_owned(),
+                    "DropLoadXtra",
+                )?;
+                context.player.xtra_manager_state.external.attach_continuation(
+                    &request,
+                    crate::player::xtra::external::ExternalXtraContinuation::Create {
+                        xtra_name: "DropLoadXtra".to_owned(),
+                        args: Vec::new(),
+                    },
+                )?;
+                Ok::<_, crate::player::ScriptError>(request)
+            })
+            .expect("load fixture player exists")
+            .expect("load request should be prepared");
+        load.notify_host = false;
+        let mut sibling = handle
+            .borrow_mut()
+            .with_player(1, |context| {
+                let request = context.player.xtra_manager_state.external.begin_load(
+                    owner.clone(),
+                    "drop-load".to_owned(),
+                    "DropLoadXtra",
+                )?;
+                context.player.xtra_manager_state.external.attach_continuation(
+                    &request,
+                    crate::player::xtra::external::ExternalXtraContinuation::Create {
+                        xtra_name: "DropLoadXtra".to_owned(),
+                        args: Vec::new(),
+                    },
+                )?;
+                Ok::<_, crate::player::ScriptError>(request)
+            })
+            .expect("load fixture player exists")
+            .expect("sibling load request should be prepared");
+        sibling.notify_host = false;
+
+        let mut caller = Box::pin(invoke_request_owned(
+            handle.clone(),
+            1,
+            owner.clone(),
+            crate::player::driver::InternalVmRequest::ExternalXtraLoad(load.clone()),
+        ));
+        let waker = futures::task::noop_waker();
+        let mut context = std::task::Context::from_waker(&waker);
+        assert!(matches!(caller.as_mut().poll(&mut context), std::task::Poll::Pending));
+
+        let mut pump = Box::pin(crate::player::commands::pump_pending_eval_requests(&handle, 1));
+        assert!(matches!(pump.as_mut().poll(&mut context), std::task::Poll::Pending));
+
+        let borrowed = handle.borrow_mut();
+        drop(caller);
+        drop(borrowed);
+        assert!(matches!(
+            rx.try_recv().expect("cancellation should enqueue owner pump wake").command,
+            crate::player::commands::PlayerVMCommand::PumpPending
+        ));
+        async_std::task::block_on(crate::player::commands::drive_pending_owner(
+            &handle,
+            1,
+            &owner,
+        ));
+        assert!(async_std::task::block_on(async_std::future::timeout(
+            std::time::Duration::from_secs(5),
+            pump,
+        )).expect("cancellation pump should wake promptly"));
+        assert!(handle
+            .borrow_mut()
+            .with_player(1, |context| {
+                context.player.xtra_manager_state.external.take_load_waiter(&load)
+            })
+            .expect("test player exists")
+            .is_none());
+        assert!(handle
+            .borrow_mut()
+            .with_player(1, |context| {
+                context.player.xtra_manager_state.external.take_load_continuation(&load)
+            })
+            .expect("test player exists")
+            .is_none());
+        handle.borrow_mut().with_player(1, |context| {
+            context.player.xtra_manager_state.external.complete_load(
+                &owner,
+                sibling.state_id,
+                sibling.attempt_id,
+                &sibling.name,
+                true,
+            );
+        }).expect("test player exists");
+        let sibling_receiver = handle
+            .borrow_mut()
+            .with_player(1, |context| {
+                context.player.xtra_manager_state.external.take_load_waiter(&sibling)
+            })
+            .expect("test player exists")
+            .expect("sibling receiver survives target cancellation");
+        assert!(matches!(
+            async_std::task::block_on(sibling_receiver),
+            Ok(Ok(())),
+        ));
+        assert!(handle
+            .borrow_mut()
+            .with_player(1, |context| {
+                context.player.xtra_manager_state.external.take_load_continuation(&sibling)
+            })
+            .expect("test player exists")
+            .is_some());
+    }
+
+    #[test]
+    fn closed_owner_queue_keeps_logical_cancellation_fence() {
+        let mut session = test_session();
+        let (id, action, _receiver) = session
+            .start_eval_request(
+                1,
+                crate::player::driver::InternalVmRequest::ObjectProperty {
+                    receiver: DatumRef::Void,
+                    name: Symbol::builtin(BuiltInSymbol::Value),
+                },
+            )
+            .expect("request should be retained");
+        let owner = session
+            .with_player(1, |context| context.player.owner.clone())
+            .expect("test player exists");
+        let handle = Rc::new(std::cell::RefCell::new(session));
+        let queue_tx = handle
+            .borrow_mut()
+            .with_player(1, |context| context.player.queue_tx.clone())
+            .expect("test player exists");
+        queue_tx.close();
+        let guard = EvalCancellationGuard::new(handle.clone(), 1, owner.clone(), id.clone())
+            .expect("active evaluator guard");
+        let borrowed = handle.borrow_mut();
+        drop(guard);
+        drop(borrowed);
+        assert!(id.is_cancelled());
+        assert!(matches!(
+            handle.borrow_mut().resume_eval(id, &action, &owner, Ok(DatumRef::Void)),
+            EvalTurn::Complete(Err(_))
+        ));
+    }
+
+    #[test]
+    fn synchronous_owned_callback_success_and_error_keep_terminal_guards_inert() {
+        let (session, success_handler, error_handler) = callback_fixture();
+        let handle = Rc::new(std::cell::RefCell::new(session));
+        let owner = handle
+            .borrow_mut()
+            .with_player(1, |context| context.player.owner.clone())
+            .expect("callback fixture player exists");
+        let success = async_std::task::block_on(invoke_script_callback_owned(
+            handle.clone(),
+            1,
+            owner.clone(),
+            None,
+            success_handler,
+            Vec::new(),
+            false,
+        ))
+        .expect("synchronous callback should succeed");
+        assert_eq!(success.return_value, DatumRef::Void);
+        let error = async_std::task::block_on(invoke_script_callback_owned(
+            handle,
+            1,
+            owner,
+            None,
+            error_handler,
+            Vec::new(),
+            false,
+        ));
+        assert!(error.is_err());
     }
 
     fn eval_value_for_test(

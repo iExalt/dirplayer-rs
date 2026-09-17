@@ -1,0 +1,1 @@
+env CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true CARGO_TARGET_DIR=/private/tmp/dirplayer-parser-review-build/target mise exec -- cargo check --tests --target wasm32-unknown-unknown --locked --offline --message-format=json

@@ -130,13 +130,15 @@ verification and integration separately; its complete exit gate controls accepta
 - [x] **2.1 typed mutation component:** checked vector/transform replacement,
   pooled/resource-value preservation and owner-collision tests.
 - [x] **2.1 explicit value-transfer component:** owned snapshots/import, symbol remapping, DAG alias preservation and controlled cycle/unsupported-value rejection; eight focused native tests pass. See the [retained-reference audit](checkpoints/retained-reference-audit-20260917.md) for source identity and limits.
-- [x] **2.1 iterative duplication native component:** cycle preflight and iterative per-occurrence copying, six focused tests and 554-test native suite pass; [receipt](checkpoints/iterative-duplication-20260917/README.md). WASM test compilation passes; the combined Flash browser gate remains pending.
+- [x] **2.1 iterative duplication component:** cycle preflight and iterative per-occurrence copying, six focused tests and 554-test native suite pass; [receipt](checkpoints/iterative-duplication-20260917/README.md). The subsequent owner-generation checkpoint passes 561 native tests, WASM compilation and the combined 15-fixture browser gate with duplication unchanged.
 - [ ] **2.1 remaining work:** audit all remaining reference consumers and
   transfer/reclamation boundaries.
+- [x] **2.3 evaluator caller cancellation:** exact capability cancellation, deferred cleanup and shared external-load waiter linkage pass 570 native tests, WASM compilation and 15 browser fixtures; [receipt](checkpoints/evaluator-cancellation-20260917/README.md). The full async audit remains open.
 - [ ] **2.2–2.5:** remove legacy execution/browser routes, audit every async
   producer and extension completion, and verify dispatch precedence, cancellation,
   reentry and teardown through production entrypoints.
-- [ ] **2.6–2.8:** close initial Flash access before reservation, child Flash host
+- [x] **2.6 root initial access:** owner-generation replacement repair passes 561 native tests, WASM compilation and 15 browser fixtures; [receipt](checkpoints/owner-generation-20260917/README.md). Accepted component; child Flash work remains separate.
+- [ ] **2.6–2.8 remaining work:** close child Flash host
   registration/retirement and local-channel routing, actual Ruffle
   callback-origin routing. JS-Lingo consumer ownership is accepted; service seed
   installation belongs to the later session/native-service stages.

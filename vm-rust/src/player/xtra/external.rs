@@ -24,6 +24,7 @@
 //! passthrough that doesn't decode postcard).
 
 use std::{
+    cell::Cell,
     collections::{HashMap, HashSet, VecDeque},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -162,14 +163,16 @@ pub(crate) struct ExternalXtraResponse {
 
 /// A cloneable on-demand load capability. The receiver remains in the
 /// owner-local state and is taken exactly once by the executor.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct ExternalXtraLoadRequest {
     pub(crate) owner: OwnerToken,
     pub(crate) owner_key: String,
     pub(crate) name: String,
     pub(crate) request_id: u64,
+    pub(crate) attempt_id: u64,
     pub(crate) state_id: u64,
     pub(crate) notify_host: bool,
+    cancelled: std::rc::Rc<Cell<bool>>,
 }
 
 impl ExternalXtraLoadRequest {
@@ -177,7 +180,18 @@ impl ExternalXtraLoadRequest {
     /// nonce prevents two players whose request counters both start at one
     /// from satisfying one another's completion.
     pub(crate) fn attempt_capability(&self) -> String {
-        format!("{}:{}", self.state_id, self.request_id)
+        format!("{}:{}", self.state_id, self.attempt_id)
+    }
+
+    pub(crate) fn cancel_logically(&self) {
+        self.cancelled.set(true);
+    }
+
+    pub(crate) fn same_token(&self, other: &Self) -> bool {
+        self.state_id == other.state_id
+            && self.request_id == other.request_id
+            && self.attempt_id == other.attempt_id
+            && std::rc::Rc::ptr_eq(&self.cancelled, &other.cancelled)
     }
 }
 
@@ -239,6 +253,20 @@ impl ExternalXtraState {
             ScriptError::new("external Xtra request-id space is exhausted".to_owned())
         })?;
         let key = name.to_lowercase();
+        let stale_attempt = self.pending_loads.get(&key).is_some_and(|entry| {
+            !entry.cancelled.iter().any(|(id, token)| {
+                !token.get() && (entry.waiters.contains_key(id) || entry.receivers.contains_key(id))
+            })
+        });
+        if stale_attempt {
+            if let Some(entry) = self.pending_loads.remove(&key) {
+                for (request_id, token) in entry.cancelled {
+                    if token.get() {
+                        self.continuations.remove(&request_id);
+                    }
+                }
+            }
+        }
         if let Some(entry) = self.pending_loads.get(&key) {
             if !entry.owner.same_identity(&owner) || !entry.owner.is_arena_live() {
                 return Err(ScriptError::new_code(
@@ -271,19 +299,26 @@ impl ExternalXtraState {
         self.next_request_id = next_request_id;
         let entry = self.pending_loads.entry(key.clone()).or_insert_with(|| PendingLoad {
             owner: owner.clone(),
+            attempt_id: request_id,
             waiters: HashMap::new(),
             receivers: HashMap::new(),
+            cancelled: HashMap::new(),
         });
         let first = entry.waiters.is_empty();
+        let attempt_id = entry.attempt_id;
+        let cancelled = std::rc::Rc::new(Cell::new(false));
         entry.waiters.insert(request_id, tx);
         entry.receivers.insert(request_id, rx);
+        entry.cancelled.insert(request_id, cancelled.clone());
         Ok(ExternalXtraLoadRequest {
             owner,
             owner_key,
             name: key,
             request_id,
+            attempt_id,
             state_id: self.state_id,
             notify_host: first,
+            cancelled,
         })
     }
 
@@ -295,7 +330,10 @@ impl ExternalXtraState {
         request: &ExternalXtraLoadRequest,
         continuation: ExternalXtraContinuation,
     ) -> Result<(), ScriptError> {
-        if request.state_id != self.state_id || !request.owner.is_arena_live() {
+        if request.state_id != self.state_id
+            || !request.owner.is_arena_live()
+            || request.cancelled.get()
+        {
             return Err(ScriptError::new_code(
                 crate::player::ScriptErrorCode::Abort,
                 "external Xtra load owner was retired".to_owned(),
@@ -309,6 +347,9 @@ impl ExternalXtraState {
         if !entry.owner.same_identity(&request.owner)
             || !entry.owner.is_arena_live()
             || !entry.waiters.contains_key(&request.request_id)
+            || !entry.cancelled.get(&request.request_id).is_some_and(|token| {
+                std::rc::Rc::ptr_eq(token, &request.cancelled) && !token.get()
+            })
         {
             return Err(ScriptError::new(
                 "external Xtra load request has no live waiter".to_owned(),
@@ -324,6 +365,7 @@ impl ExternalXtraState {
             PendingContinuation {
                 owner: request.owner.clone(),
                 continuation,
+                cancelled: request.cancelled.clone(),
             },
         );
         Ok(())
@@ -347,46 +389,124 @@ impl ExternalXtraState {
             .is_some_and(|entry| {
                 entry.owner.same_identity(owner)
                     && owner.is_arena_live()
-                    && entry.waiters.contains_key(&request_id)
+                    && entry.attempt_id == request_id
             });
         if !owner_matches {
             return;
         }
-        if success {
+        let Some(entry) = self.pending_loads.remove(&key) else { return };
+        let live_request = entry.cancelled.iter().any(|(id, token)| {
+            !token.get() && (entry.waiters.contains_key(id) || entry.receivers.contains_key(id))
+        });
+        if success && live_request {
             self.registered.insert(key.clone());
         }
-        let completion = self.pending_loads.remove(&key).map(|entry| {
-            let request_ids: Vec<u64> = entry.waiters.keys().copied().collect();
-            (request_ids, entry.waiters, entry.receivers, entry.owner)
-        });
-        if let Some((request_ids, waiters, receivers, owner)) = completion {
-            for (_, tx) in waiters {
-                let result = if success {
-                    Ok(())
-                } else {
-                    Err(ScriptError::new(format!(
-                        "external Xtra '{}' failed to load",
-                        name
-                    )))
-                };
-                let _ = tx.send(result);
+        let PendingLoad { owner, waiters, receivers, cancelled, .. } = entry;
+        for (request_id, tx) in waiters {
+            if cancelled.get(&request_id).is_some_and(|token| token.get()) {
+                let _ = tx.send(Err(ScriptError::new(
+                    "external Xtra load waiter cancelled".to_owned(),
+                )));
+                self.continuations.remove(&request_id);
+                continue;
             }
-            for (request_id, receiver) in receivers {
-                self.completed_receivers.insert(
-                    request_id,
-                    RetainedReceiver {
-                        owner: owner.clone(),
-                        name: key.clone(),
-                        receiver,
-                    },
-                );
-            }
+            let result = if success {
+                Ok(())
+            } else {
+                Err(ScriptError::new(format!(
+                    "external Xtra '{}' failed to load",
+                    name
+                )))
+            };
+            let _ = tx.send(result);
             if !success {
-                for request_id in request_ids {
-                    self.continuations.remove(&request_id);
-                }
+                self.continuations.remove(&request_id);
             }
         }
+        for (request_id, receiver) in receivers {
+            if cancelled.get(&request_id).is_some_and(|token| token.get()) {
+                self.continuations.remove(&request_id);
+                continue;
+            }
+            self.completed_receivers.insert(
+                request_id,
+                RetainedReceiver {
+                    owner: owner.clone(),
+                    name: key.clone(),
+                    receiver,
+                    cancelled: cancelled
+                        .get(&request_id)
+                        .expect("receiver token")
+                        .clone(),
+                },
+            );
+            if !success {
+                self.continuations.remove(&request_id);
+            }
+        }
+    }
+
+    /// Cancel one waiter without cancelling a shared host load. The first
+    /// waiter owns the transport attempt, but a surviving same-name waiter
+    /// must still be completed by that attempt. The request token makes a
+    /// dropped waiter reject late completion even when this state is borrowed.
+    pub(crate) fn cancel_load_request(
+        &mut self,
+        request: &ExternalXtraLoadRequest,
+    ) -> bool {
+        if request.state_id != self.state_id || !request.owner.is_arena_live() {
+            return false;
+        }
+        request.cancel_logically();
+        let mut removed = false;
+        let mut remove_pending_entry = false;
+        if let Some(entry) = self.pending_loads.get_mut(&request.name) {
+            let matches = entry.owner.same_identity(&request.owner)
+                && entry.cancelled.get(&request.request_id).is_some_and(|token| {
+                    std::rc::Rc::ptr_eq(token, &request.cancelled)
+                });
+            if matches {
+                removed |= entry.waiters.remove(&request.request_id).is_some();
+                removed |= entry.receivers.remove(&request.request_id).is_some();
+                entry.cancelled.remove(&request.request_id);
+                remove_pending_entry = entry.waiters.is_empty() && entry.receivers.is_empty();
+            }
+        }
+        if remove_pending_entry {
+            self.pending_loads.remove(&request.name);
+        }
+        let continuation_matches = self
+            .continuations
+            .get(&request.request_id)
+            .is_some_and(|continuation| {
+                continuation.owner.same_identity(&request.owner)
+                    && std::rc::Rc::ptr_eq(&continuation.cancelled, &request.cancelled)
+            });
+        if continuation_matches {
+            self.continuations.remove(&request.request_id);
+            removed = true;
+        }
+        if let Some(retained) = self.completed_receivers.get(&request.request_id) {
+            if retained.name == request.name
+                && retained.owner.same_identity(&request.owner)
+                && std::rc::Rc::ptr_eq(&retained.cancelled, &request.cancelled)
+            {
+                self.completed_receivers.remove(&request.request_id);
+                self.continuations.remove(&request.request_id);
+                removed = true;
+            }
+        }
+        let empty = self.pending_loads.get(&request.name).is_some_and(|entry| {
+            entry.waiters.is_empty()
+                && entry.receivers.is_empty()
+                && !self.continuations.values().any(|continuation| {
+                    std::rc::Rc::ptr_eq(&continuation.cancelled, &request.cancelled)
+                })
+        });
+        if empty {
+            self.pending_loads.remove(&request.name);
+        }
+        removed
     }
 
     pub(crate) fn cancel_pending_loads(&mut self) {
@@ -411,7 +531,13 @@ impl ExternalXtraState {
         &mut self,
         request: &ExternalXtraLoadRequest,
     ) -> Option<oneshot::Receiver<Result<(), ScriptError>>> {
-        if request.state_id != self.state_id || !request.owner.is_arena_live() {
+        if request.state_id != self.state_id
+            || !request.owner.is_arena_live()
+            || request.cancelled.get()
+        {
+            if request.cancelled.get() {
+                let _ = self.cancel_load_request(request);
+            }
             return None;
         }
         // A completion may have moved this request's receiver out of the
@@ -419,7 +545,11 @@ impl ExternalXtraState {
         // Resolve the opaque request id first so the older receiver is not
         // hidden by the newer pending entry.
         if let Some(retained) = self.completed_receivers.get(&request.request_id) {
-            if retained.name != request.name || !retained.owner.same_identity(&request.owner) {
+            if retained.name != request.name
+                || !retained.owner.same_identity(&request.owner)
+                || !std::rc::Rc::ptr_eq(&retained.cancelled, &request.cancelled)
+                || retained.cancelled.get()
+            {
                 return None;
             }
             return self
@@ -428,7 +558,13 @@ impl ExternalXtraState {
                 .map(|retained| retained.receiver);
         }
         if let Some(entry) = self.pending_loads.get_mut(&request.name) {
-            if !entry.owner.same_identity(&request.owner) {
+            let Some(token) = entry.cancelled.get(&request.request_id) else {
+                return None;
+            };
+            if !entry.owner.same_identity(&request.owner)
+                || !std::rc::Rc::ptr_eq(token, &request.cancelled)
+                || token.get()
+            {
                 return None;
             }
             return entry.receivers.remove(&request.request_id);
@@ -446,7 +582,9 @@ impl ExternalXtraState {
         let continuation = self.continuations.get(&request.request_id)?;
         if request.state_id != self.state_id
             || !request.owner.is_arena_live()
+            || request.cancelled.get()
             || !continuation.owner.same_identity(&request.owner)
+            || !std::rc::Rc::ptr_eq(&continuation.cancelled, &request.cancelled)
         {
             return None;
         }
@@ -525,21 +663,25 @@ pub(crate) fn registered_names_for_player(player: &DirPlayer) -> Vec<String> {
 
 struct PendingLoad {
     owner: OwnerToken,
+    attempt_id: u64,
     /// One receiver per concurrent requester. When the load finishes
     /// `complete_load` drains the vec and signals each with the result.
     waiters: HashMap<u64, oneshot::Sender<Result<(), ScriptError>>>,
     receivers: HashMap<u64, oneshot::Receiver<Result<(), ScriptError>>>,
+    cancelled: HashMap<u64, std::rc::Rc<Cell<bool>>>,
 }
 
 struct RetainedReceiver {
     owner: OwnerToken,
     name: String,
     receiver: oneshot::Receiver<Result<(), ScriptError>>,
+    cancelled: std::rc::Rc<Cell<bool>>,
 }
 
 struct PendingContinuation {
     owner: OwnerToken,
     continuation: ExternalXtraContinuation,
+    cancelled: std::rc::Rc<Cell<bool>>,
 }
 
 /// Ask the host to resolve `name` against its registry and load the
@@ -1516,7 +1658,7 @@ mod tests {
         state.complete_load(
             &load.owner,
             load.state_id,
-            load.request_id,
+            load.attempt_id,
             "ExampleXtra",
             true,
         );
@@ -1555,7 +1697,7 @@ mod tests {
         state.complete_load(
             &load.owner,
             load.state_id,
-            load.request_id,
+            load.attempt_id,
             "ExampleXtra",
             true,
         );
@@ -1574,7 +1716,7 @@ mod tests {
         state.complete_load(
             &owner,
             first.state_id,
-            first.request_id,
+            first.attempt_id,
             "ExampleXtra",
             false,
         );
@@ -1586,7 +1728,7 @@ mod tests {
         state.complete_load(
             &second.owner,
             second.state_id,
-            first.request_id,
+            first.attempt_id,
             "ExampleXtra",
             true,
         );
@@ -1595,13 +1737,98 @@ mod tests {
         state.complete_load(
             &second.owner,
             second.state_id,
-            second.request_id,
+            second.attempt_id,
             "ExampleXtra",
             true,
         );
         // The stale completion did not satisfy the newer request; only the
         // exact request capability can deliver its success.
         assert!(matches!(second_receiver.try_recv(), Ok(Some(Ok(())))));
+    }
+
+    #[test]
+    fn cancelling_load_leader_keeps_shared_attempt_for_surviving_sibling() {
+        let owner = OwnerToken::transitional();
+        let mut state = ExternalXtraState::default();
+        let leader = state
+            .begin_load(owner.clone(), "test-owner".to_owned(), "ExampleXtra")
+            .unwrap();
+        let sibling = state
+            .begin_load(owner, "test-owner".to_owned(), "ExampleXtra")
+            .unwrap();
+        assert!(leader.notify_host);
+        assert!(!sibling.notify_host);
+        assert_eq!(leader.attempt_id, sibling.attempt_id);
+
+        assert!(state.cancel_load_request(&leader));
+        state.complete_load(
+            &sibling.owner,
+            sibling.state_id,
+            sibling.attempt_id,
+            "ExampleXtra",
+            true,
+        );
+        assert!(state.take_load_waiter(&leader).is_none());
+        let mut receiver = state.take_load_waiter(&sibling).expect("sibling receiver");
+        assert!(matches!(receiver.try_recv(), Ok(Some(Ok(())))));
+    }
+
+    #[test]
+    fn all_cancelled_load_attempt_cannot_complete_a_new_same_name_attempt() {
+        let owner = OwnerToken::transitional();
+        let mut state = ExternalXtraState::default();
+        let old = state
+            .begin_load(owner.clone(), "test-owner".to_owned(), "ExampleXtra")
+            .unwrap();
+        assert!(state.cancel_load_request(&old));
+        let replacement = state
+            .begin_load(owner, "test-owner".to_owned(), "ExampleXtra")
+            .unwrap();
+        assert_ne!(old.attempt_id, replacement.attempt_id);
+        state.complete_load(
+            &replacement.owner,
+            replacement.state_id,
+            old.attempt_id,
+            "ExampleXtra",
+            true,
+        );
+        let mut receiver = state
+            .take_load_waiter(&replacement)
+            .expect("replacement receiver");
+        assert!(matches!(receiver.try_recv(), Ok(None)));
+        state.complete_load(
+            &replacement.owner,
+            replacement.state_id,
+            replacement.attempt_id,
+            "ExampleXtra",
+            true,
+        );
+        assert!(matches!(receiver.try_recv(), Ok(Some(Ok(())))));
+    }
+
+    #[test]
+    fn logically_cancelled_attempt_is_not_reused_before_mailbox_drain() {
+        let owner = OwnerToken::transitional();
+        let mut state = ExternalXtraState::default();
+        let old = state
+            .begin_load(owner.clone(), "test-owner".to_owned(), "ExampleXtra")
+            .unwrap();
+        old.cancel_logically();
+        let replacement = state
+            .begin_load(owner, "test-owner".to_owned(), "ExampleXtra")
+            .unwrap();
+        assert_ne!(old.attempt_id, replacement.attempt_id);
+        state.complete_load(
+            &replacement.owner,
+            replacement.state_id,
+            old.attempt_id,
+            "ExampleXtra",
+            true,
+        );
+        let mut receiver = state
+            .take_load_waiter(&replacement)
+            .expect("replacement receiver");
+        assert!(matches!(receiver.try_recv(), Ok(None)));
     }
 
     #[test]
@@ -1643,8 +1870,19 @@ mod tests {
             .begin_load(owner, "owner".to_owned(), "ExampleXtra")
             .unwrap();
         assert_eq!(request_a.request_id, request_b.request_id);
+        state_b
+            .attach_continuation(
+                &request_b,
+                ExternalXtraContinuation::Create {
+                    xtra_name: "ExampleXtra".to_owned(),
+                    args: Vec::new(),
+                },
+            )
+            .unwrap();
+        assert!(!state_b.cancel_load_request(&request_a));
         assert!(state_b.take_load_waiter(&request_a).is_none());
         assert!(state_b.take_load_continuation(&request_a).is_none());
+        assert!(state_b.take_load_continuation(&request_b).is_some());
     }
 
     #[test]
@@ -1657,7 +1895,7 @@ mod tests {
         state.complete_load(
             &request.owner,
             request.state_id,
-            request.request_id,
+            request.attempt_id,
             "ExampleXtra",
             true,
         );
@@ -1684,7 +1922,7 @@ mod tests {
         state.complete_load(
             &request.owner,
             request.state_id,
-            request.request_id,
+            request.attempt_id,
             "ExampleXtra",
             true,
         );
@@ -1734,7 +1972,7 @@ mod tests {
         state.complete_load(
             &replacement.owner,
             old.state_id,
-            old.request_id,
+            old.attempt_id,
             "ExampleXtra",
             true,
         );

@@ -85,3 +85,39 @@ complete surviving waiters, while the cancelled waiter cannot resume. Once all
 waiters cancel, a late old-attempt result must not complete a new bucket with the
 same name. Required regressions cover both cases. This is part of the staged
 repair review, not yet integrated or verified behavior.
+
+## Integrated candidate and remaining pumped-load gap
+
+The working tree after `243647a3` integrates exact EvalId cancellation flags,
+weak-session deferred cleanup, owner/id child-completion fences and per-waiter
+external-load cancellation. The unused plural completion adapters are removed.
+Fresh native compilation succeeds. Eight focused tests pass, covering wrong-owner
+guards, contended caller drop through the production pump, closed queues,
+synchronous callback success/error, shared-load leader cancellation, stale
+attempts, logical cancellation before cleanup, and foreign external state.
+Receipts are under `/private/tmp/dirplayer-eval-cancellation-validation/`.
+
+This candidate is not yet accepted. `drive_eval_owned` binds detached external
+loads to its guard, but `invoke_request_owned` can have its load executed by a
+separate scheduler pump. Its guard does not receive that load capability, so
+caller drop may leave the waiter and scheduler future pending until host
+completion. The follow-up must attach the exact waiter to shared evaluator
+cancellation authority in both paths and test caller drop while the production
+pump is awaiting the load. Focused state-manager tests do not prove that linkage.
+
+The next candidate moves the exact load capability onto shared `EvalId` state
+and registers it in the common external-load executor before host work. Both
+direct and scheduler-driven execution now use that slot; cancellation takes its
+request into the exact-owner cleanup record. The full native suite passes
+**570 tests, zero failures**, with all five modified-file hashes matching
+`source-final-precompile.sha256`. The navigator checked the build completion,
+full test summary and hashes. The pumped-load fixture exercises caller drop
+during a held session borrow. Its sibling result assertion is being tightened
+before the final frozen-source WASM/browser gates; this is still candidate
+evidence, not complete Stage 2.3 acceptance.
+
+The final assertion correction passes its focused native test and WASM check.
+The combined browser run passes all 15 fixtures. The bounded caller-cancellation
+component is accepted; [portable receipts](evaluator-cancellation-20260917/README.md)
+record source identity, the test-only final delta and recovered browser output.
+The broader async-producer/consumer audit remains open.
