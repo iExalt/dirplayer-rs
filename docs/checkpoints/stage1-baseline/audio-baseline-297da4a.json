@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "status": "pass",
+  "source_revision": "297da4a410495a1116e2c1b93ee57f9f1b5c8d79",
+  "ruffle_revision": "79d1ca0f45d79e28c3a0658bbc6b8430d26ef308",
+  "browser": "147.0.7727.15",
+  "fixture_root": "/Users/clliaw/Projects/childhood-redux/resources/spybot",
+  "fixture_movie": "spybot-nightfall-incident.dcr",
+  "fixture_movie_sha256": "ddf24b667a8d014856d9db42e1658cbf9714847f1cadc2c2c14d21f8e5950c77",
+  "settle_ms": 1000,
+  "ready_frame": 6,
+  "wasm": {
+    "js": "mod-2671e42b945ed1b1.js",
+    "js_sha256": "6b65582ada1371cf5094b7d0a64b4a486b1612e5d4b2467beb4d24ae6f4fc5c4",
+    "wasm": "mod-2671e42b945ed1b1_bg.wasm",
+    "wasm_sha256": "5031199e4f52ab9a11065077c12f864214e4f84f3966681b1b0f0c3e27c6eea5"
+  },
+  "sound_cases": [
+    {
+      "test": "pitch",
+      "shift": 0,
+      "rate": 1,
+      "duration": 0.72
+    },
+    {
+      "test": "pitch",
+      "shift": -2,
+      "rate": 0.8908987045288086,
+      "duration": 0.72
+    },
+    {
+      "test": "pitch",
+      "shift": 12,
+      "rate": 2,
+      "duration": 0.72
+    },
+    {
+      "test": "queue-transition",
+      "entries": [
+        {
+          "rate": 0.5,
+          "duration": 0.72
+        },
+        {
+          "rate": 2,
+          "duration": 1.116
+        }
+      ]
+    },
+    {
+      "test": "playlist-transition",
+      "entries": [
+        {
+          "rate": 0.5,
+          "duration": 0.72
+        },
+        {
+          "rate": 2,
+          "duration": 1.116
+        }
+      ]
+    },
+    {
+      "test": "repeat-retains-pitch",
+      "entries": [
+        {
+          "rate": 0.8908987045288086,
+          "duration": 0.72
+        },
+        {
+          "rate": 0.8908987045288086,
+          "duration": 0.72
+        }
+      ]
+    },
+    {
+      "test": "bare-member-resets-pitch"
+    },
+    {
+      "test": "invalid-entry-and-missing-member-recovery"
+    }
+  ],
+  "observed_sound_starts": null,
+  "script_errors": []
+}

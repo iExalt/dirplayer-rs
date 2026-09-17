@@ -7,29 +7,37 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 
-import dotenv from "dotenv";
-import { baselineRunnerInputs } from "./native-bevy-baseline-inputs.mjs";
-
 import { testSoundPlayback } from "./test-sound-playback.mjs";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, "..");
-const env = {...(dotenv.config({path: path.join(repoRoot, ".env"), quiet: true}).parsed ?? {}), ...process.env};
-const childhoodRoot = env.CHILDHOOD_REDUX_ROOT || path.resolve(repoRoot, "../childhood-redux");
+const childhoodRoot = process.env.CHILDHOOD_REDUX_ROOT || path.resolve(repoRoot, "../childhood-redux");
+const runnerRoot = path.join(repoRoot, "vm-rust", "target", "browser_runner");
 const fixtureRoot = path.join(childhoodRoot, "resources", "spybot");
 const fixtureMovie = path.join(fixtureRoot, "spybot-nightfall-incident.dcr");
-const sourceRevision = env.NATIVE_BEVY_SOURCE_REVISION;
+const sourceRevision = process.env.NATIVE_BEVY_SOURCE_REVISION;
 const runStamp = new Date().toISOString().replaceAll(/[-:.TZ]/g, "");
-const outputPath = env.NATIVE_BEVY_AUDIO_BASELINE || path.join(repoRoot, "test-results", `native-bevy-audio-baseline-${runStamp}.json`);
+const outputPath = process.env.NATIVE_BEVY_AUDIO_BASELINE || path.join(repoRoot, "test-results", `native-bevy-audio-baseline-${runStamp}.json`);
 
 function sha256(filePath) {
   return createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
 }
 
-if (!sourceRevision) {
-  throw new Error("NATIVE_BEVY_SOURCE_REVISION is required; identify the source used to build the browser artifact");
+function firstMatchingFile(prefix, suffix) {
+  const candidates = fs.readdirSync(runnerRoot).filter(
+    (entry) => entry.startsWith(prefix) && entry.endsWith(suffix),
+  );
+  if (candidates.length !== 1) {
+    throw new Error(`Expected one ${prefix}*${suffix} under ${runnerRoot}; found ${candidates.join(", ") || "none"}`);
+  }
+  return candidates[0];
 }
-const {runnerRoot, wasmJs, wasmBinary} = baselineRunnerInputs(repoRoot, env);
+
+const wasmJs = firstMatchingFile("mod-", ".js");
+const wasmBinary = firstMatchingFile("mod-", "_bg.wasm");
+if (wasmJs.replace(/\.js$/, "") !== wasmBinary.replace(/_bg\.wasm$/, "")) {
+  throw new Error(`WASM JS/binary stems differ: ${wasmJs} vs ${wasmBinary}`);
+}
 const wasmJsPath = path.join(runnerRoot, wasmJs);
 const wasmBinaryPath = path.join(runnerRoot, wasmBinary);
 const apiStub = path.join(runnerRoot, "dirplayer-js-api.js");
@@ -38,6 +46,9 @@ const ruffleRuntime = path.join(repoRoot, "public", "ruffle");
 const requireFromRepo = createRequire(path.join(repoRoot, "package.json"));
 const { chromium } = requireFromRepo("playwright");
 
+if (!sourceRevision) {
+  throw new Error("NATIVE_BEVY_SOURCE_REVISION is required; identify the source used to build the frozen browser artifact");
+}
 for (const requiredPath of [fixtureRoot, fixtureMovie, wasmJsPath, wasmBinaryPath, apiStub, apiReal, ruffleRuntime]) {
   if (!fs.existsSync(requiredPath)) throw new Error(`Required baseline input is missing: ${requiredPath}`);
 }
@@ -61,14 +72,12 @@ import * as api from '/dirplayer-js-api.js';
 window.vm = vm;
 try {
   await init();
-  const browserHandle = new vm.BrowserPlayerHandle();
-  browserHandle.create_canvas(document.getElementById('stage_canvas_container'));
-  window.browserHandle = browserHandle;
+  vm.player_create_canvas();
   api.setVmModule(vm);
   window.__wasm_trigger_timeout = vm.trigger_timeout;
-  browserHandle.set_stage_size(650, 420);
-  browserHandle.set_base_path(new URL('/resources/', location.href).href);
-  await browserHandle.load_movie_file(new URL('/resources/spybot-nightfall-incident.dcr', location.href).href, true);
+  vm.set_stage_size(650, 420);
+  vm.set_base_path(new URL('/resources/', location.href).href);
+  await vm.load_movie_file(new URL('/resources/spybot-nightfall-incident.dcr', location.href).href, true);
   window.__movieLoaded = true;
 } catch (error) {
   window.__scriptErrors.push(String(error?.stack || error));
@@ -155,14 +164,14 @@ try {
   if (await page.evaluate(() => window.__movieLoaded !== true)) throw new Error(`Movie failed to load: ${result.script_errors.join("; ")}`);
   await page.waitForFunction(async () => {
     try {
-      const datum = JSON.parse(await window.browserHandle.mcp_eval_lingo("_movie.frame"));
+      const datum = JSON.parse(await window.vm.mcp_eval_lingo("_movie.frame"));
       return datum.success && JSON.parse(datum.result_value) === 6;
     } catch {
       return false;
     }
   }, undefined, {timeout: 120000});
   result.ready_frame = 6;
-  await page.evaluate(() => window.browserHandle.stop());
+  await page.evaluate(() => window.vm.stop());
   await page.waitForTimeout(result.settle_ms);
   result.sound_cases = await testSoundPlayback(page, "s.select", "s.begin", {audioContext: "director"});
   result.script_errors = await page.evaluate(() => window.__scriptErrors || []);

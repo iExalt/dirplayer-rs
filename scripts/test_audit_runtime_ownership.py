@@ -46,6 +46,7 @@ static MULTI:
         reserve_player_ref(|p| p)
     ));
 static TABLE: [u8; 2] = [1, 2];
+fn lifetime_only() -> &'static swf::Header { todo!() }
 ''',
             js=r'''// const fake = new Map();
 const text = `const fake = new Map();`;
@@ -74,14 +75,61 @@ window['legacyGlobal'] = 1;
             self.assertIn(("legacy-accessor", "reserve_player_ref"), pairs)
             self.assertIn(("rust-immutable", "TABLE"), pairs)
             self.assertIn(("js-module-registry", "pending"), pairs)
-            self.assertIn(("js-module-registry", "players"), pairs)
+            self.assertIn(("js-local-state-candidate", "players"), pairs)
             self.assertNotIn(("js-module-registry", "local"), pairs)
             self.assertIn(("js-module-binding", "vmCallbacks"), pairs)
             self.assertIn(("js-global-write", "globalThis"), pairs)
             self.assertEqual(sum(item["category"] == "js-global-write" for item in findings), 2)
             self.assertNotIn(("rust-static-mut", "COMMENTED"), pairs)
             self.assertNotIn(("rust-static-mut", "RAW"), pairs)
+            self.assertFalse(any(item["symbol"] == "swf" for item in findings))
             self.assertNotIn(("js-module-registry", "fake"), pairs)
+        finally:
+            directory.cleanup()
+
+    def test_production_ruffle_coverage_and_typed_state(self) -> None:
+        directory = self.fixture()
+        try:
+            root = Path(directory.name)
+            sources = {
+                "ruffle/core/src/lib.rs": "static LINGO_CALLBACKS: CustomRegistry = make_registry();\nstatic READY: Once = Once::new();\n",
+                "ruffle/web/src/lib.rs": "thread_local! {\n static INSTANCES: RefCell<Vec<u8>> = RefCell::default();\n}\n",
+                "ruffle/render/wgpu/src/lib.rs": "static NEXT: AtomicU32 = AtomicU32::new(0);\n",
+                "ruffle/web/packages/core/src/state.ts": "const privateRegistry: Record<string, Registration> = {};\nexport let currentScriptURL: URL | null = null;\nlet objects: HTMLCollectionOf<HTMLObjectElement>;\nconst singleton = createRegistry();\nlet first = 0, second = new Map();\nclass Test {\n static STATE = {};\n}\nconst { owner } = host;\nwindow.value += 1;\nwindow.value === 1;\n",
+                "extension/src/background.ts": "(() => {\n let nextId = 0;\n})();\n",
+                "ruffle/tests/src/lib.rs": "static mut EXCLUDED: u8 = 0;\n",
+                "ruffle/core/build.rs": "static mut EXCLUDED_BUILD: u8 = 0;\n",
+                "public/ruffle/generated.js": "let EXCLUDED_GENERATED = 1;\n",
+                "ruffle/web/common/src/lib.rs": "thread_local! { pub(crate) static INLINE: Cell<u8> = Cell::new(0); }\n",
+                "ruffle/web/packages/core/dist/state.js": "let excluded = 1;\n",
+            }
+            for name, text in sources.items():
+                file = root / name
+                file.parent.mkdir(parents=True, exist_ok=True)
+                file.write_text(text, encoding="utf-8")
+            result = run_audit(root, "--format", "json")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            findings = json.loads(result.stdout)
+            pairs = {(item["category"], item["symbol"]) for item in findings}
+            self.assertIn(("rust-static-review", "LINGO_CALLBACKS"), pairs)
+            self.assertIn(("rust-mutable-singleton", "READY"), pairs)
+            self.assertIn(("rust-thread-local", "INSTANCES"), pairs)
+            self.assertIn(("rust-thread-local", "INLINE"), pairs)
+            self.assertIn(("rust-mutable-singleton", "NEXT"), pairs)
+            self.assertIn(("js-module-registry", "privateRegistry"), pairs)
+            for symbol in ("currentScriptURL", "objects", "singleton"):
+                self.assertIn(("js-module-binding", symbol), pairs)
+            self.assertIn(("js-local-state-candidate", "nextId"), pairs)
+            self.assertEqual(sum(item["category"] == "js-declaration-review" for item in findings), 3)
+            self.assertEqual(sum(item["category"] == "js-global-write" for item in findings), 1)
+            self.assertFalse(any("EXCLUDED" in item["symbol"] for item in findings))
+            report = json.loads(run_audit(root, "--coverage").stdout)
+            self.assertIn("ruffle/render/wgpu/src/lib.rs", report["rust_files"])
+            self.assertNotIn("ruffle/core/build.rs", report["rust_files"])
+            self.assertIn("ruffle/web/common/src/lib.rs", report["rust_files"])
+            self.assertNotIn("public/ruffle/generated.js", report["js_files"])
+            self.assertIn("xtra-sdk/src", report["missing_roots"])
+            self.assertNotIn("ruffle/web/packages/core/dist/state.js", report["js_files"])
         finally:
             directory.cleanup()
 

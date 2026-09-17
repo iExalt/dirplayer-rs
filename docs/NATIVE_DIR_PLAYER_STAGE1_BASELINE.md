@@ -6,7 +6,35 @@ the shared-runtime ownership migration. It is tied to source revision
 `79d1ca0f45d79e28c3a0658bbc6b8430d26ef308`. The ownership classification is
 maintained separately in [NATIVE_OWNERSHIP_INVENTORY.md](NATIVE_OWNERSHIP_INVENTORY.md).
 
-## Checklist
+## Retained evidence and current reproducibility
+
+The durable [Stage 1 evidence package](checkpoints/stage1-baseline/README.md)
+retains the original valid eight-case audio JSON, complete focused shape log,
+version-compatible historical audio harness, license texts, and a hashed manifest.
+It provides an isolated historical-source reproduction recipe. The generated
+frozen browser artifacts are no longer available; a matching-named raw candidate
+regenerated to different hashes and was rejected. The shape movie is currently
+missing locally, and its retained passing log has no exact working-tree source
+manifest. These historical results do not verify the current runtime.
+
+A fresh isolated build of the historical source passed all eight audio cases
+with no script errors; see
+[audio-reproduced-297da4a.json](checkpoints/stage1-baseline/audio-reproduced-297da4a.json).
+The release build passed in 2m35s. Cargo's successful artifact receipt selected
+the generated WASM, and all served fixture files remained unchanged. Generated
+hashes differ from the original frozen artifact. The retained first failed
+attempt is explicitly excluded because it accidentally selected a stale file.
+
+The commands below target the **current checkout**, not the historical baseline.
+The browser harness generates the JavaScript/WASM pair and API bridges required
+by the audio runner; direct `cargo build` alone does not prepare those inputs.
+Both current runners honor `BROWSER_RUNNER_DIR`, falling back to
+`CARGO_TARGET_DIR/browser_runner` or `vm-rust/target/browser_runner`, including
+`.env` configuration with process environment taking precedence. Use the same
+settings for both commands. The current audio harness requires the current
+`BrowserPlayerHandle` API; use the retained historical harness for `297da4a`.
+
+## Historical checklist (2026-09-14)
 
 - [x] Capture the baseline from the clean `native-bevy` branch at `297da4a`,
   before the ownership pilot's subsequent runtime edits.
@@ -31,7 +59,13 @@ maintained separately in [NATIVE_OWNERSHIP_INVENTORY.md](NATIVE_OWNERSHIP_INVENT
   the Stage 2 ownership refactor; the scanner result is not a stage-completion
   claim.
 
-## Reproducible setup and checks
+## Current-checkout commands (not a fresh runtime verification)
+
+These commands require the shape fixture at
+`public/dcr_dirplayer_test_movies/D8_5_00001_shapes_1.dcr`, which is currently
+absent. Supply it through the authorized fixture setup before running shapes.
+The historical checklist above records three scanner tests; the current scanner
+test suite is tracked separately in the ownership inventory.
 
 Run these commands from the repository root. The defaults below point at the
 verified Chromium 1217 cache in a sibling `childhood-redux` checkout; override
@@ -68,8 +102,8 @@ mise exec -- python scripts/test_audit_runtime_ownership.py
 ```
 
 The audio runner writes a timestamped JSON result under `test-results/` and
-requires one uniquely stemmed `mod-*.js` and `mod-*_bg.wasm` pair in
-`vm-rust/target/browser_runner`. Set `NATIVE_BEVY_AUDIO_BASELINE` to retain a
+requires one uniquely stemmed `mod-*.js` and `mod-*_bg.wasm` pair in the
+resolved browser runner directory. Set `NATIVE_BEVY_AUDIO_BASELINE` to retain a
 stable filename in a local evidence directory. Its fixture is
 `resources/spybot/spybot-nightfall-incident.dcr` from the configured
 `CHILDHOOD_REDUX_ROOT`; the runner records that movie's SHA-256. The required

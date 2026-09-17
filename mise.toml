@@ -22,6 +22,18 @@ run = "python scripts/audit-runtime-ownership.py"
 description = "Run focused ownership-audit scanner tests"
 run = "python scripts/test_audit_runtime_ownership.py"
 
+[tasks."check:ownership-inventory"]
+description = "Check Stage 1 ownership classification and source coverage"
+run = "python scripts/check-runtime-ownership-classification.py"
+
+[tasks."test:ownership-inventory"]
+description = "Test the Stage 1 ownership classification checker"
+run = "python scripts/test_runtime_ownership_classification.py"
+
+[tasks."test:baseline-inputs"]
+description = "Test reproducible Stage 1 audio baseline fixture selection"
+run = "node --test scripts/test-native-bevy-baseline-inputs.mjs"
+
 [tasks."test:symbol-ownership"]
 description = "Run the isolated production symbol ownership harness natively"
 run = "cargo test --manifest-path tools/symbol-ownership-tests/Cargo.toml --locked"

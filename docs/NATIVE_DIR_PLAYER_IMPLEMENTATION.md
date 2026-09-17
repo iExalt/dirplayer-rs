@@ -3,13 +3,54 @@
 This checklist follows the [native DirPlayer roadmap](../../childhood-redux/docs/NATIVE_DIR_PLAYER_PLAN.md).
 The roadmap owns architecture and milestones; this file retains detailed task and
 verification history. Baseline `297da4a`; the implementation checkpoint developed
-on `native-bevy` is being preserved on `dev` over upstream main plus the audio
-fix. **Runtime implementation is paused.** Publication is not integration or
+on `native-bevy` is preserved on `dev` over upstream main plus the audio
+fix. Current Stage 1 source is `dev` at
+`65772143f59e18b239ea34a86affd4f77a5092cf`. **Stages 2–6 runtime implementation
+remain paused.** Publication is not integration or
 acceptance of the review-stage changes. See the
 [publication checkpoint](checkpoints/native-ownership-20260917/README.md) for
 compact patches and retained verification records.
 
-## Current authoritative checkpoint
+## Current Stage 1 checkpoint
+
+The authorized work is complete and has stopped after Stage 1. Existing runtime source, dirty Ruffle
+integration and archived review patches remain unchanged by this work.
+
+- [x] **1.1:** Accept the scoped baseline with retained revisions, licenses,
+  toolchains and fixture availability in the
+  [baseline manifest](checkpoints/stage1-baseline/manifest.json). Fresh
+  source-isolated `297da4a` browser playback reached Spybot frame 6 and passed
+  all eight audio cases without script errors; see the
+  [fresh result](checkpoints/stage1-baseline/audio-reproduced-297da4a.json) and
+  [exact reproduction/build record](checkpoints/stage1-baseline/reproduction-run.json).
+  The [baseline document](NATIVE_DIR_PLAYER_STAGE1_BASELINE.md) separates this
+  reproduction from historical shapes 1/0, whose exact source manifest is not
+  retained and whose fixture is currently missing. The full licensed/Habbo
+  campaign is excluded. Neither historical nor freshly reproduced historical
+  source results certify the current `dev` runtime.
+- [x] **1.2:** Refresh and classify 1,311 lexical findings across 1,042 source
+  files (900 Rust, 142 JS/TS), including 209 Ruffle findings. Every finding has
+  an explicit owner or reviewed narrow disposition in the
+  [classification manifest](native-ownership-classification.json); the
+  [inventory](NATIVE_OWNERSHIP_INVENTORY.md) retains manual supplemental review
+  and lexical limitations.
+- [x] Verify deterministic scanner output and focused scanner/checker
+  regressions. Retained receipts: [scanner summary](checkpoints/stage1-inventory/summary.json),
+  [source coverage](checkpoints/stage1-inventory/coverage.json),
+  [scanner tests](checkpoints/stage1-inventory/tests.log),
+  [classification tests](checkpoints/stage1-inventory/classification-tests.log),
+  and [classification gate](checkpoints/stage1-inventory/classification-check.log).
+
+Stages 1.1 and 1.2 are accepted within those explicit coverage boundaries.
+Stages 2–6 remain paused; no runtime migration or archived patch integration
+was performed as part of Stage 1.
+
+Use `mise run check:ownership-inventory`, `mise run test:ownership-audit`,
+`mise run test:ownership-inventory` and `mise run test:baseline-inputs` for the
+Stage 1 gates. The existing `check:ownership` task is the separate Stage 2
+removal gate; unresolved globals, TLS and legacy access paths remain.
+
+## Retained runtime checkpoint
 
 The latest reviewed combined source is in
 `/private/tmp/dirplayer-combined-reviewed-20260916`. Its
@@ -48,7 +89,7 @@ verification and integration separately; its complete exit gate controls accepta
 - [ ] **5.1–5.4:** integrate native Ruffle/Bevy and accept Spybot title, START, tower 3 and a legal gameplay sequence.
 - [ ] **6.1–6.3:** deliver the parity worker/backend and certify repeatability, cleanup, performance, fidelity and provenance.
 
-Stage 1 retains scoped baseline evidence; refresh its inventory under 1.2.
+Stage 1 baseline and inventory are complete within their recorded scope.
 The complete licensed browser campaign is not verified; the broader Habbo test
 lacks its required movie. Native Xtras, Shockwave 3D, native nested Director,
 full campaign and Linux/Windows certification remain deferred as specified in
@@ -57,14 +98,14 @@ the roadmap, while existing browser behavior must be preserved.
 Use one Cargo target, `/private/tmp/dirplayer-parser-review-build/target`, with
 `CARGO_INCREMENTAL=0`. Do not copy dependency/build trees. Retain compact
 commands/logs/manifests and reviewed source deltas before removing obsolete
-artifacts. This documentation revision starts no implementation or builds.
+artifacts. The sequence above remains paused beyond the authorized Stage 1 work.
 
 ## Historical checkpoints — not the current to-do list
 
 Everything below is retained verbatim from the preceding implementation log.
 Headings such as “Current”, “Active” and “Pending”, unchecked tasks, running-job
 statements and compiler failures describe their historical checkpoint only.
-Later entries can supersede them. Consult the authoritative checkpoint and
+Later entries can supersede them. Consult the Stage 1 checkpoint, retained runtime checkpoint and
 remaining sequence above for present status; no old green subset proves a full
 milestone. The original Stage 1 checkmark denotes its scoped baseline only.
 

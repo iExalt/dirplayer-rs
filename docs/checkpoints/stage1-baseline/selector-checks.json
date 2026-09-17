@@ -1,0 +1,22 @@
+[
+  {
+    "case": "pass",
+    "exit_code": 0
+  },
+  {
+    "case": "failed-build",
+    "exit_code": 1
+  },
+  {
+    "case": "wrong-target",
+    "exit_code": 1
+  },
+  {
+    "case": "not-test",
+    "exit_code": 1
+  },
+  {
+    "case": "ambiguous",
+    "exit_code": 1
+  }
+]

@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "baseline_source_revision": "297da4a410495a1116e2c1b93ee57f9f1b5c8d79",
+  "ruffle_revision": "79d1ca0f45d79e28c3a0658bbc6b8430d26ef308",
+  "retained_at_source_revision": "65772143f59e18b239ea34a86affd4f77a5092cf",
+  "evidence": {
+    "LICENSE.dirplayer": {
+      "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+    },
+    "LICENSE.ruffle.md": {
+      "sha256": "e39a2fa3dfd7238f0924f568fabb659ee1a9d95ea6460dbae4bc9b67017a1c71"
+    },
+    "README.md": {
+      "sha256": "73e0204f11a79f05b46224b35b449e36df2462849cb1af4b14cd91f5fc8de722"
+    },
+    "audio-attempt1-stale-artifact.json": {
+      "sha256": "711e9fc5d682d57a98d8ceea3ed7d2b448ab2255c64d35c8205f2a09d4cc223a"
+    },
+    "audio-baseline-297da4a.json": {
+      "sha256": "2769fb332dc59ec3443058d14e512d23a54f5699522396423803ce7220403ed8"
+    },
+    "audio-reproduced-297da4a.json": {
+      "sha256": "b56df2855ce36fb823ddbf49bef3462b4ea65dc397c58830714d53fcee68a272"
+    },
+    "browser-shapes-working-tree.log": {
+      "sha256": "7a889b6678a8744ea5f4266bff2b4008a727c5033b476b6bf39f4bec47f4d4e2"
+    },
+    "compiler-artifact.jsonl": {
+      "sha256": "82d63e81a0c1f32bcb53a1904224d9cab4fda5cd835ebc4af9d700bceb9d45a1"
+    },
+    "fixture-files.json": {
+      "sha256": "a4e155ba8812aeda9df24700a0a5fad6b0dd89546ff2d417f0bfcc188382140c"
+    },
+    "prepare-historical.py": {
+      "sha256": "a19af3f703d131ef3c89e7e7f0033daa8e391509865c23dfa23e3ff98e324c26"
+    },
+    "reproduction-preparation.json": {
+      "sha256": "3d9f8225949edf69b9229bb570a1285ca8cbc92ecd2fdbf1f56f4d1d2baeb903"
+    },
+    "reproduction-run.json": {
+      "sha256": "4a07cee110a012b792ccdecfceff11d010c70eaadd290d3cf678e11bbe026e1f"
+    },
+    "run-historical-audio-baseline.mjs": {
+      "sha256": "b30661b98e3c8e092d26b99ae119a9b99724d26928ca4e4c8bc1b384d113dfc6"
+    },
+    "select-test-artifact.py": {
+      "sha256": "71fc4c9fca546eccf456173d4566a5a6d7eedeadd71bb3d7bb7116f937193c78"
+    },
+    "selector-checks.json": {
+      "sha256": "202eb27dbe37ec6884ae72d0ac5189f3781c04147a6f284eb31f65b4e55e451d"
+    },
+    "test-sound-playback.mjs": {
+      "sha256": "340dd42f78a3f80bfdf1ff43d34b102b799481f3a334186f0ec10ee68a0ba9c6"
+    }
+  },
+  "limitations": [
+    "Shapes historical working tree has unknown precise source identity.",
+    "Frozen browser artifacts are not retained; matching-named raw candidate regenerated to different hashes.",
+    "Shapes fixture missing locally; full licensed movie campaign excluded."
+  ],
+  "available_fixture": {
+    "path": "../childhood-redux/resources/spybot/spybot-nightfall-incident.dcr",
+    "sha256": "ddf24b667a8d014856d9db42e1658cbf9714847f1cadc2c2c14d21f8e5950c77"
+  },
+  "toolchain": {
+    "node": "24.14.0",
+    "npm": "11.9.0",
+    "rust": "1.98.1",
+    "cargo": "1.98.1",
+    "python": "3.14.7",
+    "wasm-bindgen": "0.2.108",
+    "playwright": "1.59.1",
+    "chromium": "147.0.7727.15",
+    "chromium_revision": "1217"
+  },
+  "source_inputs": {
+    ".@297da4a410495a1116e2c1b93ee57f9f1b5c8d79:package-lock.json": "d245108de43a4e0ae27c811cab0d1957c7774eb426b8568bfee2242bf58c5d44",
+    ".@297da4a410495a1116e2c1b93ee57f9f1b5c8d79:vm-rust/Cargo.lock": "0be0d949624679b5d0f4bfa1d0ec65dd59b7bbeabdbfecc91438fa3248d0f641",
+    ".@297da4a410495a1116e2c1b93ee57f9f1b5c8d79:LICENSE": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+    "ruffle@79d1ca0f45d79e28c3a0658bbc6b8430d26ef308:web/package-lock.json": "0170a4c82e87c958c84274d9e130670b85d4708e623c1e1ffcdfc158a04b497a",
+    "ruffle@79d1ca0f45d79e28c3a0658bbc6b8430d26ef308:Cargo.lock": "5198749e1f55122a5278b1163d33c82ed1c19bbe08e0913945ccde679218f586",
+    "ruffle@79d1ca0f45d79e28c3a0658bbc6b8430d26ef308:LICENSE.md": "e39a2fa3dfd7238f0924f568fabb659ee1a9d95ea6460dbae4bc9b67017a1c71"
+  },
+  "receipt_provenance": {
+    "audio-baseline-297da4a.json": ".cache/native-bevy/evidence/native-bevy-audio-final-20260914T042734Z.log",
+    "browser-shapes-working-tree.log": ".cache/native-bevy/evidence/native-bevy-browser-shapes-20260914T051042Z.log",
+    "run-historical-audio-baseline.mjs": ".cache/native-bevy/evidence/native-green-integration-20260916T053739Z/before/scripts/run-native-bevy-audio-baseline.mjs"
+  },
+  "fresh_verification": {
+    "source_revision": "297da4a410495a1116e2c1b93ee57f9f1b5c8d79",
+    "audio_cases_passed": 8,
+    "shape": "Historical pass only; no fresh fixture available.",
+    "runtime": "Historical source only, not current Stage 2 runtime."
+  }
+}

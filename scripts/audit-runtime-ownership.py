@@ -31,11 +31,20 @@ DEFAULT_ALLOWLIST = Path(__file__).with_name("runtime-ownership-allowlist.json")
 RUST_ROOTS = ("vm-rust/src", "xtra-sdk/src")
 RUST_GLOB_ROOTS = ("xtras",)
 JS_ROOTS = ("src", "extension/src", "polyfill/src", "dirplayer-js-api", "public")
-EXCLUDED_PARTS = {"target", "node_modules", "dist", "build", ".git", "ruffle"}
+EXCLUDED_PARTS = {"target", "node_modules", "dist", "build", ".git", "vendor", "tests", "test"}
+RUFFLE_RUST_ROOTS = (
+    "ruffle/core", "ruffle/desktop", "ruffle/exporter", "ruffle/flv",
+    "ruffle/frontend-utils", "ruffle/render", "ruffle/scanner",
+    "ruffle/stub-report", "ruffle/swf", "ruffle/video", "ruffle/web", "ruffle/wstr",
+)
+RUFFLE_JS_ROOTS = ("ruffle/web/packages",)
+EXCLUDED_PATHS = ("public/ruffle",)
+REQUIRED_ROOTS = (*RUST_ROOTS, *RUST_GLOB_ROOTS, *JS_ROOTS, *RUFFLE_RUST_ROOTS, *RUFFLE_JS_ROOTS)
+JS_SUFFIXES = {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"}
 
 STATIC_RE = re.compile(
-    r"\bstatic\s+(?P<mut>mut\s+)?(?P<ref>ref\s+)?(?P<symbol>[A-Za-z_]\w*)"
-    r"(?:\s*:\s*(?P<decl>.*))?\Z",
+    r"(?<!')\bstatic\s+(?P<mut>mut\s+)?(?P<ref>ref\s+)?(?P<symbol>[A-Za-z_]\w*)"
+    r"\s*(?::(?!:)\s*(?P<decl>.*)|=\s*(?P<init>.*))",
     re.DOTALL,
 )
 RUST_LEGACY_RE = re.compile(
@@ -50,14 +59,14 @@ RUST_SPAWN_RE = re.compile(
 )
 JS_DECL_RE = re.compile(
     r"\b(?P<binding>const|let|var)\s+(?P<symbol>[A-Za-z_$][\w$]*)"
-    r"\s*=\s*(?P<init>.*)\Z",
+    r"(?:\s*:\s*(?P<type>.*?))?(?:\s*=(?![=>])\s*(?P<init>.*)|\s*;)\Z",
     re.DOTALL,
 )
 JS_COLLECTION_RE = re.compile(
     r"^\s*(?:new\s+(?:Map|Set|WeakMap|WeakSet)\b|\[|\{)"
 )
 JS_GLOBAL_WRITE_RE = re.compile(
-    r"\b(?P<global>window|globalThis|global)\s*(?:\.\s*[A-Za-z_$][\w$]*|\s*\[[^\]]*\])\s*="
+    r"\b(?P<global>window|globalThis|global)\s*(?:\.\s*[A-Za-z_$][\w$]*|\s*\[[^\]]*\])\s*(?:=(?!=|>)|\+=|-=|\|\|=|&&=|\?\?=|\+\+|--)"
 )
 JS_REGISTRY_NAME_RE = re.compile(
     r"(?:registry|instance|pending|handler|callback|player|plugin|runtime|object|"
@@ -219,7 +228,7 @@ def _relative(root: Path, path: Path) -> str:
     return path.relative_to(root).as_posix()
 
 
-def _files(root: Path, roots: Iterable[str], suffixes: set[str]) -> list[Path]:
+def _files(root: Path, roots: Iterable[str], suffixes: set[str], *, source_only: bool = False) -> list[Path]:
     found: set[Path] = set()
     for rel in roots:
         base = root / rel
@@ -229,6 +238,13 @@ def _files(root: Path, roots: Iterable[str], suffixes: set[str]) -> list[Path]:
             if not path.is_file() or path.suffix not in suffixes:
                 continue
             if any(part in EXCLUDED_PARTS for part in path.relative_to(root).parts):
+                continue
+            relative = path.relative_to(root)
+            if any(relative.as_posix() == prefix or relative.as_posix().startswith(prefix + "/") for prefix in EXCLUDED_PATHS):
+                continue
+            if source_only and "src" not in relative.parts:
+                continue
+            if path.name.endswith(".d.ts") or path.name.endswith((".test.ts", ".test.js", ".spec.ts", ".spec.js")):
                 continue
             found.add(path)
     return sorted(found)
@@ -267,8 +283,8 @@ def _joined_statement(masked_lines: list[str], start: int, max_lines: int = 24) 
 
 
 def _parse_static(statement: str) -> re.Match[str] | None:
-    # A declaration is required to occupy the meaningful part of the line;
-    # this avoids treating `foo(static BAR)` as a global declaration.
+    # Include macro bodies and inline thread_local declarations. This is a
+    # conservative candidate scan, not a Rust grammar validator.
     return STATIC_RE.search(statement.strip().rstrip(";"))
 
 
@@ -300,13 +316,19 @@ def _rust_findings(root: Path, path: Path) -> list[Finding]:
                     category = "rust-thread-local"
                 elif parsed.group("ref") or re.search(
                     r"\b(?:Mutex|RwLock|RefCell|UnsafeCell|Cell|Atomic[A-Za-z0-9_]*|"
-                    r"Once(?:Lock|Cell)|Lazy(?:Lock)?|(?:Hash)?Map|(?:Hash)?Set|Vec|"
+                    r"Once(?:Lock|Cell)?|Lazy(?:Lock)?|(?:Hash)?Map|(?:Hash)?Set|Vec|"
                     r"Option|Sender|Receiver|Arc|Rc)\b",
                     decl,
                 ):
                     category = "rust-mutable-singleton"
-                else:
+                elif re.fullmatch(
+                    r"(?:&(?:'static\s+)?\s*)?(?:str|bool|char|[ui](?:8|16|32|64|128|size)|f(?:32|64)|"
+                    r"\[\s*(?:[ui](?:8|16|32|64|128|size)|f(?:32|64)|bool|char)\s*;[^]]+\])",
+                    decl.split("=", 1)[0].strip(),
+                ):
                     category = "rust-immutable"
+                else:
+                    category = "rust-static-review"
                 findings.append(
                     _finding(category, root, path, index + 1, symbol, full_source, statement, full_source)
                 )
@@ -340,32 +362,43 @@ def _js_findings(root: Path, path: Path) -> list[Finding]:
     masked = _masked_code(text, "js").splitlines()
     findings: list[Finding] = []
     brace_depth = 0
-    declaration_continuations: set[int] = set()
     for index, masked_line in enumerate(masked):
         original_line = lines[index] if index < len(lines) else ""
         before = brace_depth
-        decl_match = None if index in declaration_continuations else JS_DECL_RE.search(masked_line.strip())
+        decl_match = None
+        if re.search(r"\b(?:const|let|var)\s+[A-Za-z_$]", masked_line):
+            statement, _ = _joined_statement(masked, index)
+            decl_match = JS_DECL_RE.search(statement.strip())
         if decl_match:
             symbol = decl_match.group("symbol")
-            init = decl_match.group("init")
-            statement, end = _joined_statement(masked, index)
-            parsed = JS_DECL_RE.search(statement.strip().rstrip(";"))
-            if parsed:
-                init = parsed.group("init")
-                collection = bool(JS_COLLECTION_RE.search(init))
-                module_binding = parsed.group("binding") in {"let", "var"}
-                known_registry = bool(JS_REGISTRY_NAME_RE.search(symbol))
-                # A closure-level registry is a process/page singleton too;
-                # only report nested collections with an ownership-shaped name.
-                if (collection and (before == 0 or known_registry)) or (module_binding and before == 0):
-                    category = "js-module-registry" if collection else "js-module-binding"
-                    full_source, _ = _joined_statement(lines, index)
-                    findings.append(
-                        _finding(category, root, path, index + 1, symbol, full_source, statement, full_source)
-                    )
-                    # Preserve continuation lines for scope tracking and other
-                    # references while suppressing duplicate declarations.
-                    declaration_continuations.update(range(index + 1, min(end + 1, len(masked))))
+            init = decl_match.group("init") or ""
+            collection = bool(JS_COLLECTION_RE.search(init))
+            mutable_binding = decl_match.group("binding") in {"let", "var"}
+            known_registry = bool(JS_REGISTRY_NAME_RE.search(symbol))
+            factory = bool(re.search(r"\bnew\s+|[\w$.]+\s*\(", init))
+            if (collection and (before == 0 or known_registry)) or mutable_binding or (before == 0 and factory):
+                if before != 0:
+                    category = "js-local-state-candidate"
+                elif collection:
+                    category = "js-module-registry"
+                else:
+                    category = "js-module-binding"
+                full_source, _ = _joined_statement(lines, index)
+                findings.append(
+                    _finding(category, root, path, index + 1, symbol, full_source, statement, full_source)
+                )
+
+        if decl_match and re.search(r",\s*[A-Za-z_$][\w$]*\s*(?::[^=;]+)?=(?!=|>)", statement):
+            full_source, _ = _joined_statement(lines, index)
+            findings.append(_finding("js-declaration-review", root, path, index + 1,
+                                     "multi-binding", full_source, statement, full_source))
+
+        # Complex declarations and class fields need manual semantic review.
+        # Reporting the declaration avoids silently losing destructured owners
+        # without pretending this lexical pass is an AST.
+        if re.search(r"\b(?:const|let|var)\s*[\[{]|\bstatic\s+[\w$]+\s*(?::|=)", masked_line):
+            findings.append(_finding("js-declaration-review", root, path, index + 1,
+                                     "declaration", original_line, masked_line, original_line))
 
         global_match = JS_GLOBAL_WRITE_RE.search(masked_line)
         if global_match:
@@ -378,18 +411,41 @@ def _js_findings(root: Path, path: Path) -> list[Finding]:
     return findings
 
 
+def source_files(root: Path) -> tuple[list[Path], list[Path]]:
+    rust = _files(root, (*RUST_ROOTS, *RUST_GLOB_ROOTS), {".rs"})
+    rust += _files(root, RUFFLE_RUST_ROOTS, {".rs"}, source_only=True)
+    js = _files(root, JS_ROOTS, JS_SUFFIXES)
+    js += _files(root, RUFFLE_JS_ROOTS, JS_SUFFIXES, source_only=True)
+    return sorted(set(rust)), sorted(set(js))
+
+
 def scan(root: Path) -> list[Finding]:
-    rust_files = _files(root, RUST_ROOTS, {".rs"})
-    for base in RUST_GLOB_ROOTS:
-        rust_files.extend(_files(root, (base,), {".rs"}))
-    rust_files = sorted(set(rust_files))
-    js_files = _files(root, JS_ROOTS, {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"})
+    rust_files, js_files = source_files(root)
     findings: list[Finding] = []
     for path in rust_files:
         findings.extend(_rust_findings(root, path))
     for path in js_files:
         findings.extend(_js_findings(root, path))
     return sorted(findings, key=lambda item: (item.path, item.line, item.category, item.symbol, item.match))
+
+
+def coverage(root: Path) -> dict[str, object]:
+    rust, js = source_files(root)
+    return {
+        "rust_files": [_relative(root, path) for path in rust],
+        "js_files": [_relative(root, path) for path in js],
+        "excluded_directory_names": sorted(EXCLUDED_PARTS),
+        "excluded_paths": list(EXCLUDED_PATHS),
+        "required_roots": sorted(set(REQUIRED_ROOTS)),
+        "missing_roots": sorted({rel for rel in REQUIRED_ROOTS if not (root / rel).is_dir()}),
+        "limitations": [
+            "Lexical candidates, not semantic ownership or proven defects.",
+            "Ruffle production src trees only; build scripts, fixtures and generated bundles excluded.",
+            "Declaration-only .d.ts and named .test/.spec JS/TS files excluded; inline Rust tests retained.",
+            "Macro expansion, aliases, computed mutation, template interpolation and indirect state require manual review.",
+            "Brace depth is lexical: local candidates may include per-call state; multi-binding declarations require manual review.",
+        ],
+    }
 
 
 def _load_allowlist(path: Path) -> list[dict[str, object]]:
@@ -494,8 +550,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--allowlist", type=Path, default=DEFAULT_ALLOWLIST, help="reviewed JSON diagnostics allowlist")
     parser.add_argument("--format", choices=("text", "json"), default="text")
     parser.add_argument("--check", action="store_true", help="fail on unallowlisted non-immutable findings")
+    parser.add_argument("--coverage", action="store_true", help="print JSON source coverage and exclusions")
     args = parser.parse_args(argv)
     root = args.root.resolve()
+    if args.coverage:
+        print(json.dumps(coverage(root), indent=2, sort_keys=True))
+        return 0
     findings = scan(root)
     if args.format == "json":
         print(json.dumps([finding.as_dict() for finding in findings], indent=2, sort_keys=True))
