@@ -10,6 +10,37 @@ const routeFlashPlayOwned = (ownerKey, spriteNum) =>
   vmCallbacksByOwner.get(ownerKey)?.onFlashPlayOwned?.(spriteNum);
 const routeFlashLocalConnectionSendOwned = (ownerKey, name, method, argsJson) =>
   vmCallbacksByOwner.get(ownerKey)?.onFlashLocalConnectionSendOwned?.(name, method, argsJson) ?? false;
+
+// Generation-aware Flash routes are installed by FlashPlayerManager. These
+// wrappers deliberately call only the exact owner route and return a typed
+// failure when the route is absent; they never fall back to legacy globals or
+// the current VM callback provider.
+const invokeOwnedFlashGenerationRoute = (name, args) => {
+  const route = globalThis.window?.[name];
+  if (typeof route !== 'function') return { ok: false, code: 'unknown-owner' };
+  return route(...args);
+};
+
+export function dirplayer_ruffleGetVariableOwnedForBinding(ownerKey, spriteNum, path, returnAsObject = false) {
+  return invokeOwnedFlashGenerationRoute('dirplayer_ruffleGetVariableOwnedForBinding', [ownerKey, spriteNum, path, returnAsObject]);
+}
+
+export function dirplayer_ruffleGetVariableOwnedAtGeneration(ownerKey, spriteNum, generation, path, returnAsObject = false) {
+  return invokeOwnedFlashGenerationRoute('dirplayer_ruffleGetVariableOwnedAtGeneration', [ownerKey, spriteNum, generation, path, returnAsObject]);
+}
+
+export function dirplayer_isFlashInstanceReadyOwned(ownerKey, spriteNum, generation) {
+  return invokeOwnedFlashGenerationRoute('dirplayer_isFlashInstanceReadyOwned', [ownerKey, spriteNum, generation]);
+}
+
+export function dirplayer_ruffleSetVariableOwnedAtGeneration(ownerKey, spriteNum, generation, path, value) {
+  return invokeOwnedFlashGenerationRoute('dirplayer_ruffleSetVariableOwnedAtGeneration', [ownerKey, spriteNum, generation, path, value]);
+}
+
+export function dirplayer_ruffleCallFunctionOwnedAtGeneration(ownerKey, spriteNum, generation, path, argsXml) {
+  return invokeOwnedFlashGenerationRoute('dirplayer_ruffleCallFunctionOwnedAtGeneration', [ownerKey, spriteNum, generation, path, argsXml]);
+}
+
 if (typeof globalThis.window !== 'undefined') {
   const win = globalThis.window;
   if (typeof win.dirplayer_rufflePlayOwned !== 'function') {
@@ -18,6 +49,33 @@ if (typeof globalThis.window !== 'undefined') {
   if (typeof win.dirplayer_localConnectionSendOwned !== 'function') {
     win.dirplayer_localConnectionSendOwned = routeFlashLocalConnectionSendOwned;
   }
+}
+
+/** Dispatch an owner-bound VM callback without consulting a current player. */
+export function dispatchVmCallback(ownerKey, name, ...args) {
+  const callbacks = vmCallbacksByOwner.get(ownerKey);
+  const callback = callbacks?.[name];
+  if (typeof callback !== 'function') return undefined;
+  return callback(...args);
+}
+
+// These routes are used by owner-bound Rust callbacks.  They intentionally
+// never fall back to vmCallbacks: an unknown or retired owner must be dropped
+// rather than delivered to whichever provider registered most recently.
+export function onDebugMessageOwned(ownerKey, message) {
+  return dispatchVmCallback(ownerKey, 'onDebugMessage', message);
+}
+
+export function onScriptErrorOwned(ownerKey, data) {
+  return dispatchVmCallback(ownerKey, 'onScriptError', data);
+}
+
+export function onDatumSnapshotOwned(ownerKey, datumRef, snapshot) {
+  return dispatchVmCallback(ownerKey, 'onDatumSnapshot', datumRef, snapshot);
+}
+
+export function onScriptInstanceSnapshotOwned(ownerKey, instanceId, snapshot) {
+  return dispatchVmCallback(ownerKey, 'onScriptInstanceSnapshot', instanceId, snapshot);
 }
 
 export function registerVmCallbacks(callbacks, ownerKey) {
@@ -33,11 +91,67 @@ export function registerVmCallbacks(callbacks, ownerKey) {
   };
 }
 
-// Resolvers for in-flight whenMovieLoaded() calls. We resolve them
-// from inside onMovieLoaded so callers can await movie-load completion
-// even though vm-rust's `load_movie_file` is fire-and-forget
-// (it dispatches a command and returns immediately).
+// Legacy no-owner waiters remain separate from handle-owned waiters.
 const _movieLoadedResolvers = [];
+
+/**
+ * Create a callback sink whose waiter state belongs to one BrowserPlayerHandle.
+ * The returned function is passed directly to Rust; no owner-keyed module map
+ * is consulted for owner-qualified events.
+ */
+export function createVmHostEventSink(onEvent) {
+  const waiters = new Set();
+  let disposed = false;
+  let activeOwnerKey;
+  const rejectWaiters = (reason, ownerKey) => {
+    const pending = [...waiters].filter((waiter) => ownerKey === undefined || waiter.ownerKey === ownerKey);
+    for (const waiter of pending) waiters.delete(waiter);
+    for (const waiter of pending) {
+      try { waiter.reject(new Error(reason)); } catch (e) { console.error('movie waiter rejection threw:', e); }
+    }
+  };
+  const sink = (event, ownerKey) => {
+    if (disposed) return;
+    const effectiveOwnerKey = event?.ownerKey ?? ownerKey;
+    const ownedEvent = { ...event, ownerKey: effectiveOwnerKey };
+    if (event?.type === 'ownerBound') {
+      activeOwnerKey = effectiveOwnerKey;
+    } else if (event?.type === 'ownerRetired') {
+      rejectWaiters('VM host event owner retired', effectiveOwnerKey);
+      if (activeOwnerKey === effectiveOwnerKey) activeOwnerKey = undefined;
+    } else if (event?.type === 'flashReset') {
+      rejectWaiters('VM host event sink owner reset', ownerKey);
+      if (activeOwnerKey === ownerKey) activeOwnerKey = undefined;
+    }
+    if (event?.type === 'movieLoaded' && activeOwnerKey === ownerKey) {
+      const pending = [...waiters].filter((waiter) => waiter.ownerKey === ownerKey);
+      for (const waiter of pending) waiters.delete(waiter);
+      for (const waiter of pending) {
+        try { waiter.resolve(event); } catch (e) { console.error('movie waiter resolver threw:', e); }
+      }
+    } else if (event?.type === 'movieLoadFailed' && activeOwnerKey === ownerKey) {
+      rejectWaiters(event.error, ownerKey);
+    }
+    onEvent(ownedEvent);
+  };
+  return {
+    sink,
+    whenMovieLoaded(ownerKey = activeOwnerKey) {
+      if (disposed) return Promise.reject(new Error('VM host event sink disposed'));
+      if (ownerKey === undefined) return Promise.reject(new Error('VM host event sink has no active owner'));
+      return new Promise((resolve, reject) => waiters.add({ resolve, reject, ownerKey }));
+    },
+    cancelMovieLoadedWaiters(reason = 'movie owner reset', ownerKey) {
+      rejectWaiters(reason, ownerKey);
+    },
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      rejectWaiters('VM host event sink disposed');
+      activeOwnerKey = undefined;
+    },
+  };
+}
 
 /// Returns a Promise that resolves the NEXT time onMovieLoaded fires
 /// from vm-rust. Use this between `load_movie_file(path, false)` and
@@ -194,6 +308,25 @@ export function onFlashResetAll(ownerKey) {
   if (callbacks?.onFlashResetAll) {
     callbacks.onFlashResetAll(ownerKey);
   }
+}
+
+export function onFlashGetVariable(spriteNum, path, ownerKey) {
+  return dispatchVmCallback(ownerKey, 'onFlashGetVariable', spriteNum, path);
+}
+export function onFlashSetVariable(spriteNum, path, value, ownerKey) {
+  return dispatchVmCallback(ownerKey, 'onFlashSetVariable', spriteNum, path, value);
+}
+export function onFlashCallFunction(spriteNum, path, argsXml, ownerKey) {
+  return dispatchVmCallback(ownerKey, 'onFlashCallFunction', spriteNum, path, argsXml);
+}
+export function onFlashGotoFrame(spriteNum, frameOrLabel, ownerKey) {
+  return dispatchVmCallback(ownerKey, 'onFlashGotoFrame', spriteNum, frameOrLabel);
+}
+export function onFlashGotoFrameAndStop(spriteNum, frameOrLabel, ownerKey) {
+  return dispatchVmCallback(ownerKey, 'onFlashGotoFrameAndStop', spriteNum, frameOrLabel);
+}
+export function onFlashInstanceReady(spriteNum, ownerKey) {
+  return dispatchVmCallback(ownerKey, 'onFlashInstanceReady', spriteNum);
 }
 
 export function onStageSizeChanged(width, height, center) {

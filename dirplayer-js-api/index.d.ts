@@ -58,11 +58,55 @@ type TVmCallbacks = {
   onFlashResetAll?: (ownerKey: string) => void,
   onFlashPlayOwned?: (spriteNum: number) => void,
   onFlashLocalConnectionSendOwned?: (name: string, method: string, argsJson: string) => boolean,
+  onFlashGetVariable?: (spriteNum: number, path: string) => unknown,
+  onFlashSetVariable?: (spriteNum: number, path: string, value: string) => unknown,
+  onFlashCallFunction?: (spriteNum: number, path: string, argsXml: string) => unknown,
+  onFlashGotoFrame?: (spriteNum: number, frameOrLabel: string) => unknown,
+  onFlashGotoFrameAndStop?: (spriteNum: number, frameOrLabel: string) => unknown,
+  onFlashInstanceReady?: (spriteNum: number) => boolean,
   onStageSizeChanged?: (width: number, height: number, center: boolean) => void,
 }
 declare let vmCallbacks: TVmCallbacks | undefined;
 
 export function registerVmCallbacks(callbacks: TVmCallbacks, ownerKey?: string): () => void;
+export function dispatchVmCallback(ownerKey: string, name: string, ...args: any[]): any;
+export function onDebugMessageOwned(ownerKey: string, message: string): any;
+export function onScriptErrorOwned(ownerKey: string, data: OnScriptErrorData): any;
+export function onDatumSnapshotOwned(ownerKey: string, datumRef: DatumRef, snapshot: JsBridgeDatum): any;
+export function onScriptInstanceSnapshotOwned(ownerKey: string, scriptInstanceRef: ScriptInstanceId, scriptInstance: JsBridgeDatum): any;
+
+export type FlashOwnedResult =
+  | { ok: true; generation: number; value: unknown }
+  | {
+      ok: false;
+      code: 'unknown-owner' | 'disposed-owner' | 'missing-instance' |
+        'stale-generation' | 'invalid-generation' | 'not-ready' | 'host-error';
+      generation?: number;
+      message?: string;
+    };
+
+export type FlashReadyResult =
+  | { ok: true; generation: number; ready: boolean }
+  | Extract<FlashOwnedResult, { ok: false }>;
+
+export function dirplayer_ruffleGetVariableOwnedForBinding(
+  ownerKey: string,
+  spriteNum: number,
+  path: string,
+  returnAsObject?: boolean,
+): FlashOwnedResult;
+export function dirplayer_ruffleGetVariableOwnedAtGeneration(
+  ownerKey: string,
+  spriteNum: number,
+  generation: number,
+  path: string,
+  returnAsObject?: boolean,
+): FlashOwnedResult;
+export function dirplayer_isFlashInstanceReadyOwned(
+  ownerKey: string,
+  spriteNum: number,
+  generation: number,
+): FlashReadyResult;
 
 /**
  * Promise that resolves the next time vm-rust fires onMovieLoaded.
@@ -70,6 +114,15 @@ export function registerVmCallbacks(callbacks: TVmCallbacks, ownerKey?: string):
  * finish loading (vm-rust's `load_movie_file` returns immediately
  * after dispatching a command, NOT after the load completes).
  */
+export interface VmHostEventSink {
+  sink: (event: Record<string, unknown>, ownerKey: string) => void;
+  whenMovieLoaded(ownerKey?: string): Promise<any>;
+  cancelMovieLoadedWaiters(reason?: string, ownerKey?: string): void;
+  dispose(): void;
+}
+export function createVmHostEventSink(
+  onEvent: (event: Record<string, unknown>) => void,
+): VmHostEventSink;
 export function whenMovieLoaded(): Promise<any>;
 
 // ── External Xtra plugin loader + JS↔WASM bridge ─────────────────────

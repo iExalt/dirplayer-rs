@@ -1,6 +1,20 @@
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 use manual_future::ManualFuture;
+use std::{cell::{Cell, RefCell}, collections::HashMap, rc::Rc};
+
+use crate::player::{
+    allocator::{DatumAllocatorTrait, ScriptInstanceAllocatorTrait},
+    cast_lib::CastLib,
+    script::{Script, ScriptInstance},
+    symbols::{builtin::BuiltInSymbol, symbol::Symbol},
+};
+use crate::director::{
+    chunks::{handler::{Bytecode, HandlerDef}, script::ScriptChunk},
+    enums::ScriptType,
+    lingo::{datum::Datum, opcode::OpCode},
+};
+use fxhash::FxHashMap;
 
 use crate::player::{
     cast_lib::CastMemberRef,
@@ -29,6 +43,86 @@ struct MultiuserServerState {
     received_survival_b: bool,
 }
 
+/// Symbols written by the synthetic playback scripts. The values live in the
+/// owning player's globals, so the browser playback test observes real Lingo
+/// handler effects instead of Rust-side lifecycle counters.
+struct PlaybackEffectMarkers {
+    init: Symbol,
+    frame: Symbol,
+    stop_movie: Symbol,
+    end_sprite_after_stop: Symbol,
+}
+
+fn playback_counter_handler(global_index: u16, names_len: usize) -> Rc<HandlerDef> {
+    Rc::new(HandlerDef {
+        name_id: 0,
+        bytecode_array: vec![
+            Bytecode::new(OpCode::GetGlobal, global_index as i64, 0),
+            Bytecode::new(OpCode::PushInt8, 1, 1),
+            Bytecode::new(OpCode::Add, 0, 2),
+            Bytecode::new(OpCode::SetGlobal, global_index as i64, 3),
+            Bytecode::new(OpCode::Ret, 0, 4),
+        ],
+        bytecode_index_map: FxHashMap::default(),
+        argument_name_ids: vec![],
+        local_name_ids: vec![],
+        global_name_ids: (1..names_len as u16).collect(),
+        compiled_ir: RefCell::new(None),
+    })
+}
+
+fn playback_end_sprite_handler(stop_index: u16, end_index: u16, names_len: usize) -> Rc<HandlerDef> {
+    Rc::new(HandlerDef {
+        name_id: 0,
+        bytecode_array: vec![
+            Bytecode::new(OpCode::GetGlobal, stop_index as i64, 0),
+            Bytecode::new(OpCode::SetGlobal, end_index as i64, 1),
+            Bytecode::new(OpCode::Ret, 0, 2),
+        ],
+        bytecode_index_map: FxHashMap::default(),
+        argument_name_ids: vec![],
+        local_name_ids: vec![],
+        global_name_ids: (1..names_len as u16).collect(),
+        compiled_ir: RefCell::new(None),
+    })
+}
+
+fn read_playback_marker(
+    handle: &crate::BrowserPlayerHandle,
+    marker: &Symbol,
+) -> Result<i32, String> {
+    handle
+        .with_context(|context| {
+            let value = context
+                .player
+                .globals
+                .get(marker)
+                .and_then(|value| match context.player.get_datum(value) {
+                    Datum::Int(value) => Some(*value),
+                    _ => None,
+                })
+                .unwrap_or(0);
+            value
+        })
+        .map_err(|error| format!("playback marker read failed: {error:?}"))
+}
+
+fn create_public_play_test_container(label: &str) -> Result<web_sys::HtmlElement, String> {
+    let document = web_sys::window()
+        .ok_or_else(|| "browser window is required".to_owned())?
+        .document()
+        .ok_or_else(|| "browser document is required".to_owned())?;
+    let element = document
+        .create_element("div")
+        .map_err(|error| format!("create {label} renderer container failed: {error:?}"))?;
+    element
+        .set_attribute("data-dirplayer-public-play", label)
+        .map_err(|error| format!("tag {label} renderer container failed: {error:?}"))?;
+    element
+        .dyn_into::<web_sys::HtmlElement>()
+        .map_err(|_| format!("{label} renderer container was not an HTML element"))
+}
+
 /// Browser test harness with an owned command and frame scheduler.
 /// The wasm test entrypoint skips the production global loops, so each RAF
 /// step explicitly drives the supplied session's timeout and frame turns.
@@ -37,6 +131,74 @@ pub struct BrowserTestPlayer {
     renderer: crate::rendering::RendererStateHandle,
     command_tx: async_std::channel::Sender<crate::player::PlayerVMExecutionItem>,
     flash_capability: Option<BrowserFlashCapability>,
+}
+
+/// Restores the production Flash bridge globals after a transport fixture.
+/// The evaluator calls these globals directly from Rust, so leaving a test
+/// closure installed would contaminate the next browser test even when an
+/// assertion returns early.
+struct FlashOwnedRouteGuard {
+    window: web_sys::Window,
+    entries: Vec<(String, JsValue)>,
+}
+
+impl Drop for FlashOwnedRouteGuard {
+    fn drop(&mut self) {
+        for (name, value) in &self.entries {
+            if value.is_undefined() {
+                let _ = js_sys::Reflect::delete_property(
+                    &self.window,
+                    &JsValue::from_str(name),
+                );
+            } else {
+                let _ = js_sys::Reflect::set(
+                    &self.window,
+                    &JsValue::from_str(name),
+                    value,
+                );
+            }
+        }
+    }
+}
+
+fn flash_owned_test_response(generation: f64, value: JsValue) -> JsValue {
+    let response = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(
+        &response,
+        &JsValue::from_str("ok"),
+        &JsValue::TRUE,
+    );
+    let _ = js_sys::Reflect::set(
+        &response,
+        &JsValue::from_str("generation"),
+        &JsValue::from_f64(generation),
+    );
+    let _ = js_sys::Reflect::set(
+        &response,
+        &JsValue::from_str("value"),
+        &value,
+    );
+    response.into()
+}
+
+fn flash_owned_test_error(code: &str, message: &str) -> JsValue {
+    let response = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(
+        &response,
+        &JsValue::from_str("ok"),
+        &JsValue::FALSE,
+    );
+    let _ = js_sys::Reflect::set(
+        &response,
+        &JsValue::from_str("code"),
+        &JsValue::from_str(code),
+    );
+    let _ = js_sys::Reflect::set(
+        &response,
+        &JsValue::from_str("message"),
+        &JsValue::from_str(message),
+    );
+    response.into()
 }
 
 impl BrowserTestPlayer {
@@ -306,6 +468,454 @@ impl BrowserTestPlayer {
         Ok(())
     }
 
+    /// Exercise the real owner-generation Flash readiness capabilities.  The
+    /// first assertions deliberately hold the session borrow while publishing
+    /// readiness; a capability setter must not re-enter that borrow.
+    pub async fn test_flash_scripted_access_owner_capabilities(&mut self) -> Result<(), String> {
+        let mut first = crate::BrowserPlayerHandle::new()
+            .map_err(|error| format!("first browser handle construction failed: {error:?}"))?;
+        let second = crate::BrowserPlayerHandle::new()
+            .map_err(|error| format!("second browser handle construction failed: {error:?}"))?;
+
+        let first_session = first.session.clone();
+        let mut first_borrow = first_session.borrow_mut();
+        first
+            .set_flash_scripted_access_pending(true)
+            .map_err(|error| format!("first readiness setter re-entered session: {error:?}"))?;
+        let first_pending = first_borrow
+            .with_player(first.player_id, |context| context.player.flash_scripted_access_pending.get())
+            .ok_or_else(|| "first browser player disappeared".to_owned())?;
+        if !first_pending {
+            return Err("first readiness setter did not update its owner cell".to_owned());
+        }
+        drop(first_borrow);
+
+        second
+            .set_flash_scripted_access_pending(true)
+            .map_err(|error| format!("second readiness setter failed: {error:?}"))?;
+        let second_pending = second
+            .session
+            .borrow_mut()
+            .with_player(second.player_id, |context| context.player.flash_scripted_access_pending.get())
+            .ok_or_else(|| "second browser player disappeared".to_owned())?;
+        if !second_pending {
+            return Err("second readiness setter did not update its owner cell".to_owned());
+        }
+        let first_cell_before_reset = first.flash_scripted_access_pending.clone();
+        let second_cell = second.flash_scripted_access_pending.clone();
+        if Rc::ptr_eq(&first_cell_before_reset, &second_cell) {
+            return Err("distinct browser owners share a Flash readiness cell".to_owned());
+        }
+        first
+            .reset()
+            .map_err(|error| format!("first browser handle reset failed: {error:?}"))?;
+        if first_cell_before_reset.get() {
+            return Err("reset did not clear the retired readiness cell".to_owned());
+        }
+        let first_replacement = first
+            .session
+            .borrow_mut()
+            .with_player(first.player_id, |context| context.player.flash_scripted_access_pending.get())
+            .ok_or_else(|| "replacement browser player disappeared".to_owned())?;
+        if first_replacement {
+            return Err("replacement owner inherited retired readiness state".to_owned());
+        }
+        if !second_cell.get() {
+            return Err("resetting owner A cleared owner B readiness".to_owned());
+        }
+        first
+            .set_flash_scripted_access_pending(true)
+            .map_err(|error| format!("replacement readiness setter failed: {error:?}"))?;
+        if !first.flash_scripted_access_pending.get() {
+            return Err("replacement owner setter did not update its fresh cell".to_owned());
+        }
+        if !second_cell.get() {
+            return Err("changing owner A changed owner B readiness".to_owned());
+        }
+
+        let stale_capability = self
+            .flash_capability
+            .take()
+            .ok_or_else(|| "browser Flash capability was not registered".to_owned())?;
+        self.reset_player_with(false).await;
+        if stale_capability
+            .set_flash_scripted_access_pending(true)
+            .is_ok()
+        {
+            return Err("retired BrowserFlashCapability accepted a readiness update".to_owned());
+        }
+        let fresh_pending = self
+            .harness_runtime()
+            .with_context(|context| context.player.flash_scripted_access_pending.get())
+            .ok_or_else(|| "fresh harness player disappeared".to_owned())?;
+        if fresh_pending {
+            return Err("fresh harness owner inherited stale capability state".to_owned());
+        }
+
+        let fresh_capability = self
+            .flash_capability
+            .as_ref()
+            .ok_or_else(|| "fresh browser Flash capability was not registered".to_owned())?;
+        let fresh_session = self.harness_runtime().session();
+        let mut fresh_borrow = fresh_session.borrow_mut();
+        fresh_capability
+            .set_flash_scripted_access_pending(true)
+            .map_err(|error| format!("fresh capability setter re-entered session: {error:?}"))?;
+        let fresh_pending = fresh_borrow
+            .with_player(self.harness_runtime().player_id(), |context| context.player.flash_scripted_access_pending.get())
+            .ok_or_else(|| "fresh owner disappeared during capability test".to_owned())?;
+        if !fresh_pending {
+            return Err("fresh capability did not update its owner cell".to_owned());
+        }
+        drop(fresh_borrow);
+
+        let window = web_sys::window().ok_or_else(|| "browser window is unavailable".to_owned())?;
+        let helper = js_sys::Reflect::get(
+            &window,
+            &JsValue::from_str("dirplayer_testFlashOwnerCapability"),
+        )
+        .map_err(|_| "production FlashOwnerHost helper is unavailable".to_owned())?
+        .dyn_into::<js_sys::Function>()
+        .map_err(|_| "production FlashOwnerHost helper is not callable".to_owned())?;
+        let owner_key = fresh_capability.owner_identity();
+        let observed_states = Rc::new(RefCell::new(Vec::<bool>::new()));
+        let observed_states_for_callback = observed_states.clone();
+        let observed_session = self.harness_runtime().session();
+        let observed_player_id = self.harness_runtime().player_id();
+        let observe = Closure::wrap(Box::new(move |_phase: JsValue| {
+            let pending = observed_session
+                .borrow_mut()
+                .with_player(observed_player_id, |context| {
+                    context.player.flash_scripted_access_pending.get()
+                })
+                .unwrap_or(false);
+            observed_states_for_callback.borrow_mut().push(pending);
+        }) as Box<dyn FnMut(JsValue)>);
+        let js_capability = BrowserFlashCapability::new(
+            self.harness_runtime().session(),
+            self.harness_runtime().player_id(),
+            self.harness_runtime().owner().clone(),
+            self.harness_runtime()
+                .with_context(|context| context.player.flash_scripted_access_pending.clone())
+                .ok_or_else(|| "could not capture fresh Flash readiness cell".to_owned())?,
+            self.command_tx.clone(),
+        );
+        let js_capability: JsValue = js_capability.into();
+        let promise = helper
+            .call3(
+                &window,
+                &JsValue::from_str(&owner_key),
+                &js_capability,
+                observe.as_ref(),
+            )
+            .map_err(|error| format!("production FlashOwnerHost invocation failed: {error:?}"))?
+            .dyn_into::<js_sys::Promise>()
+            .map_err(|_| "production FlashOwnerHost helper did not return a Promise".to_owned())?;
+        JsFuture::from(promise)
+            .await
+            .map_err(|error| format!("production FlashOwnerHost lifecycle failed: {error:?}"))?;
+        drop(observe);
+        let observed_states = observed_states.borrow().clone();
+        if observed_states != [true, false, true, false] {
+            return Err(format!(
+                "production FlashOwnerHost readiness transitions were {observed_states:?}"
+            ));
+        }
+        let final_pending = self
+            .harness_runtime()
+            .with_context(|context| context.player.flash_scripted_access_pending.get())
+            .ok_or_else(|| "fresh owner disappeared after FlashOwnerHost lifecycle".to_owned())?;
+        if final_pending {
+            return Err("production FlashOwnerHost did not clear scripted readiness".to_owned());
+        }
+        Ok(())
+    }
+
+    /// Exercise the production evaluator's owner-bound Flash request path.
+    /// The host functions are replaced only for this test, but Rust reaches
+    /// them through `eval_lingo_command_owned`: the first request is an
+    /// unbound BindGet and the property read is a generation-qualified Get.
+    /// The second host callback replaces the sprite generation before its
+    /// response is applied, so the late result must be rejected and a fresh
+    /// bind must still work.
+    pub async fn test_flash_owned_evaluator_binding(&self) -> Result<(), String> {
+        let window = web_sys::window().ok_or_else(|| "browser window is unavailable".to_owned())?;
+        // `dirplayer_registerFlashOwner` loads the production manager lazily.
+        // Prime that existing helper before replacing only the two transport
+        // globals; this prevents a late bundle import from overwriting the
+        // controlled callbacks below.
+        let owner = self.harness_runtime().owner().clone();
+        let owner_key = {
+            let key = owner.key();
+            format!("{}:{}:{}", key.session, key.player, key.generation)
+        };
+        let pending_cell = self
+            .harness_runtime()
+            .with_context(|context| context.player.flash_scripted_access_pending.clone())
+            .ok_or_else(|| "Flash readiness state is unavailable".to_owned())?;
+        let capability = BrowserFlashCapability::new(
+            self.harness_runtime().session(),
+            self.harness_runtime().player_id(),
+            owner.clone(),
+            pending_cell.clone(),
+            self.command_tx.clone(),
+        );
+        let helper = js_sys::Reflect::get(
+            &window,
+            &JsValue::from_str("dirplayer_testFlashOwnerCapability"),
+        )
+        .map_err(|_| "production FlashOwnerHost helper is unavailable".to_owned())?
+        .dyn_into::<js_sys::Function>()
+        .map_err(|_| "production FlashOwnerHost helper is not callable".to_owned())?;
+        let helper_capability: JsValue = capability.into();
+        let helper_result = helper
+            .call3(
+                &window,
+                &JsValue::from_str(&owner_key),
+                &helper_capability,
+                &JsValue::UNDEFINED,
+            )
+            .map_err(|error| format!("FlashOwnerHost priming failed: {error:?}"))?
+            .dyn_into::<js_sys::Promise>()
+            .map_err(|_| "FlashOwnerHost priming did not return a Promise".to_owned())?;
+        JsFuture::from(helper_result)
+            .await
+            .map_err(|error| format!("FlashOwnerHost priming rejected: {error:?}"))?;
+        Self::next_frame().await;
+
+        let route_names = [
+            "dirplayer_ruffleGetVariableOwnedForBinding",
+            "dirplayer_ruffleGetVariableOwnedAtGeneration",
+        ];
+        let originals = route_names
+            .iter()
+            .map(|name| {
+                js_sys::Reflect::get(&window, &JsValue::from_str(name))
+                    .map(|value| ((*name).to_owned(), value))
+                    .map_err(|error| format!("could not capture {name}: {error:?}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let _routes = FlashOwnedRouteGuard {
+            window: window.clone(),
+            entries: originals,
+        };
+
+        let route_capability = BrowserFlashCapability::new(
+            self.harness_runtime().session(),
+            self.harness_runtime().player_id(),
+            owner.clone(),
+            pending_cell.clone(),
+            self.command_tx.clone(),
+        );
+        let assertion_capability = BrowserFlashCapability::new(
+            self.harness_runtime().session(),
+            self.harness_runtime().player_id(),
+            owner.clone(),
+            pending_cell,
+            self.command_tx.clone(),
+        );
+        let initial_generation = route_capability
+            .reserve_flash_instance_generation(1.0)
+            .map_err(|error| format!("initial Flash generation reservation failed: {error:?}"))?;
+        let calls = Rc::new(RefCell::new(Vec::<String>::new()));
+        let route_error = Rc::new(RefCell::new(None::<String>));
+        let replace_on_get = Rc::new(Cell::new(false));
+        let replacement_generation = Rc::new(Cell::new(initial_generation));
+        let successful_get_generation = Rc::new(Cell::new(None::<f64>));
+
+
+        let bind_calls = calls.clone();
+        let bind_error = route_error.clone();
+        let bind_generation = replacement_generation.clone();
+        let bind_owner_key = owner_key.clone();
+        let bind_response = Closure::wrap(Box::new(
+            move |requested_owner: JsValue,
+                  sprite: JsValue,
+                  path: JsValue,
+                  return_as_object: JsValue|
+                  -> JsValue {
+                let owner_matches = requested_owner.as_string().as_deref() == Some(bind_owner_key.as_str());
+                let sprite_matches = sprite.as_f64() == Some(1.0);
+                let path = path.as_string().unwrap_or_default();
+                let object_mode = return_as_object.as_bool().unwrap_or(false);
+                bind_calls.borrow_mut().push(format!(
+                    "bind:{path}:{}",
+                    bind_generation.get()
+                ));
+                if !owner_matches || !sprite_matches || !object_mode {
+                    *bind_error.borrow_mut() = Some(format!(
+                        "invalid BindGet arguments owner={owner_matches} sprite={sprite_matches} object={object_mode}"
+                    ));
+                    return flash_owned_test_error("invalid-arguments", "invalid BindGet arguments");
+                }
+                let value = js_sys::Object::new();
+                let _ = js_sys::Reflect::set(
+                    &value,
+                    &JsValue::from_str("__dirplayer_stored_path"),
+                    &JsValue::from_str("_root.fixture"),
+                );
+                flash_owned_test_response(bind_generation.get(), value.into())
+            },
+        ) as Box<dyn FnMut(JsValue, JsValue, JsValue, JsValue) -> JsValue>);
+
+        let get_calls = calls.clone();
+        let get_error = route_error.clone();
+        let get_capability = route_capability;
+        let get_generation = replacement_generation.clone();
+        let get_replace = replace_on_get.clone();
+        let get_successful_generation = successful_get_generation.clone();
+        let get_owner_key = owner_key.clone();
+        let get_response = Closure::wrap(Box::new(
+            move |requested_owner: JsValue,
+                  sprite: JsValue,
+                  generation: JsValue,
+                  path: JsValue,
+                  return_as_object: JsValue|
+                  -> JsValue {
+                let requested_generation = generation.as_f64().unwrap_or(f64::NAN);
+                let owner_matches = requested_owner.as_string().as_deref() == Some(get_owner_key.as_str());
+                let sprite_matches = sprite.as_f64() == Some(1.0);
+                let path = path.as_string().unwrap_or_default();
+                get_calls.borrow_mut().push(format!(
+                    "get:{path}:{requested_generation}"
+                ));
+                if !owner_matches || !sprite_matches || !return_as_object.as_bool().unwrap_or(false) {
+                    *get_error.borrow_mut() = Some("invalid generation-qualified Get arguments".to_owned());
+                    return flash_owned_test_error("invalid-arguments", "invalid generation-qualified Get arguments");
+                }
+                if !get_replace.get() {
+                    get_successful_generation.set(Some(requested_generation));
+                }
+                if get_replace.get() {
+                    get_replace.set(false);
+                    let invalidated = get_capability
+                        .invalidate_flash_instance_generation(1.0, requested_generation)
+                        .unwrap_or(false);
+                    let fresh = get_capability
+                        .reserve_flash_instance_generation(1.0)
+                        .unwrap_or(0.0);
+                    get_generation.set(fresh);
+                    if !invalidated || fresh <= requested_generation {
+                        *get_error.borrow_mut() = Some(format!(
+                            "replacement did not advance generation (invalidated={invalidated}, old={requested_generation}, fresh={fresh})"
+                        ));
+                    }
+                }
+                flash_owned_test_response(requested_generation, JsValue::from_str("stale-or-current-value"))
+            },
+        ) as Box<dyn FnMut(JsValue, JsValue, JsValue, JsValue, JsValue) -> JsValue>);
+
+        js_sys::Reflect::set(
+            &window,
+            &JsValue::from_str("dirplayer_ruffleGetVariableOwnedForBinding"),
+            bind_response.as_ref(),
+        )
+        .map_err(|error| format!("could not install BindGet fixture route: {error:?}"))?;
+        js_sys::Reflect::set(
+            &window,
+            &JsValue::from_str("dirplayer_ruffleGetVariableOwnedAtGeneration"),
+            get_response.as_ref(),
+        )
+        .map_err(|error| format!("could not install generation Get fixture route: {error:?}"))?;
+
+        self.eval("put getVariable(sprite(1), \"_root.fixture\", 0) into bound")
+            .await
+            .map_err(|error| format!("BindGet evaluator turn failed: {error:?}"))?;
+        let current_value = self
+            .eval_datum("bound.value")
+            .await
+            .map_err(|error| format!("generation-qualified Get failed: {error:?}"))?;
+        if !matches!(
+            &current_value,
+            crate::director::static_datum::StaticDatum::String(value)
+                if value == "stale-or-current-value"
+        ) {
+            return Err(format!("unexpected generation-qualified Get value: {current_value:?}"));
+        }
+        if let Some(error) = route_error.borrow_mut().take() {
+            return Err(error);
+        }
+        if successful_get_generation.get() != Some(initial_generation) {
+            return Err(format!(
+                "generation-qualified Get used {:?}, expected {initial_generation}",
+                successful_get_generation.get()
+            ));
+        }
+        let calls_before_replacement = calls.borrow().clone();
+        if calls_before_replacement.len() != 2
+            || !calls_before_replacement[0].starts_with("bind:")
+            || !calls_before_replacement[1].starts_with("get:")
+            || !calls_before_replacement[1].ends_with(&format!(":{initial_generation}"))
+        {
+            return Err(format!(
+                "unexpected BindGet/Get transport sequence: {calls_before_replacement:?}"
+            ));
+        }
+
+        replace_on_get.set(true);
+        let stale_result = self.eval_datum("bound.value").await;
+        if stale_result.is_ok() {
+            return Err("stale generation-qualified Get completed successfully".to_owned());
+        }
+        let fresh_generation = replacement_generation.get();
+        if fresh_generation <= initial_generation
+            || !assertion_capability
+                .is_flash_instance_generation_current(1.0, fresh_generation)
+                .map_err(|error| format!("fresh generation query failed: {error:?}"))?
+        {
+            return Err("replacement generation was not left current".to_owned());
+        }
+        if let Some(error) = route_error.borrow_mut().take() {
+            return Err(error);
+        }
+
+        self.eval("put getVariable(sprite(1), \"_root.fixture\", 0) into replacement")
+            .await
+            .map_err(|error| format!("replacement BindGet failed: {error:?}"))?;
+        let replacement_value = self
+            .eval_datum("replacement.value")
+            .await
+            .map_err(|error| format!("replacement Get failed: {error:?}"))?;
+        if !matches!(
+            &replacement_value,
+            crate::director::static_datum::StaticDatum::String(value)
+                if value == "stale-or-current-value"
+        ) {
+            return Err(format!("unexpected replacement Get value: {replacement_value:?}"));
+        }
+        if let Some(error) = route_error.borrow_mut().take() {
+            return Err(error);
+        }
+        if successful_get_generation.get() != Some(fresh_generation) {
+            return Err(format!(
+                "replacement Get used {:?}, expected {fresh_generation}",
+                successful_get_generation.get()
+            ));
+        }
+        let calls_after_replacement = calls.borrow().clone();
+        if calls_after_replacement.len() != 5
+            || calls_after_replacement
+                .iter()
+                .filter(|call| call.starts_with("bind:"))
+                .count()
+                != 2
+            || calls_after_replacement
+                .iter()
+                .filter(|call| call.starts_with("get:"))
+                .count()
+                != 3
+        {
+            return Err(format!(
+                "unexpected replacement transport sequence: {calls_after_replacement:?}"
+            ));
+        }
+        // Restore the production bridge before the callback closures are
+        // released, so a reentrant browser task can never observe a dropped
+        // fixture closure behind the restored global.
+        drop(_routes);
+        Ok(())
+    }
+
     async fn dispatch_sysmenu_global(
         &self,
         name: &str,
@@ -334,6 +944,274 @@ impl BrowserTestPlayer {
         crate::player::xtra::manager::execute_pending_intent(&session, player_id, intent)
             .await
             .map_err(|error| error.message)
+    }
+
+    async fn dispatch_budapi_global(
+        &self,
+        name: &str,
+        args: Vec<crate::player::DatumRef>,
+    ) -> Result<crate::player::DatumRef, String> {
+        let symbol = self
+            .harness_runtime()
+            .with_context(|mut context| context.symbols.intern(name))
+            .ok_or_else(|| "BudAPI test player is stale before dispatch".to_owned())?;
+        let session = self.harness_runtime().session();
+        let player_id = self.harness_runtime().player_id();
+        let dispatch = session
+            .borrow_mut()
+            .dispatch_global(player_id, &symbol, &args)
+            .map_err(|error| error.message)?;
+        let intent = match dispatch {
+            crate::player::driver::GlobalDispatch::PendingRequest {
+                request: crate::player::driver::InternalVmRequest::XtraPending(intent),
+                ..
+            } => intent,
+            crate::player::driver::GlobalDispatch::SyncResult(result) => {
+                return result.map_err(|error| error.message)
+            }
+            _ => return Err(format!("BudAPI global {name} did not produce a typed host intent")),
+        };
+        crate::player::xtra::manager::execute_pending_intent(&session, player_id, intent)
+            .await
+            .map_err(|error| error.message)
+    }
+
+    /// Run BudAPI through the real global-dispatch and browser host boundary.
+    /// The mocked alert re-enters reset, proving the host call is outside the
+    /// VM borrow and the post-host owner fence rejects the late result.
+    pub async fn test_budapi_host_effects(&mut self) -> Result<(), String> {
+        let window = web_sys::window().ok_or_else(|| "browser window is unavailable".to_owned())?;
+        let original_alert = js_sys::Reflect::get(&window, &JsValue::from_str("alert"))
+            .map_err(|_| "browser alert is unavailable".to_owned())?;
+        let session = self.harness_runtime().session();
+        let player_id = self.harness_runtime().player_id();
+        let owner = self.harness_runtime().owner().clone();
+        let reset_window = window.clone();
+        let reset_closure = Closure::wrap(Box::new(move || {
+            let succeeded = session
+                .borrow_mut()
+                .reset_player_owned(player_id, &owner)
+                .is_ok();
+            let _ = js_sys::Reflect::set(
+                &reset_window,
+                &JsValue::from_str("__budapiResetObserved"),
+                &JsValue::from_bool(succeeded),
+            );
+        }) as Box<dyn FnMut()>);
+        js_sys::Reflect::set(
+            &window,
+            &JsValue::from_str("__budapiResetDuringAlert"),
+            reset_closure.as_ref(),
+        )
+        .map_err(|_| "could not install BudAPI reset hook".to_owned())?;
+        js_sys::Reflect::set(
+            &window,
+            &JsValue::from_str("__budapiResetObserved"),
+            &JsValue::FALSE,
+        )
+        .map_err(|_| "could not initialize BudAPI reset marker".to_owned())?;
+
+        let alert_window = window.clone();
+        let alert_closure = Closure::wrap(Box::new(move |_value: JsValue| -> JsValue {
+            if let Ok(callback) = js_sys::Reflect::get(
+                &alert_window,
+                &JsValue::from_str("__budapiResetDuringAlert"),
+            ) {
+                if let Ok(callback) = callback.dyn_into::<js_sys::Function>() {
+                    let _ = callback.call0(&alert_window);
+                }
+            }
+            JsValue::UNDEFINED
+        }) as Box<dyn FnMut(JsValue) -> JsValue>);
+        js_sys::Reflect::set(&window, &JsValue::from_str("alert"), alert_closure.as_ref())
+            .map_err(|_| "could not install BudAPI alert hook".to_owned())?;
+
+        let args = self
+            .harness_runtime()
+            .with_context(|mut context| {
+                vec![context.player.alloc_datum(
+                    crate::director::lingo::datum::Datum::String("BudAPI fixture".to_owned()),
+                )]
+            })
+            .ok_or_else(|| "BudAPI player disappeared before dispatch".to_owned())?;
+        let result = self.dispatch_budapi_global("baMsgBox", args).await;
+        let reset_observed = js_sys::Reflect::get(
+            &window,
+            &JsValue::from_str("__budapiResetObserved"),
+        )
+        .ok()
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+
+        let _ = js_sys::Reflect::set(&window, &JsValue::from_str("alert"), &original_alert);
+        let _ = js_sys::Reflect::delete_property(&window, &JsValue::from_str("__budapiResetDuringAlert"));
+        let _ = js_sys::Reflect::delete_property(&window, &JsValue::from_str("__budapiResetObserved"));
+        if !self.harness_runtime().owner_valid() {
+            self.reset_player().await;
+        }
+        if result.is_ok() {
+            return Err("BudAPI message box completed after owner reset".to_owned());
+        }
+        if !reset_observed {
+            return Err("BudAPI alert did not re-enter the owner reset path".to_owned());
+        }
+
+        // Exercise a rejected clipboard promise while the host callback resets
+        // the owner.  The executor must catch the rejection, then reject the
+        // stale completion rather than mutating the replacement state.
+        let navigator = window.navigator();
+        let original_clipboard = js_sys::Reflect::get(
+            navigator.as_ref(),
+            &JsValue::from_str("clipboard"),
+        )
+        .map_err(|_| "could not inspect browser clipboard capability".to_owned())?;
+        let mut clipboard_replaced = false;
+        let clipboard = if original_clipboard.is_null() || original_clipboard.is_undefined() {
+            let fake = js_sys::Object::new();
+            let define = js_sys::Function::new_with_args(
+                "target, value",
+                "Object.defineProperty(target, 'clipboard', { configurable: true, writable: true, value: value });",
+            );
+            define
+                .call2(&JsValue::UNDEFINED, navigator.as_ref(), &fake)
+                .map_err(|_| "browser clipboard capability cannot be masked".to_owned())?;
+            clipboard_replaced = true;
+            fake.into()
+        } else {
+            original_clipboard.clone()
+        };
+        let original_write = js_sys::Reflect::get(&clipboard, &JsValue::from_str("writeText"))
+            .map_err(|_| "could not inspect browser clipboard writer".to_owned())?;
+        let mut clipboard_reset: Option<Closure<dyn FnMut()>> = None;
+        let mut rejection_write = None;
+        let throwing_write = js_sys::Function::new_no_args("throw new Error('clipboard fixture throw')");
+        if !js_sys::Reflect::set(&clipboard, &JsValue::from_str("writeText"), &throwing_write)
+            .map_err(|_| "could not install throwing clipboard writer".to_owned())?
+        {
+            return Err("browser clipboard writer cannot be masked".to_owned());
+        }
+        let throwing_copy_args = self
+            .harness_runtime()
+            .with_context(|mut context| {
+                vec![context.player.alloc_datum(
+                    crate::director::lingo::datum::Datum::String("synchronous clipboard throw".to_owned()),
+                )]
+            })
+            .ok_or_else(|| "BudAPI player disappeared before synchronous clipboard dispatch".to_owned())?;
+        if self.dispatch_budapi_global("baCopyText", throwing_copy_args).await.is_err() {
+            return Err("synchronous clipboard throw escaped the owner fallback".to_owned());
+        }
+
+        let reset_session = self.harness_runtime().session();
+        let reset_player_id = self.harness_runtime().player_id();
+        let reset_owner = self.harness_runtime().owner().clone();
+        let reset_window = window.clone();
+        let reset_closure = Closure::wrap(Box::new(move || {
+            let succeeded = reset_session
+                .borrow_mut()
+                .reset_player_owned(reset_player_id, &reset_owner)
+                .is_ok();
+            let _ = js_sys::Reflect::set(
+                &reset_window,
+                &JsValue::from_str("__budapiClipboardResetObserved"),
+                &JsValue::from_bool(succeeded),
+            );
+        }) as Box<dyn FnMut()>);
+        js_sys::Reflect::set(
+            &window,
+            &JsValue::from_str("__budapiResetDuringClipboard"),
+            reset_closure.as_ref(),
+        )
+        .map_err(|_| "could not install BudAPI clipboard reset hook".to_owned())?;
+        clipboard_reset = Some(reset_closure);
+        js_sys::Reflect::set(
+            &window,
+            &JsValue::from_str("__budapiClipboardResetObserved"),
+            &JsValue::FALSE,
+        )
+        .map_err(|_| "could not initialize BudAPI clipboard reset marker".to_owned())?;
+        let rejection_window = window.clone();
+        let rejection = Closure::wrap(Box::new(move |_value: JsValue| -> js_sys::Promise {
+            if let Ok(callback) = js_sys::Reflect::get(
+                &rejection_window,
+                &JsValue::from_str("__budapiResetDuringClipboard"),
+            ) {
+                if let Ok(callback) = callback.dyn_into::<js_sys::Function>() {
+                    let _ = callback.call0(&rejection_window);
+                }
+            }
+            js_sys::Promise::reject(&JsValue::from_str("clipboard fixture rejection"))
+        }) as Box<dyn FnMut(JsValue) -> js_sys::Promise>);
+        if !js_sys::Reflect::set(&clipboard, &JsValue::from_str("writeText"), rejection.as_ref())
+            .map_err(|_| "could not install rejected clipboard writer".to_owned())?
+        {
+            return Err("browser clipboard writer cannot install rejection fixture".to_owned());
+        }
+        rejection_write = Some(rejection);
+        {
+            let rejected_copy_args = self
+                .harness_runtime()
+                .with_context(|mut context| {
+                    vec![context.player.alloc_datum(
+                        crate::director::lingo::datum::Datum::String("rejected clipboard".to_owned()),
+                    )]
+                })
+                .ok_or_else(|| "BudAPI player disappeared before rejected clipboard dispatch".to_owned())?;
+            let rejected_copy = self.dispatch_budapi_global("baCopyText", rejected_copy_args).await;
+            let clipboard_reset_observed = js_sys::Reflect::get(
+                &window,
+                &JsValue::from_str("__budapiClipboardResetObserved"),
+            )
+            .ok()
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+            let _ = js_sys::Reflect::set(&clipboard, &JsValue::from_str("writeText"), &original_write);
+            drop(rejection_write);
+            drop(clipboard_reset);
+            let _ = js_sys::Reflect::delete_property(&window, &JsValue::from_str("__budapiResetDuringClipboard"));
+            let _ = js_sys::Reflect::delete_property(&window, &JsValue::from_str("__budapiClipboardResetObserved"));
+            if rejected_copy.is_ok() || !clipboard_reset_observed {
+                return Err("rejected clipboard completion crossed the retired owner".to_owned());
+            }
+            self.reset_player().await;
+        }
+        if clipboard_replaced {
+            let restore = js_sys::Function::new_with_args(
+                "target, value",
+                "Object.defineProperty(target, 'clipboard', { configurable: true, writable: true, value: value });",
+            );
+            let _ = restore.call2(&JsValue::UNDEFINED, navigator.as_ref(), &original_clipboard);
+        }
+
+        // With the real clipboard method restored (or absent), copy/paste
+        // must still work through the owner-local fallback state.
+        let copy_args = self
+            .harness_runtime()
+            .with_context(|mut context| {
+                vec![context.player.alloc_datum(
+                    crate::director::lingo::datum::Datum::String("BudAPI clipboard fixture".to_owned()),
+                )]
+            })
+            .ok_or_else(|| "BudAPI player disappeared before clipboard dispatch".to_owned())?;
+        self.dispatch_budapi_global("baCopyText", copy_args)
+            .await
+            .map_err(|error| format!("BudAPI clipboard write failed: {error}"))?;
+        let pasted = self.dispatch_budapi_global("baPasteText", Vec::new()).await
+            .map_err(|error| format!("BudAPI clipboard read failed: {error}"))?;
+        let pasted_text = self
+            .harness_runtime()
+            .with_context(|context| {
+                context.player.allocator.try_get_datum(&pasted).and_then(|datum| match datum {
+                    crate::director::lingo::datum::Datum::String(value) => Some(value.clone()),
+                    _ => None,
+                })
+            })
+            .flatten()
+            .ok_or_else(|| "BudAPI clipboard read returned a non-string".to_owned())?;
+        if pasted_text != "BudAPI clipboard fixture" {
+            return Err(format!("unexpected BudAPI clipboard value: {pasted_text:?}"));
+        }
+        Ok(())
     }
 
     /// Run SysMenu through the production global-dispatch and owner-bound host
@@ -508,6 +1386,338 @@ impl BrowserTestPlayer {
     /// cached sprite textures from a previously loaded movie.
     /// Call the JS bridge's `resolveAndLoadMovieXtras()` (exposed on `window`
     /// by the runner template) and await it. No-op when the hook is absent.
+    fn install_playback_effect_fixture(
+        handle: &crate::BrowserPlayerHandle,
+    ) -> Result<PlaybackEffectMarkers, String> {
+        handle
+            .with_context(|context| {
+                let prepare_movie = Symbol::builtin(BuiltInSymbol::PrepareMovie);
+                let prepare_frame = Symbol::builtin(BuiltInSymbol::PrepareFrame);
+                let enter_frame = Symbol::builtin(BuiltInSymbol::EnterFrame);
+                let start_movie = Symbol::builtin(BuiltInSymbol::StartMovie);
+                let stop_movie = Symbol::builtin(BuiltInSymbol::StopMovie);
+                let end_sprite = Symbol::builtin(BuiltInSymbol::EndSprite);
+                let init = context.symbols.intern("browserPlaybackInit");
+                let frame = context.symbols.intern("browserPlaybackFrame");
+                let stop_marker = context.symbols.intern("browserPlaybackStopMovie");
+                let end_after_stop = context.symbols.intern("browserPlaybackEndSpriteAfterStop");
+                // Index zero is the event symbol; the remaining entries are
+                // the globals addressed by the bytecode operands below.
+                let names = vec![
+                    stop_movie.clone(),
+                    init.clone(),
+                    frame.clone(),
+                    stop_marker.clone(),
+                    end_after_stop.clone(),
+                ];
+                for marker in [&init, &frame, &stop_marker, &end_after_stop] {
+                    let value = context
+                        .player
+                        .allocator
+                        .alloc_datum(Datum::Int(0), &mut context.player.bitmap_manager)
+                        .map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()))?;
+                    context.player.globals.insert(marker.clone(), value);
+                }
+
+                let chunk = || ScriptChunk {
+                    script_number: 1,
+                    literals: vec![],
+                    handlers: vec![],
+                    property_name_ids: vec![],
+                    property_defaults: HashMap::new(),
+                };
+                let mut movie_handlers = FxHashMap::default();
+                movie_handlers.insert(
+                    prepare_movie.clone(),
+                    playback_counter_handler(1, names.len()),
+                );
+                movie_handlers.insert(
+                    start_movie,
+                    playback_counter_handler(1, names.len()),
+                );
+                movie_handlers.insert(
+                    prepare_frame,
+                    playback_counter_handler(2, names.len()),
+                );
+                movie_handlers.insert(
+                    enter_frame,
+                    playback_counter_handler(2, names.len()),
+                );
+                movie_handlers.insert(
+                    stop_movie.clone(),
+                    playback_counter_handler(3, names.len()),
+                );
+                let movie_ref = CastMemberRef { cast_lib: 1, cast_member: 2 };
+                let behavior_ref = CastMemberRef { cast_lib: 1, cast_member: 1 };
+                let movie_script = Rc::new(Script {
+                    member_ref: movie_ref,
+                    name: "browser-playback-movie".to_owned(),
+                    chunk: chunk(),
+                    script_type: ScriptType::Movie,
+                    handlers: movie_handlers,
+                    handler_names_raw: vec![
+                        "prepareMovie".to_owned(),
+                        "startMovie".to_owned(),
+                        "prepareFrame".to_owned(),
+                        "enterFrame".to_owned(),
+                        "stopMovie".to_owned(),
+                    ],
+                    handler_names: vec![
+                        prepare_movie,
+                        Symbol::builtin(BuiltInSymbol::StartMovie),
+                        Symbol::builtin(BuiltInSymbol::PrepareFrame),
+                        Symbol::builtin(BuiltInSymbol::EnterFrame),
+                        stop_movie,
+                    ],
+                    properties: RefCell::new(FxHashMap::default()),
+                });
+                let behavior_script = Rc::new(Script {
+                    member_ref: behavior_ref.clone(),
+                    name: "browser-playback-behavior".to_owned(),
+                    chunk: chunk(),
+                    script_type: ScriptType::Score,
+                    handlers: FxHashMap::from_iter([(
+                        end_sprite.clone(),
+                        playback_end_sprite_handler(3, 4, names.len()),
+                    )]),
+                    handler_names_raw: vec!["endSprite".to_owned()],
+                    handler_names: vec![end_sprite],
+                    properties: RefCell::new(FxHashMap::default()),
+                });
+                let mut cast = CastLib::test_external(1, 0);
+                cast.name_symbols = Rc::from(names);
+                cast.scripts.insert(1, behavior_script);
+                cast.scripts.insert(2, movie_script);
+                context.player.movie.cast_manager.casts.push(cast);
+
+                let instance = context.player.allocator.alloc_script_instance(ScriptInstance {
+                    instance_id: 1,
+                    script: behavior_ref,
+                    ancestor: None,
+                    properties: FxHashMap::default(),
+                    begin_sprite_called: false,
+                });
+                let mut channel = SpriteChannel::new(1);
+                channel.sprite.entered = true;
+                channel.sprite.script_instance_list = vec![instance];
+                context.player.movie.score.channels = vec![SpriteChannel::new(0), channel];
+                context.player.movie.score.invalidate_render_channel_cache();
+                Ok::<_, wasm_bindgen::JsValue>(PlaybackEffectMarkers {
+                    init,
+                    frame,
+                    stop_movie: stop_marker,
+                    end_sprite_after_stop: end_after_stop,
+                })
+            })
+            .and_then(|result| result)
+            .map_err(|error| format!("playback effect fixture setup failed: {error:?}"))
+    }
+
+    /// Exercise the public handle playback boundary without a movie asset.
+    /// The assertions cover the part that was previously untestable: one
+    /// owner gets one cancellable loop, stop wakes it, replay claims a fresh
+    /// epoch, and reset cannot cancel or clear the other handle's loop.
+    pub async fn test_browser_handle_public_play(&self) -> Result<(), String> {
+        let mut first = crate::BrowserPlayerHandle::new()
+            .map_err(|error| format!("first handle construction failed: {error:?}"))?;
+        let second = crate::BrowserPlayerHandle::new()
+            .map_err(|error| format!("second handle construction failed: {error:?}"))?;
+        let first_owner = first.owner.clone();
+        let second_owner = second.owner.clone();
+        let first_container = create_public_play_test_container("first")?;
+        let second_container = create_public_play_test_container("second")?;
+        first
+            .create_canvas(first_container)
+            .map_err(|error| format!("first renderer creation failed: {error:?}"))?;
+        second
+            .create_canvas(second_container)
+            .map_err(|error| format!("second renderer creation failed: {error:?}"))?;
+        let first_markers = Self::install_playback_effect_fixture(&first)?;
+        let second_markers = Self::install_playback_effect_fixture(&second)?;
+
+        first
+            .play()
+            .map_err(|error| format!("first play failed: {error:?}"))?;
+        first
+            .play()
+            .map_err(|error| format!("duplicate first play failed: {error:?}"))?;
+        second
+            .play()
+            .map_err(|error| format!("second play failed: {error:?}"))?;
+        if !first
+            .session
+            .borrow()
+            .playback_loop_active(first.player_id, &first_owner)
+            || !second
+                .session
+                .borrow()
+                .playback_loop_active(second.player_id, &second_owner)
+        {
+            return Err("public play did not install both owner loops".into());
+        }
+
+        for _ in 0..32 {
+            async_std::task::yield_now().await;
+        }
+        let first_effects = first
+            .session
+            .borrow_mut()
+            .with_player(first.player_id, |context| {
+                (
+                    context.player.is_playing,
+                    context.player.last_initialized_frame,
+                    context.player.movie.current_frame,
+                    context.player.playback_init_count,
+                    context.player.playback_frame_count,
+                    context.player.playback_stop_count,
+                )
+            })
+            .ok_or_else(|| "first owner disappeared during initial playback".to_string())?;
+        if !first_effects.0 || first_effects.1.is_none() {
+            return Err(format!(
+                "initial playback did not complete owned init: playing={}, initialized_frame={:?}",
+                first_effects.0, first_effects.1
+            ));
+        }
+        if read_playback_marker(&first, &first_markers.init)? != 2
+            || read_playback_marker(&first, &first_markers.frame)? == 0
+            || read_playback_marker(&second, &second_markers.init)? == 0
+        {
+            return Err("owned init/frame handlers did not update the expected owner globals".into());
+        }
+        if read_playback_marker(&first, &first_markers.stop_movie)? != 0
+            || read_playback_marker(&first, &first_markers.end_sprite_after_stop)? != 0
+        {
+            return Err("stop lifecycle markers were set before stop()".into());
+        }
+
+        first
+            .stop()
+            .map_err(|error| format!("first stop failed: {error:?}"))?;
+        let stopped = first
+            .session
+            .borrow_mut()
+            .with_player(first.player_id, |context| context.player.is_playing)
+            .ok_or_else(|| "first owner disappeared after stop".to_string())?;
+        if stopped {
+            return Err("stop returned while the first owner was still playing".into());
+        }
+        // Queue the replay before yielding so the stopped epoch must retain
+        // the request until its StopMovie/endSprite cleanup completes.
+        first
+            .play()
+            .map_err(|error| format!("immediate first replay failed: {error:?}"))?;
+        for _ in 0..32 {
+            async_std::task::yield_now().await;
+            if read_playback_marker(&first, &first_markers.end_sprite_after_stop)? != 0 {
+                break;
+            }
+        }
+        if read_playback_marker(&first, &first_markers.stop_movie)? == 0
+            || read_playback_marker(&first, &first_markers.end_sprite_after_stop)?
+                != read_playback_marker(&first, &first_markers.stop_movie)?
+        {
+            return Err("StopMovie/endSprite handlers did not observe the real lifecycle order".into());
+        }
+        if read_playback_marker(&second, &second_markers.stop_movie)? != 0 {
+            return Err("stopping the first owner mutated the second owner lifecycle".into());
+        }
+        // The second owner remains live while the first owner completes its
+        // queued stop-cleanup/replay handoff.
+        for _ in 0..8 {
+            async_std::task::yield_now().await;
+        }
+        if !second
+            .session
+            .borrow()
+            .playback_loop_active(second.player_id, &second_owner)
+        {
+            return Err("stopping first handle affected second owner".into());
+        }
+
+        let mut replayed = false;
+        for _ in 0..64 {
+            async_std::task::yield_now().await;
+            if first
+                .session
+                .borrow()
+                .playback_loop_active(first.player_id, &first.owner)
+            {
+                replayed = true;
+                break;
+            }
+        }
+        if !replayed {
+            return Err("immediate replay did not claim a replacement epoch".into());
+        }
+        let replay_effects = first
+            .session
+            .borrow_mut()
+            .with_player(first.player_id, |context| {
+                (
+                    context.player.is_playing,
+                    context.player.last_initialized_frame,
+                    context.player.playback_init_count,
+                    context.player.playback_frame_count,
+                    context.player.playback_stop_count,
+                )
+            })
+            .ok_or_else(|| "first owner disappeared during replay".to_string())?;
+        if !replay_effects.0 || replay_effects.1 != first_effects.1 {
+            return Err(format!(
+                "replay did not restore playback without reinitializing: playing={}, initialized_frame={:?}, before={:?}",
+                replay_effects.0, replay_effects.1, first_effects.1
+            ));
+        }
+        if replay_effects.2 != first_effects.3 {
+            return Err(format!(
+                "replay reinitialized the movie: init_count={} before={}",
+                replay_effects.2, first_effects.3
+            ));
+        }
+        if replay_effects.3 <= first_effects.4 {
+            return Err(format!(
+                "replay did not advance a frame: frame_count={} before={}",
+                replay_effects.3, first_effects.4
+            ));
+        }
+        // The initialization marker is deliberately stable at two handler
+        // invocations (prepareMovie + startMovie). Frame progress is checked
+        // by the production frame counter above; this proves replay did not
+        // run initialization again.
+        if read_playback_marker(&first, &first_markers.init)? != 2 {
+            return Err("replay reran the synthetic initialization handlers".into());
+        }
+        if replay_effects.4 <= first_effects.5 {
+            return Err(format!(
+                "stop lifecycle did not run: stop_count={} before={}",
+                replay_effects.4, first_effects.5
+            ));
+        }
+        first
+            .reset()
+            .map_err(|error| format!("first reset failed: {error:?}"))?;
+        if first_owner.is_arena_live()
+            || first
+                .session
+                .borrow()
+                .playback_loop_active(first.player_id, &first_owner)
+        {
+            return Err("reset left stale playback ownership alive".into());
+        }
+        if !second
+            .session
+            .borrow()
+            .playback_loop_active(second.player_id, &second_owner)
+        {
+            return Err("reset of first handle affected second owner".into());
+        }
+        second
+            .stop()
+            .map_err(|error| format!("second stop failed: {error:?}"))?;
+        Ok(())
+    }
+
     async fn resolve_movie_xtras() {
         let Some(window) = web_sys::window() else { return };
         let Ok(hook) = js_sys::Reflect::get(&window, &JsValue::from_str("dirplayer_resolveAndLoadMovieXtras")) else { return };
@@ -528,10 +1738,19 @@ impl BrowserTestPlayer {
     }
 
     fn register_flash_owner(&mut self) {
+        let flash_scripted_access_pending = self
+            .runtime
+            .session()
+            .borrow_mut()
+            .with_player(self.runtime.player_id(), |context| {
+                context.player.flash_scripted_access_pending.clone()
+            })
+            .expect("browser test player must expose Flash readiness state");
         let capability = BrowserFlashCapability::new(
             self.runtime.session(),
             self.runtime.player_id(),
             self.runtime.owner().clone(),
+            flash_scripted_access_pending.clone(),
             self.command_tx.clone(),
         );
         // The JS callback registration owns its own wasm-bindgen wrapper. Keep
@@ -543,6 +1762,7 @@ impl BrowserTestPlayer {
             self.runtime.session(),
             self.runtime.player_id(),
             self.runtime.owner().clone(),
+            flash_scripted_access_pending,
             self.command_tx.clone(),
         );
         let owner_key = capability.owner_identity();
@@ -678,8 +1898,19 @@ impl BrowserTestPlayer {
             });
         }
 
-        // Load the system font (required for text rendering)
-        crate::player::font::player_load_system_font("/assets/charmap-system.png").await;
+        // Load the system font (required for text rendering). Decode happens
+        // outside the session borrow; installation remains bound to this
+        // runtime's captured owner generation.
+        let font_session = self.runtime.session();
+        let font_player_id = self.runtime.player_id();
+        let font_owner = self.runtime.owner().clone();
+        let _ = crate::player::font::player_load_system_font_owned(
+            font_session,
+            font_player_id,
+            font_owner,
+            "/assets/charmap-system.png".to_owned(),
+        )
+        .await;
     }
 
     /// Wait for the next animation frame.

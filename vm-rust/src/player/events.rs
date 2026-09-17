@@ -4426,6 +4426,215 @@ mod owned_event_scope_tests {
         })
     }
 
+    fn playback_counter_handler(
+        global_index: u16,
+        names_len: usize,
+        fail_after_increment: bool,
+    ) -> std::rc::Rc<crate::director::chunks::handler::HandlerDef> {
+        let mut bytecode_array = vec![
+            crate::director::chunks::handler::Bytecode::new(
+                crate::director::lingo::opcode::OpCode::GetGlobal,
+                global_index as i64,
+                0,
+            ),
+            crate::director::chunks::handler::Bytecode::new(
+                crate::director::lingo::opcode::OpCode::PushInt8,
+                1,
+                1,
+            ),
+            crate::director::chunks::handler::Bytecode::new(
+                crate::director::lingo::opcode::OpCode::Add,
+                0,
+                2,
+            ),
+            crate::director::chunks::handler::Bytecode::new(
+                crate::director::lingo::opcode::OpCode::SetGlobal,
+                global_index as i64,
+                3,
+            ),
+        ];
+        bytecode_array.push(crate::director::chunks::handler::Bytecode::new(
+            if fail_after_increment {
+                crate::director::lingo::opcode::OpCode::Invalid
+            } else {
+                crate::director::lingo::opcode::OpCode::Ret
+            },
+            0,
+            4,
+        ));
+        std::rc::Rc::new(crate::director::chunks::handler::HandlerDef {
+            name_id: 0,
+            bytecode_array,
+            bytecode_index_map: fxhash::FxHashMap::default(),
+            argument_name_ids: vec![],
+            local_name_ids: vec![],
+            global_name_ids: (1..names_len as u16).collect(),
+            compiled_ir: std::cell::RefCell::new(None),
+        })
+    }
+
+    fn install_playback_cleanup_fixture(
+        session: &RuntimeSessionHandle,
+    ) -> (Symbol, Symbol, CastMemberRef) {
+        let (stop_count, end_count) = session
+            .borrow_mut()
+            .with_player(1, |context| {
+                (
+                    context.symbols.intern("ownedStopMovieCount"),
+                    context.symbols.intern("ownedEndSpriteCount"),
+                )
+            })
+            .expect("cleanup fixture player exists");
+        let stop_movie = Symbol::builtin(BuiltInSymbol::StopMovie);
+        let end_sprite = Symbol::builtin(BuiltInSymbol::EndSprite);
+        let member_ref = CastMemberRef { cast_lib: 1, cast_member: 1 };
+        let filmloop_ref = CastMemberRef { cast_lib: 1, cast_member: 2 };
+        session
+            .borrow_mut()
+            .with_player(1, |context| {
+                let mut script = event_script(
+                    member_ref.clone(),
+                    crate::director::enums::ScriptType::Score,
+                    stop_movie.clone(),
+                    playback_counter_handler(2, 4, true),
+                );
+                std::rc::Rc::get_mut(&mut script)
+                    .expect("cleanup fixture script must be uniquely owned")
+                    .handlers
+                    .insert(
+                        end_sprite,
+                        playback_counter_handler(3, 4, false),
+                    );
+                let instance = context.player.allocator.alloc_script_instance(
+                    crate::player::script::ScriptInstance {
+                        instance_id: 1,
+                        script: member_ref.clone(),
+                        ancestor: None,
+                        properties: fxhash::FxHashMap::default(),
+                        begin_sprite_called: false,
+                    },
+                );
+                let filmloop_instance = context.player.allocator.alloc_script_instance(
+                    crate::player::script::ScriptInstance {
+                        instance_id: 2,
+                        script: member_ref.clone(),
+                        ancestor: None,
+                        properties: fxhash::FxHashMap::default(),
+                        begin_sprite_called: false,
+                    },
+                );
+                let mut cast = crate::player::cast_lib::CastLib::test_external(1, 0);
+                cast.name_symbols = std::rc::Rc::from(vec![
+                    stop_movie,
+                    Symbol::builtin(BuiltInSymbol::EndSprite),
+                    stop_count.clone(),
+                    end_count.clone(),
+                ]);
+                cast.scripts.insert(1, script);
+                let mut filmloop_score = crate::player::score::Score::empty();
+                filmloop_score.sprite_spans.push(crate::player::score::ScoreSpriteSpan {
+                    channel_number: 1,
+                    start_frame: 1,
+                    end_frame: 20,
+                    scripts: Vec::new(),
+                });
+                filmloop_score.channels = vec![
+                    crate::player::score::SpriteChannel::new(0),
+                    crate::player::score::SpriteChannel::new(1),
+                ];
+                filmloop_score.channels[1].sprite.entered = true;
+                filmloop_score.channels[1].sprite.visible = true;
+                filmloop_score.channels[1].sprite.script_instance_list = vec![filmloop_instance];
+                cast.members.insert(
+                    2,
+                    crate::player::cast_member::CastMember::new(
+                        1,
+                        crate::player::cast_member::CastMemberType::FilmLoop(
+                            crate::player::cast_member::FilmLoopMember {
+                                info: crate::director::enums::FilmLoopInfo {
+                                    reg_point: (0, 0),
+                                    width: 1,
+                                    height: 1,
+                                    center: 0,
+                                    crop: 0,
+                                    sound: 0,
+                                    loops: 0,
+                                },
+                                score_chunk: crate::director::chunks::score::ScoreChunk {
+                                    header: crate::director::chunks::score::ScoreChunkHeader {
+                                        total_length: 0,
+                                        unk1: 0,
+                                        unk2: 0,
+                                        entry_count: 0,
+                                        unk3: 0,
+                                        entry_size_sum: 0,
+                                    },
+                                    entries: Vec::new(),
+                                    frame_intervals: Vec::new(),
+                                    frame_data: Default::default(),
+                                    sprite_details: std::collections::HashMap::new(),
+                                },
+                                score: filmloop_score,
+                                current_frame: 1,
+                                initial_rect: crate::player::geometry::IntRect {
+                                    left: 0,
+                                    top: 0,
+                                    right: 1,
+                                    bottom: 1,
+                                },
+                                cached_total_frames: Some(20),
+                            },
+                        ),
+                    ),
+                );
+                context.player.movie.cast_manager.casts.push(cast);
+                context.player.movie.score.channels = vec![
+                    crate::player::score::SpriteChannel::new(0),
+                    crate::player::score::SpriteChannel::new(1),
+                ];
+                let channel = &mut context.player.movie.score.channels[1];
+                channel.sprite.entered = true;
+                channel.sprite.visible = true;
+                channel.sprite.member = Some(filmloop_ref.clone());
+                channel.sprite.script_instance_list = vec![instance];
+                context.player.movie.score.sprite_spans.push(
+                    crate::player::score::ScoreSpriteSpan {
+                        channel_number: 1,
+                        start_frame: 1,
+                        end_frame: 20,
+                        scripts: Vec::new(),
+                    },
+                );
+                let zero = context.player.alloc_datum(
+                    crate::director::lingo::datum::Datum::Int(0),
+                );
+                context.player.globals.insert(stop_count.clone(), zero);
+                let zero = context.player.alloc_datum(
+                    crate::director::lingo::datum::Datum::Int(0),
+                );
+                context.player.globals.insert(end_count.clone(), zero);
+            })
+            .expect("cleanup fixture must remain owner-bound");
+        (stop_count, end_count, filmloop_ref)
+    }
+
+    fn read_playback_counter(session: &RuntimeSessionHandle, marker: &Symbol) -> i32 {
+        session
+            .borrow_mut()
+            .with_player(1, |context| {
+                context
+                    .player
+                    .globals
+                    .get(marker)
+                    .and_then(|value| match context.player.get_datum(value) {
+                        crate::director::lingo::datum::Datum::Int(value) => Some(*value),
+                        _ => None,
+                    })
+                    .unwrap_or(0)
+            })
+            .expect("cleanup counter player exists")
+    }
+
     fn install_behavior_fixture(
         session: &RuntimeSessionHandle,
         first_handler: std::rc::Rc<crate::director::chunks::handler::HandlerDef>,
@@ -4705,6 +4914,115 @@ mod owned_event_scope_tests {
     }
 
     #[test]
+    fn stop_cleanup_reports_callback_error_once_and_consumes_replay() {
+        let session = session_handle();
+        let (stop_count, end_count, filmloop_ref) = install_playback_cleanup_fixture(&session);
+        let captured = owner(&session);
+        let (epoch, _cancel_rx) = session
+            .borrow_mut()
+            .begin_playback_loop(1, &captured)
+            .expect("cleanup loop must be claimable")
+            .expect("cleanup loop must be installed");
+        assert_eq!(
+            session
+                .borrow_mut()
+                .cancel_playback_loop(1, &captured, true),
+            Some(epoch)
+        );
+        assert!(session
+            .borrow_mut()
+            .begin_playback_loop(1, &captured)
+            .expect("same-owner replay must be queued")
+            .is_none());
+
+        crate::player::reset_test_script_error_count();
+        let result = async_std::task::block_on(drive_with_production_pump(
+            session.clone(),
+            1,
+            captured.clone(),
+            crate::player::stop_movie_sequence_owned(session.clone(), 1, captured.clone()),
+        ));
+        assert_eq!(
+            result.as_ref().err().map(|error| error.code.clone()),
+            Some(crate::player::ScriptErrorCode::Generic),
+            "live StopMovie callback error must reach cleanup"
+        );
+        assert_eq!(
+            crate::player::test_script_error_count(),
+            0,
+            "StopMovie cleanup carries the callback failure to its finalizer"
+        );
+        assert_eq!(read_playback_counter(&session, &stop_count), 1);
+        assert_eq!(read_playback_counter(&session, &end_count), 2);
+        let exited = session
+            .borrow_mut()
+            .with_player(1, |context| {
+                let stage = context.player.movie.score.channels[1].sprite.exited;
+                let filmloop = context
+                    .player
+                    .movie
+                    .cast_manager
+                    .find_member_by_ref(&filmloop_ref)
+                    .and_then(|member| member.member_type.as_film_loop())
+                    .map(|filmloop| filmloop.score.channels[1].sprite.exited);
+                (stage, filmloop)
+            })
+            .expect("cleanup fixture owner must remain live");
+        assert_eq!(exited, (true, Some(true)));
+
+        // Exercise the same finalizer used by start_playback_owned. A cleanup
+        // error reports once, retires the old loop, and consumes replay without
+        // launching a replacement loop.
+        crate::player::reset_test_script_error_count();
+        crate::player::finish_playback_owned(
+            session.clone(),
+            1,
+            captured.clone(),
+            epoch,
+            result,
+        );
+        assert_eq!(read_playback_counter(&session, &stop_count), 1);
+        assert_eq!(read_playback_counter(&session, &end_count), 2);
+        assert_eq!(
+            crate::player::test_script_error_count(),
+            1,
+            "the real cleanup failure is reported exactly once by the finalizer"
+        );
+
+        // Abort is cancellation rather than a script failure. It still
+        // consumes a queued replay so a canceled old loop cannot restart, but
+        // the live replacement owner must observe no ScriptError callback.
+        let (abort_epoch, _abort_cancel_rx) = session
+            .borrow_mut()
+            .begin_playback_loop(1, &captured)
+            .expect("cleanup owner must remain live")
+            .expect("failed cleanup must not auto-restart playback");
+        assert!(session
+            .borrow_mut()
+            .begin_playback_loop(1, &captured)
+            .expect("abort replay request must be accepted")
+            .is_none());
+        crate::player::reset_test_script_error_count();
+        crate::player::finish_playback_owned(
+            session.clone(),
+            1,
+            captured.clone(),
+            abort_epoch,
+            Err(crate::player::cancelled_scope_error()),
+        );
+        assert_eq!(
+            crate::player::test_script_error_count(),
+            0,
+            "Abort cancellation must not report a ScriptError"
+        );
+        let (_after_abort_epoch, _after_abort_cancel) = session
+            .borrow_mut()
+            .begin_playback_loop(1, &captured)
+            .expect("Abort finalizer must leave the owner usable")
+            .expect("Abort finalizer must consume queued replay");
+    }
+
+    #[test]
     fn queued_targeted_event_reports_foreign_instance_lookup_error() {
         use crate::director::chunks::handler::Bytecode;
         use crate::director::lingo::opcode::OpCode;
@@ -4850,12 +5168,14 @@ mod owned_event_scope_tests {
         let mut raw_session = RuntimeSession::new(SymbolOwner { session: 913, generation: 1 });
         assert!(raw_session.add_player(1, channel::unbounded().0));
         let session = Rc::new(RefCell::new(raw_session));
-        let (event, nothing) = session
+        let (event, nothing, replacement_event, replacement_marker) = session
             .borrow_mut()
             .with_player(1, |context| {
                 (
                     context.symbols.intern("suspendedTargeted"),
                     Symbol::builtin(BuiltInSymbol::Nothing),
+                    context.symbols.intern("replacementTargeted"),
+                    context.symbols.intern("replacementTargetedMarker"),
                 )
             })
             .expect("suspended-target fixture player exists");
@@ -4868,17 +5188,39 @@ mod owned_event_scope_tests {
                 Bytecode::new(OpCode::Ret, 0, 2),
             ],
         );
-        let script = event_script(member_ref.clone(), ScriptType::Movie, event.clone(), handler);
+        let mut script = event_script(member_ref.clone(), ScriptType::Movie, event.clone(), handler);
+        let replacement_handler = std::rc::Rc::new(crate::director::chunks::handler::HandlerDef {
+            name_id: 0,
+            bytecode_array: vec![
+                Bytecode::new(OpCode::PushInt8, 42, 0),
+                Bytecode::new(OpCode::SetGlobal, 3, 1),
+                Bytecode::new(OpCode::Ret, 0, 2),
+            ],
+            bytecode_index_map: fxhash::FxHashMap::default(),
+            argument_name_ids: vec![],
+            local_name_ids: vec![],
+            global_name_ids: (1..4).collect(),
+            compiled_ir: std::cell::RefCell::new(None),
+        });
+        std::rc::Rc::get_mut(&mut script)
+            .expect("suspended-target fixture script must be uniquely owned")
+            .handlers
+            .insert(replacement_event.clone(), replacement_handler);
         let instance = session
             .borrow_mut()
             .with_player(1, |context| {
                 let mut cast = CastLib::test_external(1, 0);
-                cast.name_symbols = Rc::from(vec![event.clone(), nothing]);
+                cast.name_symbols = Rc::from(vec![
+                    event.clone(),
+                    nothing,
+                    replacement_event.clone(),
+                    replacement_marker.clone(),
+                ]);
                 cast.scripts.insert(1, script);
                 context.player.movie.cast_manager.casts.push(cast);
                 let instance = context.player.allocator.alloc_script_instance(ScriptInstance {
                     instance_id: 1,
-                    script: member_ref,
+                        script: member_ref.clone(),
                     ancestor: None,
                     properties: fxhash::FxHashMap::default(),
                     begin_sprite_called: false,
@@ -4918,6 +5260,57 @@ mod owned_event_scope_tests {
                 }),
             Some((false, 0)),
             "dropping a suspended targeted event must not mutate the replacement"
+        );
+
+        // Reuse the retained script under the replacement allocator and prove
+        // the new owner can complete a fresh callback after the old pending
+        // request was cancelled. A stale completion must not satisfy or mutate
+        // this replacement callback.
+        let replacement_instance = session
+            .borrow_mut()
+            .with_player(1, |context| {
+                let instance = context.player.allocator.alloc_script_instance(ScriptInstance {
+                    instance_id: 2,
+                    script: member_ref.clone(),
+                    ancestor: None,
+                    properties: fxhash::FxHashMap::default(),
+                    begin_sprite_called: false,
+                });
+                context.player.movie.score.channels =
+                    vec![SpriteChannel::new(0), SpriteChannel::new(1)];
+                context.player.movie.score.channels[1].sprite.entered = true;
+                context.player.movie.score.channels[1].sprite.script_instance_list =
+                    vec![instance.clone()];
+                instance
+            })
+            .expect("replacement callback fixture must install");
+        let replacement_result = async_std::task::block_on(drive_with_production_pump(
+            session.clone(),
+            1,
+            replacement.clone(),
+            dispatch_targeted_vm_event_owned(
+                Some(&session),
+                1,
+                Some(&replacement),
+                PlayerVMEvent::Targeted(
+                    replacement_event,
+                    vec![],
+                    Some(vec![replacement_instance]),
+                ),
+            ),
+        ));
+        assert!(replacement_result.is_ok(), "replacement callback failed: {:?}", replacement_result.err());
+        assert_eq!(
+            session.borrow_mut().with_player(1, |context| {
+                context.player.globals.get(&replacement_marker).and_then(|value| {
+                    match context.player.get_datum(value) {
+                        crate::director::lingo::datum::Datum::Int(value) => Some(*value),
+                        _ => None,
+                    }
+                })
+            }),
+            Some(Some(42)),
+            "replacement callback must complete after old pending callback cancellation",
         );
     }
 

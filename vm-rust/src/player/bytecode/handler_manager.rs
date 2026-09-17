@@ -294,6 +294,7 @@ impl StaticBytecodeHandlerManager {
             OpCode::ExtCall => true,
             OpCode::ObjCall => true,
             OpCode::ObjCallV4 => true,
+            OpCode::GetObjProp => true,
             OpCode::SetObjProp => true,
             OpCode::TellCall => true,
             _ => false,

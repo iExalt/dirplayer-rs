@@ -308,7 +308,7 @@ pub(crate) async fn wait_for_flash_ready(sprite_num: i16) {
 /// `_level0`, so prefix a bare name with `_level0.` (JS translateLevel0 maps
 /// `_level0` → `_root` before it reaches Ruffle). Already-qualified paths are
 /// left untouched.
-fn root_flash_path(path: &str) -> String {
+pub(crate) fn root_flash_path(path: &str) -> String {
     if path.is_empty()
         || path.starts_with("_level0")
         || path.starts_with("_root")
@@ -1833,11 +1833,7 @@ impl SpriteDatumHandlers {
                         .and_then(|s| s.member.as_ref())
                         .map(|m| (m.cast_lib, m.cast_member))
                         .unwrap_or((0, 0));
-                    let id = super::flash_object::FLASH_OBJECT_COUNTER.with(|c| {
-                        let v = c.get() + 1;
-                        c.set(v);
-                        v
-                    });
+                    let id = player.next_flash_object_id()?;
                     // Sanitise the class name into a readable, valid AS path segment.
                     let safe: String = object_type
                         .chars()

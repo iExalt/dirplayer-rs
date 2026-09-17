@@ -8,8 +8,9 @@ import {
   resolveAndLoadMovieXtras,
   setXtraRegistry,
   getXtraRegistry,
+  dispatchVmCallback,
 } from "dirplayer-js-api";
-import { createFlashInstanceForOwner, destroyFlashInstance, destroyAllFlashInstances, initFlashBridge, localConnectionSendForOwner, playFlashForOwner } from "../services/flashPlayerManager";
+import { callFunctionForOwner, createFlashInstanceForOwner, destroyFlashInstance, destroyAllFlashInstances, getVariableForOwner, goToFrameAndStopForOwner, goToFrameForOwner, initFlashBridge, isFlashInstanceReadyForOwner, localConnectionSendForOwner, playFlashForOwner, setVariableForOwner } from "../services/flashPlayerManager";
 import store from "../store";
 import { breakpointListChanged, castLibNameChanged, castListChanged, castMemberChanged, castMemberListChanged, channelChanged, channelDisplayNameChanged, channelDisplayNamesChanged, datumSnapshot, debugContentAdded, debugMessageAdded, debugMessagesCleared, frameChanged, globalsChanged, movieLoaded, movieLoadFailed, onScriptError, removeTimeoutHandle, scopeListChanged, scoreChanged, scriptErrorCleared, scriptInstanceSnapshot, setTimeoutHandle } from "../store/vmSlice";
 import type { BrowserPlayerHandle, OnMovieLoadedCallbackData } from 'vm-rust'
@@ -17,6 +18,29 @@ import type { DebugContent } from "dirplayer-js-api";
 import { DatumRef, IVMScope, JsBridgeDatum, MemberSnapshot, ScoreSnapshot, ScoreSpriteSnapshot } from ".";
 import { onMemberSelected } from "../store/uiSlice";
 import { isUIShown } from "../utils/debug";
+
+const ownerGetVariable = (ownerKey: string, spriteNum: number, path: string) =>
+  dispatchVmCallback(ownerKey, 'onFlashGetVariable', spriteNum, path);
+const ownerSetVariable = (ownerKey: string, spriteNum: number, path: string, value: string) =>
+  dispatchVmCallback(ownerKey, 'onFlashSetVariable', spriteNum, path, value);
+const ownerCallFunction = (ownerKey: string, spriteNum: number, path: string, argsXml: string) =>
+  dispatchVmCallback(ownerKey, 'onFlashCallFunction', spriteNum, path, argsXml);
+const ownerGotoFrame = (ownerKey: string, spriteNum: number, frameOrLabel: string) =>
+  dispatchVmCallback(ownerKey, 'onFlashGotoFrame', spriteNum, frameOrLabel);
+const ownerGotoFrameAndStop = (ownerKey: string, spriteNum: number, frameOrLabel: string) =>
+  dispatchVmCallback(ownerKey, 'onFlashGotoFrameAndStop', spriteNum, frameOrLabel);
+const ownerFlashInstanceReady = (ownerKey: string, spriteNum: number) =>
+  dispatchVmCallback(ownerKey, 'onFlashInstanceReady', spriteNum);
+
+function installOwnerVmRouters(): void {
+  const win = window as any;
+  if (typeof win.dirplayer_ruffleGetVariableOwned !== 'function') win.dirplayer_ruffleGetVariableOwned = ownerGetVariable;
+  if (typeof win.dirplayer_ruffleSetVariableOwned !== 'function') win.dirplayer_ruffleSetVariableOwned = ownerSetVariable;
+  if (typeof win.dirplayer_ruffleCallFunctionOwned !== 'function') win.dirplayer_ruffleCallFunctionOwned = ownerCallFunction;
+  if (typeof win.dirplayer_ruffleGoToFrameOwned !== 'function') win.dirplayer_ruffleGoToFrameOwned = ownerGotoFrame;
+  if (typeof win.dirplayer_ruffleGoToFrameAndStopOwned !== 'function') win.dirplayer_ruffleGoToFrameAndStopOwned = ownerGotoFrameAndStop;
+  if (typeof win.dirplayer_isFlashInstanceReadyOwned !== 'function') win.dirplayer_isFlashInstanceReadyOwned = ownerFlashInstanceReady;
+}
 
 export type VmCallbackRegistration = (() => void) & {
   rebindOwner: (ownerKey: string) => void;
@@ -228,6 +252,18 @@ export function initVmCallbacks(browserHandle: BrowserPlayerHandle): VmCallbackR
     },
     onFlashLocalConnectionSendOwned: (name: string, method: string, argsJson: string) =>
       localConnectionSendForOwner(flashHost, name, method, argsJson),
+    onFlashGetVariable: (spriteNum: number, path: string) =>
+      getVariableForOwner(flashHost, spriteNum, path),
+    onFlashSetVariable: (spriteNum: number, path: string, value: string) =>
+      setVariableForOwner(flashHost, spriteNum, path, value),
+    onFlashCallFunction: (spriteNum: number, path: string, argsXml: string) =>
+      callFunctionForOwner(flashHost, spriteNum, path, argsXml),
+    onFlashGotoFrame: (spriteNum: number, frameOrLabel: string) =>
+      goToFrameForOwner(flashHost, spriteNum, frameOrLabel),
+    onFlashGotoFrameAndStop: (spriteNum: number, frameOrLabel: string) =>
+      goToFrameAndStopForOwner(flashHost, spriteNum, frameOrLabel),
+    onFlashInstanceReady: (spriteNum: number) =>
+      isFlashInstanceReadyForOwner(flashHost, spriteNum),
     onStageSizeChanged: (width: number, height: number, center: boolean) => {
       const inner = document.getElementById('stage_canvas_container');
       if (inner) {
@@ -242,6 +278,7 @@ export function initVmCallbacks(browserHandle: BrowserPlayerHandle): VmCallbackR
       }
     },
   };
+  installOwnerVmRouters();
   let disposeRegistered = registerVmCallbacks(callbacks, browserHandle.owner_identity());
   const disposeVmCallbacks = (() => {
     disposeFlashBridge();

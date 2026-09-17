@@ -10,12 +10,15 @@ pub mod utils;
 use async_std::{channel::{unbounded, Receiver, Sender}, task::spawn_local};
 use log::{debug, warn};
 use manual_future::ManualFuture;
+use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::rc::Rc;
 use js_api::JsApi;
 use num::ToPrimitive;
 use utils::set_panic_hook;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen_futures::future_to_promise;
 
 #[macro_use]
 extern crate pest_derive;
@@ -30,6 +33,8 @@ use player::{
     init_player, reserve_player_mut, reserve_player_ref,
     score::get_sprite_at,
     ownership::OwnerToken,
+    host_events::{BrowserHostSink, HostEvent, HostEventDelivery},
+    owner_key_string,
     session::{ExecutionContext, PlayerId, RuntimeSession, RuntimeSessionHandle},
     symbols::symbol_table::SymbolOwner,
     PlayerVMExecutionItem,
@@ -45,6 +50,600 @@ extern "C" {
 
 static NEXT_BROWSER_SESSION: AtomicU64 = AtomicU64::new(1);
 
+fn checked_flash_sprite_number(value: f64) -> Result<i16, JsValue> {
+    if !value.is_finite() || value.fract() != 0.0 || value < 1.0 || value > i16::MAX as f64 {
+        return Err(JsValue::from_str("Flash sprite number is outside the supported range"));
+    }
+    Ok(value as i16)
+}
+
+fn checked_flash_generation(value: f64) -> Result<u64, JsValue> {
+    if !value.is_finite() || value.fract() != 0.0 || value < 1.0 || value > 9_007_199_254_740_991.0 {
+        return Err(JsValue::from_str("Flash instance generation is not a safe integer"));
+    }
+    Ok(value as u64)
+}
+
+fn dispatch_host_sink_event(
+    sink: &BrowserHostSink,
+    event: &player::host_events::HostEvent,
+    owner: &OwnerToken,
+) -> Result<(), JsValue> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let payload = JsApi::host_event_to_js(event);
+        sink.dispatch(payload, &owner_key_string(owner))
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = (sink, event, owner);
+        Ok(())
+    }
+}
+
+/// Owns the reservation created by `begin_host_event_drain`.
+///
+/// A detached delivery future can be cancelled while a callback is running.
+/// Keeping the unattempted suffix in this guard lets Drop return that suffix
+/// to the session and release the reservation instead of leaving the player
+/// permanently marked as draining.
+struct HostEventDrainGuard {
+    session: RuntimeSessionHandle,
+    player_id: PlayerId,
+    deliveries: Vec<HostEventDelivery>,
+    owner: Option<OwnerToken>,
+    next: usize,
+    attempted: bool,
+    armed: bool,
+}
+
+impl HostEventDrainGuard {
+    fn new(
+        session: RuntimeSessionHandle,
+        player_id: PlayerId,
+        deliveries: Vec<HostEventDelivery>,
+    ) -> Self {
+        Self {
+            session,
+            player_id,
+            owner: deliveries.first().map(|delivery| delivery.owner.clone()),
+            deliveries,
+            next: 0,
+            attempted: false,
+            armed: true,
+        }
+    }
+
+    fn current(&self) -> Option<&HostEventDelivery> {
+        self.deliveries.get(self.next)
+    }
+
+    fn begin_attempt(&mut self) {
+        debug_assert!(!self.attempted);
+        debug_assert!(self.next < self.deliveries.len());
+        self.attempted = true;
+    }
+
+    fn consume_current(&mut self) {
+        if self.next < self.deliveries.len() {
+            self.session
+                .borrow_mut()
+                .consume_host_event_delivery(self.player_id);
+            self.next += 1;
+            self.attempted = false;
+        }
+    }
+
+    fn finish(&mut self) -> bool {
+        if !self.armed {
+            return false;
+        }
+        self.armed = false;
+        self.session
+            .borrow_mut()
+            .finish_host_event_drain(self.player_id)
+    }
+
+    fn requeue_unattempted(&mut self) -> Result<(), String> {
+        if !self.armed {
+            return Ok(());
+        }
+        let tail = self.deliveries[self.next..].to_vec();
+        let mut session = self.session.borrow_mut();
+        session.release_host_event_reservation(self.player_id, tail.len());
+        if let Err(error) = session.prepend_host_event_deliveries(self.player_id, tail) {
+            if let Some(owner) = self.owner.as_ref() {
+                session.with_player(self.player_id, |context| {
+                    if context.player.owner.same_identity(owner) {
+                        context.player.host_event_backpressure = Some(error);
+                    }
+                });
+                session.cancel_host_backpressured_owner(self.player_id, owner);
+            }
+            return Err(format!("host lifecycle queue overflow: {error:?}"));
+        }
+        drop(session);
+        Ok(())
+    }
+}
+
+impl Drop for HostEventDrainGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let session = self.session.clone();
+        let player_id = self.player_id;
+        let owner = self.owner.clone();
+        // The callback is consumed before its external invocation. If the
+        // callback unwinds, only the suffix after the attempted item may be
+        // restored; replaying the attempted item can duplicate teardown.
+        let attempted = self.attempted;
+        let tail_start = self.next + usize::from(attempted);
+        let tail = self.deliveries[tail_start..].to_vec();
+        self.armed = false;
+        // Drop may run during a callback unwind while the session is still
+        // borrowed. Defer until that borrow is released, retaining the tail
+        // and reservation in the task rather than silently losing either.
+        spawn_local(async move {
+            loop {
+                if let Ok(mut runtime) = session.try_borrow_mut() {
+                    if attempted {
+                        runtime.consume_host_event_delivery(player_id);
+                    }
+                    runtime.release_host_event_reservation(player_id, tail.len());
+                    let schedule_again = match runtime.prepend_host_event_deliveries(player_id, tail) {
+                        Ok(()) => runtime.finish_host_event_drain(player_id),
+                        Err(error) => {
+                            if let Some(owner) = owner.as_ref() {
+                                runtime.with_player(player_id, |context| {
+                                    if context.player.owner.same_identity(owner) {
+                                        context.player.host_event_backpressure = Some(error);
+                                    }
+                                });
+                                runtime.cancel_host_backpressured_owner(player_id, owner);
+                            }
+                            log::error!("host lifecycle queue overflow while restoring cancelled drain: {:?}", error);
+                            runtime.finish_host_event_drain(player_id);
+                            false
+                        }
+                    };
+                    drop(runtime);
+                    finish_host_event_boundary(session.clone(), player_id, schedule_again);
+                    break;
+                }
+                // A wasm-bindgen callback can keep the receiver borrow alive
+                // until the current macrotask returns. Use the existing
+                // timer-backed async-std scheduler instead of monopolizing
+                // microtasks with an unbounded yield loop.
+                async_std::task::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        });
+    }
+}
+
+/// Finish a detached lifecycle batch after its lifecycle fence has completed.
+/// Rescheduling is independent of the first delivery owner because a batch
+/// can contain retired and replacement generations. Final notifications and
+/// PumpPending are resolved against the current live owner only.
+fn finish_host_event_boundary(
+    session: RuntimeSessionHandle,
+    player_id: PlayerId,
+    schedule_again: bool,
+) {
+    // A lifecycle batch may contain retired-owner deliveries followed by a
+    // replacement OwnerBound delivery.  The first delivery's owner is not a
+    // valid authority for deciding whether the next batch should run.
+    if schedule_again {
+        schedule_host_event_drain(session, player_id);
+        return;
+    }
+
+    // Resolve the live owner only after the lifecycle batch has completed.  A
+    // reset/rebind may have replaced the first delivery's generation while the
+    // detached batch was running; notification/PumpPending must target only
+    // the replacement generation and must happen after this borrow is dropped.
+    let owner = session
+        .try_borrow_mut()
+        .ok()
+        .and_then(|mut runtime| runtime.with_player(player_id, |context| context.player.owner.clone()));
+    let Some(owner) = owner else {
+        return;
+    };
+    if !session.borrow().player_owner_matches(player_id, &owner) {
+        return;
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        if !session.borrow().player_owner_matches(player_id, &owner) {
+            return;
+        }
+        if let Err(error) = JsApi::dispatch_player_notifications(session.clone(), player_id) {
+            log::error!("deferred browser notification delivery failed: {:?}", error);
+        }
+        if !session.borrow().player_owner_matches(player_id, &owner) {
+            return;
+        }
+        let queue_tx = session.borrow_mut().with_player(player_id, |context| {
+            context
+                .player
+                .owner
+                .same_identity(&owner)
+                .then(|| context.player.queue_tx.clone())
+        });
+        if let Some(Some(queue_tx)) = queue_tx {
+            let _ = queue_tx.try_send(PlayerVMExecutionItem {
+                command: PlayerVMCommand::PumpPending,
+                completer: None,
+            });
+        }
+    }
+}
+
+/// Start one detached lifecycle delivery batch. The batch owns its callback
+/// capability and is independent of the mutable wasm-bindgen handle borrow
+/// that queued it. A callback may reset or clear the handle; those operations
+/// append work for a later batch.
+fn schedule_host_event_drain(session: RuntimeSessionHandle, player_id: PlayerId) {
+    let Some(batch) = session.borrow_mut().begin_host_event_drain(player_id) else {
+        return;
+    };
+    let drain = HostEventDrainGuard::new(session.clone(), player_id, batch);
+    spawn_local(async move {
+        let mut drain = drain;
+        let mut first_error = None;
+        while let Some(delivery) = drain.current().cloned() {
+            if matches!(delivery.event, HostEvent::OwnerBound { .. }) {
+                let is_current = {
+                    let runtime = session.borrow();
+                    runtime.player_owner_matches(player_id, &delivery.owner)
+                        && runtime
+                            .host_sink(player_id, &delivery.owner)
+                            .is_some_and(|sink| Rc::ptr_eq(&sink, &delivery.sink))
+                };
+                if !is_current {
+                    drain.consume_current();
+                    continue;
+                }
+            }
+            drain.begin_attempt();
+            let dispatch_result =
+                dispatch_host_sink_event(&delivery.sink, &delivery.event, &delivery.owner);
+            drain.consume_current();
+            if let Err(error) = dispatch_result {
+                first_error = Some(error);
+                break;
+            }
+        }
+        if drain.current().is_some() {
+            if let Err(error) = drain.requeue_unattempted() {
+                first_error.get_or_insert_with(|| JsValue::from_str(&error));
+            }
+        }
+        let schedule_again = drain.finish();
+        // The failed callback itself is never replayed; only the finite
+        // unattempted tail (and work queued by that callback) is retried on a
+        // later task turn. If no tail remains, the same helper performs the
+        // final owner-validated notification drain and wake.
+        finish_host_event_boundary(session.clone(), player_id, schedule_again);
+        if let Some(error) = first_error {
+            log::error!("detached browser host lifecycle delivery failed: {:?}", error);
+        }
+    });
+}
+
+/// Schedule owner-tagged player notifications after the exported handle call
+/// has returned. JavaScript callbacks may re-enter the handle, so no callback
+/// is invoked while a wasm-bindgen receiver or session borrow is active.
+pub(crate) fn schedule_player_notification_drain(
+    session: RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: OwnerToken,
+) {
+    let should_schedule = {
+        let mut runtime = session.borrow_mut();
+        if runtime.host_event_lifecycle_pending(player_id) {
+            false
+        } else {
+            runtime.begin_scheduled_player_notification(player_id, &owner)
+        }
+    };
+    if !should_schedule {
+        return;
+    }
+    spawn_local(async move {
+        let still_current = session
+            .borrow()
+            .player_owner_matches(player_id, &owner);
+        if !still_current {
+            session
+                .borrow_mut()
+                .finish_scheduled_player_notification(player_id, &owner);
+            return;
+        }
+
+        let result = JsApi::dispatch_player_notifications(session.clone(), player_id);
+        let lifecycle_pending = session.borrow().host_event_lifecycle_pending(player_id);
+        session
+            .borrow_mut()
+            .finish_scheduled_player_notification(player_id, &owner);
+
+        if let Err(error) = result {
+            // The attempted callback is consumed by the notification drain;
+            // its unattempted suffix remains queued for a later owner turn.
+            // Detached delivery cannot return this error through the already
+            // completed exported method, so retain the existing log/error
+            // reporting path.
+            log::error!(
+                "detached browser notification delivery failed for owner {}: {:?}",
+                owner_key_string(&owner),
+                error
+            );
+            // Do not turn an unbound sink or throwing callback into a busy
+            // retry loop. The retained suffix is retried by the next owner
+            // producer or lifecycle bind.
+            return;
+        }
+        if lifecycle_pending {
+            schedule_host_event_drain(session, player_id);
+            return;
+        }
+        if let Some(queue_tx) = session
+            .borrow_mut()
+            .with_player(player_id, |context| context.player.queue_tx.clone())
+        {
+            let _ = queue_tx.try_send(PlayerVMExecutionItem {
+                command: PlayerVMCommand::PumpPending,
+                completer: None,
+            });
+        }
+    });
+}
+
+async fn dispatch_command_owned(
+    session: RuntimeSessionHandle,
+    player_id: PlayerId,
+    command_tx: Sender<PlayerVMExecutionItem>,
+    owner: OwnerToken,
+    command: PlayerVMCommand,
+) -> Result<player::datum_ref::DatumRef, JsValue> {
+    if !session.borrow().player_owner_matches(player_id, &owner) {
+        return Err(JsValue::from_str("browser player handle is stale"));
+    }
+    let (future, completer) = ManualFuture::new();
+    command_tx
+        .send(PlayerVMExecutionItem {
+            command,
+            completer: Some(completer),
+        })
+        .await
+        .map_err(|_| JsValue::from_str("browser player command loop stopped"))?;
+    let result = future
+        .await
+        .map_err(|error| JsValue::from_str(&error.message));
+    if !session.borrow().player_owner_matches(player_id, &owner) {
+        return Err(JsValue::from_str("browser player handle is stale"));
+    }
+    result
+}
+
+fn rejected_promise(error: JsValue) -> js_sys::Promise {
+    js_sys::Promise::reject(&error)
+}
+
+fn queue_host_event_delivery(
+    session: &RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: OwnerToken,
+    sink: Rc<BrowserHostSink>,
+    event: HostEvent,
+) -> Result<(), JsValue> {
+    queue_host_event_deliveries(
+        session,
+        vec![HostEventDelivery {
+            player_id,
+            owner,
+            sink,
+            event,
+        }],
+    )
+}
+
+fn queue_host_event_deliveries(
+    session: &RuntimeSessionHandle,
+    deliveries: Vec<HostEventDelivery>,
+) -> Result<(), JsValue> {
+    session
+        .try_borrow_mut()
+        .map_err(|_| JsValue::from_str("browser player session is already borrowed"))?
+        .queue_host_event_deliveries(deliveries)
+        .map_err(|error| JsValue::from_str(&format!("host lifecycle queue overflow: {error:?}")))
+}
+
+/// Verify cancellation of a detached host drain releases its reservation and
+/// restores only the unattempted suffix. The first item is marked attempted
+/// and then the guard is dropped while the session is borrowed, forcing the
+/// deferred Drop cleanup path. The automatically rescheduled drain must emit
+/// only the retained second item.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub async fn test_browser_host_event_guard_drops_attempted_callback() -> Result<(), JsValue> {
+    // Keep this guard test independent from the public handle's command loop.
+    // The loop is intentionally absent so the held RuntimeSession borrow can
+    // isolate deferred Drop cleanup from unrelated PumpPending work.
+    let session_key = NEXT_BROWSER_SESSION.fetch_add(1, Ordering::Relaxed);
+    let session = RuntimeSession::new(SymbolOwner {
+        session: session_key,
+        generation: 1,
+    })
+    .into_handle();
+    let (command_tx, _command_rx) = unbounded();
+    let player_id = 1;
+    if !session
+        .borrow_mut()
+        .add_player(player_id, command_tx)
+    {
+        return Err(JsValue::from_str("failed to install guard-test player"));
+    }
+    let events = js_sys::Array::new();
+    let sink_factory = js_sys::Function::new_with_args(
+        "events",
+        "return function(event) { events.push(String(event.type)); };",
+    );
+    let sink = Rc::new(BrowserHostSink::new(
+        sink_factory
+            .call1(&JsValue::UNDEFINED, &events)?
+            .dyn_into::<js_sys::Function>()?,
+    ));
+    let owner = session
+        .borrow_mut()
+        .with_player(player_id, |context| context.player.owner.clone())
+        .ok_or_else(|| JsValue::from_str("failed to capture guard-test owner"))?;
+    session
+        .borrow_mut()
+        .bind_host_sink(player_id, &owner, &sink)
+        .map_err(|error| JsValue::from_str(&error.message))?;
+    session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            context.player.queue_player_notification(
+                crate::player::cast_lib::PlayerNotificationKind::Host(
+                    HostEvent::FrameChanged { frame: 99 },
+                ),
+            );
+        });
+    let first = HostEventDelivery {
+        player_id,
+        owner: owner.clone(),
+        sink: sink.clone(),
+        event: HostEvent::StageSizeChanged {
+            width: 1,
+            height: 1,
+            center: false,
+        },
+    };
+    let second = HostEventDelivery {
+        player_id,
+        owner,
+        sink: sink.clone(),
+        event: HostEvent::MovieLoaded {
+            version: 1,
+            cast_names: vec!["retained".to_owned()],
+        },
+    };
+    session
+        .borrow_mut()
+        .queue_host_event_deliveries(vec![first, second])
+        .map_err(|error| JsValue::from_str(&format!("fixture queue failed: {error:?}")))?;
+    let batch = session
+        .borrow_mut()
+        .begin_host_event_drain(player_id)
+        .ok_or_else(|| JsValue::from_str("fixture drain did not start"))?;
+    let mut drain = HostEventDrainGuard::new(session.clone(), player_id, batch);
+    drain.begin_attempt();
+    let held_session = session.borrow();
+    drop(drain);
+
+    // Keep the receiver borrow alive across a real browser turn. Deferred
+    // cleanup must wait for this borrow to release rather than dispatching
+    // the retained suffix against a still-borrowed session.
+    async_std::task::sleep(std::time::Duration::from_millis(1)).await;
+    let delivered_while_borrowed: Vec<String> = (0..events.length())
+        .filter_map(|index| events.get(index).as_string())
+        .collect();
+    if !delivered_while_borrowed.is_empty() {
+        drop(held_session);
+        return Err(JsValue::from_str(&format!(
+            "host drain dispatched while session borrow was held: {delivered_while_borrowed:?}"
+        )));
+    }
+    drop(held_session);
+
+    let expected = vec!["movieLoaded".to_owned(), "frameChanged".to_owned()];
+    let mut delivered = Vec::new();
+    for _ in 0..64 {
+        delivered = (0..events.length())
+            .filter_map(|index| events.get(index).as_string())
+            .collect();
+        if delivered == expected {
+            break;
+        }
+        // Wait for a real browser macrotask; checking only the first callback
+        // can pass while the retained suffix is still stranded or reordered.
+        async_std::task::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    if delivered != expected {
+        return Err(JsValue::from_str(&format!(
+            "cancelled host drain replayed or lost events: {delivered:?}"
+        )));
+    }
+    drop(session);
+    Ok(())
+}
+
+/// Exercise a real exported reset/rebind path where one detached lifecycle
+/// batch starts with the retired owner and ends with the replacement owner.
+/// The final queued player event must be delivered to the replacement after
+/// the mixed lifecycle batch completes.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub async fn test_browser_host_event_guard_handles_rebound_owner() -> Result<(), JsValue> {
+    let mut handle = BrowserPlayerHandle::new()?;
+    let events = js_sys::Array::new();
+    let sink_factory = js_sys::Function::new_with_args(
+        "events",
+        "return function(event) { events.push(String(event.type)); };",
+    );
+    let callback = sink_factory
+        .call1(&JsValue::UNDEFINED, &events)?
+        .dyn_into::<js_sys::Function>()?;
+    handle.set_host_event_sink(callback)?;
+    let expected_bound = vec!["ownerBound".to_owned()];
+    let mut delivered = Vec::new();
+    for _ in 0..64 {
+        delivered = (0..events.length())
+            .filter_map(|index| events.get(index).as_string())
+            .collect();
+        if delivered == expected_bound {
+            break;
+        }
+        async_std::task::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    if delivered != expected_bound {
+        return Err(JsValue::from_str(&format!(
+            "initial owner binding did not complete: {delivered:?}"
+        )));
+    }
+    events.set_length(0);
+
+    handle.reset()?;
+    handle.test_queue_host_events(vec![HostEvent::FrameChanged { frame: 17 }])?;
+    let expected_reset = vec![
+        "ownerRetired".to_owned(),
+        "flashReset".to_owned(),
+        "ownerBound".to_owned(),
+        "frameChanged".to_owned(),
+    ];
+    delivered.clear();
+    for _ in 0..64 {
+        delivered = (0..events.length())
+            .filter_map(|index| events.get(index).as_string())
+            .collect();
+        if delivered == expected_reset {
+            break;
+        }
+        async_std::task::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    if delivered != expected_reset {
+        return Err(JsValue::from_str(&format!(
+            "mixed retired/replacement lifecycle stranded or reordered events: {delivered:?}"
+        )));
+    }
+    drop(handle);
+    Ok(())
+}
+
 /// Explicit browser-side capability for one player and its session-owned
 /// symbol table. Host code keeps this handle and passes it to stateful entry
 /// points; no entry point discovers a player through the legacy global slots.
@@ -53,6 +652,11 @@ pub struct BrowserPlayerHandle {
     session: RuntimeSessionHandle,
     player_id: PlayerId,
     owner: OwnerToken,
+    /// Owner-generation-local Flash readiness state. Host callbacks update
+    /// this cell without borrowing the session; reset replaces it together
+    /// with the owner generation.
+    flash_scripted_access_pending: Rc<Cell<bool>>,
+    flash_binding_state: Rc<RefCell<player::FlashBindingState>>,
     command_tx: Sender<PlayerVMExecutionItem>,
     renderer: rendering::RendererStateHandle,
     /// Kept only until the owner-bound command loop takes it.  The loop is
@@ -60,6 +664,19 @@ pub struct BrowserPlayerHandle {
     /// linked; retaining the receiver here prevents a constructor from
     /// silently dropping the queue on an incomplete host integration.
     command_rx: Option<Receiver<PlayerVMExecutionItem>>,
+    /// Strong browser callback capability. RuntimeSession stores only a weak
+    /// owner-qualified binding so this cannot form a session cycle.
+    host_event_sink: Option<Rc<BrowserHostSink>>,
+}
+
+/// Hidden Rust-only context used by the browser integration fixture to invoke
+/// a detached notification drain.  Keeping the session capability opaque
+/// prevents the fixture from borrowing the handle slot while a callback is
+/// running, which is the re-entry boundary the production bridge relies on.
+#[doc(hidden)]
+pub struct BrowserPlayerTestContext {
+    session: RuntimeSessionHandle,
+    player_id: PlayerId,
 }
 
 /// Non-owning Flash callback capability for browser test harnesses. It carries
@@ -70,6 +687,8 @@ pub struct BrowserFlashCapability {
     session: RuntimeSessionHandle,
     player_id: PlayerId,
     owner: OwnerToken,
+    flash_scripted_access_pending: Rc<Cell<bool>>,
+    flash_binding_state: Rc<RefCell<player::FlashBindingState>>,
     command_tx: Sender<PlayerVMExecutionItem>,
 }
 
@@ -78,9 +697,14 @@ impl BrowserFlashCapability {
         session: RuntimeSessionHandle,
         player_id: PlayerId,
         owner: OwnerToken,
+        flash_scripted_access_pending: Rc<Cell<bool>>,
         command_tx: Sender<PlayerVMExecutionItem>,
     ) -> Self {
-        Self { session, player_id, owner, command_tx }
+        let flash_binding_state = session
+            .borrow_mut()
+            .with_player(player_id, |context| context.player.flash_binding_state.clone())
+            .expect("browser flash capability player must expose binding state");
+        Self { session, player_id, owner, flash_scripted_access_pending, flash_binding_state, command_tx }
     }
 
     fn with_context<R>(
@@ -118,6 +742,56 @@ impl BrowserFlashCapability {
     pub fn owner_identity(&self) -> String {
         let key = self.owner.key();
         format!("{}:{}:{}", key.session, key.player, key.generation)
+    }
+
+    /// Publish Flash scripted-access readiness without borrowing the VM.
+    /// Host callbacks can arrive while the owner is suspended inside an async
+    /// script, so this is deliberately capability-local.
+    pub fn set_flash_scripted_access_pending(&self, pending: bool) -> Result<(), JsValue> {
+        if !self.owner.is_arena_live() {
+            return Err(JsValue::from_str("browser flash capability is stale"));
+        }
+        self.flash_scripted_access_pending.set(pending);
+        Ok(())
+    }
+
+    /// Reserve a new generation for the sprite represented by a host Flash
+    /// instance. The returned value is a JavaScript-safe integer and remains
+    /// authoritative even while the VM is borrowed by an async request.
+    pub fn reserve_flash_instance_generation(&self, sprite_num: f64) -> Result<f64, JsValue> {
+        let sprite_num = checked_flash_sprite_number(sprite_num)?;
+        if !self.owner.is_arena_live() {
+            return Err(JsValue::from_str("browser flash capability is stale"));
+        }
+        let generation = self.flash_binding_state.borrow_mut().reserve(sprite_num)
+            .map_err(|error| JsValue::from_str(&error.message))?;
+        Ok(generation as f64)
+    }
+
+    pub fn invalidate_flash_instance_generation(
+        &self,
+        sprite_num: f64,
+        expected_generation: f64,
+    ) -> Result<bool, JsValue> {
+        let sprite_num = checked_flash_sprite_number(sprite_num)?;
+        let generation = checked_flash_generation(expected_generation)?;
+        if !self.owner.is_arena_live() {
+            return Err(JsValue::from_str("browser flash capability is stale"));
+        }
+        Ok(self.flash_binding_state.borrow_mut().invalidate(sprite_num, generation))
+    }
+
+    pub fn is_flash_instance_generation_current(
+        &self,
+        sprite_num: f64,
+        expected_generation: f64,
+    ) -> Result<bool, JsValue> {
+        let sprite_num = checked_flash_sprite_number(sprite_num)?;
+        let generation = checked_flash_generation(expected_generation)?;
+        if !self.owner.is_arena_live() {
+            return Err(JsValue::from_str("browser flash capability is stale"));
+        }
+        Ok(self.flash_binding_state.borrow().is_current(sprite_num, generation))
     }
 
     pub fn update_flash_frame(
@@ -191,18 +865,6 @@ impl BrowserFlashCapability {
 }
 
 impl BrowserPlayerHandle {
-    async fn dispatch_command(&self, command: PlayerVMCommand) -> Result<player::datum_ref::DatumRef, JsValue> {
-        if !self.owner.is_arena_live() {
-            return Err(JsValue::from_str("browser player handle is stale"));
-        }
-        let (future, completer) = ManualFuture::new();
-        self.command_tx
-            .send(PlayerVMExecutionItem { command, completer: Some(completer) })
-            .await
-            .map_err(|_| JsValue::from_str("browser player command loop stopped"))?;
-        future.await.map_err(|error| JsValue::from_str(&error.message))
-    }
-
     /// Start exactly one loop for the currently captured owner.  The loop
     /// receives the session and capability explicitly; using the legacy
     /// process-global command loop here would let a stale browser handle
@@ -248,6 +910,47 @@ impl BrowserPlayerHandle {
     pub(crate) fn owner(&self) -> &OwnerToken {
         &self.owner
     }
+
+    /// Queue owned host events for the browser integration fixture.  This is
+    /// deliberately a Rust-only hidden method; production callers use the
+    /// real state producers and never manufacture HostEvent values.
+    #[doc(hidden)]
+    pub fn test_queue_host_events(
+        &self,
+        events: Vec<player::host_events::HostEvent>,
+    ) -> Result<(), JsValue> {
+        self.with_context(|context| {
+            for event in events {
+                context
+                    .player
+                    .queue_host_event(event)
+                    .map_err(|error| {
+                        JsValue::from_str(&format!("host event mailbox overflow: {error:?}"))
+                    })?;
+            }
+            Ok::<(), JsValue>(())
+        })??;
+        Ok(())
+    }
+
+    /// Capture the owner/session capability before entering the detached
+    /// notification pump.  The returned context owns no handle borrow.
+    #[doc(hidden)]
+    pub fn test_notification_context(&self) -> BrowserPlayerTestContext {
+        BrowserPlayerTestContext {
+            session: self.session.clone(),
+            player_id: self.player_id,
+        }
+    }
+}
+
+/// Run one bounded owner notification batch after all BrowserPlayerHandle and
+/// RuntimeSession borrows have ended.  This is intentionally not a
+/// wasm-bindgen export: it exists only for the Rust/browser integration
+/// fixture to exercise the same detached boundary as the frontend executor.
+#[doc(hidden)]
+pub fn test_dispatch_host_events(context: BrowserPlayerTestContext) -> Result<(), JsValue> {
+    JsApi::dispatch_player_notifications(context.session, context.player_id)
 }
 
 #[wasm_bindgen]
@@ -275,15 +978,26 @@ impl BrowserPlayerHandle {
             .borrow_mut()
             .with_player(player_id, |context| context.player.owner.clone())
             .ok_or_else(|| JsValue::from_str("failed to capture browser player owner"))?;
+        let flash_scripted_access_pending = session
+            .borrow_mut()
+            .with_player(player_id, |context| context.player.flash_scripted_access_pending.clone())
+            .ok_or_else(|| JsValue::from_str("failed to capture Flash readiness state"))?;
+        let flash_binding_state = session
+            .borrow_mut()
+            .with_player(player_id, |context| context.player.flash_binding_state.clone())
+            .ok_or_else(|| JsValue::from_str("failed to capture Flash binding state"))?;
         let renderer = rendering::new_renderer_state();
         session.borrow_mut().bind_renderer_state(player_id, &renderer);
         let mut handle = Self {
             session,
             player_id,
             owner,
+            flash_scripted_access_pending,
+            flash_binding_state,
             command_tx,
             renderer,
             command_rx: Some(command_rx),
+            host_event_sink: None,
         };
         handle.start_command_loop();
         Ok(handle)
@@ -301,6 +1015,160 @@ impl BrowserPlayerHandle {
         format!("{}:{}:{}", key.session, key.player, key.generation)
     }
 
+    /// Publish Flash scripted-access readiness without borrowing the VM.
+    /// This remains usable while the owner is suspended in an async script.
+    pub fn set_flash_scripted_access_pending(&self, pending: bool) -> Result<(), JsValue> {
+        if !self.owner.is_arena_live() {
+            return Err(JsValue::from_str("browser player handle is stale"));
+        }
+        self.flash_scripted_access_pending.set(pending);
+        Ok(())
+    }
+
+    pub fn reserve_flash_instance_generation(&self, sprite_num: f64) -> Result<f64, JsValue> {
+        let sprite_num = checked_flash_sprite_number(sprite_num)?;
+        if !self.owner.is_arena_live() {
+            return Err(JsValue::from_str("browser player handle is stale"));
+        }
+        let generation = self.flash_binding_state.borrow_mut().reserve(sprite_num)
+            .map_err(|error| JsValue::from_str(&error.message))?;
+        Ok(generation as f64)
+    }
+
+    pub fn invalidate_flash_instance_generation(
+        &self,
+        sprite_num: f64,
+        expected_generation: f64,
+    ) -> Result<bool, JsValue> {
+        let sprite_num = checked_flash_sprite_number(sprite_num)?;
+        let generation = checked_flash_generation(expected_generation)?;
+        if !self.owner.is_arena_live() {
+            return Err(JsValue::from_str("browser player handle is stale"));
+        }
+        Ok(self.flash_binding_state.borrow_mut().invalidate(sprite_num, generation))
+    }
+
+    pub fn is_flash_instance_generation_current(
+        &self,
+        sprite_num: f64,
+        expected_generation: f64,
+    ) -> Result<bool, JsValue> {
+        let sprite_num = checked_flash_sprite_number(sprite_num)?;
+        let generation = checked_flash_generation(expected_generation)?;
+        if !self.owner.is_arena_live() {
+            return Err(JsValue::from_str("browser player handle is stale"));
+        }
+        Ok(self.flash_binding_state.borrow().is_current(sprite_num, generation))
+    }
+
+    /// Bind a callback directly to this handle's current owner generation.
+    /// The session retains only a weak binding; the handle owns the strong
+    /// callback capability and therefore controls its lifetime.
+    pub fn set_host_event_sink(&mut self, callback: js_sys::Function) -> Result<(), JsValue> {
+        let sink = Rc::new(BrowserHostSink::new(callback));
+        let previous = self.host_event_sink.take();
+        let bind_result = (|| {
+            let mut session = self
+                .session
+                .try_borrow_mut()
+                .map_err(|_| JsValue::from_str("browser player session is already borrowed"))?;
+            session
+                .ensure_host_event_capacity(self.player_id, if previous.is_some() { 2 } else { 1 })
+                .map_err(|error| JsValue::from_str(&format!("host lifecycle queue overflow: {error:?}")))?;
+            if previous.is_some() {
+                session.unbind_host_sink(self.player_id, &self.owner);
+            }
+            session
+                .bind_host_sink(self.player_id, &self.owner, &sink)
+                .map_err(|error| JsValue::from_str(&error.message))
+        })();
+        if let Err(error) = bind_result {
+            self.host_event_sink = previous;
+            return Err(error);
+        }
+        self.host_event_sink = Some(sink);
+        let mut lifecycle = Vec::with_capacity(2);
+        if let Some(previous) = previous.as_ref() {
+            lifecycle.push(HostEventDelivery {
+                player_id: self.player_id,
+                owner: self.owner.clone(),
+                sink: previous.clone(),
+                event: HostEvent::OwnerRetired {
+                    owner_key: owner_key_string(&self.owner),
+                },
+            });
+        }
+        lifecycle.push(HostEventDelivery {
+            player_id: self.player_id,
+            owner: self.owner.clone(),
+            sink: self.host_event_sink.as_ref().expect("sink installed").clone(),
+            event: HostEvent::OwnerBound {
+                owner_key: owner_key_string(&self.owner),
+            },
+        });
+        if let Err(error) = queue_host_event_deliveries(&self.session, lifecycle) {
+            if let Ok(mut session) = self.session.try_borrow_mut() {
+                session.unbind_host_sink(self.player_id, &self.owner);
+                if let Some(previous) = previous.as_ref() {
+                    let _ = session.bind_host_sink(self.player_id, &self.owner, previous);
+                }
+            }
+            self.host_event_sink = previous;
+            schedule_host_event_drain(self.session.clone(), self.player_id);
+            return Err(error);
+        }
+        schedule_host_event_drain(self.session.clone(), self.player_id);
+        // A detached notification batch may have been parked while the
+        // previous sink was cleared. Wake the owner loop only after the new
+        // sink is installed and lifecycle delivery has returned; doing this
+        // from prepend_host_events would spin forever with no sink bound.
+        let _ = self.command_tx.try_send(PlayerVMExecutionItem {
+            command: PlayerVMCommand::PumpPending,
+            completer: None,
+        });
+        Ok(())
+    }
+
+    pub fn clear_host_event_sink(&mut self) -> Result<(), JsValue> {
+        let Some(sink) = self.host_event_sink.take() else {
+            return Ok(());
+        };
+        let capacity = self.session.try_borrow()
+            .map_err(|_| JsValue::from_str("browser player session is already borrowed"))
+            .and_then(|session| session.ensure_host_event_terminal_capacity(self.player_id)
+                .map_err(|error| JsValue::from_str(&format!("host lifecycle queue overflow: {error:?}"))));
+        if let Err(error) = capacity {
+            self.host_event_sink = Some(sink);
+            return Err(error);
+        }
+        let unbind_result = self
+            .session
+            .try_borrow_mut()
+            .map_err(|_| JsValue::from_str("browser player session is already borrowed"))
+            .map(|mut session| session.unbind_host_sink(self.player_id, &self.owner));
+        if let Err(error) = unbind_result {
+            self.host_event_sink = Some(sink);
+            return Err(error);
+        }
+        if let Err(error) = queue_host_event_delivery(
+            &self.session,
+            self.player_id,
+            self.owner.clone(),
+            sink.clone(),
+            HostEvent::OwnerRetired {
+                owner_key: owner_key_string(&self.owner),
+            },
+        ) {
+            if let Ok(mut session) = self.session.try_borrow_mut() {
+                let _ = session.bind_host_sink(self.player_id, &self.owner, &sink);
+            }
+            self.host_event_sink = Some(sink);
+            return Err(error);
+        }
+        schedule_host_event_drain(self.session.clone(), self.player_id);
+        Ok(())
+    }
+
     /// Transfer the queue receiver to the owner-bound frontend executor.
     /// This is one-shot for each installed player; callers must start the
     /// explicit `(session, player_id, owner)` loop before dispatching queued
@@ -311,11 +1179,13 @@ impl BrowserPlayerHandle {
     }
 
     pub fn play(&self) -> Result<(), JsValue> {
-        self.with_context(|context| context.player.play())
+        crate::player::start_playback_owned(self.session.clone(), self.player_id, self.owner.clone())
+            .map_err(|error| JsValue::from_str(&error.message))
     }
 
     pub fn stop(&self) -> Result<(), JsValue> {
-        self.with_context(|context| context.player.stop())
+        crate::player::stop_playback_owned(self.session.clone(), self.player_id, &self.owner)
+            .map_err(|error| JsValue::from_str(&error.message))
     }
 
     /// Create and start the renderer owned by this browser player.  Renderer
@@ -421,7 +1291,11 @@ impl BrowserPlayerHandle {
                 .player
                 .queue_player_notification(crate::player::cast_lib::PlayerNotificationKind::ChannelChanged(channel));
         })?;
-        JsApi::dispatch_player_notifications(self.session.clone(), self.player_id)?;
+        schedule_player_notification_drain(
+            self.session.clone(),
+            self.player_id,
+            self.owner.clone(),
+        );
         Ok(())
     }
 
@@ -464,10 +1338,22 @@ impl BrowserPlayerHandle {
         self.with_context(|context| context.player.font_manager.pfr_enabled)
     }
 
-    pub async fn print_member_bitmap_hex(&self, cast_lib: i32, cast_member: i32) -> Result<(), JsValue> {
-        self.dispatch_command(PlayerVMCommand::PrintMemberBitmapHex(CastMemberRef { cast_lib, cast_member }))
+    pub fn print_member_bitmap_hex(&self, cast_lib: i32, cast_member: i32) -> js_sys::Promise {
+        let session = self.session.clone();
+        let player_id = self.player_id;
+        let command_tx = self.command_tx.clone();
+        let owner = self.owner.clone();
+        future_to_promise(async move {
+            dispatch_command_owned(
+                session,
+                player_id,
+                command_tx,
+                owner,
+                PlayerVMCommand::PrintMemberBitmapHex(CastMemberRef { cast_lib, cast_member }),
+            )
             .await
-            .map(|_| ())
+            .map(|_| JsValue::UNDEFINED)
+        })
     }
 
     pub fn print_member_sound_hex(&self, cast_lib: i32, cast_member: i32) -> Result<(), JsValue> {
@@ -476,10 +1362,22 @@ impl BrowserPlayerHandle {
         })
     }
 
-    pub async fn play_member_sound(&self, cast_lib: i32, cast_member: i32) -> Result<(), JsValue> {
-        self.dispatch_command(PlayerVMCommand::PlayMemberSound(CastMemberRef { cast_lib, cast_member }))
+    pub fn play_member_sound(&self, cast_lib: i32, cast_member: i32) -> js_sys::Promise {
+        let session = self.session.clone();
+        let player_id = self.player_id;
+        let command_tx = self.command_tx.clone();
+        let owner = self.owner.clone();
+        future_to_promise(async move {
+            dispatch_command_owned(
+                session,
+                player_id,
+                command_tx,
+                owner,
+                PlayerVMCommand::PlayMemberSound(CastMemberRef { cast_lib, cast_member }),
+            )
             .await
-            .map(|_| ())
+            .map(|_| JsValue::UNDEFINED)
+        })
     }
 
     pub fn update_flash_frame(
@@ -632,20 +1530,37 @@ impl BrowserPlayerHandle {
         }).and_then(|result| result)
     }
 
-    pub async fn dispatch_flash_lingo(&self, body: String) -> Result<bool, JsValue> {
+    pub fn dispatch_flash_lingo(&self, body: String) -> js_sys::Promise {
         let trimmed = body.trim().to_owned();
         if trimmed.is_empty() {
-            return Ok(false);
+            return if self
+                .session
+                .borrow()
+                .player_owner_matches(self.player_id, &self.owner)
+            {
+                js_sys::Promise::resolve(&JsValue::FALSE)
+            } else {
+                rejected_promise(JsValue::from_str("browser player handle is stale"))
+            };
         }
-        crate::player::eval_lingo_command_owned(
-            self.session.clone(),
-            self.player_id,
-            self.owner.clone(),
-            trimmed,
-        )
-        .await
-        .map(|_| true)
-        .map_err(|error| JsValue::from_str(&error.message))
+        let session = self.session.clone();
+        let player_id = self.player_id;
+        let owner = self.owner.clone();
+        future_to_promise(async move {
+            let result = crate::player::eval_lingo_command_owned(
+                session.clone(),
+                player_id,
+                owner.clone(),
+                trimmed,
+            )
+            .await;
+            if !session.borrow().player_owner_matches(player_id, &owner) {
+                return Err(JsValue::from_str("browser player handle is stale"));
+            }
+            result
+                .map(|_| JsValue::TRUE)
+                .map_err(|error| JsValue::from_str(&error.message))
+        })
     }
 
     pub fn reset(&mut self) -> Result<(), JsValue> {
@@ -654,6 +1569,8 @@ impl BrowserPlayerHandle {
         // the allocator epoch.  Validate the captured capability before
         // changing the queue so a failed/stale reset leaves the live player
         // untouched.
+        let old_owner = self.owner.clone();
+        let retained_sink = self.host_event_sink.clone();
         let mut session = self
             .session
             .try_borrow_mut()
@@ -664,6 +1581,17 @@ impl BrowserPlayerHandle {
         if !current_owner.same_identity(&self.owner) || !self.owner.is_arena_live() {
             return Err(JsValue::from_str("browser player handle is stale"));
         }
+        if retained_sink.is_some() {
+            session
+                .ensure_host_event_capacity(self.player_id, 3)
+                .map_err(|error| {
+                    JsValue::from_str(&format!("host lifecycle queue overflow: {error:?}"))
+                })?;
+        }
+        session.unbind_host_sink(self.player_id, &old_owner);
+        // Preserve queued retirement and FlashReset obligations from older
+        // generations while removing their stale bound/content notifications.
+        session.clear_pending_host_event_deliveries(self.player_id);
 
         let (command_tx, command_rx) = unbounded();
         let owner = session
@@ -675,6 +1603,10 @@ impl BrowserPlayerHandle {
                 // Install the replacement queue only after the session reset
                 // has validated and retired the captured owner.
                 context.player.queue_tx = command_tx.clone();
+                (
+                    context.player.flash_scripted_access_pending.clone(),
+                    context.player.flash_binding_state.clone(),
+                )
             });
         if queue_result.is_none() {
             drop(session);
@@ -687,8 +1619,18 @@ impl BrowserPlayerHandle {
         // has received its replacement queue.
         self.command_tx.close();
         self.owner = owner;
+        let (flash_scripted_access_pending, flash_binding_state) = queue_result
+            .expect("replacement player was validated above");
+        self.flash_scripted_access_pending = flash_scripted_access_pending;
+        self.flash_binding_state = flash_binding_state;
         self.command_tx = command_tx;
         self.command_rx = Some(command_rx);
+        if let Some(sink) = retained_sink.as_ref() {
+            self.session
+                .borrow_mut()
+                .bind_host_sink(self.player_id, &self.owner, sink)
+                .map_err(|error| JsValue::from_str(&error.message))?;
+        }
         rendering::rebind_renderer_owner(
             &self.renderer,
             self.session.clone(),
@@ -697,7 +1639,41 @@ impl BrowserPlayerHandle {
         )
         .map_err(|error| JsValue::from_str(&error.message))?;
         self.start_command_loop();
-        JsApi::dispatch_player_notifications(self.session.clone(), self.player_id)?;
+        if let Some(sink) = retained_sink.as_ref() {
+            let old_key = owner_key_string(&old_owner);
+            queue_host_event_deliveries(
+                &self.session,
+                vec![
+                    HostEventDelivery {
+                        player_id: self.player_id,
+                        owner: old_owner.clone(),
+                        sink: sink.clone(),
+                        event: HostEvent::OwnerRetired { owner_key: old_key.clone() },
+                    },
+                    HostEventDelivery {
+                        player_id: self.player_id,
+                        owner: old_owner,
+                        sink: sink.clone(),
+                        event: HostEvent::FlashReset { owner_key: old_key },
+                    },
+                    HostEventDelivery {
+                        player_id: self.player_id,
+                        owner: self.owner.clone(),
+                        sink: sink.clone(),
+                        event: HostEvent::OwnerBound {
+                            owner_key: owner_key_string(&self.owner),
+                        },
+                    },
+                ],
+            )?;
+        }
+        // Also wake any retained retirement obligations from a previous
+        // detached batch when this reset has no currently bound sink.
+        schedule_host_event_drain(self.session.clone(), self.player_id);
+        let _ = self.command_tx.try_send(PlayerVMExecutionItem {
+            command: PlayerVMCommand::PumpPending,
+            completer: None,
+        });
         Ok(())
     }
 
@@ -720,8 +1696,15 @@ impl BrowserPlayerHandle {
             context.player.external_params = external_params;
             crate::player::stage::apply_stage_draw_rect(context.player);
             let (width, height) = crate::player::stage::stage_canvas_dims(context.player);
-            JsApi::dispatch_stage_size_changed(width, height, context.player.center_stage);
-        })?;
+            context
+                .player
+                .queue_host_event(crate::player::host_events::HostEvent::StageSizeChanged {
+                    width,
+                    height,
+                    center: context.player.center_stage,
+                })
+                .map_err(|error| JsValue::from_str(&format!("host event mailbox overflow: {error:?}")))
+        })??;
         Ok(())
     }
 
@@ -768,8 +1751,16 @@ impl BrowserPlayerHandle {
             context.player.stage_size = (width, height);
             crate::player::stage::apply_stage_draw_rect(context.player);
             let (width, height) = crate::player::stage::stage_canvas_dims(context.player);
-            JsApi::dispatch_stage_size_changed(width, height, context.player.center_stage);
-        })
+            context
+                .player
+                .queue_host_event(crate::player::host_events::HostEvent::StageSizeChanged {
+                    width,
+                    height,
+                    center: context.player.center_stage,
+                })
+                .map_err(|error| JsValue::from_str(&format!("host event mailbox overflow: {error:?}")))
+        })??;
+        Ok(())
     }
 
     /// Read the per-player stage size for owner-isolation checks and browser
@@ -1156,24 +2147,86 @@ impl BrowserPlayerHandle {
     /// The receiver is deliberately not serviced by the legacy global loop;
     /// the frontend executor must attach the captured session/player/owner
     /// before calling this method.
-    pub async fn load_movie_file(&self, path: String, autoplay: bool) -> Result<(), JsValue> {
-        self.dispatch_command(PlayerVMCommand::LoadMovieFromFile(path, autoplay)).await.map(|_| ())
+    pub fn load_movie_file(&self, path: String, autoplay: bool) -> js_sys::Promise {
+        let session = self.session.clone();
+        let player_id = self.player_id;
+        let command_tx = self.command_tx.clone();
+        let owner = self.owner.clone();
+        future_to_promise(async move {
+            dispatch_command_owned(
+                session,
+                player_id,
+                command_tx,
+                owner,
+                PlayerVMCommand::LoadMovieFromFile(path, autoplay),
+            )
+            .await
+            .map(|_| JsValue::UNDEFINED)
+        })
     }
 
-    pub async fn set_system_font_path(&self, path: String) -> Result<(), JsValue> {
-        self.dispatch_command(PlayerVMCommand::SetSystemFontPath(path)).await.map(|_| ())
+    pub fn set_system_font_path(&self, path: String) -> js_sys::Promise {
+        let session = self.session.clone();
+        let player_id = self.player_id;
+        let command_tx = self.command_tx.clone();
+        let owner = self.owner.clone();
+        future_to_promise(async move {
+            dispatch_command_owned(
+                session,
+                player_id,
+                command_tx,
+                owner,
+                PlayerVMCommand::SetSystemFontPath(path),
+            )
+                .await
+                .map(|_| JsValue::UNDEFINED)
+        })
     }
 
-    pub async fn provide_net_task_data(&self, task_id: u32, data: Vec<u8>) -> Result<(), JsValue> {
-        let shared = self.with_context(|context| std::sync::Arc::clone(&context.player.net_manager.shared_state))?;
-        shared.lock().await.fulfill_task(task_id, Ok(data)).await;
-        Ok(())
+    pub fn provide_net_task_data(&self, task_id: u32, data: Vec<u8>) -> js_sys::Promise {
+        let shared = match self
+            .with_context(|context| std::sync::Arc::clone(&context.player.net_manager.shared_state))
+        {
+            Ok(shared) => shared,
+            Err(error) => return rejected_promise(error),
+        };
+        let session = self.session.clone();
+        let player_id = self.player_id;
+        let owner = self.owner.clone();
+        future_to_promise(async move {
+            let mut state = shared.lock().await;
+            if !session.borrow().player_owner_matches(player_id, &owner) {
+                return Err(JsValue::from_str("browser player handle is stale"));
+            }
+            state.fulfill_task(task_id, Ok(data)).await;
+            if !session.borrow().player_owner_matches(player_id, &owner) {
+                return Err(JsValue::from_str("browser player handle is stale"));
+            }
+            Ok(JsValue::UNDEFINED)
+        })
     }
 
-    pub async fn provide_net_task_error(&self, task_id: u32) -> Result<(), JsValue> {
-        let shared = self.with_context(|context| std::sync::Arc::clone(&context.player.net_manager.shared_state))?;
-        shared.lock().await.fulfill_task(task_id, Err(4)).await;
-        Ok(())
+    pub fn provide_net_task_error(&self, task_id: u32) -> js_sys::Promise {
+        let shared = match self
+            .with_context(|context| std::sync::Arc::clone(&context.player.net_manager.shared_state))
+        {
+            Ok(shared) => shared,
+            Err(error) => return rejected_promise(error),
+        };
+        let session = self.session.clone();
+        let player_id = self.player_id;
+        let owner = self.owner.clone();
+        future_to_promise(async move {
+            let mut state = shared.lock().await;
+            if !session.borrow().player_owner_matches(player_id, &owner) {
+                return Err(JsValue::from_str("browser player handle is stale"));
+            }
+            state.fulfill_task(task_id, Err(4)).await;
+            if !session.borrow().player_owner_matches(player_id, &owner) {
+                return Err(JsValue::from_str("browser player handle is stale"));
+            }
+            Ok(JsValue::UNDEFINED)
+        })
     }
 
     pub fn mcp_list_scripts(&self, cast_lib: i32, limit: i32, offset: i32) -> Result<String, JsValue> {
@@ -1301,36 +2354,81 @@ impl BrowserPlayerHandle {
 
     /// Evaluate a Lingo expression in this handle's owner-bound runtime and
     /// format the result with the same authoritative symbol table.
-    pub async fn mcp_eval_lingo(&self, code: String) -> Result<String, JsValue> {
-        let result = player::eval_lingo_command_owned(
-            self.session.clone(),
-            self.player_id,
-            self.owner.clone(),
-            code,
-        )
-        .await;
-        self.with_context(|context| {
-            player::mcp::mcp_format_eval_result(context.player, context.symbols, result)
+    pub fn mcp_eval_lingo(&self, code: String) -> js_sys::Promise {
+        let session = self.session.clone();
+        let player_id = self.player_id;
+        let owner = self.owner.clone();
+        future_to_promise(async move {
+            let result = player::eval_lingo_command_owned(
+                session.clone(),
+                player_id,
+                owner.clone(),
+                code,
+            )
+            .await;
+            let formatted = session
+                .borrow_mut()
+                .with_player(player_id, |context| {
+                    if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                        return Err(JsValue::from_str("browser player handle is stale"));
+                    }
+                    Ok(player::mcp::mcp_format_eval_result(
+                        context.player,
+                        context.symbols,
+                        result,
+                    ))
+                })
+                .ok_or_else(|| JsValue::from_str("browser player handle is stale"))??;
+            Ok(JsValue::from_str(&formatted))
         })
     }
 
     /// Evaluate a debugger command without re-entering the legacy global
     /// player slot. Errors are reported through this same owner context.
-    pub async fn eval_command(&self, command: String) -> Result<(), JsValue> {
-        JsApi::dispatch_debug_message(&command);
-        let result = player::eval_lingo_command_owned(
-            self.session.clone(),
-            self.player_id,
-            self.owner.clone(),
-            command,
-        )
-        .await;
-        if let Err(error) = result {
-            self.with_context(|context| {
-                JsApi::dispatch_script_error(context.player, &error);
-            })?;
-        }
-        Ok(())
+    pub fn eval_command(&self, command: String) -> js_sys::Promise {
+        let session = self.session.clone();
+        let player_id = self.player_id;
+        let owner = self.owner.clone();
+        future_to_promise(async move {
+            // This future starts after the exported receiver borrow has
+            // returned, so debug callbacks may safely re-enter the handle.
+            if !session.borrow().player_owner_matches(player_id, &owner) {
+                return Err(JsValue::from_str("browser player handle is stale"));
+            }
+            let owner_key = owner_key_string(&owner);
+            if let Err(error) = JsApi::dispatch_debug_message_owned(&owner_key, &command) {
+                log::error!("detached debug callback failed: {:?}", error);
+            }
+            let result = player::eval_lingo_command_owned(
+                session.clone(),
+                player_id,
+                owner.clone(),
+                command,
+            )
+            .await;
+            if !session.borrow().player_owner_matches(player_id, &owner) {
+                return Err(JsValue::from_str("browser player handle is stale"));
+            }
+            if let Err(error) = result {
+                let data = session
+                    .borrow_mut()
+                    .with_player(player_id, |context| {
+                        if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                            return None;
+                        }
+                        Some(JsApi::script_error_data(context.player, &error))
+                    })
+                    .ok_or_else(|| JsValue::from_str("browser player handle is stale"))?;
+                if let Some(data) = data {
+                    if let Err(callback_error) =
+                        JsApi::dispatch_script_error_data_owned(&owner_key, data)
+                    {
+                        log::error!("detached script-error callback failed: {:?}", callback_error);
+                    }
+                }
+            }
+            Ok(JsValue::UNDEFINED)
+        })
     }
 
     pub fn add_breakpoint(&self, script_name: String, handler_name: String, bytecode_index: usize) -> Result<(), JsValue> {
@@ -1398,9 +2496,21 @@ impl BrowserPlayerHandle {
     pub fn request_datum(&self, datum_id: u32) -> Result<(), JsValue> {
         self.with_context(|context| {
             if let Some(datum_ref) = context.player.allocator.get_datum_ref(datum_id as DatumId) {
-                JsApi::dispatch_datum_snapshot(&datum_ref, context.symbols, context.player);
+                context
+                    .player
+                    .queue_player_notification(
+                        crate::player::cast_lib::PlayerNotificationKind::DatumSnapshot(
+                            datum_ref,
+                        ),
+                    );
             }
-        })
+        })?;
+        schedule_player_notification_drain(
+            self.session.clone(),
+            self.player_id,
+            self.owner.clone(),
+        );
+        Ok(())
     }
 
     pub fn request_script_instance_snapshot(&self, script_instance_id: u32) -> Result<(), JsValue> {
@@ -1411,9 +2521,21 @@ impl BrowserPlayerHandle {
                 Some(context.player.allocator.get_script_instance_ref(script_instance_id)
                     .ok_or_else(|| JsValue::from_str("script instance is not live"))?)
             };
-            JsApi::dispatch_script_instance_snapshot(instance_ref, context.symbols, context.player);
+            context
+                .player
+                .queue_player_notification(
+                    crate::player::cast_lib::PlayerNotificationKind::ScriptInstanceSnapshot(
+                        instance_ref,
+                    ),
+                );
             Ok(())
-        }).and_then(|result| result)
+        })??;
+        schedule_player_notification_drain(
+            self.session.clone(),
+            self.player_id,
+            self.owner.clone(),
+        );
+        Ok(())
     }
 
     pub fn clear_debug_messages(&self) -> Result<(), JsValue> {
@@ -1455,13 +2577,23 @@ impl BrowserPlayerHandle {
     }
 
     pub fn subscribe_to_member(&self, cast_lib: i32, cast_member: i32) -> Result<(), JsValue> {
+        let member_ref = cast_member_ref(cast_lib, cast_member);
         self.with_context(|context| {
-            let member_ref = cast_member_ref(cast_lib, cast_member);
             if !context.player.subscribed_member_refs.contains(&member_ref) {
                 context.player.subscribed_member_refs.push(member_ref.clone());
             }
-            JsApi::dispatch_cast_member_changed(member_ref, context.symbols, context.player);
-        })
+            context
+                .player
+                .queue_player_notification(
+                    crate::player::cast_lib::PlayerNotificationKind::CastMemberChanged(member_ref),
+                );
+        })?;
+        schedule_player_notification_drain(
+            self.session.clone(),
+            self.player_id,
+            self.owner.clone(),
+        );
+        Ok(())
     }
 
     pub fn unsubscribe_from_member(&self, cast_lib: i32, cast_member: i32) -> Result<(), JsValue> {
@@ -1472,11 +2604,19 @@ impl BrowserPlayerHandle {
     }
 
     pub fn subscribe_to_channel_names(&self) -> Result<(), JsValue> {
-        let (names, owner_key) = self.with_context(|context| {
+        self.with_context(|context| {
             context.player.is_subscribed_to_channel_names = true;
-            JsApi::channel_names_snapshot_for_player(context.player)
+            context
+                .player
+                .queue_player_notification(
+                    crate::player::cast_lib::PlayerNotificationKind::ChannelNamesChanged,
+                );
         })?;
-        JsApi::dispatch_channel_names_snapshot(names, &owner_key);
+        schedule_player_notification_drain(
+            self.session.clone(),
+            self.player_id,
+            self.owner.clone(),
+        );
         Ok(())
     }
 
@@ -1485,13 +2625,17 @@ impl BrowserPlayerHandle {
     }
 
     pub fn subscribe_to_score(&self) -> Result<(), JsValue> {
-        let snapshot = self.with_context(|context| {
+        self.with_context(|context| {
             context.player.is_subscribed_to_score = true;
-            JsApi::score_snapshot_for_player(context.player)
+            context
+                .player
+                .queue_player_notification(crate::player::cast_lib::PlayerNotificationKind::ScoreChanged);
         })?;
-        if let Some((snapshot, owner_key)) = snapshot {
-            JsApi::dispatch_score_snapshot(snapshot, &owner_key);
-        }
+        schedule_player_notification_drain(
+            self.session.clone(),
+            self.player_id,
+            self.owner.clone(),
+        );
         Ok(())
     }
 
@@ -1521,8 +2665,20 @@ impl BrowserPlayerHandle {
     pub fn subscribe_to_cast_member_list(&self, cast_number: u32) -> Result<(), JsValue> {
         self.with_context(|context| {
             context.player.subscribed_cast_member_lists.insert(cast_number);
-            JsApi::dispatch_cast_member_list_changed(cast_number);
-        })
+            context
+                .player
+                .queue_player_notification(
+                    crate::player::cast_lib::PlayerNotificationKind::CastMemberListChanged(
+                        cast_number,
+                    ),
+                );
+        })?;
+        schedule_player_notification_drain(
+            self.session.clone(),
+            self.player_id,
+            self.owner.clone(),
+        );
+        Ok(())
     }
 
     pub fn unsubscribe_from_cast_member_list(&self, cast_number: u32) -> Result<(), JsValue> {
@@ -1689,6 +2845,25 @@ impl BrowserPlayerHandle {
 
 impl Drop for BrowserPlayerHandle {
     fn drop(&mut self) {
+        let retired_sink = self.host_event_sink.take();
+        if let Some(sink) = retired_sink.as_ref() {
+            if let Ok(mut session) = self.session.try_borrow_mut() {
+                session.unbind_host_sink(self.player_id, &self.owner);
+                drop(session);
+                if let Err(error) = queue_host_event_delivery(
+                    &self.session,
+                    self.player_id,
+                    self.owner.clone(),
+                    sink.clone(),
+                    HostEvent::OwnerRetired {
+                        owner_key: owner_key_string(&self.owner),
+                    },
+                ) {
+                    log::error!("browser host sink retirement during drop failed: {:?}", error);
+                }
+                schedule_host_event_drain(self.session.clone(), self.player_id);
+            }
+        }
         // Close before removing the player: DirPlayer and queued work retain
         // sender clones, so dropping this handle alone would otherwise leave
         // the receiver task alive and keep the session graph reachable.

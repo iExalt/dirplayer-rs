@@ -11,7 +11,6 @@ use crate::{
         file::{DirectorFile, read_director_file_bytes},
         lingo::{datum::Datum, script::ScriptContext},
     },
-    js_api::JsApi,
     player::{
         cast_member::ScriptMember,
         symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable},
@@ -31,6 +30,7 @@ use super::{
         PaletteMember, SoundMember, TextMember, VectorShapeMember,
     },
     datum_ref::DatumRef,
+    host_events::HostEvent,
     handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers,
     net_manager::resolve_preload_url,
     ownership::{OwnerKey, OwnerToken},
@@ -141,12 +141,24 @@ pub enum CastNotification {
 /// Owner-local notifications produced while a player is mutably borrowed.
 /// These contain no JS values; the owning session extracts snapshots and
 /// dispatches them only after releasing the player borrow.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum PlayerNotificationKind {
     ScoreChanged,
     ChannelChanged(i16),
     ChannelNameChanged(i16),
+    ChannelNamesChanged,
+    CastMemberChanged(CastMemberRef),
+    CastMemberListChanged(u32),
     CastMemberNameChanged(u32),
+    DatumSnapshot(crate::player::datum_ref::DatumRef),
+    ScriptInstanceSnapshot(Option<crate::player::script_ref::ScriptInstanceRef>),
+    /// An owner-local portable event.  The payload contains no arena or JS
+    /// references and is dispatched only after the player borrow ends.
+    Host(HostEvent),
+    /// Terminal owner-local backpressure. The producer could not retain the
+    /// event within its bounded mailbox; the detached drain must stop and
+    /// report this failure so the owner can reset/rebind explicitly.
+    HostBackpressure(usize),
 }
 
 #[derive(Clone, Debug)]
@@ -184,6 +196,7 @@ pub struct CastLib {
     /// owning session drains this queue after the cast borrow ends, then runs
     /// each top-level program before publishing its runtime for dispatch.
     pub(crate) pending_js_registrations: Vec<crate::player::js_lingo_loader::JsScriptRegistration>,
+    pub(crate) pending_notifications: CastNotificationOutbox,
     pub name_symbols: Rc<[Symbol]>,
     pub preload_mode: u16,
     pub capital_x: bool,
@@ -207,7 +220,6 @@ pub struct CastLib {
 }
 
 impl CastLib {
-    #[cfg(test)]
     pub(crate) fn test_external(number: u32, preload_mode: u16) -> Self {
         Self {
             name: format!("external-{number}"),
@@ -220,6 +232,7 @@ impl CastLib {
             members: FxHashMap::default(),
             scripts: FxHashMap::default(),
             pending_js_registrations: Vec::new(),
+            pending_notifications: CastNotificationOutbox::default(),
             name_symbols: Rc::from(Vec::<Symbol>::new()),
             preload_mode,
             capital_x: false,
@@ -238,6 +251,10 @@ impl CastLib {
         &mut self,
     ) -> Vec<crate::player::js_lingo_loader::JsScriptRegistration> {
         std::mem::take(&mut self.pending_js_registrations)
+    }
+
+    pub(crate) fn take_notifications(&mut self) -> Vec<CastNotification> {
+        self.pending_notifications.drain()
     }
 
     /// Install every registration decoded by `insert_member` through short
@@ -344,7 +361,8 @@ impl CastLib {
         self.members.remove(&number);
         self.scripts.remove(&number);
         self.invalidate_name_index();
-        JsApi::dispatch_cast_member_list_changed(self.number);
+        self.pending_notifications
+            .push(CastNotification::CastMemberListChanged(self.number));
     }
 
     /// Reserve a load synchronously. The retained capability prevents a
@@ -645,7 +663,8 @@ impl CastLib {
         if let Some(outbox) = outbox.as_deref_mut() {
             outbox.push(CastNotification::CastMemberListChanged(self.number));
         } else {
-            JsApi::dispatch_cast_member_list_changed(self.number);
+            self.pending_notifications
+            .push(CastNotification::CastMemberListChanged(self.number));
         }
     }
 
@@ -663,7 +682,8 @@ impl CastLib {
             if let Some(outbox) = outbox.as_deref_mut() {
                 outbox.push(CastNotification::CastNameChanged(self.number));
             } else {
-                JsApi::dispatch_cast_name_changed(self.number);
+                self.pending_notifications
+                .push(CastNotification::CastNameChanged(self.number));
             }
         }
     }
@@ -853,7 +873,8 @@ impl CastLib {
         if let Some(outbox) = outbox.as_deref_mut() {
             outbox.push(CastNotification::CastMemberListChanged(self.number));
         } else {
-            JsApi::dispatch_cast_member_list_changed(self.number);
+            self.pending_notifications
+            .push(CastNotification::CastMemberListChanged(self.number));
         }
         unsafe {
             let player_mut = &mut crate::player::player_mut();
@@ -1065,7 +1086,8 @@ impl CastLib {
             ))),
         })?;
         self.insert_member(number, member, symbols);
-        JsApi::dispatch_cast_member_list_changed(self.number);
+        self.pending_notifications
+            .push(CastNotification::CastMemberListChanged(self.number));
         Ok(cast_member_ref(self.number as i32, number as i32))
     }
 
@@ -1221,6 +1243,7 @@ mod name_index_tests {
             members: FxHashMap::default(),
             scripts: FxHashMap::default(),
             pending_js_registrations: Vec::new(),
+            pending_notifications: CastNotificationOutbox::default(),
             name_symbols: Rc::from(Vec::<Symbol>::new()),
             preload_mode: 0,
             capital_x: false,

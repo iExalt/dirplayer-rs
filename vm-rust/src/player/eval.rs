@@ -239,6 +239,16 @@ impl EvalContinuation {
                 request: crate::player::driver::InternalVmRequest::Object { receiver, name, args },
                 reason: None,
             },
+            crate::player::driver::InternalVmRequest::Flash(request) => EvalPending::Object {
+                capability,
+                request: crate::player::driver::InternalVmRequest::Flash(request),
+                reason: None,
+            },
+            crate::player::driver::InternalVmRequest::ObjectProperty { receiver, name } => EvalPending::Object {
+                capability,
+                request: crate::player::driver::InternalVmRequest::ObjectProperty { receiver, name },
+                reason: None,
+            },
             crate::player::driver::InternalVmRequest::SetProperty { receiver, name, value } => EvalPending::SetProperty {
                 capability,
                 request: crate::player::driver::InternalVmRequest::SetProperty { receiver, name, value },
@@ -2241,7 +2251,8 @@ pub(crate) async fn invoke_script_callback_owned(
             crate::player::driver::DriverTurn::Error(_),
         ) => {}
         crate::player::session::EvalRequestTurn::Evaluator(EvalTurn::Pending { .. })
-        | crate::player::session::EvalRequestTurn::MovieAsync(_) => {
+        | crate::player::session::EvalRequestTurn::MovieAsync(_)
+        | crate::player::session::EvalRequestTurn::Flash(_) => {
             return Err(ScriptError::new(
                 "nested script callback yielded an unsupported evaluator request".to_owned(),
             ));
@@ -2696,6 +2707,40 @@ impl EvalContinuation {
             }
             EvalFrame::ApplyObjProp(name) => {
                 let object = eval_turn_try!(self.pop_value());
+                let flash_request = session.with_player(self.player_id, |context| {
+                    let value = crate::player::driver::checked_internal_datum(
+                        context.player,
+                        context.symbols,
+                        &object,
+                    )?.clone();
+                    if matches!(value, Datum::FlashObjectRef(_)) {
+                        let symbol = context.symbols.intern(&name);
+                        Ok::<_, ScriptError>(Some(
+                            crate::player::handlers::datum_handlers::flash_object::FlashObjectDatumHandlers::prepare_get_prop(
+                                context.player,
+                                &object,
+                                &context
+                                    .symbols
+                                    .display(&symbol)
+                                    .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
+                                    .to_owned(),
+                            )?,
+                        ))
+                    } else {
+                        Ok(None)
+                    }
+                }).ok_or_else(crate::player::cancelled_scope_error).and_then(|result| result);
+                let flash_request = eval_turn_try!(flash_request);
+                if let Some(request) = flash_request {
+                    let capability = self.new_action(false);
+                    return Some(EvalTurn::Pending {
+                        request: EvalPending::Object {
+                            capability,
+                            request: crate::player::driver::InternalVmRequest::Flash(request),
+                            reason: None,
+                        },
+                    });
+                }
                 let result = session.with_player(self.player_id, |context| {
                     let symbol = context.symbols.intern(&name);
                     get_obj_prop(context.player, context.symbols, &object, symbol)

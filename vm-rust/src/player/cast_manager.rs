@@ -12,7 +12,6 @@ use crate::js_api::ascii_safe;
 
 use crate::{
     director::{enums::ScriptType, file::DirectorFile, lingo::datum::Datum},
-    js_api::JsApi,
     player::cast_lib::CastLib,
     player::symbols::symbol_table::SymbolTable,
 };
@@ -85,6 +84,7 @@ pub struct CastManager {
     /// before the next frame. Populated when a member is erased or its slot
     /// reassigned; drained by the renderer at frame start.
     pub pending_texture_invalidations: RefCell<Vec<CastMemberRef>>,
+    pub(crate) pending_notifications: CastNotificationOutbox,
     /// External casts that must settle before palette and cast-list readiness
     /// is published for the current preload boundary.
     required_preloads: HashMap<u32, std::sync::Arc<CastLoadCapability>>,
@@ -119,9 +119,18 @@ impl CastManager {
             palette_cache: RefCell::new(None),
             palette_version: RefCell::new(0),
             pending_texture_invalidations: RefCell::new(Vec::new()),
+            pending_notifications: CastNotificationOutbox::default(),
             required_preloads: HashMap::new(),
             preload_state: CastPreloadState::Idle,
         }
+    }
+
+    pub(crate) fn take_notifications(&mut self) -> Vec<CastNotification> {
+        let mut notifications = self.pending_notifications.drain();
+        for cast in &mut self.casts {
+            notifications.extend(cast.take_notifications());
+        }
+        notifications
     }
 
     pub fn load_from_dir(
@@ -197,6 +206,7 @@ impl CastManager {
                 members: FxHashMap::default(),
                 scripts: FxHashMap::default(),
                 pending_js_registrations: Vec::new(),
+                pending_notifications: CastNotificationOutbox::default(),
                 name_symbols: Rc::from(Vec::<crate::player::symbols::symbol::Symbol>::new()),
                 preload_mode: cast_entry.preload_settings,
                 capital_x: false,
@@ -217,7 +227,7 @@ impl CastManager {
         self.invalidate_member_name_cache();
         // External cast requests are returned to RuntimeSession for async fetch
         // and synchronous apply. Palette resolution waits for that boundary.
-        JsApi::dispatch_cast_list_changed();
+        self.pending_notifications.push(CastNotification::CastListChanged);
     }
 
     /// After all casts (including external) are loaded, resolve bitmap palette refs

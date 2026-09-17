@@ -441,6 +441,41 @@ pub(crate) fn try_call_datum_handler_sync(
                         SyncDatumCall::Unsupported
                     }
                 }
+                DatumType::FlashObjectRef => {
+                    let is_local_connection = matches!(value, Datum::FlashObjectRef(flash_ref)
+                        if flash_ref.path.contains("__dpObj_LocalConnection"));
+                    if is_local_connection && handler_name_display.eq_ignore_ascii_case("connect") {
+                        let name = args
+                            .first()
+                            .map(|arg| runtime.player.get_datum(arg).string_value(runtime.symbols).unwrap_or_default())
+                            .unwrap_or_default();
+                        if let Datum::FlashObjectRef(flash_ref) = value {
+                            if !name.is_empty() {
+                                runtime.player.flash_lc_connections.insert(name, flash_ref.path.clone());
+                            }
+                        }
+                        SyncDatumCall::Handled(Ok(runtime.player.alloc_datum(Datum::Int(1))))
+                    } else if is_local_connection && handler_name_display.eq_ignore_ascii_case("close") {
+                        if let Datum::FlashObjectRef(flash_ref) = value {
+                            runtime.player.flash_lc_connections.retain(|_, path| path != &flash_ref.path);
+                        }
+                        SyncDatumCall::Handled(Ok(runtime.player.alloc_datum(Datum::Void)))
+                    } else {
+                        match flash_object::FlashObjectDatumHandlers::prepare_call(
+                            runtime.player,
+                            runtime.symbols,
+                            datum,
+                            handler_name,
+                            args,
+                        ) {
+                            Ok(request) => SyncDatumCall::Pending {
+                                request: crate::player::driver::InternalVmRequest::Flash(request),
+                                reason: "Flash method call requires owner/generation-bound host execution".to_owned(),
+                            },
+                            Err(error) => SyncDatumCall::Handled(Err(error)),
+                        }
+                    }
+                }
                 DatumType::SpriteRef => {
                     let name_lower = runtime
                         .symbols

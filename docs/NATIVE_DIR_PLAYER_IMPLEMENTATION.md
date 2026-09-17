@@ -3,18 +3,19 @@
 This checklist follows the [native DirPlayer roadmap](../../childhood-redux/docs/NATIVE_DIR_PLAYER_PLAN.md).
 The roadmap owns architecture and milestones; this file retains detailed task and
 verification history. Baseline `297da4a`; the implementation checkpoint developed
-on `native-bevy` is preserved on `dev` over upstream main plus the audio
-fix. Current Stage 1 source is `dev` at
-`65772143f59e18b239ea34a86affd4f77a5092cf`. **Stages 2–6 runtime implementation
-remain paused.** Publication is not integration or
-acceptance of the review-stage changes. See the
-[publication checkpoint](checkpoints/native-ownership-20260917/README.md) for
-compact patches and retained verification records.
+on `native-bevy` is preserved on `dev` over upstream main plus the audio fix.
+The Stage 1 committed base is `dev` at
+`c0eb16f1c9dcabb5fcb43d6e5b5e413711fd8b25`. Stage 2 resumed for the bounded
+combined-checkpoint integration recorded below; the complete Stage 2 exit gate
+and Stages 3–6 remain open. See the [publication checkpoint](checkpoints/native-ownership-20260917/README.md)
+for the archived review inputs and the [live integration receipt](checkpoints/stage2-checkpoint-integration-20260917/README.md)
+for current source identity and verification.
 
 ## Current Stage 1 checkpoint
 
-The authorized work is complete and has stopped after Stage 1. Existing runtime source, dirty Ruffle
-integration and archived review patches remain unchanged by this work.
+Stage 1 remains accepted at its committed source identity. The runtime has since
+advanced through the bounded Stage 2 checkpoint integration below, while the
+seven recorded Ruffle working-tree edits remain unchanged.
 
 - [x] **1.1:** Accept the scoped baseline with retained revisions, licenses,
   toolchains and fixture availability in the
@@ -41,47 +42,48 @@ integration and archived review patches remain unchanged by this work.
   [classification tests](checkpoints/stage1-inventory/classification-tests.log),
   and [classification gate](checkpoints/stage1-inventory/classification-check.log).
 
-Stages 1.1 and 1.2 are accepted within those explicit coverage boundaries.
-Stages 2–6 remain paused; no runtime migration or archived patch integration
-was performed as part of Stage 1.
+Stages 1.1 and 1.2 are accepted within those explicit coverage boundaries. No
+runtime migration or archived patch integration was performed as part of Stage
+1. The classification manifest remains a Stage 1 record and is intentionally
+not refreshed to make the later Stage 2 removal gate appear green.
 
 Use `mise run check:ownership-inventory`, `mise run test:ownership-audit`,
 `mise run test:ownership-inventory` and `mise run test:baseline-inputs` for the
 Stage 1 gates. The existing `check:ownership` task is the separate Stage 2
 removal gate; unresolved globals, TLS and legacy access paths remain.
 
-## Retained runtime checkpoint
+## Current integrated Stage 2 checkpoint
 
-The latest reviewed combined source is in
-`/private/tmp/dirplayer-combined-reviewed-20260916`. Its
-`integration-evidence/flash-verified-pause-20260917.json` records:
+The 36 runtime and test paths from the latest combined review batch are now
+integrated over Stage 1. `mise.toml` retains the Stage 1 tasks and
+`CARGO_INCREMENTAL=0`; the seven existing Ruffle edits remain byte-for-byte
+unchanged. The [integration receipt](checkpoints/stage2-checkpoint-integration-20260917/README.md)
+records the reconciled hashes, commands and source-frozen results:
 
 - [x] Native test compilation: zero errors; exact library binary **480 passed, 0 failed**.
 - [x] WASM test compilation: zero errors.
 - [x] Actual browser runtime: **13 fixtures passed, 0 failed**, including Flash evaluator binding/replacement.
 - [x] Frontend Flash lifecycle: **34 passed, 0 failed**; targeted generated-capability TypeScript check passed.
-- [x] Six recorded checkpoint source hashes and the 408-file live baseline rechecked during roadmap revision.
-- [ ] Integrate the latest combined review batch into the live checkout and verify that resulting source.
+- [x] All 36 integrated paths match their retained review hashes; the 516-entry
+  runtime manifest had zero post-verification drift.
+- [x] Integrate the latest combined review batch into the live checkout and verify the resulting source.
 
-Native gate: `native-tests-review-20260917T021707569805Z`; WASM gate:
-`wasm-tests-review-20260917T021822298126Z`; browser gate:
-`browser-isolation-runtime-20260917T021843Z`. Their evidence is under the review
-stage's `.cache/native-bevy/evidence/`. These are retained scoped results, not
-new test executions or full movie-campaign acceptance.
-
-Live remains at the accepted SysMenu/reset integration boundary:
-`.cache/native-bevy/evidence/sysmenu-reset-integration-20260916T191307Z/`.
-The latest Flash, scheduler, host-lifecycle and native snapshot work includes
-changes verified only in the review stage. Ruffle callback-origin work remains
-an isolated, uncompiled nine-file proposal. JS-Lingo legacy TLS and global player/
-renderer paths remain. Passing native library tests is not a working native player.
+The browser command first regenerated its runner but could not bind its local
+port in the sandbox; the identical elevated run passed all 13 fixtures. These
+are fresh live-checkout executions, but remain scoped rather than a full movie
+campaign. Ruffle callback-origin work remains an isolated, uncompiled nine-file
+proposal. JS-Lingo legacy TLS and global player/renderer paths remain. Passing
+native library tests is not a working native player.
 
 ## Current remaining sequence
 
 Milestone IDs refer to the governing roadmap. Each milestone tracks implementation,
 verification and integration separately; its complete exit gate controls acceptance.
 
-- [ ] **2.10, early consolidation:** preserve compact evidence, reconcile current bases, integrate the reviewed combined batch and verify live source.
+- [x] **2.10 checkpoint integration subtask:** preserve compact evidence,
+  reconcile current bases, integrate the reviewed combined batch and verify live source.
+- [ ] **2.10 remaining consolidation:** finish residual owner cutovers and
+  remove temporary adapters in one verified checkout.
 - [ ] **2.6–2.8:** close initial Flash access before reservation, actual Ruffle callback-origin routing, and JS-Lingo runtime/object/RNG ownership.
 - [ ] **2.9–2.10:** finish player graph, render/audio effects, loading/cache ownership and remove temporary adapters in one verified checkout.
 - [ ] **3.1–3.2:** accept interleaved/separate-thread isolation, lifecycle/panic cleanup, static audit and applicable Miri.
@@ -98,7 +100,8 @@ the roadmap, while existing browser behavior must be preserved.
 Use one Cargo target, `/private/tmp/dirplayer-parser-review-build/target`, with
 `CARGO_INCREMENTAL=0`. Do not copy dependency/build trees. Retain compact
 commands/logs/manifests and reviewed source deltas before removing obsolete
-artifacts. The sequence above remains paused beyond the authorized Stage 1 work.
+artifacts. This publication stops at the verified integration checkpoint; all
+complete Stage 2 exit gates and Stages 3–6 remain open.
 
 ## Historical checkpoints — not the current to-do list
 

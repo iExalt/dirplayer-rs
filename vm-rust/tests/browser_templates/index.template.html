@@ -213,6 +213,7 @@
       api.setVmModule(wasm);
       window.dirplayer_registerFlashOwner = api.dirplayer_registerFlashOwner;
       window.dirplayer_unregisterFlashOwner = api.dirplayer_unregisterFlashOwner;
+      window.dirplayer_testFlashOwnerCapability = api.dirplayer_testFlashOwnerCapability;
       // Prime the xtra registry from /assets/xtra-registry.json so movies
       // that declare an external Xtra (Groove, BobbaXtra) get their wasm
       // plugin auto-loaded, exactly like the dev host does. The harness
@@ -238,6 +239,460 @@
       const testFns = Object.keys(wasm)
         .filter(k => k.startsWith('test_') && typeof wasm[k] === 'function')
         .filter(k => filterParts.length === 0 || filterParts.some(f => k.toLowerCase().includes(f)));
+
+      // Exercise the generated wasm-bindgen class wrapper itself.  The Rust
+      // fixture can re-enter a handle through a captured capability, but this
+      // path proves that a synchronous lifecycle callback can call methods on
+      // the actual JavaScript BrowserPlayerHandle instance while set/clear
+      // are still returning through wasm-bindgen.
+      const generatedHandleTestName = 'test_generated_browser_player_handle_lifecycle_reentry';
+      const runGeneratedHandleTest = filterParts.length === 0
+        || filterParts.some(f => generatedHandleTestName.toLowerCase().includes(f));
+      if (runGeneratedHandleTest) {
+        const name = generatedHandleTestName;
+        const group = startTest(name);
+        let handle = null;
+        let failure = null;
+        let cleanupFailure = null;
+        try {
+          if (typeof wasm.BrowserPlayerHandle !== 'function') {
+            throw new Error('BrowserPlayerHandle export is missing');
+          }
+          // Exercise destruction before the owner command loop gets a chance
+          // to receive its first queued lifecycle event.
+          const earlyHandle = new wasm.BrowserPlayerHandle();
+          earlyHandle.set_host_event_sink(() => {});
+          earlyHandle.free();
+          await new Promise(resolve => setTimeout(resolve, 0));
+          handle = new wasm.BrowserPlayerHandle();
+          const events = [];
+          let reentries = 0;
+          let clearFromResetCallback = false;
+          let throwNextRetired = false;
+          let retiredThrows = 0;
+          const sink = (event) => {
+            events.push(String(event.type));
+            handle.preview_state();
+            reentries++;
+            if (event.type === 'ownerRetired' && throwNextRetired) {
+              throwNextRetired = false;
+              retiredThrows++;
+              throw new Error('intentional retired callback failure');
+            }
+            if (event.type === 'flashReset' && !clearFromResetCallback) {
+              clearFromResetCallback = true;
+              handle.clear_host_event_sink();
+            }
+          };
+          handle.set_host_event_sink(sink);
+          await new Promise(resolve => setTimeout(resolve, 0));
+          if (events.join(',') !== 'ownerBound') {
+            throw new Error(`generated handle bound event order was ${events.join(',')}`);
+          }
+          handle.clear_host_event_sink();
+          await new Promise(resolve => setTimeout(resolve, 0));
+          if (events.join(',') !== 'ownerBound,ownerRetired') {
+            throw new Error(`generated handle clear event order was ${events.join(',')}`);
+          }
+          handle.set_host_event_sink(sink);
+          await new Promise(resolve => setTimeout(resolve, 0));
+          throwNextRetired = true;
+          // Both resets occur before the detached lifecycle task runs. The
+          // queue must retain both generations' retirement obligations while
+          // dropping stale bound notifications.
+          handle.reset();
+          handle.reset();
+          await new Promise(resolve => setTimeout(resolve, 0));
+          await new Promise(resolve => setTimeout(resolve, 0));
+          await new Promise(resolve => setTimeout(resolve, 0));
+          if (retiredThrows !== 1) {
+            throw new Error(`generated handle retired callback failures were ${retiredThrows}, expected 1`);
+          }
+          if (events.filter(type => type === 'flashReset').length !== 2) {
+            throw new Error('generated handle repeated reset lost a flashReset obligation');
+          }
+          if (!events.includes('ownerRetired') || !events.includes('ownerBound')) {
+            throw new Error(`generated handle reset lifecycle events missing: ${events.join(',')}`);
+          }
+          if (reentries < 2) {
+            throw new Error(`generated handle callback reentry count was ${reentries}, expected at least 2`);
+          }
+
+          // Exercise content notification routing through the real owner
+          // callback registry. The generated shim re-enters the mutable
+          // BrowserPlayerHandle API from the channel-7 callback, then binds
+          // a replacement host sink while the notification producer is
+          // still unwinding.
+          const waitUntil = async (predicate, label) => {
+            const deadline = Date.now() + 2000;
+            while (!predicate()) {
+              if (Date.now() >= deadline) throw new Error(`${label} timed out`);
+              await new Promise(resolve => setTimeout(resolve, 0));
+            }
+          };
+          const requireRejected = async (promise, label) => {
+            let timeoutId;
+            try {
+              const outcome = await Promise.race([
+                promise.then(
+                  () => ({ resolved: true }),
+                  (error) => ({ resolved: false, error }),
+                ),
+                new Promise((_, reject) => {
+                  timeoutId = setTimeout(() => reject(new Error(`${label} timed out`)), 2000);
+                }),
+              ]);
+              if (outcome.resolved) throw new Error(`${label} resolved after owner retirement`);
+            } finally {
+              clearTimeout(timeoutId);
+            }
+          };
+
+          const contentHandle = new wasm.BrowserPlayerHandle();
+          const contentOwner = contentHandle.owner_identity();
+          const contentEvents = [];
+          const initialHostEvents = [];
+          const unifiedEvents = [];
+          let contentRegistered = false;
+          try {
+            contentHandle.set_host_event_sink((event, ownerKey) => {
+              const record = {
+                kind: `host:${String(event.type)}`,
+                payload: event,
+                ownerKey,
+                source: 'initial',
+              };
+              initialHostEvents.push(record);
+              unifiedEvents.push(record);
+            });
+            await waitUntil(
+              () => initialHostEvents.some(event => event.kind === 'host:ownerBound'),
+              'initial generated host sink binding',
+            );
+            api.__testRegisterBrowserHandleCallback(
+              contentOwner,
+              (kind, payload, ownerKey) => {
+                const record = { kind, payload, ownerKey, source: 'replacement' };
+                contentEvents.push(record);
+                unifiedEvents.push(record);
+              },
+              contentHandle,
+              true,
+            );
+            contentRegistered = true;
+            contentHandle.set_debug_selected_channel(7);
+            await waitUntil(
+              () => unifiedEvents.some(event => event.kind === 'channel:8')
+                && unifiedEvents.some(
+                  event => event.source === 'initial' && event.kind === 'host:ownerRetired',
+                )
+                && unifiedEvents.some(
+                  event => event.source === 'replacement' && event.kind === 'host:ownerBound',
+                ),
+              'content callback re-entry and sink rebind',
+            );
+            const unifiedKinds = unifiedEvents.map(event => event.kind);
+            const initialKinds = initialHostEvents.map(event => event.kind);
+            const contentKinds = contentEvents.map(event => event.kind);
+            if (initialKinds.join(',') !== 'host:ownerBound,host:ownerRetired') {
+              throw new Error(`initial sink lifecycle events were ${initialKinds.join(',')}`);
+            }
+            if (!contentKinds.includes('channel:7') || !contentKinds.includes('channel:8')) {
+              throw new Error(`content callback channel re-entry was ${contentKinds.join(',')}`);
+            }
+            for (const event of unifiedEvents) {
+              if (event.ownerKey !== contentOwner) {
+                throw new Error(`content callback received foreign owner ${event.ownerKey}`);
+              }
+              if (event.payload === undefined || event.payload === null) {
+                throw new Error(`content callback dropped payload for ${event.kind}`);
+              }
+              if (event.kind.startsWith('host:') && event.payload.type !== event.kind.slice(5)) {
+                throw new Error(`host payload/type mismatch for ${event.kind}`);
+              }
+            }
+            const oldRetiredIndex = unifiedEvents.findIndex(
+              event => event.source === 'initial' && event.kind === 'host:ownerRetired',
+            );
+            const newBoundIndex = unifiedEvents.findIndex(
+              event => event.source === 'replacement' && event.kind === 'host:ownerBound',
+            );
+            const channel8Index = unifiedEvents.findIndex(event => event.kind === 'channel:8');
+            if (
+              oldRetiredIndex < 0
+              || newBoundIndex < 0
+              || channel8Index < 0
+              || oldRetiredIndex >= newBoundIndex
+              || newBoundIndex >= channel8Index
+            ) {
+              throw new Error(`content sink rebind order was ${unifiedKinds.join(',')}`);
+            }
+            const channel7 = contentEvents.find(event => event.kind === 'channel:7');
+            const channel8 = contentEvents.find(event => event.kind === 'channel:8');
+            if (!channel7?.payload || !channel8?.payload) {
+              throw new Error('content channel callbacks did not retain payloads');
+            }
+            const initialCountAfterRebind = initialHostEvents.length;
+            await new Promise(resolve => setTimeout(resolve, 0));
+            if (initialHostEvents.length !== initialCountAfterRebind) {
+              throw new Error('retired initial sink received an event after replacement binding');
+            }
+          } finally {
+            if (contentRegistered) api.__testUnregisterBrowserHandleCallback(contentOwner);
+            try { contentHandle.free(); } catch (_) { /* best-effort */ }
+          }
+
+          // Immediate Promise-returning work must reject when the captured
+          // owner resets or is freed before the detached future starts.
+          const immediateResetHandle = new wasm.BrowserPlayerHandle();
+          try {
+            const pendingReset = immediateResetHandle.mcp_eval_lingo('1');
+            immediateResetHandle.reset();
+            await requireRejected(pendingReset, 'immediate reset Promise');
+          } finally {
+            try { immediateResetHandle.free(); } catch (_) { /* best-effort */ }
+          }
+          const immediateFreeHandle = new wasm.BrowserPlayerHandle();
+          let immediateFreeDisposed = false;
+          try {
+            const pendingFree = immediateFreeHandle.mcp_eval_lingo('1');
+            immediateFreeHandle.free();
+            immediateFreeDisposed = true;
+            await requireRejected(pendingFree, 'immediate free Promise');
+          } finally {
+            if (!immediateFreeDisposed) {
+              try { immediateFreeHandle.free(); } catch (_) { /* best-effort */ }
+            }
+          }
+
+          const awaitBounded = async (promise, label) => {
+            let timeoutId;
+            try {
+              return await Promise.race([
+                promise,
+                new Promise((_, reject) => {
+                  timeoutId = setTimeout(
+                    () => reject(new Error(label + ' timed out')),
+                    2000,
+                  );
+                }),
+              ]);
+            } finally {
+              clearTimeout(timeoutId);
+            }
+          };
+          const assetUrl = new URL('./assets/charmap-system.png', document.baseURI).href;
+          const assetResponse = await awaitBounded(window.fetch(assetUrl), 'font asset fetch');
+          if (!assetResponse.ok) {
+            throw new Error('font asset fetch returned HTTP ' + assetResponse.status);
+          }
+          const responsePath = new URL(assetResponse.url, document.baseURI).pathname;
+          const expectedAssetPath = new URL(assetUrl, document.baseURI).pathname;
+          if (responsePath !== expectedAssetPath) {
+            throw new Error('font asset served from unexpected path ' + responsePath);
+          }
+          const validBlob = await awaitBounded(
+            assetResponse.clone().blob(),
+            'font asset body read',
+          );
+          const validBitmap = await awaitBounded(
+            createImageBitmap(validBlob),
+            'font asset image decode',
+          );
+          validBitmap.close();
+
+          // Keep a real font fetch pending after its first poll, then retire
+          // the owner. Release both a rejected and a valid response only
+          // after reset/free so cancellation and late-success fencing are
+          // exercised through the real font command path.
+          const runPendingFetchRetirement = async (label, retire, responseMode) => {
+            const sentinelUrl = `https://owned-fence.invalid/${label}.png`;
+            const originalFetch = window.fetch;
+            let request = null;
+            let handleUnderTest = new wasm.BrowserPlayerHandle();
+            let disposed = false;
+            window.fetch = function(input, init) {
+              if (String(input) !== sentinelUrl) return originalFetch.call(window, input, init);
+              return new Promise((resolve, reject) => {
+                request = { resolve, reject, settled: false };
+              });
+            };
+            try {
+              const pending = handleUnderTest.set_system_font_path(sentinelUrl);
+              const outcome = pending.then(
+                () => ({ resolved: true }),
+                (error) => ({ resolved: false, error }),
+              );
+              await waitUntil(() => request !== null, `${label} fetch start`);
+              let settled = false;
+              outcome.then(() => { settled = true; });
+              await new Promise(resolve => setTimeout(resolve, 0));
+              if (settled) throw new Error(`${label} fetch Promise settled before retirement`);
+              const ownerBefore = handleUnderTest.owner_identity();
+              if (retire === 'reset') {
+                handleUnderTest.reset();
+              } else {
+                handleUnderTest.free();
+                disposed = true;
+              }
+              const ownerAfter = retire === 'reset' ? handleUnderTest.owner_identity() : null;
+              if (retire === 'reset' && ownerBefore === ownerAfter) {
+                throw new Error(`${label} reset did not rotate the owner`);
+              }
+              // Reset may cancel the command promptly; either outcome is
+              // valid. Always settle the controlled resource before waiting
+              // for the stale operation's rejection.
+              if (request && !request.settled) {
+                request.settled = true;
+                if (responseMode === 'valid') {
+                  request.resolve(new Response(validBlob, {
+                    status: 200,
+                    headers: { 'Content-Type': 'image/png' },
+                  }));
+                } else {
+                  request.reject(new Error(`${label} controlled fetch released after retirement`));
+                }
+              }
+              const result = await awaitBounded(outcome, label + ' stale Promise');
+              if (result.resolved) throw new Error(label + ' stale Promise resolved');
+            } finally {
+              window.fetch = originalFetch;
+              if (request && !request.settled) {
+                request.settled = true;
+                request.reject(new Error(`${label} controlled fetch cleanup`));
+              }
+              if (!disposed) {
+                try { handleUnderTest.free(); } catch (_) { /* best-effort */ }
+              }
+            }
+          };
+          await runPendingFetchRetirement('reset-rejected', 'reset', 'reject');
+          await runPendingFetchRetirement('free-rejected', 'free', 'reject');
+          await runPendingFetchRetirement('reset-late-success', 'reset', 'valid');
+          await runPendingFetchRetirement('free-late-success', 'free', 'valid');
+
+          // Confirm ordinary API completion with the same verified browser
+          // asset after the controlled stale-completion cases. Native helper
+          // tests cover actual font installation; this only checks resolution.
+          const successfulFontHandle = new wasm.BrowserPlayerHandle();
+          let successTimeoutId;
+          try {
+            const successfulFont = successfulFontHandle.set_system_font_path(
+              assetUrl,
+            );
+            const successTimeout = new Promise((_, reject) =>
+              successTimeoutId = setTimeout(() => reject(new Error('normal system-font load timed out')), 2000)
+            );
+            await Promise.race([successfulFont, successTimeout]);
+          } finally {
+            clearTimeout(successTimeoutId);
+            try { successfulFontHandle.free(); } catch (_) { /* best-effort */ }
+          }
+
+          let overflowHandle = null;
+          try {
+            let overflowTriggered = false;
+            let overflowErrors = 0;
+            let flashResets = 0;
+            overflowHandle = new wasm.BrowserPlayerHandle();
+            const overflowSink = (event) => {
+              if (event.type === 'flashReset') flashResets++;
+              if (!overflowTriggered) {
+                overflowTriggered = true;
+                for (let i = 0; i < 200; i++) {
+                  try { overflowHandle.set_host_event_sink(overflowSink); } catch (_) { overflowErrors++; }
+                }
+                throw new Error('intentional overflow callback failure');
+              }
+            };
+            overflowHandle.set_host_event_sink(overflowSink);
+            overflowHandle.reset();
+            overflowHandle.reset();
+            await new Promise(resolve => setTimeout(resolve, 0));
+            await new Promise(resolve => setTimeout(resolve, 0));
+            await new Promise(resolve => setTimeout(resolve, 0));
+            if (overflowErrors === 0) {
+              throw new Error('host lifecycle overflow probe never reached its bounded capacity');
+            }
+            if (flashResets < 2) {
+              throw new Error(`host lifecycle overflow probe lost a retained tail (${flashResets} flashReset events)`);
+            }
+          } finally {
+            if (overflowHandle) {
+              try { overflowHandle.clear_host_event_sink(); } catch (_) { /* best-effort */ }
+              await new Promise(resolve => setTimeout(resolve, 0));
+              try { overflowHandle.free(); } catch (_) { /* best-effort */ }
+            }
+          }
+          let terminalHandle = null;
+          try {
+            let successfulBindings = 0;
+            let failedBindings = 0;
+            let terminalRetirements = 0;
+            terminalHandle = new wasm.BrowserPlayerHandle();
+            const terminalSink = (event) => {
+              if (event.type === 'ownerRetired') terminalRetirements++;
+            };
+            for (let i = 0; i < 200; i++) {
+              try {
+                terminalHandle.set_host_event_sink(terminalSink);
+                successfulBindings++;
+              } catch (_) {
+                // The regular lifecycle queue is intentionally full here.
+                failedBindings++;
+              }
+            }
+            if (failedBindings === 0 || successfulBindings === 0) {
+              throw new Error(
+                `terminal owner binding probe did not saturate (${successfulBindings} successful, ${failedBindings} failed)`
+              );
+            }
+            // Drop before the detached task gets a turn. The reserved
+            // terminal slot must still deliver this final retirement.
+            terminalHandle.free();
+            terminalHandle = null;
+            await new Promise(resolve => setTimeout(resolve, 0));
+            await new Promise(resolve => setTimeout(resolve, 0));
+            await new Promise(resolve => setTimeout(resolve, 0));
+            if (terminalRetirements !== successfulBindings) {
+              throw new Error(
+                `terminal owner retirement count was ${terminalRetirements}, expected ${successfulBindings}`
+              );
+            }
+          } finally {
+            if (terminalHandle) {
+              try { terminalHandle.free(); } catch (_) { /* best-effort */ }
+            }
+          }
+        } catch (e) {
+          failure = e;
+        } finally {
+          if (handle) {
+            try {
+              handle.clear_host_event_sink();
+              await new Promise(resolve => setTimeout(resolve, 0));
+            } catch (e) {
+              cleanupFailure = e;
+            }
+            try {
+              if (typeof handle.free === 'function') handle.free();
+            } catch (e) {
+              cleanupFailure ||= e;
+            }
+          }
+        }
+        if (!failure && cleanupFailure) failure = cleanupFailure;
+        if (failure) {
+          const error = failure.message || String(failure);
+          results.tests.push({ name, status: 'fail', error });
+          results.failed++;
+          endTest(group, name, false, error);
+        } else {
+          results.tests.push({ name, status: 'pass' });
+          results.passed++;
+          endTest(group, name, true);
+        }
+      }
 
       for (const name of testFns) {
         const group = startTest(name);

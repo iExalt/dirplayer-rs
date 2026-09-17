@@ -10,24 +10,63 @@
 //! virtual filesystem), and returns the documented sentinel (`""` /
 //! `0` / `-1`) for things that genuinely don't exist in a browser.
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-
 use base64::Engine;
 
 use crate::{
     director::lingo::datum::{Datum, DatumType},
     player::{
-        reserve_player_mut, reserve_player_ref, symbols::symbol_table::SymbolTable, DatumRef, DirPlayer,
+        symbols::symbol_table::SymbolTable, DatumRef, DirPlayer,
         ScriptError,
     },
 };
 
 const BUDAPI_VERSION: &str = "5.0";
 
-static MOUSE_DISABLED: AtomicBool = AtomicBool::new(false);
-static KEYS_DISABLED: AtomicBool = AtomicBool::new(false);
-static SCREENSAVER_DISABLED: AtomicBool = AtomicBool::new(false);
-static SOUND_VOLUME: AtomicU8 = AtomicU8::new(100);
+/// Mutable BudAPI settings belong to one player generation.  Keeping them in
+/// the Xtra manager prevents one browser player from changing another
+/// player's keyboard, mouse, screen-saver, or volume state.
+#[derive(Clone, Debug)]
+pub(crate) struct BudApiState {
+    pub(crate) mouse_disabled: bool,
+    pub(crate) keys_disabled: bool,
+    pub(crate) screensaver_disabled: bool,
+    pub(crate) sound_volume: u8,
+    /// Browser clipboard fallback for this player generation.  It must not
+    /// use shared DOM storage: two players may have different clipboard
+    /// fixtures and reset must clear the retired generation's value.
+    pub(crate) clipboard_text: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum BudApiHostIntent {
+    Open { owner: crate::player::ownership::OwnerToken, target: String },
+    Alert { owner: crate::player::ownership::OwnerToken, text: String },
+    ClipboardWrite { owner: crate::player::ownership::OwnerToken, text: String },
+    ClipboardRead { owner: crate::player::ownership::OwnerToken },
+}
+
+impl BudApiHostIntent {
+    pub(crate) fn owner(&self) -> &crate::player::ownership::OwnerToken {
+        match self {
+            Self::Open { owner, .. }
+            | Self::Alert { owner, .. }
+            | Self::ClipboardWrite { owner, .. }
+            | Self::ClipboardRead { owner } => owner,
+        }
+    }
+}
+
+impl Default for BudApiState {
+    fn default() -> Self {
+        Self {
+            mouse_disabled: false,
+            keys_disabled: false,
+            screensaver_disabled: false,
+            sound_volume: 100,
+            clipboard_text: String::new(),
+        }
+    }
+}
 
 pub struct BudApiXtra;
 
@@ -46,72 +85,113 @@ impl BudApiXtra {
 
     pub fn call_handler(
         player: &mut DirPlayer,
+        state: &mut BudApiState,
         name: &str,
         args: &Vec<DatumRef>,
         symbols: &SymbolTable,
     ) -> Result<DatumRef, ScriptError> {
-        dispatch(player, name, args, symbols)
+        dispatch(player, state, name, args, symbols)
+    }
+
+    pub(crate) fn prepare_handler(
+        player: &mut DirPlayer,
+        state: &mut BudApiState,
+        symbols: &SymbolTable,
+        name: &str,
+        args: &[DatumRef],
+    ) -> Result<crate::player::xtra::manager::XtraPendingOrValue, ScriptError> {
+        let owner = player.owner.clone();
+        let host = match name.to_ascii_lowercase().as_str() {
+            "barunprogram" | "bashell" | "baopenfile" | "baopenurl" => {
+                Some(BudApiHostIntent::Open {
+                    owner,
+                    target: string_arg(player, &args.to_vec(), 0, symbols)?,
+                })
+            }
+            "bamsgbox" | "bamsgboxex" => {
+                let message = string_arg(player, &args.to_vec(), 0, symbols)?;
+                let caption = if args.len() > 1 {
+                    string_arg(player, &args.to_vec(), 1, symbols)?
+                } else {
+                    String::new()
+                };
+                let text = if caption.is_empty() { message } else { format!("{}\n\n{}", caption, message) };
+                Some(BudApiHostIntent::Alert { owner, text })
+            }
+            "bacopytext" => Some(BudApiHostIntent::ClipboardWrite {
+                owner,
+                text: string_arg(player, &args.to_vec(), 0, symbols)?,
+            }),
+            "bapastetext" => Some(BudApiHostIntent::ClipboardRead { owner }),
+            _ => None,
+        };
+        if let Some(host) = host {
+            return Ok(crate::player::xtra::manager::XtraPendingOrValue::Pending(
+                crate::player::xtra::manager::XtraPendingIntent::BudApi(host),
+            ));
+        }
+        dispatch(player, state, name, &args.to_vec(), symbols)
+            .map(crate::player::xtra::manager::XtraPendingOrValue::Value)
     }
 }
 
 fn dispatch(
     player: &mut DirPlayer,
+    state: &mut BudApiState,
     name: &str,
     args: &Vec<DatumRef>,
     symbols: &SymbolTable,
 ) -> Result<DatumRef, ScriptError> {
     match_ci!(name, {
         // -- Information ------------------------------------------------
-        "baVersion" => ok_string(BUDAPI_VERSION),
-        "baSysFolder" => ba_sys_folder(args, symbols),
-        "baCpuInfo" => ba_cpu_info(args, symbols),
-        "baDiskInfo" => ok_int(-1),
-        "baDiskList" => empty_list(),
-        "baMemoryInfo" => ok_int(0),
-        "baFindApp" => ok_string(""),
-        "baReadIni" | "baWriteIni" | "baDeleteIniEntry" | "baDeleteIniSection" | "baFlushIni" => ok_int(0),
-        "baReadRegString" | "baReadRegMulti" | "baReadRegBinary" => default_string(args, symbols),
-        "baReadRegNumber" => default_int(args, symbols),
-        "baWriteRegString" | "baWriteRegNumber" | "baWriteRegBinary" | "baWriteRegMulti" | "baDeleteReg" => ok_int(0),
-        "baRegKeyList" | "baRegValueList" => empty_list(),
-        "baSoundCard" => ok_int(1),
-        "baFontInstalled" => ba_font_installed(args, symbols),
-        "baFontList" => ba_font_list(args, symbols),
-        "baFontStyleList" => empty_list(),
-        "baCommandArgs" => ok_string(""),
-        "baPrevious" => ok_int(0),
-        "baScreenInfo" => ba_screen_info(args, symbols),
+        "baVersion" => ok_string(player, BUDAPI_VERSION),
+        "baSysFolder" => ba_sys_folder(player, args, symbols),
+        "baCpuInfo" => ba_cpu_info(player, args, symbols),
+        "baDiskInfo" => ok_int(player, -1),
+        "baDiskList" => empty_list(player, ),
+        "baMemoryInfo" => ok_int(player, 0),
+        "baFindApp" => ok_string(player, ""),
+        "baReadIni" | "baWriteIni" | "baDeleteIniEntry" | "baDeleteIniSection" | "baFlushIni" => ok_int(player, 0),
+        "baReadRegString" | "baReadRegMulti" | "baReadRegBinary" => default_string(player, args, symbols),
+        "baReadRegNumber" => default_int(player, args, symbols),
+        "baWriteRegString" | "baWriteRegNumber" | "baWriteRegBinary" | "baWriteRegMulti" | "baDeleteReg" => ok_int(player, 0),
+        "baRegKeyList" | "baRegValueList" => empty_list(player, ),
+        "baSoundCard" => ok_int(player, 1),
+        "baFontInstalled" => ba_font_installed(player, args, symbols),
+        "baFontList" => ba_font_list(player, args, symbols),
+        "baFontStyleList" => empty_list(player, ),
+        "baCommandArgs" => ok_string(player, ""),
+        "baPrevious" => ok_int(player, 0),
+        "baScreenInfo" => ba_screen_info(player, args, symbols),
 
         // -- System -----------------------------------------------------
-        "baDisableDiskErrors" => ok_int(0),
-        "baDisableKeys" => { KEYS_DISABLED.store(int_arg_or(args, 0, 0, symbols)? != 0, Ordering::Relaxed); ok_int(0) },
-        "baDisableMouse" => { MOUSE_DISABLED.store(int_arg_or(args, 0, 0, symbols)? != 0, Ordering::Relaxed); ok_int(0) },
-        "baDisableSwitching" => ok_int(0),
-        "baDisableScreenSaver" => { SCREENSAVER_DISABLED.store(int_arg_or(args, 0, 0, symbols)? != 0, Ordering::Relaxed); ok_int(0) },
+        "baDisableDiskErrors" => ok_int(player, 0),
+        "baDisableKeys" => { state.keys_disabled = int_arg_or(player, args, 0, 0, symbols)? != 0; ok_int(player, 0) },
+        "baDisableMouse" => { state.mouse_disabled = int_arg_or(player, args, 0, 0, symbols)? != 0; ok_int(player, 0) },
+        "baDisableSwitching" => ok_int(player, 0),
+        "baDisableScreenSaver" => { state.screensaver_disabled = int_arg_or(player, args, 0, 0, symbols)? != 0; ok_int(player, 0) },
         "baScreenSaverTime" | "baSetScreenSaver" | "baSetWallpaper" | "baSetPattern"
             | "baSetDisplay" | "baSetDisplayEx" | "baExitWindows" | "baWinHelp"
             | "baHideTaskBar" | "baSetCurrentDir" | "baPlaceCursor" | "baRestrictCursor"
             | "baFreeCursor" | "baSetSystemTime" | "baEjectDisk" | "baInstallFont"
             | "baCreatePMGroup" | "baDeletePMGroup" | "baCreatePMIcon" | "baDeletePMIcon"
-            | "baRefreshDesktop" | "baSetPrinter" | "baPrintDlg" | "baPageSetupDlg" => ok_int(0),
-        "baRunProgram" | "baShell" => ba_open_url(args, symbols),
-        "baMsgBox" => ba_msg_box(args, symbols),
-        "baMsgBoxEx" => ba_msg_box(args, symbols),
-        "baCopyText" => ba_copy_text(args, symbols),
-        "baPasteText" => ba_paste_text(),
-        "baEncryptText" => ba_encrypt_text(args, symbols),
-        "baDecryptText" => ba_decrypt_text(args, symbols),
-        "baSetVolume" => { let v = int_arg_or(args, 1, 100, symbols)?.clamp(0, 255) as u8; SOUND_VOLUME.store(v, Ordering::Relaxed); ok_int(0) },
-        "baGetVolume" => ok_int(SOUND_VOLUME.load(Ordering::Relaxed) as i32),
-        "baEnvironment" => ba_environment(args, symbols),
-        "baSetEnvironment" => ok_int(0),
-        "baAdministrator" => ok_int(0),
-        "baUserName" | "baComputerName" => ok_string(""),
-        "baKeyIsDown" | "baKeyBeenPressed" => ok_int(0),
-        "baSleep" => ba_sleep(args, symbols),
-        "baPMGroupList" | "baPMIconList" | "baPMSubGroupList" => empty_list(),
-        "baSystemTime" => ba_system_time(args, symbols),
-        "baPrinterInfo" => ok_string(""),
+            | "baRefreshDesktop" | "baSetPrinter" | "baPrintDlg" | "baPageSetupDlg" => ok_int(player, 0),
+        "baRunProgram" | "baShell" | "baMsgBox" | "baMsgBoxEx" | "baCopyText" =>
+            Err(ScriptError::new("BudAPI browser effect requires the owner host executor".to_owned())),
+        "baPasteText" => Err(ScriptError::new("BudAPI clipboard read requires the owner host executor".to_owned())),
+        "baEncryptText" => ba_encrypt_text(player, args, symbols),
+        "baDecryptText" => ba_decrypt_text(player, args, symbols),
+        "baSetVolume" => { let v = int_arg_or(player, args, 1, 100, symbols)?.clamp(0, 255) as u8; state.sound_volume = v; ok_int(player, 0) },
+        "baGetVolume" => ok_int(player, state.sound_volume as i32),
+        "baEnvironment" => ba_environment(player, args, symbols),
+        "baSetEnvironment" => ok_int(player, 0),
+        "baAdministrator" => ok_int(player, 0),
+        "baUserName" | "baComputerName" => ok_string(player, ""),
+        "baKeyIsDown" | "baKeyBeenPressed" => ok_int(player, 0),
+        "baSleep" => ba_sleep(player, args, symbols),
+        "baPMGroupList" | "baPMIconList" | "baPMSubGroupList" => empty_list(player, ),
+        "baSystemTime" => ba_system_time(player, args, symbols),
+        "baPrinterInfo" => ok_string(player, ""),
 
         // -- File -------------------------------------------------------
         "baFileExists" => ba_file_exists(player, args, symbols),
@@ -120,78 +200,76 @@ fn dispatch(
         "baCreateFolder" | "baDeleteFolder" | "baRenameFile" | "baDeleteFile"
             | "baDeleteXFiles" | "baXDelete" | "baSetFileDate" | "baSetFileAttributes"
             | "baRecycleFile" | "baCopyFile" | "baCopyXFiles" | "baXCopy" | "baMakeShortcut"
-            | "baMakeShortcutEx" | "baFindClose" => ok_int(0),
-        "baFileAge" => ok_int(-1),
-        "baFileDate" | "baFileDateEx" => ok_string(""),
-        "baFileAttributes" => ok_string(""),
+            | "baMakeShortcutEx" | "baFindClose" => ok_int(player, 0),
+        "baFileAge" => ok_int(player, -1),
+        "baFileDate" | "baFileDateEx" => ok_string(player, ""),
+        "baFileAttributes" => ok_string(player, ""),
         "baFileList" | "baFolderList" => ba_file_list(player, args, symbols),
-        "baFindFirstFile" | "baFindNextFile" => ok_string(""),
-        "baGetFilename" | "baGetFolder" => ok_string(""),
-        "baFileVersion" => ok_string(""),
-        "baEncryptFile" => ok_int(0),
-        "baFindDrive" => ok_string(""),
-        "baOpenFile" | "baOpenURL" => ba_open_url(args, symbols),
-        "baPrintFile" => ok_int(0),
-        "baShortFileName" | "baLongFileName" => default_string(args, symbols),
-        "baTempFileName" => ba_temp_file_name(args, symbols),
-        "baResolveShortcut" => default_string(args, symbols),
+        "baFindFirstFile" | "baFindNextFile" => ok_string(player, ""),
+        "baGetFilename" | "baGetFolder" => ok_string(player, ""),
+        "baFileVersion" => ok_string(player, ""),
+        "baEncryptFile" => ok_int(player, 0),
+        "baFindDrive" => ok_string(player, ""),
+        "baOpenFile" | "baOpenURL" => Err(ScriptError::new("BudAPI browser effect requires the owner host executor".to_owned())),
+        "baPrintFile" => ok_int(player, 0),
+        "baShortFileName" | "baLongFileName" => default_string(player, args, symbols),
+        "baTempFileName" => ba_temp_file_name(player, args, symbols),
+        "baResolveShortcut" => default_string(player, args, symbols),
 
         // -- Window functions (all browser no-ops) ----------------------
-        "baWindowInfo" => ok_string(""),
+        "baWindowInfo" => ok_string(player, ""),
         "baFindWindow" | "baActiveWindow" | "baWinHandle" | "baStageHandle"
             | "baActivateWindow" | "baCloseWindow" | "baCloseApp" | "baSetWindowState"
             | "baSetWindowTitle" | "baMoveWindow" | "baWindowToFront" | "baWindowToBack"
             | "baGetWindow" | "baWaitTillActive" | "baWaitForWindow" | "baNextActiveWindow"
             | "baWindowExists" | "baWindowDepth" | "baSetWindowDepth" | "baSendKeys"
             | "baSendMsg" | "baAddSysItems" | "baRemoveSysItems" | "baClipWindow"
-            | "baSetParent" => ok_int(0),
-        "baWindowList" | "baChildWindowList" => empty_list(),
+            | "baSetParent" => ok_int(player, 0),
+        "baWindowList" | "baChildWindowList" => empty_list(player, ),
 
         // -- Buddy meta -------------------------------------------------
-        "baAbout" => ok_int(0),
-        "baRegister" | "baSaveRegistration" => ok_int(1),
-        "baGetRegistration" => ok_string(""),
-        "baFunctions" => ok_int(i32::MAX),
-        "baUsedFunctions" => empty_list(),
+        "baAbout" => ok_int(player, 0),
+        "baRegister" | "baSaveRegistration" => ok_int(player, 1),
+        "baGetRegistration" => ok_string(player, ""),
+        "baFunctions" => ok_int(player, i32::MAX),
+        "baUsedFunctions" => empty_list(player, ),
 
         _ => {
             log::warn!("[BudAPI] unhandled handler: {}", name);
-            ok_int(0)
+            ok_int(player, 0)
         },
     })
 }
 
 // -- Helpers ----------------------------------------------------------------
 
-fn ok_int(n: i32) -> Result<DatumRef, ScriptError> {
-    reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Int(n))))
+fn ok_int(player: &mut DirPlayer, n: i32) -> Result<DatumRef, ScriptError> {
+    Ok(player.alloc_datum(Datum::Int(n)))
 }
 
-fn ok_string(s: &str) -> Result<DatumRef, ScriptError> {
-    let owned = s.to_string();
-    reserve_player_mut(|player| Ok(player.alloc_datum(Datum::String(owned))))
+fn ok_string(player: &mut DirPlayer, s: &str) -> Result<DatumRef, ScriptError> {
+    Ok(player.alloc_datum(Datum::String(s.to_owned())))
 }
 
-fn empty_list() -> Result<DatumRef, ScriptError> {
-    reserve_player_mut(|player| {
-        Ok(player.alloc_datum(Datum::List(
-            DatumType::List,
-            std::collections::VecDeque::new(),
-            false,
-        )))
-    })
+fn empty_list(player: &mut DirPlayer) -> Result<DatumRef, ScriptError> {
+    Ok(player.alloc_datum(Datum::List(
+        DatumType::List,
+        std::collections::VecDeque::new(),
+        false,
+    )))
 }
 
 fn int_arg_or(
+    player: &DirPlayer,
     args: &Vec<DatumRef>,
     idx: usize,
     default: i32,
     _symbols: &SymbolTable,
 ) -> Result<i32, ScriptError> {
-    reserve_player_ref(|player| match args.get(idx) {
-        Some(a) => player.get_datum(a).int_value(),
+    match args.get(idx) {
+        Some(a) => checked_datum(player, a)?.int_value(),
         None => Ok(default),
-    })
+    }
 }
 
 fn string_arg_explicit(
@@ -201,50 +279,63 @@ fn string_arg_explicit(
     symbols: &SymbolTable,
 ) -> Result<String, ScriptError> {
     match args.get(idx) {
-        Some(a) => player.get_datum(a).string_value(symbols),
+        Some(a) => checked_datum(player, a)?.string_value(symbols),
         None => Ok(String::new()),
     }
 }
 
+fn checked_datum<'a>(player: &'a DirPlayer, value: &DatumRef) -> Result<&'a Datum, ScriptError> {
+    match value {
+        DatumRef::Void => Ok(&Datum::Void),
+        _ => player.allocator.try_get_datum(value).ok_or_else(|| {
+            ScriptError::new_code(
+                crate::player::ScriptErrorCode::InvalidReference,
+                format!("foreign or stale BudAPI datum reference {value}"),
+            )
+        }),
+    }
+}
+
 fn string_arg(
+    player: &DirPlayer,
     args: &Vec<DatumRef>,
     idx: usize,
     symbols: &SymbolTable,
 ) -> Result<String, ScriptError> {
-    reserve_player_ref(|player| match args.get(idx) {
-        Some(a) => player.get_datum(a).string_value(symbols),
+    match args.get(idx) {
+        Some(a) => checked_datum(player, a)?.string_value(symbols),
         None => Ok(String::new()),
-    })
+    }
 }
 
 /// Many BudAPI getters accept a default-value argument that's returned
 /// verbatim when the underlying read fails. In WASM the read effectively
 /// always fails, so we just echo the default back. Default is in arg[2] for
 /// baReadRegString-style calls, and arg[0] for shortname-style getters.
-fn default_string(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+fn default_string(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
     let default_idx = if args.len() >= 3 { 2 } else { 0 };
-    let s = string_arg(args, default_idx, symbols)?;
-    reserve_player_mut(|player| Ok(player.alloc_datum(Datum::String(s))))
+    let s = string_arg(player, args, default_idx, symbols)?;
+    Ok(player.alloc_datum(Datum::String(s)))
 }
 
-fn default_int(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
-    let n = int_arg_or(args, 2, 0, symbols)?;
-    reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Int(n))))
+fn default_int(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+    let n = int_arg_or(player, args, 2, 0, symbols)?;
+    Ok(player.alloc_datum(Datum::Int(n)))
 }
 
 // -- Information ------------------------------------------------------------
 
-fn ba_sys_folder(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
-    let kind = string_arg(args, 0, symbols)?;
+fn ba_sys_folder(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+    let kind = string_arg(player, args, 0, symbols)?;
     let path = match kind.to_ascii_lowercase().as_str() {
         "temp" | "windows" | "system" | "program files" | "appdata" | "localappdata" => "/",
         _ => "/",
     };
-    ok_string(path)
+    ok_string(player, path)
 }
 
-fn ba_cpu_info(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
-    let kind = string_arg(args, 0, symbols)?;
+fn ba_cpu_info(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+    let kind = string_arg(player, args, 0, symbols)?;
     let value = match kind.to_ascii_lowercase().as_str() {
         "vendor" => "WebAssembly",
         "name" => "WASM Virtual CPU",
@@ -255,11 +346,11 @@ fn ba_cpu_info(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, 
             .unwrap_or(""),
         _ => "",
     };
-    ok_string(value)
+    ok_string(player, value)
 }
 
-fn ba_screen_info(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
-    let kind = string_arg(args, 0, symbols)?;
+fn ba_screen_info(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+    let kind = string_arg(player, args, 0, symbols)?;
     let screen = web_sys::window().and_then(|w| w.screen().ok());
     let result = match kind.to_ascii_lowercase().as_str() {
         "width" => screen.as_ref().and_then(|s| s.width().ok()).unwrap_or(0),
@@ -274,20 +365,20 @@ fn ba_screen_info(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRe
             .unwrap_or(24),
         _ => 0,
     };
-    ok_int(result)
+    ok_int(player, result)
 }
 
-fn ba_font_installed(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
-    let name = string_arg(args, 0, symbols)?;
+fn ba_font_installed(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+    let name = string_arg(player, args, 0, symbols)?;
     if name.is_empty() {
-        return ok_int(0);
+        return ok_int(player, 0);
     }
     // Canvas-based font detection: measure a probe string twice using two
     // distinct fallback families plus the candidate. If both widths still
     // match the fallbacks, the candidate isn't actually installed.
     let document = match web_sys::window().and_then(|w| w.document()) {
         Some(d) => d,
-        None => return ok_int(0),
+        None => return ok_int(player, 0),
     };
     let canvas = match document.create_element("canvas") {
         Ok(el) => el.dyn_into::<web_sys::HtmlCanvasElement>().ok(),
@@ -295,15 +386,15 @@ fn ba_font_installed(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<Datu
     };
     let canvas = match canvas {
         Some(c) => c,
-        None => return ok_int(0),
+        None => return ok_int(player, 0),
     };
     let ctx_obj = match canvas.get_context("2d") {
         Ok(Some(c)) => c,
-        _ => return ok_int(0),
+        _ => return ok_int(player, 0),
     };
     let ctx: web_sys::CanvasRenderingContext2d = match ctx_obj.dyn_into() {
         Ok(c) => c,
-        Err(_) => return ok_int(0),
+        Err(_) => return ok_int(player, 0),
     };
     let probe = "mwjxyzABCabc012345";
     let measure = |font: &str| -> f64 {
@@ -316,13 +407,13 @@ fn ba_font_installed(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<Datu
     let candidate_b = measure(&format!("72px '{}', serif", name));
     let installed =
         (candidate_a - baseline_a).abs() > 0.5 || (candidate_b - baseline_b).abs() > 0.5;
-    ok_int(if installed { 1 } else { 0 })
+    ok_int(player, if installed { 1 } else { 0 })
 }
 
-fn ba_font_list(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+fn ba_font_list(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
     // Browsers don't expose a font enumeration API on the open web (FontFace
     // API is privacy-gated). Always return the canonical web-safe set.
-    let _ = string_arg(args, 0, symbols)?;
+    let _ = string_arg(player, args, 0, symbols)?;
     let names = [
         "Arial",
         "Arial Black",
@@ -336,72 +427,19 @@ fn ba_font_list(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef,
         "Trebuchet MS",
         "Verdana",
     ];
-    reserve_player_mut(|player| {
-        let refs: std::collections::VecDeque<DatumRef> = names
-            .iter()
-            .map(|n| player.alloc_datum(Datum::String(n.to_string())))
-            .collect();
-        Ok(player.alloc_datum(Datum::List(DatumType::List, refs, false)))
-    })
+    let refs: std::collections::VecDeque<DatumRef> = names
+        .iter()
+        .map(|n| player.alloc_datum(Datum::String(n.to_string())))
+        .collect();
+    Ok(player.alloc_datum(Datum::List(DatumType::List, refs, false)))
 }
 
 use wasm_bindgen::JsCast;
 
 // -- System / clipboard / time ---------------------------------------------
 
-fn ba_open_url(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
-    let target = string_arg(args, 0, symbols)?;
-    let ok = match web_sys::window() {
-        Some(w) => w.open_with_url_and_target(&target, "_blank").is_ok(),
-        None => false,
-    };
-    ok_int(if ok { 1 } else { 0 })
-}
-
-fn ba_msg_box(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
-    let message = string_arg(args, 0, symbols)?;
-    let caption = string_arg(args, 1, symbols).unwrap_or_default();
-    let text = if caption.is_empty() {
-        message
-    } else {
-        format!("{}\n\n{}", caption, message)
-    };
-    if let Some(window) = web_sys::window() {
-        let _ = window.alert_with_message(&text);
-    }
-    ok_int(1)
-}
-
-fn ba_copy_text(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
-    let text = string_arg(args, 0, symbols)?;
-    let _ = text;
-    // navigator.clipboard.writeText is async and requires a user gesture.
-    // Lingo expects a sync return — we kick off the write and return success
-    // optimistically.
-    if let Some(window) = web_sys::window() {
-        let clipboard = window.navigator().clipboard();
-        let promise = clipboard.write_text(&text);
-        crate::player::spawn_player_local(async move {
-            let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
-        });
-    }
-    ok_int(1)
-}
-
-fn ba_paste_text() -> Result<DatumRef, ScriptError> {
-    // Synchronous clipboard read isn't available; legacy Director scripts
-    // expect an immediate string. We return whatever was cached in the
-    // dirplayer-rs paste buffer (kept in localStorage by `baCopyText`-style
-    // writes from earlier sessions), or empty.
-    let cached = web_sys::window()
-        .and_then(|w| w.local_storage().ok().flatten())
-        .and_then(|s| s.get_item("dirplayer_budapi_clipboard").ok().flatten())
-        .unwrap_or_default();
-    ok_string(&cached)
-}
-
-fn ba_environment(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
-    let name = string_arg(args, 0, symbols)?;
+fn ba_environment(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+    let name = string_arg(player, args, 0, symbols)?;
     let value = match name.to_ascii_uppercase().as_str() {
         "USERLANGUAGE" | "LANG" => web_sys::window()
             .map(|w| w.navigator().language().unwrap_or_default())
@@ -411,26 +449,26 @@ fn ba_environment(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRe
             .unwrap_or_default(),
         _ => String::new(),
     };
-    ok_string(&value)
+    ok_string(player, &value)
 }
 
-fn ba_sleep(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+fn ba_sleep(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
     // We can't block the WASM thread; busy-wait `Date.now()` instead so
     // callers get the time delay they asked for (without making the page
     // unresponsive — we cap at 500ms to avoid runaway scripts).
-    let ms = int_arg_or(args, 0, 0, symbols)?.clamp(0, 500) as f64;
+    let ms = int_arg_or(player, args, 0, 0, symbols)?.clamp(0, 500) as f64;
     if let Some(perf) = web_sys::window().and_then(|w| w.performance()) {
         let end = perf.now() + ms;
         while perf.now() < end {
             // tight loop, but ≤500ms by clamp above
         }
     }
-    ok_int(0)
+    ok_int(player, 0)
 }
 
-fn ba_system_time(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+fn ba_system_time(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
     use chrono::{Datelike, Local, Timelike};
-    let format = string_arg(args, 0, symbols).unwrap_or_default();
+    let format = string_arg(player, args, 0, symbols)?;
     let now = Local::now();
     let formatted = match format.to_ascii_uppercase().as_str() {
         "" | "LONG" => now.format("%A, %B %e, %Y %H:%M:%S").to_string(),
@@ -446,7 +484,7 @@ fn ba_system_time(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRe
         "SECOND" => now.second().to_string(),
         _ => now.format(&format).to_string(),
     };
-    ok_string(&formatted)
+    ok_string(player, &formatted)
 }
 
 // -- File ops via FileIO virtual filesystem --------------------------------
@@ -480,8 +518,8 @@ fn ba_file_size(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &SymbolTa
 }
 
 fn ba_file_list(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
-    let folder = string_arg_explicit(player, args, 0, symbols).unwrap_or_default();
-    let _pattern = string_arg_explicit(player, args, 1, symbols).unwrap_or_default();
+    let folder = string_arg_explicit(player, args, 0, symbols)?;
+    let _pattern = string_arg_explicit(player, args, 1, symbols)?;
     let prefix = if folder.is_empty() { String::new() } else if folder.ends_with('/') { folder } else { format!("{}/", folder) };
     let files = player.with_xtra_manager_state(|state, _| {
         state.fileio.virtual_fs.keys().filter(|k| k.starts_with(&prefix)).cloned().collect::<Vec<_>>()
@@ -490,12 +528,12 @@ fn ba_file_list(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &SymbolTa
     Ok(player.alloc_datum(Datum::List(DatumType::List, refs, false)))
 }
 
-fn ba_temp_file_name(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
-    let prefix = string_arg(args, 0, symbols).unwrap_or_default();
+fn ba_temp_file_name(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+    let prefix = string_arg(player, args, 0, symbols)?;
     let mut raw = [0u8; 8];
     let _ = getrandom::fill(&mut raw);
     let suffix: String = raw.iter().map(|b| format!("{:02x}", b)).collect();
-    ok_string(&format!("/tmp/{}{}.tmp", prefix, suffix))
+    ok_string(player, &format!("/tmp/{}{}.tmp", prefix, suffix))
 }
 
 // -- Encrypt / decrypt -----------------------------------------------------
@@ -515,25 +553,25 @@ fn xor_with_key(data: &[u8], key: &[u8]) -> Vec<u8> {
         .collect()
 }
 
-fn ba_encrypt_text(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
-    let text = string_arg(args, 0, symbols)?;
-    let key = string_arg(args, 1, symbols)?;
+fn ba_encrypt_text(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+    let text = string_arg(player, args, 0, symbols)?;
+    let key = string_arg(player, args, 1, symbols)?;
     let bytes: Vec<u8> = text.chars().map(|c| c as u8).collect();
     let key_bytes: Vec<u8> = key.chars().map(|c| c as u8).collect();
     let cipher = xor_with_key(&bytes, &key_bytes);
     let encoded = base64::engine::general_purpose::STANDARD.encode(cipher);
-    ok_string(&encoded)
+    ok_string(player, &encoded)
 }
 
-fn ba_decrypt_text(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
-    let text = string_arg(args, 0, symbols)?;
-    let key = string_arg(args, 1, symbols)?;
+fn ba_decrypt_text(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+    let text = string_arg(player, args, 0, symbols)?;
+    let key = string_arg(player, args, 1, symbols)?;
     let cipher = match base64::engine::general_purpose::STANDARD.decode(text.as_bytes()) {
         Ok(v) => v,
-        Err(_) => return ok_string(""),
+        Err(_) => return ok_string(player, ""),
     };
     let key_bytes: Vec<u8> = key.chars().map(|c| c as u8).collect();
     let plain = xor_with_key(&cipher, &key_bytes);
     let s: String = plain.iter().map(|&b| b as char).collect();
-    ok_string(&s)
+    ok_string(player, &s)
 }

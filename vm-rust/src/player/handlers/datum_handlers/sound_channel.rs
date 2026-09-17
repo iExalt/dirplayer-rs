@@ -1133,6 +1133,15 @@ pub struct SoundManager {
 }
 
 impl SoundManager {
+    /// Empty replacement used while an owner-bound frame tick temporarily
+    /// moves the manager out of the player to avoid overlapping mutable borrows.
+    pub(crate) fn empty() -> Self {
+        Self {
+            channels: Vec::new(),
+            audio_context: None,
+        }
+    }
+
     pub fn new(num_channels: usize) -> Result<Self, ScriptError> {
         #[cfg(target_arch = "wasm32")]
         let context = Some(Arc::new(getAudioContext()));

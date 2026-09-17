@@ -4,9 +4,9 @@
 //! by those players. A context borrow is intentionally synchronous: callers
 //! must finish the borrow before awaiting host I/O or dispatching a callback.
 
-use std::{collections::HashMap, rc::Rc};
+use std::{collections::{HashMap, HashSet, VecDeque}, rc::Rc};
 
-use async_std::channel::Sender;
+use async_std::channel::{self, Receiver, Sender};
 use log::warn;
 
 use crate::director::file::DirectorFile;
@@ -32,6 +32,10 @@ use super::js_lingo_loader::JsRuntimeRegistry;
 use super::nested::{NestedChildRecord, NestedPlayerRegistry};
 use crate::director::lingo::datum::{Datum, VarRef};
 use super::symbols::{builtin::BuiltInSymbol, symbol::Symbol};
+use super::host_events::{
+    NativeHostEventMailbox, NativeNotificationError, NativePlayerNotificationMailbox,
+};
+use super::host_events::{BrowserHostSinkRef, BrowserHostSinkWeak, HostEventDelivery};
 
 pub type PlayerId = u32;
 use super::symbols::symbol_table::{SymbolOwner, SymbolTable};
@@ -69,6 +73,10 @@ pub(crate) enum EvalRequestTurn {
     Evaluator(crate::player::eval::EvalTurn),
     Child(DriverTurn),
     MovieAsync(super::handlers::movie::MovieAsyncRequest),
+    /// An owner-bound Flash request executed outside the session borrow. The
+    /// command pump retains the mutable request clone so an initial BindGet
+    /// can capture its first validated generation before evaluator resume.
+    Flash(super::handlers::datum_handlers::flash_object::FlashRequest),
     /// An external Xtra request prepared while the evaluator is suspended.
     /// The command pump executes this owned request after releasing its
     /// `RuntimeSession` borrow, then re-enters only for owner-checked
@@ -98,6 +106,17 @@ struct InflightEvalRoute {
     owner: OwnerToken,
     action: crate::player::eval::EvalAction,
     sender: Sender<Result<DatumRef, ScriptError>>,
+}
+
+/// Cancellation for the one frame loop owned by a player generation.
+///
+/// The sender lives in the session so stop/reset/remove can wake a loop that
+/// is parked in pacing or host I/O. The loop keeps the receiver; the epoch
+/// check prevents an old finalizer from clearing a replacement loop.
+struct PlaybackLoopControl {
+    owner: OwnerToken,
+    epoch: u64,
+    cancel: Sender<()>,
 }
 
 pub(crate) struct DeferredRequest {
@@ -144,7 +163,6 @@ pub struct RuntimeSession {
     owner: SymbolOwner,
     generation: u64,
     pending_casts: Vec<PendingCastLoad>,
-    notifications: CastNotificationOutbox,
     completed_property_casts: Vec<(PlayerId, CompletionTicket)>,
     drivers: HashMap<PlayerId, DriverContinuation>,
     eval_drivers: HashMap<crate::player::eval::EvalId, EvalChildContinuation>,
@@ -168,13 +186,37 @@ pub struct RuntimeSession {
     /// Host resources retired while this session is mutably borrowed. The
     /// owner boundary drains this queue only after releasing the RefMut.
     pending_host_teardowns: Vec<crate::player::xtra::manager::XtraTeardownRequest>,
+    /// Native host events are retained in an explicit bounded sink when the
+    /// wasm callback surface is unavailable. They are drained by the native
+    /// adapter, never silently discarded by notification pumping.
+    native_host_events: NativeHostEventMailbox,
+    /// Native notifications are partitioned by player so one owner's
+    /// backpressure cannot consume another owner's bounded capacity.
+    native_player_notifications: HashMap<PlayerId, NativePlayerNotificationMailbox>,
+    native_notification_errors: HashMap<PlayerId, NativeNotificationError>,
+    /// Session-owned weak bindings for the direct browser host sink. The
+    /// strong capability remains on BrowserPlayerHandle.
+    host_sinks: HashMap<PlayerId, (OwnerToken, BrowserHostSinkWeak)>,
     /// Owner-generation fence for notification drains. Reentrant drains for
     /// the same generation return immediately; a reset may replace the
     /// entry with its new owner without clearing an older outer drain.
     notification_drains: HashMap<PlayerId, OwnerToken>,
+    /// One detached notification task may be queued before its drain starts.
+    /// The owner token prevents an old task from clearing a replacement
+    /// generation's marker.
+    scheduled_notification_drains: HashMap<PlayerId, OwnerToken>,
+    /// Detached lifecycle deliveries. These are drained outside the mutable
+    /// session/wasm-bindgen handle borrow so callbacks may re-enter safely.
+    host_event_deliveries: HashMap<PlayerId, VecDeque<HostEventDelivery>>,
+    host_event_drains: HashSet<PlayerId>,
+    host_event_inflight: HashMap<PlayerId, usize>,
     /// Owner-qualified linked `#movie` children. Teardown takes records out
     /// before closing channels so cleanup is performed exactly once.
     nested: NestedPlayerRegistry,
+    playback_loops: HashMap<PlayerId, PlaybackLoopControl>,
+    playback_epochs: HashMap<PlayerId, u64>,
+    playback_cancellations: HashMap<PlayerId, (OwnerToken, u64, bool)>,
+    playback_replay_requests: HashMap<PlayerId, (OwnerToken, u64)>,
 }
 
 /// Shared owner of a runtime session for host operations that may await.
@@ -385,7 +427,6 @@ impl RuntimeSession {
             owner,
             generation: owner.generation,
             pending_casts: Vec::new(),
-            notifications: CastNotificationOutbox::default(),
             completed_property_casts: Vec::new(),
             drivers: HashMap::new(),
             eval_drivers: HashMap::new(),
@@ -404,8 +445,20 @@ impl RuntimeSession {
             js_lingo: JsRuntimeRegistry::default(),
             renderer_bindings: HashMap::new(),
             pending_host_teardowns: Vec::new(),
+            native_host_events: NativeHostEventMailbox::default(),
+            native_player_notifications: HashMap::new(),
+            native_notification_errors: HashMap::new(),
+            host_sinks: HashMap::new(),
             notification_drains: HashMap::new(),
+            scheduled_notification_drains: HashMap::new(),
+            host_event_deliveries: HashMap::new(),
+            host_event_drains: HashSet::new(),
+            host_event_inflight: HashMap::new(),
             nested: NestedPlayerRegistry::new(),
+            playback_loops: HashMap::new(),
+            playback_epochs: HashMap::new(),
+            playback_cancellations: HashMap::new(),
+            playback_replay_requests: HashMap::new(),
         }
     }
 
@@ -849,6 +902,7 @@ impl RuntimeSession {
                 if matches!(
                     &request,
                     crate::player::driver::InternalVmRequest::MovieAsync(_)
+                        | crate::player::driver::InternalVmRequest::Flash(_)
                         | crate::player::driver::InternalVmRequest::ExternalXtra(_)
                         | crate::player::driver::InternalVmRequest::ExternalXtraLoad(_)
                         | crate::player::driver::InternalVmRequest::XtraPending(_)
@@ -990,6 +1044,11 @@ impl RuntimeSession {
                 prepared_child: None,
                 ..
             } => EvalRequestTurn::MovieAsync(request),
+            crate::player::eval::EvalPending::Global {
+                request: crate::player::driver::InternalVmRequest::Flash(request),
+                prepared_child: None,
+                ..
+            } => EvalRequestTurn::Flash(request),
             pending @ crate::player::eval::EvalPending::Global { .. }
             | pending @ crate::player::eval::EvalPending::SetProperty { .. } => {
                 EvalRequestTurn::Evaluator(crate::player::eval::EvalTurn::Pending { request: pending })
@@ -1083,10 +1142,18 @@ impl RuntimeSession {
                         );
                     }
                 }
+                let request = match request {
+                    crate::player::driver::InternalVmRequest::Flash(request) => {
+                        return EvalRequestTurn::Flash(request);
+                    }
+                    request => request,
+                };
                 if existing_reason.is_some()
                     || matches!(
                         request,
                         crate::player::driver::InternalVmRequest::CastMemberAsync(_)
+                            | crate::player::driver::InternalVmRequest::Flash(_)
+                            | crate::player::driver::InternalVmRequest::ObjectProperty { .. }
                     )
                 {
                     let pending_reason = existing_reason
@@ -1760,6 +1827,9 @@ impl RuntimeSession {
             super::driver::InternalVmRequest::CastMemberAsync(request) => {
                 (request.player_id, &request.owner)
             }
+            super::driver::InternalVmRequest::Flash(request) => {
+                (request.player_id, &request.owner)
+            }
             _ => return false,
         };
         let current_owner = self.with_player(player_id, |context| context.player.owner.clone());
@@ -1770,6 +1840,19 @@ impl RuntimeSession {
             || !current_owner.is_arena_live()
         {
             return false;
+        }
+        if let super::driver::InternalVmRequest::Flash(request) = request {
+            let Some(current) = request.expected_generation else {
+                return false;
+            };
+            if !self.with_player(player_id, |context| {
+                context.player.is_flash_instance_generation_current(
+                    request.sprite_num as i16,
+                    current,
+                )
+            }).unwrap_or(false) {
+                return false;
+            }
         }
         self.complete_eval(id, action, &current_owner, result)
     }
@@ -1938,6 +2021,193 @@ impl RuntimeSession {
             self.w3d_clocks.insert(id, W3dClock::new(player_owner));
         }
         inserted
+    }
+
+    /// Claim the single playback loop for a captured owner. A second `play`
+    /// on the same handle is intentionally idempotent; a replacement owner
+    /// cannot inherit the old loop or its cancellation channel.
+    pub(crate) fn begin_playback_loop(
+        &mut self,
+        player_id: PlayerId,
+        owner: &OwnerToken,
+    ) -> Result<Option<(u64, Receiver<()>)>, ScriptError> {
+        let owner_matches = self
+            .players
+            .players
+            .get(&player_id)
+            .is_some_and(|player| player.owner.same_identity(owner) && owner.is_arena_live());
+        if !owner_matches {
+            return Err(super::cancelled_scope_error());
+        }
+        if let Some(active) = self.playback_loops.get(&player_id) {
+            if active.owner.same_identity(owner) {
+                return Ok(None);
+            }
+            // A stale owner may have been invalidated before its task got a
+            // chance to run its finalizer. Wake it before replacing the slot.
+            let _ = active.cancel.try_send(());
+        }
+        // A stopped loop still owes StopMovie/endSprite cleanup. Do not let
+        // an immediate replay install a replacement until that old owner has
+        // finished its cancellable cleanup boundary.
+        if self
+            .playback_cancellations
+            .get(&player_id)
+            .is_some_and(|(active_owner, _, stop_sequence)| {
+                *stop_sequence && active_owner.same_identity(owner)
+            })
+        {
+            let epoch = self
+                .playback_cancellations
+                .get(&player_id)
+                .map(|(_, epoch, _)| *epoch)
+                .expect("matching playback cancellation disappeared");
+            self.playback_replay_requests
+                .insert(player_id, (owner.clone(), epoch));
+            return Ok(None);
+        }
+        let epoch = self
+            .playback_epochs
+            .entry(player_id)
+            .and_modify(|epoch| *epoch = epoch.wrapping_add(1).max(1))
+            .or_insert(1);
+        let epoch = *epoch;
+        let (cancel, receiver) = channel::bounded(1);
+        self.playback_loops.insert(
+            player_id,
+            PlaybackLoopControl {
+                owner: owner.clone(),
+                epoch,
+                cancel,
+            },
+        );
+        Ok(Some((epoch, receiver)))
+    }
+
+    /// Wake and remove the exact owner-bound loop. Identity is checked before
+    /// removal so an old stop cannot cancel a replacement player with the same
+    /// numeric id.
+    pub(crate) fn cancel_playback_loop(
+        &mut self,
+        player_id: PlayerId,
+        owner: &OwnerToken,
+        stop_sequence: bool,
+    ) -> Option<u64> {
+        if self
+            .playback_replay_requests
+            .get(&player_id)
+            .is_some_and(|(request_owner, _)| request_owner.same_identity(owner))
+        {
+            // Reset/remove and a second stop cancel an already queued
+            // same-owner replay before old cleanup can hand it back.
+            self.playback_replay_requests.remove(&player_id);
+        }
+        let Some(active) = self.playback_loops.get(&player_id) else {
+            return None;
+        };
+        if !active.owner.same_identity(owner) {
+            return None;
+        }
+        let active = self
+            .playback_loops
+            .remove(&player_id)
+            .expect("playback loop disappeared after owner validation");
+        let epoch = active.epoch;
+        let _ = active.cancel.try_send(());
+        self.playback_cancellations
+            .insert(player_id, (owner.clone(), epoch, stop_sequence));
+        self.playback_epochs
+            .entry(player_id)
+            .and_modify(|epoch| *epoch = epoch.wrapping_add(1).max(1))
+            .or_insert(1);
+        Some(epoch)
+    }
+
+    /// Clear a loop only if its owner and epoch still match. This is the
+    /// finalizer fence for a loop that was stopped while its future was
+    /// suspended and a replacement loop was started immediately afterward.
+    pub(crate) fn finish_playback_loop(
+        &mut self,
+        player_id: PlayerId,
+        owner: &OwnerToken,
+        epoch: u64,
+    ) -> bool {
+        let matches = self.playback_loops.get(&player_id).is_some_and(|active| {
+            active.epoch == epoch && active.owner.same_identity(owner)
+        });
+        if matches {
+            self.playback_loops.remove(&player_id);
+        }
+        self.playback_cancellations.retain(|id, (_, active_epoch, _)| {
+            *id != player_id || *active_epoch != epoch
+        });
+        matches
+    }
+
+    pub(crate) fn take_playback_replay_request(
+        &mut self,
+        player_id: PlayerId,
+        owner: &OwnerToken,
+        epoch: u64,
+    ) -> bool {
+        let Some((request_owner, request_epoch)) =
+            self.playback_replay_requests.get(&player_id).cloned()
+        else {
+            return false;
+        };
+        if request_epoch != epoch
+            || !request_owner.same_identity(owner)
+            || !owner.is_arena_live()
+        {
+            return false;
+        }
+        self.playback_replay_requests.remove(&player_id);
+        true
+    }
+
+    pub(crate) fn discard_playback_replay_request(
+        &mut self,
+        player_id: PlayerId,
+        owner: &OwnerToken,
+        epoch: u64,
+    ) -> bool {
+        let Some((request_owner, request_epoch)) =
+            self.playback_replay_requests.get(&player_id)
+        else {
+            return false;
+        };
+        if *request_epoch != epoch || !request_owner.same_identity(owner) {
+            return false;
+        }
+        self.playback_replay_requests.remove(&player_id);
+        true
+    }
+
+    pub(crate) fn take_playback_stop_cleanup(
+        &mut self,
+        player_id: PlayerId,
+        owner: &OwnerToken,
+        epoch: u64,
+    ) -> bool {
+        let Some((cancel_owner, cancel_epoch, stop_sequence)) =
+            self.playback_cancellations.get(&player_id).cloned()
+        else {
+            return false;
+        };
+        if cancel_epoch != epoch || !cancel_owner.same_identity(owner) {
+            return false;
+        }
+        stop_sequence
+    }
+
+    pub(crate) fn playback_loop_active(
+        &self,
+        player_id: PlayerId,
+        owner: &OwnerToken,
+    ) -> bool {
+        self.playback_loops
+            .get(&player_id)
+            .is_some_and(|active| active.owner.same_identity(owner))
     }
 
     pub(crate) fn register_nested_player(
@@ -2293,6 +2563,7 @@ impl RuntimeSession {
             child.event_tx.close();
             let _ = self.remove_player(child.child_id);
         }
+        self.cancel_playback_loop(player_id, &current_owner, false);
         self.cancel_owner_work(player_id, &current_owner);
         if let Some(mut driver) = self.drivers.remove(&player_id) {
             let _ = driver.cancel(self);
@@ -2303,6 +2574,11 @@ impl RuntimeSession {
         self.actions.cancel_owner(&current_owner);
         self.js_lingo.clear_player(player_id, &current_owner);
         self.cancel_player_cast_loads(player_id);
+        // Native snapshots belong to the retired generation.  Drop them
+        // before reset installs the replacement owner; lifecycle teardown is
+        // carried by the separate host-event queue.
+        self.native_player_notifications.remove(&player_id);
+        self.native_notification_errors.remove(&player_id);
         let player = self
             .players
             .players
@@ -2325,6 +2601,9 @@ impl RuntimeSession {
 
     pub fn remove_player(&mut self, id: PlayerId) -> Option<DirPlayer> {
         self.notification_drains.remove(&id);
+        self.native_player_notifications.remove(&id);
+        self.native_notification_errors.remove(&id);
+        self.host_sinks.remove(&id);
         let owner = self.players.players.get(&id).map(|player| player.owner.clone());
         if let Some(owner) = owner {
             let nested_children = self.take_nested_children_for(id, &owner);
@@ -2337,6 +2616,7 @@ impl RuntimeSession {
                 child.command_tx.close();
                 child.event_tx.close();
             }
+            self.cancel_playback_loop(id, &owner, false);
             self.cancel_owner_work(id, &owner);
             self.js_lingo.clear_player(id, &owner);
             // Drop the continuation before removing the arena. Its frames may
@@ -2427,8 +2707,12 @@ impl RuntimeSession {
         true
     }
 
-    pub fn drain_notifications(&mut self) -> Vec<CastNotification> {
-        self.notifications.drain()
+    fn publish_pending_cast_notifications(
+        &mut self,
+        player_id: PlayerId,
+        generated: &mut CastNotificationOutbox,
+    ) {
+        self.append_notifications(player_id, generated);
     }
 
     pub(crate) fn append_notifications(
@@ -2436,8 +2720,10 @@ impl RuntimeSession {
         player_id: PlayerId,
         outbox: &mut CastNotificationOutbox,
     ) {
-        let mut retained = Vec::new();
         if let Some(player) = self.players.get_mut(player_id) {
+            for notification in player.movie.cast_manager.take_notifications() {
+                outbox.push(notification);
+            }
             for notification in outbox.drain() {
                 match notification {
                     CastNotification::CastMemberNameChanged(slot) => {
@@ -2445,14 +2731,64 @@ impl RuntimeSession {
                             PlayerNotificationKind::CastMemberNameChanged(slot),
                         );
                     }
-                    other => retained.push(other),
+                    CastNotification::CastNameChanged(cast) => {
+                        let name = player
+                            .movie
+                            .cast_manager
+                            .get_cast_or_null(cast)
+                            .map(|cast| cast.name.clone())
+                            .unwrap_or_default();
+                        if let Err(error) = player.queue_host_event(
+                            super::host_events::HostEvent::CastNameChanged { cast, name },
+                        ) {
+                            player.queue_player_notification(
+                                PlayerNotificationKind::HostBackpressure(error.capacity),
+                            );
+                        }
+                    }
+                    CastNotification::CastListChanged => {
+                        let names = player
+                            .movie
+                            .cast_manager
+                            .casts
+                            .iter()
+                            .map(|cast| cast.name.clone())
+                            .collect();
+                        if let Err(error) = player.queue_host_event(
+                            super::host_events::HostEvent::CastListChanged { names },
+                        ) {
+                            player.queue_player_notification(
+                                PlayerNotificationKind::HostBackpressure(error.capacity),
+                            );
+                        }
+                    }
+                    CastNotification::CastMemberListChanged(cast) => {
+                        let members = player
+                            .movie
+                            .cast_manager
+                            .get_cast_or_null(cast)
+                            .map(|cast| {
+                                cast.members
+                                    .values()
+                                    .map(|member| (member.number, member.name.clone()))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        if let Err(error) = player.queue_host_event(
+                            super::host_events::HostEvent::CastMemberListChanged { cast, members },
+                        ) {
+                            player.queue_player_notification(
+                                PlayerNotificationKind::HostBackpressure(error.capacity),
+                            );
+                        }
+                    }
                 }
             }
         } else {
-            retained = outbox.drain();
-        }
-        for notification in retained {
-            self.notifications.push(notification);
+            // There is no owner to which a cast transition can be delivered.
+            // Drain it explicitly rather than retaining a process-wide event
+            // that could later be mistaken for another player.
+            outbox.drain();
         }
     }
 
@@ -2474,6 +2810,29 @@ impl RuntimeSession {
             .unwrap_or(false)
     }
 
+    /// Stop all retained work for an owner whose host mailbox overflowed.
+    /// The overflow marker remains until reset/rebind, so subsequent owner
+    /// checks continue to reject execution without repeatedly retaining work.
+    pub(crate) fn cancel_host_backpressured_owner(
+        &mut self,
+        player_id: PlayerId,
+        owner: &OwnerToken,
+    ) {
+        let active = self.players.players.get(&player_id).is_some_and(|player| {
+            owner.same_identity(&player.owner) && player.host_event_backpressure.is_some()
+        });
+        if !active {
+            return;
+        }
+        self.cancel_owner_work(player_id, owner);
+        if let Some(mut driver) = self.drivers.remove(&player_id) {
+            let _ = driver.cancel(self);
+        }
+        self.cancel_eval_children_for_owner(owner);
+        self.cancel_eval_continuations(owner);
+        self.actions.cancel_owner(owner);
+    }
+
     pub(crate) fn begin_player_notification_drain(
         &mut self,
         player_id: PlayerId,
@@ -2485,10 +2844,68 @@ impl RuntimeSession {
         let batch = self
             .players
             .get_mut(player_id)
-            .map(|player| std::mem::take(&mut player.pending_player_notifications))
+            .map(|player| {
+                let owner = player.owner.clone();
+                let mut batch = std::mem::take(&mut player.pending_player_notifications);
+                batch.extend(player.take_host_events().into_iter().map(|kind| PlayerNotification {
+                    owner: owner.clone(),
+                    kind: PlayerNotificationKind::Host(kind),
+                }));
+                if let Some(error) = player.host_event_backpressure {
+                    batch.push(PlayerNotification {
+                        owner: owner.clone(),
+                        kind: PlayerNotificationKind::HostBackpressure(error.capacity),
+                    });
+                }
+                batch
+            })
             .unwrap_or_default();
         self.notification_drains.insert(player_id, owner.clone());
         Some((owner, batch))
+    }
+
+    pub(crate) fn begin_scheduled_player_notification(
+        &mut self,
+        player_id: PlayerId,
+        owner: &OwnerToken,
+    ) -> bool {
+        if !self
+            .players
+            .players
+            .get(&player_id)
+            .is_some_and(|player| player.owner.same_identity(owner))
+        {
+            return false;
+        }
+        match self.scheduled_notification_drains.entry(player_id) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(owner.clone());
+                true
+            }
+            std::collections::hash_map::Entry::Occupied(entry)
+                if entry.get().same_identity(owner) => false,
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                // A reset/replacement may occur before the old detached task
+                // starts. Replace the stale marker; the old task's exact-owner
+                // finish check cannot clear this generation's marker.
+                entry.insert(owner.clone());
+                true
+            }
+        }
+    }
+
+    pub(crate) fn finish_scheduled_player_notification(
+        &mut self,
+        player_id: PlayerId,
+        owner: &OwnerToken,
+    ) {
+        if self
+            .scheduled_notification_drains
+            .get(&player_id)
+            .is_some_and(|scheduled| scheduled.same_identity(owner))
+        {
+            self.scheduled_notification_drains.remove(&player_id);
+        }
     }
 
     pub(crate) fn finish_player_notification_drain(
@@ -2502,6 +2919,279 @@ impl RuntimeSession {
             .is_some_and(|active| active.same_identity(owner))
         {
             self.notification_drains.remove(&player_id);
+        }
+    }
+
+    pub(crate) fn push_native_host_event(
+        &mut self,
+        player_id: PlayerId,
+        owner: OwnerToken,
+        event: super::host_events::HostEvent,
+    ) -> Result<(), super::host_events::HostEventOverflow> {
+        self.native_host_events.push(super::host_events::NativeHostEvent {
+            player_id,
+            owner,
+            event,
+        })
+    }
+
+    pub(crate) fn take_native_host_events(
+        &mut self,
+    ) -> Vec<super::host_events::NativeHostEvent> {
+        self.native_host_events.drain()
+    }
+
+    pub(crate) fn push_native_player_notification(
+        &mut self,
+        notification: super::host_events::NativePlayerNotification,
+    ) -> Result<(), super::host_events::HostEventOverflow> {
+        // A reset may rotate the owner between detached snapshot extraction
+        // and mailbox insertion.  Such a snapshot is stale and must not be
+        // attributed to the replacement generation.
+        if !self.player_owner_matches(notification.player_id, &notification.owner) {
+            return Ok(());
+        }
+        self.native_player_notifications
+            .entry(notification.player_id)
+            .or_default()
+            .push(notification)
+    }
+
+    pub(crate) fn take_native_player_notifications(
+        &mut self,
+        player_id: PlayerId,
+    ) -> Vec<super::host_events::NativePlayerNotification> {
+        self.native_player_notifications
+            .get_mut(&player_id)
+            .map(NativePlayerNotificationMailbox::drain)
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn record_native_notification_error(
+        &mut self,
+        error: NativeNotificationError,
+    ) {
+        if self.player_owner_matches(error.player_id, &error.owner) {
+            self.native_notification_errors
+                .insert(error.player_id, error);
+        }
+    }
+
+    pub(crate) fn take_native_notification_error(
+        &mut self,
+        player_id: PlayerId,
+    ) -> Option<NativeNotificationError> {
+        self.native_notification_errors.remove(&player_id)
+    }
+
+    pub(crate) fn bind_host_sink(
+        &mut self,
+        player_id: PlayerId,
+        owner: &OwnerToken,
+        sink: &BrowserHostSinkRef,
+    ) -> Result<(), ScriptError> {
+        if !self.player_owner_matches(player_id, owner) {
+            return Err(super::cancelled_scope_error());
+        }
+        self.host_sinks
+            .insert(player_id, (owner.clone(), Rc::downgrade(sink)));
+        Ok(())
+    }
+
+    pub(crate) fn unbind_host_sink(&mut self, player_id: PlayerId, owner: &OwnerToken) {
+        if self
+            .host_sinks
+            .get(&player_id)
+            .is_some_and(|(bound, _)| bound.same_identity(owner))
+        {
+            self.host_sinks.remove(&player_id);
+        }
+    }
+
+    pub(crate) fn host_sink(
+        &self,
+        player_id: PlayerId,
+        owner: &OwnerToken,
+    ) -> Option<BrowserHostSinkRef> {
+        let (bound_owner, sink) = self.host_sinks.get(&player_id)?;
+        if !bound_owner.same_identity(owner) || !owner.is_arena_live() {
+            return None;
+        }
+        sink.upgrade()
+    }
+
+    pub(crate) fn queue_host_event_delivery(
+        &mut self,
+        delivery: HostEventDelivery,
+    ) -> Result<(), super::host_events::HostEventOverflow> {
+        self.queue_host_event_deliveries(vec![delivery])
+    }
+
+    pub(crate) fn queue_host_event_deliveries(
+        &mut self,
+        deliveries: Vec<HostEventDelivery>,
+    ) -> Result<(), super::host_events::HostEventOverflow> {
+        if deliveries.is_empty() {
+            return Ok(());
+        }
+        let player_id = deliveries[0].player_id;
+        debug_assert!(deliveries.iter().all(|delivery| delivery.player_id == player_id));
+        let inflight = self.host_event_inflight.get(&player_id).copied().unwrap_or(0);
+        let queue = self
+            .host_event_deliveries
+            .entry(player_id)
+            .or_default();
+        let terminal_reserve = deliveries.len() == 1
+            && matches!(
+                &deliveries[0].event,
+                super::host_events::HostEvent::OwnerRetired { .. }
+            );
+        let capacity = super::host_events::MAX_HOST_EVENTS
+            + if terminal_reserve {
+                super::host_events::HOST_EVENT_TERMINAL_RESERVE
+            } else {
+                0
+            };
+        if queue
+            .len()
+            .saturating_add(inflight)
+            .saturating_add(deliveries.len())
+            > capacity
+        {
+            return Err(super::host_events::HostEventOverflow {
+                capacity,
+            });
+        }
+        queue.extend(deliveries);
+        Ok(())
+    }
+
+    pub(crate) fn ensure_host_event_capacity(
+        &self,
+        player_id: PlayerId,
+        additional: usize,
+    ) -> Result<(), super::host_events::HostEventOverflow> {
+        let queued = self
+            .host_event_deliveries
+            .get(&player_id)
+            .map_or(0, VecDeque::len);
+        let inflight = self.host_event_inflight.get(&player_id).copied().unwrap_or(0);
+        if queued
+            .saturating_add(inflight)
+            .saturating_add(additional)
+            > super::host_events::MAX_HOST_EVENTS
+        {
+            return Err(super::host_events::HostEventOverflow {
+                capacity: super::host_events::MAX_HOST_EVENTS,
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn ensure_host_event_terminal_capacity(
+        &self,
+        player_id: PlayerId,
+    ) -> Result<(), super::host_events::HostEventOverflow> {
+        let queued = self
+            .host_event_deliveries
+            .get(&player_id)
+            .map_or(0, VecDeque::len);
+        let inflight = self.host_event_inflight.get(&player_id).copied().unwrap_or(0);
+        if queued.saturating_add(inflight)
+            >= super::host_events::MAX_HOST_EVENTS
+                + super::host_events::HOST_EVENT_TERMINAL_RESERVE
+        {
+            return Err(super::host_events::HostEventOverflow {
+                capacity: super::host_events::MAX_HOST_EVENTS
+                    + super::host_events::HOST_EVENT_TERMINAL_RESERVE,
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn begin_host_event_drain(
+        &mut self,
+        player_id: PlayerId,
+    ) -> Option<Vec<HostEventDelivery>> {
+        if self.host_event_drains.contains(&player_id) {
+            return None;
+        }
+        let deliveries = self.host_event_deliveries.remove(&player_id)?;
+        self.host_event_drains.insert(player_id);
+        self.host_event_inflight
+            .insert(player_id, deliveries.len());
+        Some(deliveries.into_iter().collect())
+    }
+
+    pub(crate) fn host_event_lifecycle_pending(&self, player_id: PlayerId) -> bool {
+        self.host_event_drains.contains(&player_id)
+            || self
+                .host_event_deliveries
+                .get(&player_id)
+                .is_some_and(|queue| !queue.is_empty())
+    }
+
+    pub(crate) fn consume_host_event_delivery(&mut self, player_id: PlayerId) {
+        if let Some(inflight) = self.host_event_inflight.get_mut(&player_id) {
+            *inflight = inflight.saturating_sub(1);
+        }
+    }
+
+    pub(crate) fn release_host_event_reservation(
+        &mut self,
+        player_id: PlayerId,
+        count: usize,
+    ) {
+        if let Some(inflight) = self.host_event_inflight.get_mut(&player_id) {
+            *inflight = inflight.saturating_sub(count);
+        }
+    }
+
+    pub(crate) fn prepend_host_event_deliveries(
+        &mut self,
+        player_id: PlayerId,
+        deliveries: Vec<HostEventDelivery>,
+    ) -> Result<(), super::host_events::HostEventOverflow> {
+        if deliveries.is_empty() {
+            return Ok(());
+        }
+        let inflight = self.host_event_inflight.get(&player_id).copied().unwrap_or(0);
+        let queue = self.host_event_deliveries.entry(player_id).or_default();
+        if queue
+            .len()
+            .saturating_add(inflight)
+            .saturating_add(deliveries.len())
+            > super::host_events::MAX_HOST_EVENTS
+                + super::host_events::HOST_EVENT_TERMINAL_RESERVE
+        {
+            return Err(super::host_events::HostEventOverflow {
+                capacity: super::host_events::MAX_HOST_EVENTS
+                    + super::host_events::HOST_EVENT_TERMINAL_RESERVE,
+            });
+        }
+        for delivery in deliveries.into_iter().rev() {
+            queue.push_front(delivery);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn finish_host_event_drain(&mut self, player_id: PlayerId) -> bool {
+        self.host_event_drains.remove(&player_id);
+        self.host_event_inflight.remove(&player_id);
+        self.host_event_deliveries
+            .get(&player_id)
+            .is_some_and(|queue| !queue.is_empty())
+    }
+
+    pub(crate) fn clear_pending_host_event_deliveries(&mut self, player_id: PlayerId) {
+        if let Some(queue) = self.host_event_deliveries.get_mut(&player_id) {
+            queue.retain(|delivery| {
+                matches!(
+                    &delivery.event,
+                    super::host_events::HostEvent::OwnerRetired { .. }
+                        | super::host_events::HostEvent::FlashReset { .. }
+                )
+            });
         }
     }
 
@@ -2570,9 +3260,14 @@ impl RuntimeSession {
         &mut self,
         pending: PendingEvalRequest,
     ) {
+        // One evaluator continuation owns one sender and one owner route at a
+        // time.  A resumed continuation may issue a new capability, so the
+        // action changes while the EvalId and owner remain stable.  Retire
+        // that prior route by continuation identity rather than by the old
+        // action; sibling EvalIds remain untouched.
         self.inflight_eval_routes.retain(|route| {
             !(route.id == pending.id
-                && route.action == pending.action
+                && route.player_id == pending.player_id
                 && route.owner.same_identity(&pending.owner))
         });
         self.pending_eval_requests.push(pending);
@@ -2871,7 +3566,15 @@ impl RuntimeSession {
             .pending_eval_requests
             .iter()
             .position(|pending| pending.player_id == player_id)?;
-        Some(self.pending_eval_requests.swap_remove(index))
+        let pending = self.pending_eval_requests.swap_remove(index);
+        self.inflight_eval_routes.push(InflightEvalRoute {
+            id: pending.id.clone(),
+            player_id: pending.player_id,
+            owner: pending.owner.clone(),
+            action: pending.action.clone(),
+            sender: pending.sender.clone(),
+        });
+        Some(pending)
     }
 
     /// Accept a host result for the explicit owner-bound action. The command
@@ -3004,6 +3707,7 @@ impl RuntimeSession {
                 // forever would leak its action ticket and leave the callback
                 // receiver waiting indefinitely.
                 EvalRequestTurn::MovieAsync(_)
+                | EvalRequestTurn::Flash(_)
                 | EvalRequestTurn::ExternalXtra(_)
                 | EvalRequestTurn::ExternalXtraLoad(_)
                 | EvalRequestTurn::XtraPending(_) => {
@@ -3402,7 +4106,9 @@ impl RuntimeSession {
             purpose: PendingCastPurpose::Property { ticket },
         });
         if cache_hit {
-            self.drain_ready_casts(id);
+            let mut generated = CastNotificationOutbox::default();
+            self.drain_ready_casts(id, &mut generated);
+            self.publish_pending_cast_notifications(id, &mut generated);
             Ok(None)
         } else {
             Ok(Some(request))
@@ -3725,6 +4431,18 @@ impl RuntimeSession {
             }
 
             match name.into_builtin() {
+                Some(BuiltInSymbol::GetVariable) => {
+                    if let Some(request) = super::handlers::datum_handlers::flash_object::FlashObjectDatumHandlers::prepare_global_bind_get(
+                        context.player,
+                        context.symbols,
+                        args,
+                    )? {
+                        return Ok(GlobalDispatch::PendingRequest {
+                            request: super::driver::InternalVmRequest::Flash(request),
+                            reason: "Flash getVariable requires owner/generation-bound host execution".to_owned(),
+                        });
+                    }
+                }
                 Some(BuiltInSymbol::Call) => {
                     match BuiltInHandlerManager::prepare_call(&mut context, args)? {
                         super::handlers::manager::CallPreparation::Complete(result) => {
@@ -4001,6 +4719,43 @@ impl RuntimeSession {
                 }
             }
 
+            // OpenURL and BudAPI browser effects carry owned arguments into
+            // the host executor. This keeps window/clipboard calls outside
+            // the RuntimeSession borrow while retaining external-plugin
+            // precedence above these built-ins.
+            if let Some(outcome) = super::xtra::manager::prepare_openurl_handler_explicit(
+                context.player,
+                context.symbols,
+                &display,
+                args,
+            ) {
+                return match outcome? {
+                    super::xtra::manager::XtraPendingOrValue::Value(value) =>
+                        Ok(GlobalDispatch::SyncResult(Ok(value))),
+                    super::xtra::manager::XtraPendingOrValue::Pending(request) =>
+                        Ok(GlobalDispatch::PendingRequest {
+                            request: super::driver::InternalVmRequest::XtraPending(request),
+                            reason: format!("OpenURL {} host effect", display),
+                        }),
+                };
+            }
+            if let Some(outcome) = super::xtra::manager::prepare_budapi_handler_explicit(
+                context.player,
+                context.symbols,
+                &display,
+                args,
+            ) {
+                return match outcome? {
+                    super::xtra::manager::XtraPendingOrValue::Value(value) =>
+                        Ok(GlobalDispatch::SyncResult(Ok(value))),
+                    super::xtra::manager::XtraPendingOrValue::Pending(request) =>
+                        Ok(GlobalDispatch::PendingRequest {
+                            request: super::driver::InternalVmRequest::XtraPending(request),
+                            reason: format!("BudAPI {} host effect", display),
+                        }),
+                };
+            }
+
             // SysMenu is owner-local. Menu mutations complete synchronously;
             // print/message-box effects become typed host intents only after
             // external-plugin precedence has declined, so the browser call
@@ -4193,11 +4948,17 @@ impl RuntimeSession {
                 });
             }
         }
-        self.drain_ready_casts(id);
+        let mut generated = CastNotificationOutbox::default();
+        self.drain_ready_casts(id, &mut generated);
+        self.publish_pending_cast_notifications(id, &mut generated);
         outbound
     }
 
-    fn drain_ready_casts(&mut self, id: PlayerId) -> bool {
+    fn drain_ready_casts(
+        &mut self,
+        id: PlayerId,
+        generated: &mut CastNotificationOutbox,
+    ) -> bool {
         let mut applied_any = false;
         self.purge_invalid_pending();
         loop {
@@ -4302,7 +5063,7 @@ impl RuntimeSession {
                         &mut player.bitmap_manager,
                         &mut player.dir_cache,
                         &mut self.symbols,
-                        &mut self.notifications,
+                        generated,
                     ),
                 PendingCastState::ReadyCached(file) => {
                     if property {
@@ -4316,7 +5077,7 @@ impl RuntimeSession {
                                 file,
                                 &mut player.bitmap_manager,
                                 &mut self.symbols,
-                                &mut self.notifications,
+                                generated,
                             )
                     } else {
                         player
@@ -4329,7 +5090,7 @@ impl RuntimeSession {
                                 file,
                                 &mut player.bitmap_manager,
                                 &mut self.symbols,
-                                &mut self.notifications,
+                                generated,
                             )
                     }
                 }
@@ -4340,7 +5101,7 @@ impl RuntimeSession {
                         player.movie.cast_manager.complete_preload(
                             &request,
                             &mut player.bitmap_manager,
-                            &mut self.notifications,
+                            generated,
                         );
                         applied_any = true;
                     }
@@ -4370,7 +5131,7 @@ impl RuntimeSession {
                 player
                     .movie
                     .cast_manager
-                    .finalize_preloads_if_ready(&mut player.bitmap_manager, &mut self.notifications);
+                    .finalize_preloads_if_ready(&mut player.bitmap_manager, generated);
             }
         }
         applied_any
@@ -4426,11 +5187,17 @@ impl RuntimeSession {
         finalize_ids.dedup();
         for id in finalize_ids {
             if let Some(player) = self.players.get_mut(id) {
+                let mut generated = CastNotificationOutbox::default();
                 player.movie.cast_manager.finalize_preloads_if_ready(
                     &mut player.bitmap_manager,
-                    &mut self.notifications,
+                    &mut generated,
                 );
+                for notification in generated.drain() {
+                    player.movie.cast_manager.pending_notifications.push(notification);
+                }
             }
+            let mut generated = CastNotificationOutbox::default();
+            self.publish_pending_cast_notifications(id, &mut generated);
         }
     }
 
@@ -4502,7 +5269,9 @@ impl RuntimeSession {
             return false;
         }
         self.pending_casts[position].state = PendingCastState::ReadyNetwork(result);
-        self.drain_ready_casts(player_id);
+        let mut generated = CastNotificationOutbox::default();
+        self.drain_ready_casts(player_id, &mut generated);
+        self.publish_pending_cast_notifications(player_id, &mut generated);
         true
     }
 }
@@ -4514,7 +5283,7 @@ mod tests {
     use binary_reader::Endian;
     use crate::director::chunks::{config::ConfigChunk, ChunkContainer};
     use crate::director::file::DirectorFile;
-    use crate::player::cast_lib::{CastLibState, CastNotification};
+    use crate::player::cast_lib::CastLibState;
     use crate::player::cast_manager::CastPreloadState;
     use url::Url;
 
@@ -4884,10 +5653,19 @@ mod tests {
                 .unwrap(),
             (CastLibState::Loading, CastLibState::Loading)
         );
-        assert!(!session
-            .drain_notifications()
+        let (before_owner, before_batch) = session
+            .begin_player_notification_drain(1)
+            .expect("player owner must be live before cast completion");
+        assert!(before_batch
             .iter()
-            .any(|event| matches!(event, CastNotification::CastListChanged)));
+            .all(|event| event.owner.same_identity(&before_owner)));
+        assert!(!before_batch.iter().any(|event| matches!(
+            &event.kind,
+            PlayerNotificationKind::Host(
+                super::super::host_events::HostEvent::CastListChanged { .. }
+            )
+        )));
+        session.finish_player_notification_drain(1, &before_owner);
         assert!(session.apply_cast_load(requests[0].complete(
             requests[0].requested_url().to_owned(),
             Err("first failed".to_owned()),
@@ -4906,11 +5684,19 @@ mod tests {
         assert_eq!(second_file_name, "cached-old.cct");
         assert_eq!(second_state, CastLibState::Loaded);
 
-        let notifications = session.drain_notifications();
+        let (owner, notifications) = session
+            .begin_player_notification_drain(1)
+            .expect("player owner must be live after cast completion");
+        session.finish_player_notification_drain(1, &owner);
+        assert!(notifications
+            .iter()
+            .all(|event| event.owner.same_identity(&owner)));
         assert_eq!(
             notifications
                 .iter()
-                .filter(|event| matches!(event, CastNotification::CastListChanged))
+                .filter(|event| matches!(&event.kind, PlayerNotificationKind::Host(
+                    super::super::host_events::HostEvent::CastListChanged { .. }
+                )))
                 .count(),
             1
         );
@@ -5167,6 +5953,442 @@ mod tests {
     }
 
     #[test]
+    fn native_notification_drain_preserves_all_owned_kinds_for_two_players() {
+        let mut session = RuntimeSession::new(SymbolOwner { session: 804, generation: 1 });
+        let (first_tx, _first_rx) = channel::unbounded();
+        let (second_tx, _second_rx) = channel::unbounded();
+        assert!(session.add_player(1, first_tx));
+        assert!(session.add_player(2, second_tx));
+        let handle = session.into_handle();
+
+        for player_id in [1, 2] {
+            handle.borrow_mut().with_player(player_id, |context| {
+                // Keep the CastMemberChanged notification backed by a real
+                // member in this player's own cast manager.  The native
+                // snapshot path deliberately rejects missing members, so a
+                // synthetic reference here would turn the test's diagnostic
+                // error into a wasm-bindgen panic on native targets.
+                let mut cast = super::super::cast_lib::CastLib::test_external(1, 0);
+                cast.members.insert(
+                    2,
+                    super::super::cast_member::CastMember::new(
+                        2,
+                        super::super::cast_member::CastMemberType::Text(
+                            super::super::cast_member::TextMember::new(),
+                        ),
+                    ),
+                );
+                context.player.movie.cast_manager.casts.push(cast);
+                context.player.queue_player_notification(PlayerNotificationKind::ScoreChanged);
+                context.player.queue_player_notification(PlayerNotificationKind::ChannelChanged(3));
+                context.player.queue_player_notification(PlayerNotificationKind::ChannelNameChanged(4));
+                context.player.queue_player_notification(PlayerNotificationKind::ChannelNamesChanged);
+                context.player.queue_player_notification(PlayerNotificationKind::CastMemberNameChanged(6));
+                context.player.queue_player_notification(PlayerNotificationKind::CastMemberChanged(CastMemberRef { cast_lib: 1, cast_member: 2 }));
+                context.player.queue_player_notification(PlayerNotificationKind::DatumSnapshot(DatumRef::Void));
+                context.player.queue_player_notification(PlayerNotificationKind::ScriptInstanceSnapshot(None));
+                context.player.queue_player_notification(PlayerNotificationKind::Host(
+                    super::super::host_events::HostEvent::FrameChanged { frame: player_id },
+                ));
+            });
+            let dispatch = crate::js_api::JsApi::dispatch_player_notifications(handle.clone(), player_id);
+            if dispatch.is_err() {
+                let diagnostic = handle
+                    .borrow_mut()
+                    .take_native_notification_error(player_id)
+                    .map(|error| format!("{}: {}", error.notification, error.message))
+                    .unwrap_or_else(|| "no native notification diagnostic".to_owned());
+                panic!("native notification dispatch failed for player {player_id}: {diagnostic}");
+            }
+        }
+
+        let events = [1, 2]
+            .into_iter()
+            .flat_map(|player_id| {
+                handle
+                    .borrow_mut()
+                    .take_native_player_notifications(player_id)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(events.len(), 18);
+        for player_id in [1, 2] {
+            let owner = handle.borrow_mut().with_player(player_id, |context| context.player.owner.clone()).unwrap();
+            let owned = events.iter().filter(|event| event.player_id == player_id).collect::<Vec<_>>();
+            assert_eq!(owned.len(), 9);
+            assert!(owned.iter().all(|event| event.owner.same_identity(&owner)));
+            assert!(owned.iter().any(|event| matches!(&event.kind, super::super::host_events::NativePlayerNotificationKind::ScoreChanged(snapshot) if snapshot.channel_count == 0)));
+            assert!(owned.iter().any(|event| matches!(&event.kind, super::super::host_events::NativePlayerNotificationKind::ChannelChanged(snapshot) if snapshot.channel == 3)));
+            assert!(owned.iter().any(|event| matches!(&event.kind, super::super::host_events::NativePlayerNotificationKind::ChannelNameChanged { channel: 4, .. })));
+            assert!(owned.iter().any(|event| matches!(&event.kind, super::super::host_events::NativePlayerNotificationKind::ChannelNamesChanged(_))));
+            assert!(owned.iter().any(|event| matches!(&event.kind, super::super::host_events::NativePlayerNotificationKind::CastMemberNameChanged { slot: 6, .. })));
+            assert!(owned.iter().any(|event| matches!(&event.kind, super::super::host_events::NativePlayerNotificationKind::CastMemberChanged(snapshot) if snapshot.member_ref == (1, 2))));
+            assert!(owned.iter().any(|event| matches!(&event.kind, super::super::host_events::NativePlayerNotificationKind::DatumSnapshot(snapshot) if snapshot.type_name == "void")));
+            assert!(owned.iter().any(|event| matches!(&event.kind, super::super::host_events::NativePlayerNotificationKind::ScriptInstanceSnapshot(snapshot) if snapshot.instance_id.is_none())));
+            assert!(owned.iter().any(|event| matches!(&event.kind, super::super::host_events::NativePlayerNotificationKind::Host(super::super::host_events::HostEvent::FrameChanged { frame }) if *frame == player_id)));
+        }
+    }
+
+    #[test]
+    fn native_notification_capacity_is_partitioned_by_player() {
+        let mut session = RuntimeSession::new(SymbolOwner { session: 805, generation: 1 });
+        let (first_tx, _first_rx) = channel::unbounded();
+        let (second_tx, _second_rx) = channel::unbounded();
+        assert!(session.add_player(1, first_tx));
+        assert!(session.add_player(2, second_tx));
+        let first_owner = session
+            .players
+            .players
+            .get(&1)
+            .expect("first player")
+            .owner
+            .clone();
+        let second_owner = session
+            .players
+            .players
+            .get(&2)
+            .expect("second player")
+            .owner
+            .clone();
+        for _ in 0..super::super::host_events::MAX_HOST_EVENTS {
+            session
+                .push_native_player_notification(super::super::host_events::NativePlayerNotification {
+                    player_id: 1,
+                    owner: first_owner.clone(),
+                    kind: super::super::host_events::NativePlayerNotificationKind::Host(
+                        super::super::host_events::HostEvent::FrameChanged { frame: 1 },
+                    ),
+                })
+                .unwrap();
+        }
+        assert!(session
+            .push_native_player_notification(super::super::host_events::NativePlayerNotification {
+                player_id: 2,
+                owner: second_owner,
+                kind: super::super::host_events::NativePlayerNotificationKind::Host(
+                    super::super::host_events::HostEvent::FrameChanged { frame: 2 },
+                ),
+            })
+            .is_ok());
+        assert_eq!(session.take_native_player_notifications(2).len(), 1);
+        assert_eq!(session.take_native_player_notifications(1).len(), super::super::host_events::MAX_HOST_EVENTS);
+    }
+
+    #[test]
+    fn native_foreign_datum_error_consumes_only_failure_and_retries_tail() {
+        let mut session = RuntimeSession::new(SymbolOwner { session: 806, generation: 1 });
+        let (first_tx, _first_rx) = channel::unbounded();
+        let (second_tx, _second_rx) = channel::unbounded();
+        assert!(session.add_player(1, first_tx));
+        assert!(session.add_player(2, second_tx));
+        let foreign = session
+            .with_player(2, |context| {
+                context
+                    .player
+                    .alloc_datum(crate::director::lingo::datum::Datum::Int(7))
+            })
+            .unwrap();
+        let handle = session.into_handle();
+        handle.borrow_mut().with_player(1, |context| {
+            context
+                .player
+                .queue_player_notification(PlayerNotificationKind::DatumSnapshot(foreign));
+            context.player.queue_player_notification(PlayerNotificationKind::Host(
+                super::super::host_events::HostEvent::FrameChanged { frame: 7 },
+            ));
+        });
+
+        assert!(crate::js_api::JsApi::dispatch_player_notifications(handle.clone(), 1).is_err());
+        let error = handle
+            .borrow_mut()
+            .take_native_notification_error(1)
+            .expect("foreign datum conversion must be observable");
+        assert_eq!(error.player_id, 1);
+        assert_eq!(error.notification, "DatumSnapshot");
+        assert!(error.message.contains("foreign or stale datum"));
+
+        assert!(crate::js_api::JsApi::dispatch_player_notifications(handle.clone(), 1).is_ok());
+        let events = handle.borrow_mut().take_native_player_notifications(1);
+        assert!(events.iter().any(|event| matches!(
+            &event.kind,
+            super::super::host_events::NativePlayerNotificationKind::Host(
+                super::super::host_events::HostEvent::FrameChanged { frame: 7 }
+            )
+        )));
+    }
+
+    #[test]
+    fn purge_for_player_a_publishes_invalid_player_b_cast_notifications_to_b() {
+        let mut session = session_with_casts(&[0, 0]);
+        let (tx, _rx) = channel::unbounded();
+        assert!(session.add_player(2, tx));
+        add_external_casts(&mut session, 2, &[0, 0]);
+
+        let first = session.prepare_cast_loads(1, CastPreloadReason::MovieLoaded);
+        let _second = session.prepare_cast_loads(2, CastPreloadReason::MovieLoaded);
+        assert_eq!(first.len(), 2);
+        // Replace B through the normal cast-manager load path. This queues a
+        // real empty cast-list transition, clears B's preload requirements,
+        // and leaves the old pending requests for A's completion to purge.
+        let replacement = empty_cached_file("replacement.cct");
+        session
+            .with_player(2, |mut context| {
+                context.with_player_and_symbols(|player, symbols| {
+                    let mut dir_cache = std::mem::take(&mut player.dir_cache);
+                    player.movie.cast_manager.load_from_dir(
+                        &replacement,
+                        &mut player.net_manager,
+                        &mut player.bitmap_manager,
+                        &mut dir_cache,
+                        symbols,
+                    );
+                    player.dir_cache = dir_cache;
+                });
+            })
+            .unwrap();
+
+        assert!(session.apply_cast_load(first[0].complete(
+            first[0].requested_url().to_owned(),
+            Err("player one failed while player two was stale".to_owned()),
+        )));
+        assert_eq!(
+            session
+                .with_player(2, |context| context.player.movie.cast_manager.preload_state)
+                .unwrap(),
+            CastPreloadState::Idle
+        );
+        assert!(!session
+            .pending_casts
+            .iter()
+            .any(|pending| pending.request.owner_key().player == 2));
+
+        let (player_a_owner, player_a) = session
+            .begin_player_notification_drain(1)
+            .expect("player A owner must be live");
+        session.finish_player_notification_drain(1, &player_a_owner);
+        assert!(player_a
+            .iter()
+            .all(|notification| notification.owner.same_identity(&player_a_owner)));
+        assert_eq!(
+            player_a
+                .iter()
+                .filter(|notification| matches!(
+                    &notification.kind,
+                    PlayerNotificationKind::Host(
+                        super::super::host_events::HostEvent::CastListChanged { .. }
+                    )
+                ))
+                .count(),
+            0
+        );
+        let (player_b_owner, player_b) = session
+            .begin_player_notification_drain(2)
+            .expect("player B owner must be live");
+        session.finish_player_notification_drain(2, &player_b_owner);
+        assert!(player_b
+            .iter()
+            .all(|notification| notification.owner.same_identity(&player_b_owner)));
+        assert_eq!(
+            player_b
+                .iter()
+                .filter(|notification| matches!(
+                    &notification.kind,
+                    PlayerNotificationKind::Host(
+                        super::super::host_events::HostEvent::CastListChanged { names }
+                    ) if names.is_empty()
+                ))
+                .count(),
+            1
+        );
+
+        assert!(session.apply_cast_load(first[1].complete(
+            first[1].requested_url().to_owned(),
+            Err("player one second cast failed".to_owned()),
+        )));
+        let (player_a_owner, player_a) = session
+            .begin_player_notification_drain(1)
+            .expect("player A owner must remain live");
+        session.finish_player_notification_drain(1, &player_a_owner);
+        assert!(player_a
+            .iter()
+            .all(|notification| notification.owner.same_identity(&player_a_owner)));
+        assert_eq!(
+            player_a
+                .iter()
+                .filter(|notification| matches!(
+            &notification.kind,
+            PlayerNotificationKind::Host(
+                super::super::host_events::HostEvent::CastListChanged { names }
+            ) if names.is_empty()
+        ))
+                .count(),
+            0
+        );
+        assert_eq!(
+            player_a
+                .iter()
+                .filter(|notification| matches!(
+                    &notification.kind,
+                    PlayerNotificationKind::Host(
+                        super::super::host_events::HostEvent::CastListChanged { names }
+                    ) if names.iter().any(|name| name == "external-1")
+                ))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn native_host_backpressure_stops_detached_drain_without_spill_queue() {
+        let mut session = RuntimeSession::new(SymbolOwner {
+            session: 802,
+            generation: 1,
+        });
+        let (tx, _rx) = channel::unbounded();
+        assert!(session.add_player(1, tx));
+        let (other_tx, _other_rx) = channel::unbounded();
+        assert!(session.add_player(2, other_tx));
+        let other_owner = session
+            .with_player(2, |context| context.player.owner.clone())
+            .unwrap();
+        session.with_player(1, |context| {
+            context.player.host_event_mailbox = crate::player::host_events::HostEventMailbox::new(1);
+            assert!(context.player.queue_host_event(crate::player::host_events::HostEvent::FrameChanged {
+                frame: 1,
+            }).is_ok());
+            assert!(context.player.queue_host_event(crate::player::host_events::HostEvent::MovieLoaded {
+                version: 5,
+                cast_names: vec!["main".into()],
+            }).is_err());
+            assert!(context.player.queue_host_event(crate::player::host_events::HostEvent::FrameChanged {
+                frame: 2,
+            }).is_err());
+            assert!(context.player.pending_player_notifications.is_empty());
+        });
+        session.with_player(2, |context| {
+            assert!(context
+                .player
+                .queue_host_event(crate::player::host_events::HostEvent::FrameChanged { frame: 9 })
+                .is_ok());
+        });
+        assert!(session.player_owner_matches(2, &other_owner));
+        let (owner, batch) = session.begin_player_notification_drain(1).unwrap();
+        assert!(matches!(
+            batch.as_slice(),
+            [
+                PlayerNotification { kind: PlayerNotificationKind::Host(crate::player::host_events::HostEvent::FrameChanged { frame: 1 }), .. },
+                PlayerNotification { kind: PlayerNotificationKind::HostBackpressure(1), .. },
+            ]
+        ));
+        session.finish_player_notification_drain(1, &owner);
+        let (_owner, retry_batch) = session.begin_player_notification_drain(1).unwrap();
+        assert!(matches!(
+            retry_batch.last(),
+            Some(PlayerNotification {
+                kind: PlayerNotificationKind::HostBackpressure(1),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn native_host_backpressure_cancels_only_retained_owner_work() {
+        let mut session = RuntimeSession::new(SymbolOwner {
+            session: 803,
+            generation: 1,
+        });
+        let (first_tx, _first_rx) = channel::unbounded();
+        let (second_tx, _second_rx) = channel::unbounded();
+        assert!(session.add_player(1, first_tx));
+        assert!(session.add_player(2, second_tx));
+        let first_owner = session
+            .with_player(1, |context| context.player.owner.clone())
+            .unwrap();
+        let second_owner = session
+            .with_player(2, |context| context.player.owner.clone())
+            .unwrap();
+        let first_ticket = session
+            .actions
+            .allocate(
+                &first_owner,
+                None,
+                ActionKind::InternalInvocation,
+                ResumePhase::ApplyOpcode,
+            )
+            .unwrap();
+        let second_ticket = session
+            .actions
+            .allocate(
+                &second_owner,
+                None,
+                ActionKind::InternalInvocation,
+                ResumePhase::ApplyOpcode,
+            )
+            .unwrap();
+        session.pending_commands.push(PendingCommand {
+            player_id: 1,
+            owner: first_owner.clone(),
+            action: None,
+            started: true,
+            ticket: Some(first_ticket.clone()),
+            completer: None,
+            event_sender: None,
+            score_continuation: None,
+            child_completion: None,
+            eval_child: None,
+            eval_sender: None,
+        });
+        session.pending_commands.push(PendingCommand {
+            player_id: 2,
+            owner: second_owner.clone(),
+            action: None,
+            started: true,
+            ticket: Some(second_ticket.clone()),
+            completer: None,
+            event_sender: None,
+            score_continuation: None,
+            child_completion: None,
+            eval_child: None,
+            eval_sender: None,
+        });
+        session.with_player(1, |context| {
+            context.player.host_event_backpressure =
+                Some(crate::player::host_events::HostEventOverflow { capacity: 1 });
+        });
+
+        // This is the production cancellation boundary reached by the owner
+        // pump after a terminal host mailbox overflow. It must retire A's
+        // action and pending command without touching sibling B.
+        session.cancel_host_backpressured_owner(1, &first_owner);
+        assert!(!session
+            .pending_commands
+            .iter()
+            .any(|pending| pending.player_id == 1));
+        assert!(session
+            .pending_commands
+            .iter()
+            .any(|pending| pending.player_id == 2));
+        assert!(session.actions.details(&first_ticket).is_none());
+        assert!(session.actions.details(&second_ticket).is_some());
+
+        // A completion arriving for B remains accepted after A is cancelled;
+        // this is the cross-owner execution fence the overflow marker relies
+        // on to avoid poisoning an unrelated browser player.
+        session.submit_pending_command_completion(
+            2,
+            second_ticket.clone(),
+            ActionCompletion::Resume,
+        );
+        assert!(session
+            .pending_completions
+            .iter()
+            .any(|(player_id, ticket, completion)| {
+                *player_id == 2
+                    && ticket.same_identity(&second_ticket)
+                    && matches!(completion, ActionCompletion::Resume)
+            }));
+    }
+
+    #[test]
     fn detached_notification_batch_preserves_replacement_generation() {
         let mut session = RuntimeSession::new(SymbolOwner {
             session: 81,
@@ -5188,6 +6410,91 @@ mod tests {
         let replacement_batch = session.take_player_notifications(1);
         assert_eq!(replacement_batch.len(), 1);
         assert!(replacement_batch[0].owner.same_identity(&new_owner));
+    }
+
+    #[test]
+    fn scheduled_notification_marker_replaces_stale_owner_without_old_clear() {
+        let mut session = RuntimeSession::new(SymbolOwner {
+            session: 83,
+            generation: 1,
+        });
+        let (tx, _rx) = channel::unbounded();
+        assert!(session.add_player(1, tx));
+        let old_owner = session.with_player(1, |context| context.player.owner.clone()).unwrap();
+        assert!(session.begin_scheduled_player_notification(1, &old_owner));
+
+        let new_owner = session.reset_player_owned(1, &old_owner).unwrap();
+        assert!(session.begin_scheduled_player_notification(1, &new_owner));
+        session.finish_scheduled_player_notification(1, &old_owner);
+        assert!(!session.begin_scheduled_player_notification(1, &new_owner));
+
+        session.finish_scheduled_player_notification(1, &new_owner);
+        assert!(session.begin_scheduled_player_notification(1, &new_owner));
+    }
+
+    #[test]
+    fn failed_playback_cleanup_consumes_same_owner_replay_without_restarting() {
+        let mut session = RuntimeSession::new(SymbolOwner {
+            session: 85,
+            generation: 1,
+        });
+        let (tx, _rx) = channel::unbounded();
+        assert!(session.add_player(1, tx));
+        let owner = session.with_player(1, |context| context.player.owner.clone()).unwrap();
+        let (epoch, _cancel_rx) = session.begin_playback_loop(1, &owner).unwrap().unwrap();
+        assert_eq!(session.cancel_playback_loop(1, &owner, true), Some(epoch));
+        assert!(session.begin_playback_loop(1, &owner).unwrap().is_none());
+        assert!(session.discard_playback_replay_request(1, &owner, epoch));
+        assert!(!session.take_playback_replay_request(1, &owner, epoch));
+    }
+
+    #[test]
+    fn deferred_datum_snapshot_retains_reference_identity_until_drain() {
+        let mut session = RuntimeSession::new(SymbolOwner {
+            session: 84,
+            generation: 1,
+        });
+        let (tx, _rx) = channel::unbounded();
+        assert!(session.add_player(1, tx));
+        let retained = session
+            .with_player(1, |context| context.player.alloc_datum(Datum::String("old".into())))
+            .unwrap();
+        let retained_id = retained.unwrap();
+        let queued = retained.clone();
+        drop(retained);
+        session.with_player(1, |context| {
+            context
+                .player
+                .queue_player_notification(PlayerNotificationKind::DatumSnapshot(queued));
+        });
+        let replacement_id = session
+            .with_player(1, |context| {
+                context
+                    .player
+                    .alloc_datum(Datum::String("replacement".into()))
+                    .unwrap()
+        })
+        .unwrap();
+        assert_ne!(replacement_id, retained_id);
+        let (_owner, batch) = session.begin_player_notification_drain(1).unwrap();
+        assert!(matches!(
+            batch.first().map(|notification| &notification.kind),
+            Some(PlayerNotificationKind::DatumSnapshot(reference))
+                if reference.unwrap() == retained_id
+        ));
+        drop(batch);
+        let recycled = session.with_player(1, |context| {
+            let first = context
+                .player
+                .alloc_datum(Datum::String("recycled-one".into()))
+                .unwrap();
+            let second = context
+                .player
+                .alloc_datum(Datum::String("recycled-two".into()))
+                .unwrap();
+            (first, second)
+        }).unwrap();
+        assert!(recycled.0 == retained_id || recycled.1 == retained_id);
     }
 
     #[cfg(not(target_arch = "wasm32"))]

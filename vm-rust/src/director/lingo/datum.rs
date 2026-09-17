@@ -167,6 +167,14 @@ pub struct FlashObjectRef {
     pub instance_id: u32,
     pub cast_lib: i32,
     pub cast_member: i32,
+    /// Captured Flash owner generation. Handles created during an owned VM
+    /// dispatch must never fall back to the process-wide numeric sprite route.
+    pub owner_key: Option<String>,
+    /// Captured generation of the Ruffle instance behind `instance_id`.
+    /// This is separate from the Director owner generation in `owner_key`:
+    /// replacing a Flash member on the same Director player retires the old
+    /// instance while keeping the player owner alive.
+    pub instance_generation: Option<u64>,
 }
 
 /// Reference to a Shockwave 3D object (model, shader, texture, camera, light, group, motion).
@@ -215,6 +223,8 @@ impl FlashObjectRef {
             instance_id: 0,
             cast_lib,
             cast_member,
+            owner_key: None,
+            instance_generation: None,
         }
     }
 
@@ -224,6 +234,8 @@ impl FlashObjectRef {
             instance_id: 0,
             cast_lib: 0,
             cast_member: 0,
+            owner_key: None,
+            instance_generation: None,
         }
     }
 
@@ -235,13 +247,33 @@ impl FlashObjectRef {
             instance_id: if sprite_num > 0 { sprite_num as u32 } else { 0 },
             cast_lib,
             cast_member,
+            owner_key: None,
+            instance_generation: None,
         }
+    }
+
+    pub fn with_owner_key(mut self, owner_key: impl Into<String>) -> Self {
+        self.owner_key = Some(owner_key.into());
+        self
+    }
+
+    pub fn with_instance_generation(mut self, generation: u64) -> Self {
+        self.instance_generation = Some(generation);
+        self
+    }
+
+    pub fn with_binding(mut self, owner_key: impl Into<String>, generation: u64) -> Self {
+        self.owner_key = Some(owner_key.into());
+        self.instance_generation = Some(generation);
+        self
     }
 
     /// The bound sprite number, if this handle was taken from a specific sprite.
     pub fn bound_sprite(&self) -> Option<i32> {
         if self.instance_id != 0 {
-            Some(self.instance_id as i32)
+            i32::try_from(self.instance_id)
+                .ok()
+                .filter(|sprite_num| *sprite_num > 0)
         } else {
             None
         }

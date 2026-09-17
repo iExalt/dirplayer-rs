@@ -4,6 +4,15 @@ import {
   onChannelChanged as onRealChannelChanged,
   onChannelDisplayNameChanged as onRealChannelDisplayNameChanged,
   onChannelDisplayNamesChanged as onRealChannelDisplayNamesChanged,
+  onDebugMessageOwned as onRealDebugMessageOwned,
+  onScriptErrorOwned as onRealScriptErrorOwned,
+  onDatumSnapshotOwned as onRealDatumSnapshotOwned,
+  onScriptInstanceSnapshotOwned as onRealScriptInstanceSnapshotOwned,
+  dirplayer_ruffleGetVariableOwnedForBinding as onRealRuffleGetVariableOwnedForBinding,
+  dirplayer_ruffleGetVariableOwnedAtGeneration as onRealRuffleGetVariableOwnedAtGeneration,
+  dirplayer_isFlashInstanceReadyOwned as onRealFlashInstanceReadyOwned,
+  dirplayer_ruffleSetVariableOwnedAtGeneration as onRealRuffleSetVariableOwnedAtGeneration,
+  dirplayer_ruffleCallFunctionOwnedAtGeneration as onRealRuffleCallFunctionOwnedAtGeneration,
 } from './dirplayer-js-api-real.js';
 
 // Stubs for the dirplayer-js-api module.
@@ -19,19 +28,29 @@ export function onCastMemberChanged() {}
 // re-enter its handle while the producer's session borrow is released.
 const _browserHandleRegistrations = new Map();
 const _browserHandleThrowNext = new Set();
-function invokeBrowserHandleCallback(ownerKey, callback, kind, payload) {
+function invokeBrowserHandleCallback(ownerKey, callback, kind, rebindHandle, rebindOnChannel, ...payload) {
   if (_browserHandleThrowNext.delete(ownerKey)) {
     throw new Error(`test callback failure for ${ownerKey}`);
   }
-  return callback(kind, payload, ownerKey);
+  const result = callback(kind, ...payload, ownerKey);
+  if (rebindOnChannel && rebindHandle && kind === 'channel:7') {
+    rebindHandle.set_debug_selected_channel(8);
+    rebindHandle.set_host_event_sink((event, owner) =>
+      callback(`host:${String(event.type)}`, event, owner));
+  }
+  return result;
 }
-export function __testRegisterBrowserHandleCallback(ownerKey, callback) {
+export function __testRegisterBrowserHandleCallback(ownerKey, callback, rebindHandle, rebindOnChannel = false) {
   _browserHandleRegistrations.get(ownerKey)?.();
   const registration = registerRealVmCallbacks({
-    onScoreChanged: (payload) => invokeBrowserHandleCallback(ownerKey, callback, 'score', payload),
-    onChannelChanged: (channel, payload) => invokeBrowserHandleCallback(ownerKey, callback, `channel:${channel}`, payload),
-    onChannelDisplayNameChanged: (_channel, payload) => invokeBrowserHandleCallback(ownerKey, callback, 'channelName', payload),
-    onChannelDisplayNamesChanged: (payload) => invokeBrowserHandleCallback(ownerKey, callback, 'channelNames', payload),
+    onScoreChanged: (payload) => invokeBrowserHandleCallback(ownerKey, callback, 'score', rebindHandle, rebindOnChannel, payload),
+    onChannelChanged: (channel, payload) => invokeBrowserHandleCallback(ownerKey, callback, `channel:${channel}`, rebindHandle, rebindOnChannel, payload),
+    onChannelDisplayNameChanged: (_channel, payload) => invokeBrowserHandleCallback(ownerKey, callback, 'channelName', rebindHandle, rebindOnChannel, payload),
+    onChannelDisplayNamesChanged: (payload) => invokeBrowserHandleCallback(ownerKey, callback, 'channelNames', rebindHandle, rebindOnChannel, payload),
+    onDebugMessage: (message) => invokeBrowserHandleCallback(ownerKey, callback, 'debug', rebindHandle, rebindOnChannel, message),
+    onScriptError: (data) => invokeBrowserHandleCallback(ownerKey, callback, 'scriptError', rebindHandle, rebindOnChannel, data),
+    onDatumSnapshot: (datumRef, snapshot) => invokeBrowserHandleCallback(ownerKey, callback, 'datum', rebindHandle, rebindOnChannel, datumRef, snapshot),
+    onScriptInstanceSnapshot: (instanceId, snapshot) => invokeBrowserHandleCallback(ownerKey, callback, 'scriptInstance', rebindHandle, rebindOnChannel, instanceId, snapshot),
   }, ownerKey);
   _browserHandleRegistrations.set(ownerKey, registration);
 }
@@ -53,6 +72,36 @@ export function onChannelDisplayNameChanged(channel, displayName, ownerKey) {
 }
 export function onChannelDisplayNamesChanged(names, ownerKey) {
   onRealChannelDisplayNamesChanged(names, ownerKey);
+}
+export function onDebugMessageOwned(ownerKey, message) {
+  return onRealDebugMessageOwned(ownerKey, message);
+}
+export function onScriptErrorOwned(ownerKey, data) {
+  return onRealScriptErrorOwned(ownerKey, data);
+}
+export function onDatumSnapshotOwned(ownerKey, datumRef, snapshot) {
+  return onRealDatumSnapshotOwned(ownerKey, datumRef, snapshot);
+}
+export function onScriptInstanceSnapshotOwned(ownerKey, instanceId, snapshot) {
+  return onRealScriptInstanceSnapshotOwned(ownerKey, instanceId, snapshot);
+}
+// Forward the owner/generation Flash routes exactly as production does. The
+// real module returns an explicit unknown-owner envelope when the route is
+// absent; this fixture must never fall back to the legacy global bridge.
+export function dirplayer_ruffleGetVariableOwnedForBinding(ownerKey, spriteNum, path, returnAsObject = false) {
+  return onRealRuffleGetVariableOwnedForBinding(ownerKey, spriteNum, path, returnAsObject);
+}
+export function dirplayer_ruffleGetVariableOwnedAtGeneration(ownerKey, spriteNum, generation, path, returnAsObject = false) {
+  return onRealRuffleGetVariableOwnedAtGeneration(ownerKey, spriteNum, generation, path, returnAsObject);
+}
+export function dirplayer_isFlashInstanceReadyOwned(ownerKey, spriteNum, generation) {
+  return onRealFlashInstanceReadyOwned(ownerKey, spriteNum, generation);
+}
+export function dirplayer_ruffleSetVariableOwnedAtGeneration(ownerKey, spriteNum, generation, path, value) {
+  return onRealRuffleSetVariableOwnedAtGeneration(ownerKey, spriteNum, generation, path, value);
+}
+export function dirplayer_ruffleCallFunctionOwnedAtGeneration(ownerKey, spriteNum, generation, path, argsXml) {
+  return onRealRuffleCallFunctionOwnedAtGeneration(ownerKey, spriteNum, generation, path, argsXml);
 }
 export function onFrameChanged() {}
 export function onScriptError(data) {
@@ -176,6 +225,32 @@ export function dirplayer_unregisterFlashOwner(ownerKey) {
   _flashOwnerCallbacks.delete(ownerKey);
   callbacks?.dispose();
 }
+
+// BrowserPlayerHandle capability regression helper. This instantiates the
+// production FlashOwnerHost with the actual wasm capability object supplied by
+// the Rust harness; it does not substitute a mock setter or expose host state.
+export async function dirplayer_testFlashOwnerCapability(ownerKey, capability, observe) {
+  const manager = await flashManager();
+  if (typeof manager.FlashOwnerHost !== 'function') {
+    throw new Error('FlashOwnerHost production class is unavailable');
+  }
+  const host = new manager.FlashOwnerHost(ownerKey, capability);
+  const ticket = host.beginScriptedAccess(1);
+  if (ticket === undefined) throw new Error('FlashOwnerHost rejected live capability');
+  observe?.('begin');
+  host.completeScriptedAccess(1, ticket);
+  observe?.('complete');
+  if (host.scriptedAccessRequestCount() !== 0) {
+    throw new Error('FlashOwnerHost retained completed scripted access');
+  }
+  const secondTicket = host.beginScriptedAccess(1);
+  if (secondTicket === undefined) throw new Error('FlashOwnerHost rejected second live capability wait');
+  observe?.('begin-again');
+  host.dispose();
+  observe?.('dispose');
+  return true;
+}
+
 function flashManager() {
   if (_flashManager) return Promise.resolve(_flashManager);
   if (!_flashManagerPromise) {

@@ -4,3 +4,4 @@ mod multiuser;
 mod fileio;
 mod nested;
 mod sysmenu;
+mod budapi;

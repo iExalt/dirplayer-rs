@@ -9,9 +9,14 @@
 //! (failure).
 
 use crate::{
-    director::lingo::datum::Datum,
-    player::{reserve_player_mut, reserve_player_ref, DatumRef, ScriptError, symbols::symbol_table::SymbolTable},
+    player::{DatumRef, DirPlayer, ScriptError, symbols::symbol_table::SymbolTable},
 };
+
+#[derive(Clone, Debug)]
+pub(crate) struct OpenUrlHostIntent {
+    pub(crate) owner: crate::player::ownership::OwnerToken,
+    pub(crate) url: String,
+}
 
 pub struct OpenUrlXtra;
 
@@ -20,34 +25,32 @@ impl OpenUrlXtra {
         name.eq_ignore_ascii_case("gsOpenURL")
     }
 
-    pub fn call_handler(name: &str, args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
-        match_ci!(name, {
-            "gsOpenURL" => gs_open_url(args, symbols),
-            _ => Err(ScriptError::new(format!(
-                "OpenURL: no handler {}",
-                name
-            ))),
-        })
+    pub(crate) fn prepare_handler(
+        player: &mut DirPlayer,
+        name: &str,
+        args: &[DatumRef],
+        symbols: &SymbolTable,
+    ) -> Result<crate::player::xtra::manager::XtraPendingOrValue, ScriptError> {
+        if !Self::has_handler(name) {
+            return Err(ScriptError::new(format!("OpenURL: no handler {}", name)));
+        }
+        let arg = args.first().ok_or_else(|| ScriptError::new("gsOpenURL requires a URL argument".to_owned()))?;
+        let url = player
+            .allocator
+            .try_get_datum(arg)
+            .ok_or_else(|| {
+                ScriptError::new_code(
+                    crate::player::ScriptErrorCode::InvalidReference,
+                    "foreign or stale OpenURL argument".to_owned(),
+                )
+            })?
+            .string_value(symbols)?;
+        Ok(crate::player::xtra::manager::XtraPendingOrValue::Pending(
+            crate::player::xtra::manager::XtraPendingIntent::OpenUrl(OpenUrlHostIntent {
+                owner: player.owner.clone(),
+                url,
+            }),
+        ))
     }
-}
 
-fn gs_open_url(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
-    let url = reserve_player_ref(|player| {
-        let arg = args.get(0).ok_or_else(|| {
-            ScriptError::new("gsOpenURL requires a URL argument".to_string())
-        })?;
-        player.get_datum(arg).string_value(symbols)
-    })?;
-
-    let ok = open_url_in_browser(&url);
-    reserve_player_mut(|player| {
-        Ok(player.alloc_datum(Datum::Int(if ok { 1 } else { 0 })))
-    })
-}
-
-fn open_url_in_browser(url: &str) -> bool {
-    match web_sys::window() {
-        Some(window) => window.open_with_url_and_target(url, "_blank").is_ok(),
-        None => false,
-    }
 }

@@ -8,7 +8,9 @@ use wasm_bindgen_futures::JsFuture;
 use crate::player::{
     bitmap::bitmap::{get_system_default_palette, Bitmap, PaletteRef},
     cast_member::CastMemberType,
-    reserve_player_mut, CastManager,
+    ownership::OwnerToken,
+    session::{PlayerId, RuntimeSessionHandle},
+    CastManager, DirPlayer, ScriptError,
 };
 
 use std::collections::HashMap;
@@ -852,19 +854,18 @@ impl FontManager {
     }
 }
 
-pub async fn player_load_system_font(path: &str) {
+async fn fetch_system_font_bitmap(path: &str) -> Option<Bitmap> {
     let window = web_sys::window().unwrap();
     let result = JsFuture::from(window.fetch_with_str(path)).await;
 
     match result {
         Ok(result) => {
-            // Helper: log a warning and bail. A missing / invalid system-font
-            // asset must NOT panic — this runs inside DirPlayer::reset() at
-            // startup, so an unwrap here takes down the whole WASM module.
+            // A missing / invalid system-font asset must degrade to the built-in
+            // font path rather than panic during startup/reset.
             macro_rules! bail {
                 ($($arg:tt)*) => {{
                     warn!($($arg)*);
-                    return;
+                    return None;
                 }};
             }
 
@@ -880,9 +881,8 @@ pub async fn player_load_system_font(path: &str) {
                 }
             };
 
-            // fetch() resolves even for 404/500 responses — the body is then an
-            // HTML error page, not an image, and createImageBitmap below would
-            // reject (the original `JsValue(Response)` panic). Detect it early.
+            // fetch() resolves for HTTP errors as well; reject those before
+            // asking createImageBitmap to decode an HTML error body.
             if !response.ok() {
                 bail!(
                     "System font not loaded: HTTP {} for {} — check the font asset path",
@@ -921,7 +921,10 @@ pub async fn player_load_system_font(path: &str) {
 
             let document = match web_sys::window().and_then(|w| w.document()) {
                 Some(d) => d,
-                None => bail!("System font: no document available"),
+                None => {
+                    image_bitmap.close();
+                    bail!("System font: no document available");
+                }
             };
             let canvas = match document
                 .create_element("canvas")
@@ -929,10 +932,15 @@ pub async fn player_load_system_font(path: &str) {
                 .and_then(|el| el.dyn_into::<web_sys::HtmlCanvasElement>().ok())
             {
                 Some(c) => c,
-                None => bail!("System font: failed to create canvas element"),
+                None => {
+                    image_bitmap.close();
+                    bail!("System font: failed to create canvas element");
+                }
             };
-            canvas.set_width(image_bitmap.width());
-            canvas.set_height(image_bitmap.height());
+            let image_width = image_bitmap.width();
+            let image_height = image_bitmap.height();
+            canvas.set_width(image_width);
+            canvas.set_height(image_height);
             let context = match canvas
                 .get_context("2d")
                 .ok()
@@ -940,21 +948,27 @@ pub async fn player_load_system_font(path: &str) {
                 .and_then(|ctx| ctx.dyn_into::<web_sys::CanvasRenderingContext2d>().ok())
             {
                 Some(ctx) => ctx,
-                None => bail!("System font: failed to get 2d canvas context"),
+                None => {
+                    image_bitmap.close();
+                    bail!("System font: failed to get 2d canvas context");
+                }
             };
 
             if let Err(e) = context.draw_image_with_image_bitmap(&image_bitmap, 0.0, 0.0) {
+                image_bitmap.close();
                 bail!("System font: drawImage failed: {:?}", e);
             }
+            // The canvas owns the copied pixels now; release the decoded image
+            // before any later canvas operation can fail.
+            image_bitmap.close();
 
-            // getImageData throws a SecurityError on a tainted (cross-origin,
-            // non-CORS) canvas — guard it so a CORS misconfig degrades to the
-            // built-in font path instead of crashing.
+            // getImageData throws a SecurityError on a tainted canvas. Keep
+            // this failure on the same warning-and-fallback path.
             let image_data = match context.get_image_data(
                 0.0,
                 0.0,
-                image_bitmap.width() as f64,
-                image_bitmap.height() as f64,
+                image_width as f64,
+                image_height as f64,
             ) {
                 Ok(d) => d,
                 Err(e) => bail!("System font: getImageData failed (tainted canvas / CORS?): {:?}", e),
@@ -974,57 +988,184 @@ pub async fn player_load_system_font(path: &str) {
                 version: 0,
             };
 
-            reserve_player_mut(|player| {
-                let grid_columns = 18;
-                let grid_rows = 7;
-                let grid_cell_width = bitmap.width / grid_columns;
-                let grid_cell_height = bitmap.height / grid_rows;
-
-                let bitmap_ref = player.bitmap_manager.add_bitmap(bitmap);
-                let font = BitmapFont {
-                    bitmap_ref,
-                    char_width: 5,
-                    char_height: 7,
-                    grid_columns: grid_columns as u8,
-                    grid_rows: grid_rows as u8,
-                    grid_cell_width,
-                    grid_cell_height,
-                    first_char_num: 32,
-                    char_offset_x: 1,
-                    char_offset_y: 1,
-                    font_name: "System".to_string(),
-                    font_size: 12,
-                    font_style: 0,
-                    char_widths: None,
-                    pfr_native_size: 0,
-                };
-
-                let rc_font = Rc::new(font.clone());
-
-                let font_ref = player.font_manager.font_counter;
-                player.font_manager.font_counter += 1;
-                player
-                    .font_manager
-                    .fonts
-                    .insert(font_ref, Rc::clone(&rc_font));
-                player.font_manager.system_font = Some(rc_font);
-
-                // Add to font_cache where rendering code looks for it
-                player
-                    .font_manager
-                    .font_cache
-                    .insert("system".to_string(), font.into());
-
-                debug!("System font loaded successfully");
-            });
-
             debug!("Loaded system font image data: {:?}", image_data);
+            Some(bitmap)
         }
         Err(err) => {
             warn!("Error fetching system font: {:?}", err);
-            return;
+            None
         }
+    }
+}
+
+fn install_system_font(player: &mut DirPlayer, bitmap: Bitmap) {
+    let grid_columns = 18;
+    let grid_rows = 7;
+    let grid_cell_width = bitmap.width / grid_columns;
+    let grid_cell_height = bitmap.height / grid_rows;
+
+    let bitmap_ref = player.bitmap_manager.add_bitmap(bitmap);
+    let font = BitmapFont {
+        bitmap_ref,
+        char_width: 5,
+        char_height: 7,
+        grid_columns: grid_columns as u8,
+        grid_rows: grid_rows as u8,
+        grid_cell_width,
+        grid_cell_height,
+        first_char_num: 32,
+        char_offset_x: 1,
+        char_offset_y: 1,
+        font_name: "System".to_string(),
+        font_size: 12,
+        font_style: 0,
+        char_widths: None,
+        pfr_native_size: 0,
     };
+
+    let rc_font = Rc::new(font.clone());
+    let font_ref = player.font_manager.font_counter;
+    player.font_manager.font_counter += 1;
+    player.font_manager.fonts.insert(font_ref, Rc::clone(&rc_font));
+    player.font_manager.system_font = Some(rc_font);
+    // Add to font_cache where rendering code looks for it.
+    player.font_manager.font_cache.insert("system".to_string(), font.into());
+    debug!("System font loaded successfully");
+}
+
+/// Apply a decoded system-font bitmap only to the still-live captured owner.
+/// The final owner check and bitmap installation share one session borrow.
+pub(crate) fn install_system_font_if_owner(
+    session: &RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: &OwnerToken,
+    bitmap: Bitmap,
+) -> Result<(), ScriptError> {
+    if !owner.is_arena_live() || !session.borrow().player_owner_matches(player_id, owner) {
+        return Err(crate::player::cancelled_scope_error());
+    }
+
+    session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            if !owner.is_arena_live() || !owner.same_identity(&context.player.owner) {
+                return Err(crate::player::cancelled_scope_error());
+            }
+            install_system_font(context.player, bitmap);
+            Ok(())
+        })
+        .unwrap_or_else(|| Err(crate::player::cancelled_scope_error()))
+}
+
+/// Fetch/decode a system font without retaining a session/player borrow, then
+/// install it only if the captured owner survived the asynchronous operation.
+pub(crate) async fn player_load_system_font_owned(
+    session: RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: OwnerToken,
+    path: String,
+) -> Result<(), ScriptError> {
+    if !owner.is_arena_live() || !session.borrow().player_owner_matches(player_id, &owner) {
+        return Err(crate::player::cancelled_scope_error());
+    }
+
+    let bitmap = fetch_system_font_bitmap(&path).await;
+    // Validate before treating a decode/network failure as the legacy fallback:
+    // a stale request must never silently succeed after reset/removal.
+    if !owner.is_arena_live() || !session.borrow().player_owner_matches(player_id, &owner) {
+        return Err(crate::player::cancelled_scope_error());
+    }
+    let Some(bitmap) = bitmap else {
+        return Ok(());
+    };
+    install_system_font_if_owner(&session, player_id, &owner, bitmap)
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod owned_system_font_tests {
+    use super::*;
+    use async_std::channel;
+
+    fn test_bitmap() -> Bitmap {
+        Bitmap::new(
+            18,
+            7,
+            32,
+            32,
+            8,
+            PaletteRef::BuiltIn(get_system_default_palette()),
+        )
+    }
+
+    fn font_snapshot(
+        handle: &RuntimeSessionHandle,
+        player_id: PlayerId,
+    ) -> (FontRef, usize, usize, Option<BitmapRef>) {
+        handle
+            .borrow_mut()
+            .with_player(player_id, |context| {
+                (
+                    context.player.font_manager.font_counter,
+                    context.player.font_manager.fonts.len(),
+                    context.player.font_manager.font_cache.len(),
+                    context
+                        .player
+                        .font_manager
+                        .system_font
+                        .as_ref()
+                        .map(|font| font.bitmap_ref),
+                )
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn system_font_install_requires_live_matching_owner() {
+        let mut session = crate::player::session::RuntimeSession::new(
+            crate::player::symbols::symbol_table::SymbolOwner {
+                session: 601,
+                generation: 1,
+            },
+        );
+        let (tx1, _rx1) = channel::unbounded();
+        let (tx2, _rx2) = channel::unbounded();
+        assert!(session.add_player(1, tx1));
+        assert!(session.add_player(2, tx2));
+        let owner1 = session.with_player(1, |context| context.player.owner.clone()).unwrap();
+        let owner2 = session.with_player(2, |context| context.player.owner.clone()).unwrap();
+        let handle = session.into_handle();
+
+        install_system_font_if_owner(&handle, 1, &owner1, test_bitmap()).unwrap();
+        let player1_after_install = font_snapshot(&handle, 1);
+        assert!(player1_after_install.3.is_some());
+
+        // A token with the same display key is still foreign: Rc identity is
+        // the capability, so a colliding session/player key cannot install.
+        let foreign = OwnerToken::new(owner1.key());
+        let error = install_system_font_if_owner(&handle, 1, &foreign, test_bitmap())
+            .expect_err("foreign owner must be rejected");
+        assert_eq!(error.code, crate::player::ScriptErrorCode::Abort);
+        assert_eq!(font_snapshot(&handle, 1), player1_after_install);
+
+        // Installing for player 2 must not touch player 1's generation.
+        let player1_before_neighbor = font_snapshot(&handle, 1);
+        install_system_font_if_owner(&handle, 2, &owner2, test_bitmap()).unwrap();
+        assert_eq!(font_snapshot(&handle, 1), player1_before_neighbor);
+        assert!(font_snapshot(&handle, 2).3.is_some());
+
+        let replacement = handle.borrow_mut().reset_player_owned(1, &owner1).unwrap();
+        let replacement_before_stale = font_snapshot(&handle, 1);
+        let stale_error = install_system_font_if_owner(&handle, 1, &owner1, test_bitmap())
+            .expect_err("reset owner must be rejected");
+        assert_eq!(stale_error.code, crate::player::ScriptErrorCode::Abort);
+        assert_eq!(font_snapshot(&handle, 1), replacement_before_stale);
+        install_system_font_if_owner(&handle, 1, &replacement, test_bitmap()).unwrap();
+
+        handle.borrow_mut().remove_player(2);
+        let removed_error = install_system_font_if_owner(&handle, 2, &owner2, test_bitmap())
+            .expect_err("removed owner must be rejected");
+        assert_eq!(removed_error.code, crate::player::ScriptErrorCode::Abort);
+    }
 }
 
 /// Recover a PFR bitmap STRIKE's true vertical metrics by scanning the

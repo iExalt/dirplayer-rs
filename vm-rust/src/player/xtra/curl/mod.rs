@@ -16,7 +16,6 @@ use wasm_bindgen_futures::JsFuture;
 use crate::{
     director::lingo::datum::{Datum, DatumType, XtraInstanceId},
     player::{
-        events::player_dispatch_callback_event, reserve_player_mut, reserve_player_ref,
         symbols::{symbol::Symbol, symbol_table::SymbolTable}, ownership::OwnerToken,
         DatumRef, DirPlayer, ScriptError,
     },
@@ -402,28 +401,6 @@ impl CurlXtra {
         )
     }
 
-    pub fn call_static_handler(name: &str, args: &Vec<DatumRef>, symbols: &mut SymbolTable) -> Result<DatumRef, ScriptError> {
-        match_ci!(name, {
-            "curl_error" => curl_error(args),
-            "curl_escape" => curl_escape(args, symbols),
-            "curl_hfs2posix" => curl_hfs2posix(args, symbols),
-            _ => Err(ScriptError::new(format!("Curl static: no handler {}", name))),
-        })
-    }
-
-    pub fn has_static_async_handler(_name: &str) -> bool {
-        false
-    }
-
-    pub async fn call_static_async_handler(
-        name: &str,
-        _args: &Vec<DatumRef>,
-    ) -> Result<DatumRef, ScriptError> {
-        Err(ScriptError::new(format!(
-            "Curl: no async static handler {}",
-            name
-        )))
-    }
 }
 
 fn curl_error_explicit(player: &mut DirPlayer, args: &[DatumRef]) -> Result<DatumRef, ScriptError> {
@@ -463,16 +440,6 @@ fn curl_hfs2posix_explicit(
     };
     Ok(player.alloc_datum(Datum::String(value)))
 }
-
-fn ok_int(n: i32) -> Result<DatumRef, ScriptError> {
-    reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Int(n))))
-}
-
-fn ok_string(s: String) -> Result<DatumRef, ScriptError> {
-    reserve_player_mut(|player| Ok(player.alloc_datum(Datum::String(s))))
-}
-
-// -- setOption --------------------------------------------------------------
 
 fn string_value_explicit(
     player: &DirPlayer,
@@ -622,159 +589,6 @@ fn get_info_explicit(
     }
 }
 
-fn set_option(instance: &mut CurlInstance, args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
-    let option = reserve_player_ref(|player| {
-        let arg = args.get(0).ok_or_else(|| {
-            ScriptError::new("setOption requires an option id".to_string())
-        })?;
-        player.get_datum(arg).int_value()
-    })?;
-    let value_ref = args.get(1);
-
-    match option {
-        opt::URL => {
-            instance.url = string_value(value_ref, symbols)?;
-        }
-        opt::HTTPGET => {
-            if int_value(value_ref)? != 0 {
-                instance.method = "GET".to_string();
-                instance.custom_method = None;
-            }
-        }
-        opt::POST => {
-            if int_value(value_ref)? != 0 {
-                instance.method = "POST".to_string();
-                instance.custom_method = None;
-            }
-        }
-        opt::NOBODY => {
-            if int_value(value_ref)? != 0 {
-                instance.method = "HEAD".to_string();
-                instance.custom_method = None;
-            }
-        }
-        opt::CUSTOMREQUEST => {
-            instance.custom_method = Some(string_value(value_ref, symbols)?);
-        }
-        opt::HTTPHEADER => {
-            instance.headers = list_string_values(value_ref, symbols)?;
-        }
-        opt::POSTFIELDS => {
-            let body = string_value(value_ref, symbols)?;
-            instance.body = Some(body.into_bytes());
-        }
-        opt::USERAGENT => instance.user_agent = Some(string_value(value_ref, symbols)?),
-        opt::REFERER => instance.referer = Some(string_value(value_ref, symbols)?),
-        opt::COOKIE => instance.cookie = Some(string_value(value_ref, symbols)?),
-        opt::USERPWD => instance.user_pwd = Some(string_value(value_ref, symbols)?),
-        opt::PROXY => instance.proxy = Some(string_value(value_ref, symbols)?),
-        opt::RANGE => instance.range = Some(string_value(value_ref, symbols)?),
-        opt::ACCEPT_ENCODING => instance.accept_encoding = Some(string_value(value_ref, symbols)?),
-        opt::SSL_VERIFYPEER | opt::CAINFO => {
-            // The browser fetch stack already handles TLS verification — these
-            // options are no-ops, but we accept them so existing Lingo code
-            // doesn't see CURLE_UNKNOWN_OPTION.
-        }
-        _ => {
-            // Unknown options are silently accepted, like the real Xtra does
-            // when libcurl reports CURLE_OK for ignored toggles.
-        }
-    }
-    ok_int(CURLE_OK)
-}
-
-fn set_form(instance: &mut CurlInstance, args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
-    let prop_ref = args.get(0).ok_or_else(|| {
-        ScriptError::new("setForm requires a property-list argument".to_string())
-    })?;
-    let pairs = reserve_player_ref(|player| {
-        let datum = player.get_datum(prop_ref);
-        if let Datum::PropList(pairs, _) = datum {
-            let mut out = Vec::new();
-            for (key, value) in pairs.iter() {
-                let k = player.get_datum(key).string_value(symbols)?;
-                let v = player.get_datum(value).string_value(symbols)?;
-                out.push((k, v));
-            }
-            Ok(out)
-        } else {
-            Err(ScriptError::new(
-                "setForm requires a property list".to_string(),
-            ))
-        }
-    })?;
-    instance.form = pairs;
-    instance.method = "POST".to_string();
-    instance.custom_method = None;
-    ok_int(CURLE_OK)
-}
-
-fn set_source_file(_instance: &mut CurlInstance, _args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-    // File uploads from disk are not available in WASM.
-    ok_int(CURLE_NOT_BUILT_IN)
-}
-
-fn set_destination_file(_instance: &mut CurlInstance, _args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-    ok_int(CURLE_NOT_BUILT_IN)
-}
-
-fn set_header_callback(
-    instance: &mut CurlInstance,
-    args: &Vec<DatumRef>,
-    symbols: &mut SymbolTable,
-) -> Result<DatumRef, ScriptError> {
-    let handler = reserve_player_ref(|player| {
-        let arg = args.get(0).ok_or_else(|| {
-            ScriptError::new("setHeaderCallback requires a symbol".to_string())
-        })?;
-        player.get_datum(arg).symbol_value(symbols)
-    })?;
-    let target = args.get(1).cloned().unwrap_or(DatumRef::Void);
-    let handler = symbols.display(&handler).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?.to_owned();
-    instance.header_callback = Some((target, handler));
-    Ok(DatumRef::Void)
-}
-
-fn set_progress_callback(
-    instance: &mut CurlInstance,
-    args: &Vec<DatumRef>,
-    symbols: &mut SymbolTable,
-) -> Result<DatumRef, ScriptError> {
-    let handler = reserve_player_ref(|player| {
-        let arg = args.get(0).ok_or_else(|| {
-            ScriptError::new("setProgressCallback requires a symbol".to_string())
-        })?;
-        player.get_datum(arg).symbol_value(symbols)
-    })?;
-    let target = args.get(1).cloned().unwrap_or(DatumRef::Void);
-    let handler = symbols.display(&handler).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?.to_owned();
-    instance.progress_callback = Some((target, handler));
-    Ok(DatumRef::Void)
-}
-
-// -- getInfo ----------------------------------------------------------------
-
-fn get_info(instance: &CurlInstance, args: &Vec<DatumRef>, _symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
-    let info = reserve_player_ref(|player| {
-        let arg = args.get(0).ok_or_else(|| {
-            ScriptError::new("getInfo requires an info id".to_string())
-        })?;
-        player.get_datum(arg).int_value()
-    })?;
-    // Mirror libcurl's CURLINFO_* constants (subset).
-    match info {
-        2097154 => ok_string(instance.last_effective_url.clone()), // EFFECTIVE_URL
-        2097162 => ok_int(instance.last_status),                   // RESPONSE_CODE
-        3145731 => reserve_player_mut(|player| {
-            Ok(player.alloc_datum(Datum::Float(0.0)))
-        }), // TOTAL_TIME
-        3145735 => reserve_player_mut(|player| {
-            Ok(player.alloc_datum(Datum::Float(instance.last_response_size as f64)))
-        }), // SIZE_DOWNLOAD
-        _ => ok_int(0),
-    }
-}
-
 pub(crate) async fn perform_fetch_owned(instance: &CurlInstance) -> (i32, Vec<u8>, String) {
     if instance.url.is_empty() {
         return (-CURLE_URL_MALFORMAT, Vec::new(), String::new());
@@ -895,88 +709,6 @@ fn serialize_headers(_response: &web_sys::Response) -> String {
     // a newer feature). We return the raw status line + an empty CRLF so
     // Lingo scripts that just look for "HTTP/1.1 <code>" continue to work.
     String::new()
-}
-
-fn string_value(value_ref: Option<&DatumRef>, symbols: &SymbolTable) -> Result<String, ScriptError> {
-    let arg = value_ref.ok_or_else(|| ScriptError::new("Missing value argument".to_string()))?;
-    reserve_player_ref(|player| player.get_datum(arg).string_value(symbols))
-}
-
-fn int_value(value_ref: Option<&DatumRef>) -> Result<i32, ScriptError> {
-    let arg = value_ref.ok_or_else(|| ScriptError::new("Missing value argument".to_string()))?;
-    reserve_player_ref(|player| player.get_datum(arg).int_value())
-}
-
-fn list_string_values(value_ref: Option<&DatumRef>, symbols: &SymbolTable) -> Result<Vec<String>, ScriptError> {
-    let arg = value_ref.ok_or_else(|| ScriptError::new("Missing list argument".to_string()))?;
-    reserve_player_ref(|player| {
-        let datum = player.get_datum(arg);
-        match datum {
-            Datum::List(_, items, _) => items
-                .iter()
-                .map(|item| player.get_datum(item).string_value(symbols))
-                .collect(),
-            Datum::String(s) => Ok(vec![s.clone()]),
-            _ => Ok(Vec::new()),
-        }
-    })
-    .map_err(|e: ScriptError| e)
-    .and_then(|v: Vec<String>| Ok(v))
-}
-
-// -- Static handlers --------------------------------------------------------
-
-fn curl_error(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-    let code = reserve_player_ref(|player| {
-        let arg = args.get(0).ok_or_else(|| {
-            ScriptError::new("curl_error requires an integer".to_string())
-        })?;
-        player.get_datum(arg).int_value()
-    })?;
-    let msg = match code {
-        0 => "No error",
-        1 => "Unsupported protocol",
-        2 => "Failed init",
-        3 => "URL malformat",
-        4 => "Not built-in (unsupported in WASM)",
-        6 => "Couldn't resolve host",
-        7 => "Couldn't connect to server",
-        22 => "HTTP returned error",
-        _ => "Unknown error",
-    };
-    ok_string(msg.to_string())
-}
-
-fn curl_escape(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
-    let s = reserve_player_ref(|player| {
-        let arg = args.get(0).ok_or_else(|| {
-            ScriptError::new("curl_escape requires a string".to_string())
-        })?;
-        player.get_datum(arg).string_value(symbols)
-    })?;
-    let escaped = percent_encoding::utf8_percent_encode(&s, percent_encoding::NON_ALPHANUMERIC)
-        .to_string();
-    ok_string(escaped)
-}
-
-fn curl_hfs2posix(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
-    // HFS-style "Macintosh HD:Users:foo" -> "/Macintosh HD/Users/foo".
-    // No-op on Windows/WASM, but we still translate the separator.
-    let s = reserve_player_ref(|player| {
-        let arg = args.get(0).ok_or_else(|| {
-            ScriptError::new("curl_hfs2posix requires a string".to_string())
-        })?;
-        player.get_datum(arg).string_value(symbols)
-    })?;
-    let posix = if s.contains(':') {
-        let mut out = String::with_capacity(s.len() + 1);
-        out.push('/');
-        out.push_str(&s.replace(':', "/"));
-        out
-    } else {
-        s
-    };
-    ok_string(posix)
 }
 
 // Silence the dead-code warnings on enum values we accept but don't act on.

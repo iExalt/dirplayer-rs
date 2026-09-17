@@ -120,6 +120,10 @@ pub(crate) enum InternalVmRequest {
         name: Symbol,
         args: Vec<DatumRef>,
     },
+    /// An owner/generation-bound Flash host operation. The session executor
+    /// must invoke it after releasing the player borrow and fence its decoded
+    /// response before allocating any result datum.
+    Flash(crate::player::handlers::datum_handlers::flash_object::FlashRequest),
     /// An object call which has already been classified as an asynchronous
     /// sprite operation.  The receiver and owned argument handles stay with
     /// the action until the host completes it; the action's owner/scope
@@ -137,6 +141,13 @@ pub(crate) enum InternalVmRequest {
         receiver: DatumRef,
         name: Symbol,
         args: Vec<DatumRef>,
+    },
+    /// Property lookup retained by the async driver so a Flash receiver can
+    /// cross the owner-bound host boundary without making every property type
+    /// use the JS path.
+    ObjectProperty {
+        receiver: DatumRef,
+        name: Symbol,
     },
     SetProperty {
         receiver: DatumRef,
@@ -212,7 +223,10 @@ pub(crate) fn eval_request_kind(request: &InternalVmRequest) -> ActionKind {
     match request {
         InternalVmRequest::Global { .. }
         | InternalVmRequest::GlobalAfterExternalProbe { .. } => ActionKind::InternalInvocation,
-        InternalVmRequest::Object { .. } | InternalVmRequest::ObjectV4 { .. } => ActionKind::InternalInvocation,
+        InternalVmRequest::Object { .. }
+        | InternalVmRequest::ObjectV4 { .. }
+        | InternalVmRequest::ObjectProperty { .. }
+        | InternalVmRequest::Flash(_) => ActionKind::InternalInvocation,
         InternalVmRequest::SpriteAsync(_)
         | InternalVmRequest::CastMemberAsync(_)
         | InternalVmRequest::MovieAsync(_)
@@ -253,6 +267,10 @@ pub(crate) fn async_request_reason(request: &InternalVmRequest) -> Option<String
             "movie {:?} requires owner-bound executor for player {}",
             request.kind, request.player_id
         )),
+        InternalVmRequest::Flash(request) => Some(format!(
+            "Flash {} on sprite {} requires owner/generation-bound host execution",
+            request.path, request.sprite_num
+        )),
         InternalVmRequest::ExternalXtra(request) => Some(format!(
             "external Xtra '{}' requires owner-bound plugin execution",
             request.xtra_name
@@ -272,6 +290,10 @@ pub(crate) fn async_request_reason(request: &InternalVmRequest) -> Option<String
                 "FileIO openFile requires owner-bound network executor".to_owned(),
             super::xtra::manager::XtraPendingIntent::SysMenu(_) =>
                 "SysMenu host effect requires owner-bound browser executor".to_owned(),
+            super::xtra::manager::XtraPendingIntent::BudApi(_) =>
+                "BudAPI host effect requires owner-bound browser executor".to_owned(),
+            super::xtra::manager::XtraPendingIntent::OpenUrl(_) =>
+                "OpenURL host effect requires owner-bound browser executor".to_owned(),
         }),
         _ => None,
     }
@@ -359,6 +381,46 @@ pub(crate) fn classify_async_object(
         _ => None,
     };
     let request = match value {
+        Datum::FlashObjectRef(_) => {
+            crate::player::handlers::datum_handlers::flash_object::FlashObjectDatumHandlers::prepare_call(
+                runtime.player,
+                runtime.symbols,
+                receiver,
+                name.clone(),
+                args,
+            )
+            .map(InternalVmRequest::Flash)?
+        }
+        Datum::SpriteRef(sprite_num) if name.eq_builtin(BuiltInSymbol::GetVariable) => {
+            let path = args
+                .first()
+                .ok_or_else(|| ScriptError::new("getVariable requires a path".to_owned()))
+                .and_then(|arg| checked_internal_datum(runtime.player, runtime.symbols, arg))?
+                .string_value(runtime.symbols)?;
+            let return_as_object = args.get(1)
+                .map(|arg| checked_internal_datum(runtime.player, runtime.symbols, arg)
+                    .map(|datum| datum.int_value().unwrap_or(1) == 0))
+                .transpose()?
+                .unwrap_or(false);
+            let (cast_lib, cast_member) = runtime
+                .player
+                .movie
+                .score
+                .get_sprite(sprite_num)
+                .and_then(|sprite| sprite.member.as_ref())
+                .map(|member| (member.cast_lib, member.cast_member))
+                .unwrap_or((0, 0));
+            InternalVmRequest::Flash(
+                crate::player::handlers::datum_handlers::flash_object::FlashObjectDatumHandlers::prepare_bind_get(
+                    runtime.player,
+                    sprite_num,
+                    crate::player::handlers::datum_handlers::sprite::root_flash_path(&path),
+                    return_as_object,
+                    cast_lib,
+                    cast_member,
+                )?,
+            )
+        }
         Datum::SpriteRef(sprite_num) => InternalVmRequest::SpriteAsync(SpriteAsyncRequest {
             player_id,
             owner,
@@ -1765,10 +1827,29 @@ impl DriverContinuation {
                         ),
                     );
                 }
-                match super::handlers::datum_handlers::flash_object::apply_set_prop(request) {
-                    Ok(()) => self.advance_current_opcode(session, frame_ctx, &frame_ctx.scope),
-                    Err(error) => self.fail_current_frame(session, error),
-                }
+                let Some(ticket) = session.allocate_action(
+                    &request.owner,
+                    &frame_ctx.scope,
+                    ActionKind::InternalInvocation,
+                    ResumePhase::ApplyOpcode,
+                ) else {
+                    return self.fail_current_frame(
+                        session,
+                        ScriptError::new("driver action sequence exhausted".to_owned()),
+                    );
+                };
+                self.internal_effect = Some(InternalResultEffect::SetProperty);
+                self.phase = DriverPhase::Awaiting {
+                    ticket: ticket.clone(),
+                    resume: ResumePhase::ApplyOpcode,
+                };
+                DriverTurn::Pending(PendingAction::Internal(InternalInvocationRequest {
+                    ticket,
+                    scope: frame_ctx.scope.clone(),
+                    request: InternalVmRequest::Flash(request),
+                    pending_reason: Some("Flash property setter requires owner-bound host execution".to_owned()),
+                    effect: Some(InternalResultEffect::SetProperty),
+                }))
             }
             SetObjPropOutcome::AwaitCastLoad(request) => {
                 let Some(owner) = Self::with_context(session, self.player_id, |runtime| {
@@ -2230,6 +2311,36 @@ impl DriverContinuation {
                 return Err(super::cancelled_scope_error());
             }
             match opcode {
+                OpCode::GetObjProp => {
+                    let bytecode = runtime.player.get_ctx_current_bytecode(&frame_ctx);
+                    let name = checked_context_name(&frame_ctx, bytecode.obj as u16)?;
+                    runtime.symbols.display(&name).map_err(|_| {
+                        ScriptError::new_code(
+                            super::ScriptErrorCode::InvalidReference,
+                            "foreign or stale opcode symbol".to_owned(),
+                        )
+                    })?;
+                    let receiver = pop_internal_ref(runtime, &frame_ctx, "get_obj_prop receiver")?;
+                    let receiver_value = checked_internal_datum(runtime.player, runtime.symbols, &receiver)?.clone();
+                    let request = match receiver_value {
+                        Datum::FlashObjectRef(_) => InternalVmRequest::Flash(
+                            crate::player::handlers::datum_handlers::flash_object::FlashObjectDatumHandlers::prepare_get_prop(
+                                runtime.player,
+                                &receiver,
+                                &runtime.symbols.display(&name).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?.to_owned(),
+                            )?,
+                        ),
+                        _ => InternalVmRequest::ObjectProperty { receiver, name },
+                    };
+                    Ok((
+                        request,
+                        InternalResultEffect::ObjectV4 {
+                            push_return: true,
+                            route_to_global: false,
+                        },
+                        None,
+                    ))
+                }
                 OpCode::NewObj => {
                     let bytecode = runtime.player.get_ctx_current_bytecode(&frame_ctx);
                     let name = checked_context_name(&frame_ctx, bytecode.obj as u16)?;

@@ -28,7 +28,7 @@ use super::{
         player_dispatch_movie_callback, player_wait_available,
         player_dispatch_event_to_sprite_targeted, player_invoke_frame_and_movie_scripts,
     },
-    font::player_load_system_font,
+    font::player_load_system_font_owned,
     keyboard_events::{player_key_down, player_key_up},
     
     player_alloc_datum, player_call_script_handler, player_call_script_handler_turn_in_session_sync, player_dispatch_global_event,
@@ -709,12 +709,22 @@ fn owner_is_current(
     player_id: u32,
     owner: &super::ownership::OwnerToken,
 ) -> bool {
-    session_handle
+    let (matches, backpressured) = session_handle
         .borrow_mut()
         .with_player(player_id, |context| {
-            owner.same_identity(&context.player.owner) && owner.is_arena_live()
+            (
+                owner.same_identity(&context.player.owner) && owner.is_arena_live(),
+                context.player.host_event_backpressure.is_some(),
+            )
         })
-        .unwrap_or(false)
+        .unwrap_or((false, false));
+    if matches && backpressured {
+        session_handle
+            .borrow_mut()
+            .cancel_host_backpressured_owner(player_id, owner);
+        return false;
+    }
+    matches
 }
 
 /// Retire a stale nested child without consulting any ambient player.  The
@@ -1185,6 +1195,8 @@ pub(crate) async fn execute_xtra_pending_request(
             &intent,
             super::xtra::manager::XtraPendingIntent::FileIoOpen(_)
                 | super::xtra::manager::XtraPendingIntent::SysMenu(_)
+                | super::xtra::manager::XtraPendingIntent::BudApi(_)
+                | super::xtra::manager::XtraPendingIntent::OpenUrl(_)
         ) {
             return super::xtra::manager::execute_pending_intent(session, player_id, intent).await;
         }
@@ -1194,6 +1206,8 @@ pub(crate) async fn execute_xtra_pending_request(
             super::xtra::manager::XtraPendingIntent::CurlExec { .. } => "Curl execAsync",
             super::xtra::manager::XtraPendingIntent::FileIoOpen(_) => unreachable!("handled above"),
             super::xtra::manager::XtraPendingIntent::SysMenu(_) => "SysMenu host effect",
+            super::xtra::manager::XtraPendingIntent::BudApi(_) => "BudAPI host effect",
+            super::xtra::manager::XtraPendingIntent::OpenUrl(_) => "OpenURL host effect",
         };
         return Err(ScriptError::new(format!(
             "{} requires the browser transport executor",
@@ -1302,6 +1316,41 @@ async fn finish_pending_eval_request_turn(
                 movie_request,
             )
             .await;
+            let resumed = session
+                .borrow_mut()
+                .resume_eval(id.clone(), &action, &owner, result);
+            match resumed {
+                super::eval::EvalTurn::Complete(result) => {
+                    if let Some(sender) = session
+                        .borrow_mut()
+                        .detach_pending_eval_route(&id, &action)
+                        .map(|(_, _, sender)| sender)
+                    {
+                        let _ = sender.try_send(result);
+                    }
+                }
+                super::eval::EvalTurn::Pending { request: next } => {
+                    let next_action = match &next {
+                        super::eval::EvalPending::Global { capability, .. }
+                        | super::eval::EvalPending::Object { capability, .. }
+                        | super::eval::EvalPending::SetProperty { capability, .. } => capability.clone(),
+                    };
+                    session.borrow_mut().requeue_pending_eval_request(
+                        super::session::PendingEvalRequest {
+                            id,
+                            player_id: request_player,
+                            owner,
+                            action: next_action,
+                            request: next,
+                            sender,
+                        },
+                    );
+                }
+            }
+            true
+        }
+        super::session::EvalRequestTurn::Flash(request) => {
+            let result = execute_owned_flash_request(session, request_player, &owner, request).await;
             let resumed = session
                 .borrow_mut()
                 .resume_eval(id.clone(), &action, &owner, result);
@@ -1569,7 +1618,7 @@ async fn execute_pending_action(
 
     match action {
         PendingAction::Internal(request) => {
-            execute_internal_action(session, player_id, request).await
+            execute_internal_action(session, player_id, owner, request).await
         }
         PendingAction::CastLoad { ticket, request } => {
             // Register the request with the session before exposing it to a
@@ -1753,9 +1802,123 @@ async fn execute_cast_load_transport(
     }
 }
 
+/// Execute a typed Flash request after the evaluator/driver has released its
+/// RuntimeSession borrow. The request clone is intentionally mutable: an
+/// initial BindGet captures the already-reserved host generation and retries
+/// only through the generation-qualified bridge route.
+pub(crate) async fn execute_owned_flash_request(
+    session: &Rc<RefCell<RuntimeSession>>,
+    player_id: u32,
+    owner: &super::ownership::OwnerToken,
+    mut request: super::handlers::datum_handlers::flash_object::FlashRequest,
+) -> Result<super::datum_ref::DatumRef, ScriptError> {
+    loop {
+        if !request.owner.same_identity(owner)
+            || !request.owner.is_arena_live()
+            || request.player_id != player_id
+            || !session.borrow().player_owner_matches(player_id, &request.owner)
+        {
+            return Err(super::cancelled_scope_error());
+        }
+        if let Some(generation) = request.expected_generation {
+            let current = session.borrow_mut().with_player(player_id, |context| {
+                super::handlers::datum_handlers::flash_object::checked_sprite_number(request.sprite_num)
+                    .map(|sprite_num| context.player.is_flash_instance_generation_current(sprite_num, generation))
+            });
+            if !matches!(current, Some(Ok(true))) {
+                return Err(ScriptError::new_code(
+                    super::ScriptErrorCode::InvalidReference,
+                    "Flash request targets a stale instance generation".to_owned(),
+                ));
+            }
+        }
+        match super::handlers::datum_handlers::flash_object::execute_flash_request(&request) {
+            Ok(response) => {
+                if request.expected_generation.is_some()
+                    && request.expected_generation != Some(response.generation)
+                {
+                    return Err(ScriptError::new_code(
+                        super::ScriptErrorCode::InvalidReference,
+                        "Flash response generation no longer matches request".to_owned(),
+                    ));
+                }
+                let sprite_num = super::handlers::datum_handlers::flash_object::checked_sprite_number(
+                    request.sprite_num,
+                )?;
+                let initial_bind = matches!(
+                    &request.operation,
+                    super::handlers::datum_handlers::flash_object::FlashOperation::BindGet { .. }
+                ) && request.expected_generation.is_none();
+                if initial_bind {
+                    let authority_current = session.borrow_mut().with_player(player_id, |context| {
+                        context.player.is_flash_instance_generation_current(
+                            sprite_num,
+                            response.generation,
+                        )
+                    });
+                    match authority_current {
+                        Some(true) => request.expected_generation = Some(response.generation),
+                        Some(false) => {
+                            return Err(ScriptError::new_code(
+                                super::ScriptErrorCode::InvalidReference,
+                                "Flash response generation is not owned by the current instance".to_owned(),
+                            ));
+                        }
+                        None => return Err(super::cancelled_scope_error()),
+                    }
+                }
+                let result = session.borrow_mut().with_player(player_id, |context| {
+                    if !request.owner.same_identity(&context.player.owner)
+                        || !request.owner.is_arena_live()
+                        || !context.player.is_flash_instance_generation_current(
+                            sprite_num,
+                            response.generation,
+                        )
+                    {
+                        return Err(super::cancelled_scope_error());
+                    }
+                    super::handlers::datum_handlers::flash_object::decoded_to_datum(
+                        context.player,
+                        response,
+                        &request,
+                    )
+                });
+                return match result {
+                    Some(result) => result,
+                    None => Err(super::cancelled_scope_error()),
+                };
+            }
+            Err(super::handlers::datum_handlers::flash_object::FlashRequestError::NotReady {
+                generation,
+            }) => {
+                if let Some(expected) = request.expected_generation {
+                    if expected != generation {
+                        return Err(ScriptError::new_code(
+                            super::ScriptErrorCode::InvalidReference,
+                            "Flash instance generation changed while waiting for readiness".to_owned(),
+                        ));
+                    }
+                } else {
+                    request.expected_generation = Some(generation);
+                }
+                super::handlers::datum_handlers::flash_object::wait_for_flash_ready_owned(
+                    &request.owner,
+                    request.sprite_num,
+                    generation,
+                )
+                .await?;
+            }
+            Err(super::handlers::datum_handlers::flash_object::FlashRequestError::Script(error)) => {
+                return Err(error);
+            }
+        }
+    }
+}
+
 async fn execute_internal_action(
     session: &Rc<RefCell<RuntimeSession>>,
     player_id: u32,
+    owner: &super::ownership::OwnerToken,
     request: crate::player::driver::InternalInvocationRequest,
 ) -> PendingActionExecution {
     use crate::player::driver::{
@@ -1864,6 +2027,18 @@ async fn execute_internal_action(
                 }
             }
         }
+        InternalVmRequest::ObjectProperty { receiver, name } => {
+            let result = session.borrow_mut().with_player(player_id, |mut context| {
+                super::script::get_obj_prop(context.player, context.symbols, &receiver, name)
+            });
+            match result {
+                Some(Ok(value)) => PendingActionExecution::Complete(ActionCompletion::InternalResult(value)),
+                Some(Err(error)) => PendingActionExecution::Complete(ActionCompletion::InternalError(error)),
+                None => PendingActionExecution::Complete(ActionCompletion::InternalError(
+                    super::cancelled_scope_error(),
+                )),
+            }
+        }
         InternalVmRequest::SetProperty { receiver, name, value } => {
             let mut outbox = super::cast_lib::CastNotificationOutbox::default();
             let outcome = session.borrow_mut().with_player(player_id, |context| {
@@ -1884,10 +2059,12 @@ async fn execute_internal_action(
                     ))
                 }
                 Some(Ok(super::script::SetObjPropOutcome::FlashSet(request))) => {
-                    let result = super::handlers::datum_handlers::flash_object::apply_set_prop(request)
-                        .map(|()| ActionCompletion::InternalResult(crate::player::datum_ref::DatumRef::Void))
-                        .unwrap_or_else(ActionCompletion::InternalError);
-                    PendingActionExecution::Complete(result)
+                    match execute_owned_flash_request(session, player_id, owner, request).await {
+                        Ok(_) => PendingActionExecution::Complete(ActionCompletion::InternalResult(
+                            crate::player::datum_ref::DatumRef::Void,
+                        )),
+                        Err(error) => PendingActionExecution::Complete(ActionCompletion::InternalError(error)),
+                    }
                 }
                 Some(Ok(super::script::SetObjPropOutcome::AwaitCastLoad(request))) => {
                     PendingActionExecution::Retain(PendingAction::CastLoad { ticket, request })
@@ -1896,6 +2073,12 @@ async fn execute_internal_action(
                 None => PendingActionExecution::Complete(ActionCompletion::InternalError(
                     super::cancelled_scope_error(),
                 )),
+            }
+        }
+        InternalVmRequest::Flash(request) => {
+            match execute_owned_flash_request(session, player_id, owner, request).await {
+                Ok(value) => PendingActionExecution::Complete(ActionCompletion::InternalResult(value)),
+                Err(error) => PendingActionExecution::Complete(ActionCompletion::InternalError(error)),
             }
         }
         InternalVmRequest::SpriteAsync(request) => {
@@ -2988,7 +3171,13 @@ async fn run_player_command_result(
         }
         PlayerVMCommand::SetSystemFontPath(path) => {
             console_warn!("Loading system font: {}", path);
-            player_load_system_font(&path).await;
+            player_load_system_font_owned(
+                session_handle.clone(),
+                player_id,
+                owner.clone(),
+                path,
+            )
+            .await?;
         }
         PlayerVMCommand::LoadMovieFromFile(file_path, autoplay) => {
             // `--doBefore` runs "in the scope of the game being curated BEFORE

@@ -29,6 +29,7 @@ pub mod font;
 pub mod geometry;
 pub mod gif;
 pub mod handlers;
+pub mod host_events;
 pub mod interp_stats;
 pub mod js_lingo;
 pub mod js_lingo_loader;
@@ -63,7 +64,7 @@ pub mod virtual_scripts;
 pub mod xtra;
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{HashMap, HashSet, VecDeque},
     future::Future,
     pin::Pin,
@@ -72,12 +73,142 @@ use std::{
     time::Duration,
 };
 
+/// Owner-local authority for Flash instance generations. The counter never
+/// wraps and the map is replaced on player reset, so a late teardown from an
+/// old instance cannot invalidate a replacement on the same sprite number.
+#[derive(Debug)]
+pub(crate) struct FlashBindingState {
+    next_generation: u64,
+    generations: HashMap<i16, u64>,
+}
+
+impl FlashBindingState {
+    pub(crate) fn new() -> Self {
+        Self { next_generation: 0, generations: HashMap::new() }
+    }
+
+    pub(crate) fn reserve(&mut self, sprite_num: i16) -> Result<u64, ScriptError> {
+        if sprite_num <= 0 {
+            return Err(ScriptError::new("Flash sprite number must be positive".to_owned()));
+        }
+        let generation = self.next_generation.checked_add(1).ok_or_else(|| {
+            ScriptError::new("Flash instance generation exhausted".to_owned())
+        })?;
+        if generation > 9_007_199_254_740_991 {
+            return Err(ScriptError::new("Flash instance generation exceeds JavaScript safe integer range".to_owned()));
+        }
+        self.next_generation = generation;
+        self.generations.insert(sprite_num, generation);
+        Ok(generation)
+    }
+
+    pub(crate) fn invalidate(&mut self, sprite_num: i16, expected: u64) -> bool {
+        if self.generations.get(&sprite_num).copied() == Some(expected) {
+            self.generations.remove(&sprite_num);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn is_current(&self, sprite_num: i16, expected: u64) -> bool {
+        self.generations.get(&sprite_num).copied() == Some(expected)
+    }
+
+}
+
+#[cfg(test)]
+mod flash_binding_state_tests {
+    use super::FlashBindingState;
+    use crate::player::{
+        session::RuntimeSession,
+        symbols::symbol_table::SymbolOwner,
+    };
+    use async_std::channel;
+    use std::rc::Rc;
+
+    #[test]
+    fn generations_are_monotonic_and_old_invalidation_cannot_remove_replacement() {
+        let mut state = FlashBindingState::new();
+        let first = state.reserve(7).expect("first generation");
+        let replacement = state.reserve(7).expect("replacement generation");
+        assert!(replacement > first);
+        assert!(!state.invalidate(7, first));
+        assert!(state.is_current(7, replacement));
+        assert!(state.invalidate(7, replacement));
+        assert!(!state.is_current(7, replacement));
+    }
+
+    #[test]
+    fn invalid_inputs_and_safe_integer_exhaustion_do_not_mutate_state() {
+        let mut state = FlashBindingState::new();
+        assert!(state.reserve(0).is_err());
+        assert!(state.reserve(-1).is_err());
+        assert!(state.generations.is_empty());
+        state.next_generation = 9_007_199_254_740_991;
+        assert!(state.reserve(2).is_err());
+        assert_eq!(state.next_generation, 9_007_199_254_740_991);
+        assert!(state.generations.is_empty());
+    }
+
+    #[test]
+    fn stale_invalidation_cannot_resurrect_a_replacement() {
+        let mut old = FlashBindingState::new();
+        let generation = old.reserve(3).expect("old generation");
+        assert!(old.invalidate(3, generation));
+        assert!(!old.is_current(3, generation));
+        let replacement = old.reserve(3).expect("replacement generation");
+        assert!(replacement > generation);
+        assert!(!old.invalidate(3, generation));
+        assert!(old.is_current(3, replacement));
+    }
+
+    #[test]
+    fn player_reset_replaces_flash_authority_and_retires_old_capability() {
+        let mut session = RuntimeSession::new(SymbolOwner { session: 91, generation: 1 });
+        assert!(session.add_player(1, channel::unbounded().0));
+        let (old_owner, old_state, old_generation) = session
+            .with_player(1, |context| {
+                let generation = context
+                    .player
+                    .reserve_flash_instance_generation(3)
+                    .expect("old Flash instance generation");
+                (
+                    context.player.owner.clone(),
+                    context.player.flash_binding_state.clone(),
+                    generation,
+                )
+            })
+            .expect("player must exist");
+
+        let replacement = session
+            .reset_player_owned(1, &old_owner)
+            .expect("reset must replace the player owner");
+        let new_state = session
+            .with_player(1, |context| context.player.flash_binding_state.clone())
+            .expect("replacement player must exist");
+        assert!(!old_owner.is_arena_live());
+        assert!(!Rc::ptr_eq(&old_state, &new_state));
+        assert!(old_state.borrow().is_current(3, old_generation));
+        assert!(new_state.borrow().generations.is_empty());
+
+        let replacement_generation = new_state
+            .borrow_mut()
+            .reserve(3)
+            .expect("replacement Flash instance generation");
+        assert!(old_state.borrow_mut().invalidate(3, replacement_generation));
+        assert!(new_state.borrow().is_current(3, replacement_generation));
+        assert!(replacement.is_arena_live());
+    }
+}
+
 use allocator::{
     DatumAllocator, DatumAllocatorTrait, ResetableAllocator, ScriptInstanceAllocatorTrait,
 };
 use async_recursion::async_recursion;
+use futures::future::{select, Either, FutureExt};
 use async_std::{
-    channel::{self, Sender},
+    channel::{self, Receiver, Sender},
     future::{self, timeout},
     sync::Mutex,
     task::spawn_local,
@@ -92,6 +223,7 @@ use log::{debug, error, warn};
 use manual_future::{ManualFuture, ManualFutureCompleter};
 use net_manager::NetManager;
 use ownership::OwnerToken;
+use host_events::{HostEvent, HostEventMailbox, HostEventOverflow};
 use driver::{DriverStart, DriverTurn};
 use rand::SeedableRng;
 use scope::ScopeResult;
@@ -387,6 +519,12 @@ pub struct DirPlayer {
     /// Host notifications captured during player mutation. The owning
     /// session drains this queue after releasing its player borrow.
     pub(crate) pending_player_notifications: Vec<PlayerNotification>,
+    /// Bounded portable lifecycle/cast mailbox. Ordered transitions are
+    /// retained; state snapshots may be coalesced by `HostEventMailbox`.
+    pub(crate) host_event_mailbox: HostEventMailbox,
+    /// One terminal backpressure marker is enough to stop the owner at its
+    /// next detached drain without growing an unbounded fallback queue.
+    pub(crate) host_event_backpressure: Option<HostEventOverflow>,
     /// Anchor for syncing score-frame advance to audio-context time while
     /// sound channel 1 is playing. Set the moment audio actually starts
     /// (`source.start()`), cleared when audio stops. The frame loop uses
@@ -485,6 +623,17 @@ pub struct DirPlayer {
     /// ordinary interactions (navigator windows vanishing/rebuilding). Keeps the
     /// hundreds of per-frame interop calls sync with no async-dispatch overhead.
     pub flash_ready_sprites: HashSet<i16>,
+    /// Owner-local Flash instance generation authority shared with browser
+    /// capabilities without borrowing the session during host callbacks.
+    pub flash_binding_state: Rc<RefCell<FlashBindingState>>,
+    /// Owner-local synthetic Flash object path counter.
+    pub flash_object_counter: u32,
+    /// Owner-scoped scripted Flash access is waiting for a ready Ruffle
+    /// instance. Display-only loads do not set this flag.
+    /// Owner-generation-local Flash scripted-access gate.  This is deliberately
+    /// detached from the session borrow so a browser host callback can publish
+    /// readiness while the VM is suspended in an async action.
+    pub flash_scripted_access_pending: Rc<Cell<bool>>,
     /// Flash `LocalConnection` receiver registry (Neopets DGS score/protocol).
     /// A Director-created LocalConnection is `newObject("LocalConnection")` →
     /// synthetic `_root.__dpObj_LocalConnection_N` ref, `connect(name)` claims a
@@ -591,6 +740,12 @@ pub struct DirPlayer {
     pub is_getting_property_descriptions: bool,
     pub is_initializing_behavior_props: bool,
     pub last_initialized_frame: Option<u32>,
+    /// Playback lifecycle effects exposed to the browser regression harness.
+    /// These counters are owner-local and reset with the player; they are not
+    /// used to drive playback decisions.
+    pub playback_init_count: u32,
+    pub playback_frame_count: u64,
+    pub playback_stop_count: u32,
     /// Current score context for sprite property access.
     /// When a filmloop sprite's behavior runs, this is set to the filmloop's ScoreRef
     /// so that sprite(n) accesses the filmloop's sprites, not the main stage.
@@ -782,8 +937,42 @@ pub enum MovieFrameTarget {
 }
 
 impl DirPlayer {
+    pub(crate) fn reserve_flash_instance_generation(
+        &self,
+        sprite_num: i16,
+    ) -> Result<u64, ScriptError> {
+        self.flash_binding_state.borrow_mut().reserve(sprite_num)
+    }
+
+    pub(crate) fn invalidate_flash_instance_generation(
+        &self,
+        sprite_num: i16,
+        expected: u64,
+    ) -> bool {
+        self.flash_binding_state
+            .borrow_mut()
+            .invalidate(sprite_num, expected)
+    }
+
+    pub(crate) fn is_flash_instance_generation_current(
+        &self,
+        sprite_num: i16,
+        expected: u64,
+    ) -> bool {
+        self.flash_binding_state.borrow().is_current(sprite_num, expected)
+    }
+
+    pub(crate) fn next_flash_object_id(&mut self) -> Result<u32, ScriptError> {
+        self.flash_object_counter = self
+            .flash_object_counter
+            .checked_add(1)
+            .ok_or_else(|| ScriptError::new("Flash object path counter exhausted".to_owned()))?;
+        Ok(self.flash_object_counter)
+    }
+
     pub(crate) fn queue_player_notification(&mut self, kind: PlayerNotificationKind) {
-        let wake_owner_loop = self.pending_player_notifications.is_empty();
+        let wake_owner_loop = self.pending_player_notifications.is_empty()
+            && self.host_event_mailbox.is_empty();
         self.pending_player_notifications.push(PlayerNotification {
             owner: self.owner.clone(),
             kind,
@@ -794,6 +983,88 @@ impl DirPlayer {
                 completer: None,
             });
         }
+    }
+
+    /// Restore detached non-host notifications ahead of work queued
+    /// reentrantly during their callback. These are the existing evaluator
+    /// notification queue entries, not a spill path for host events.
+    pub(crate) fn prepend_player_notifications(&mut self, events: Vec<PlayerNotification>) {
+        if events.is_empty() {
+            return;
+        }
+        let wake_owner_loop = self.pending_player_notifications.is_empty()
+            && self.host_event_mailbox.is_empty();
+        let mut retained = std::mem::take(&mut self.pending_player_notifications);
+        self.pending_player_notifications = events;
+        self.pending_player_notifications.append(&mut retained);
+        if wake_owner_loop {
+            let _ = self.queue_tx.try_send(PlayerVMExecutionItem {
+                command: commands::PlayerVMCommand::PumpPending,
+                completer: None,
+            });
+        }
+    }
+
+    /// Queue a portable host event without retaining any VM/JS reference.
+    /// Callers that cannot propagate the error must surface it through their
+    /// existing script error path; this method never evicts an older ordered
+    /// transition to make room for a new one.
+    pub(crate) fn queue_host_event(
+        &mut self,
+        event: HostEvent,
+    ) -> Result<(), HostEventOverflow> {
+        // Mailbox overflow is terminal for this owner generation. Do not
+        // accept later events behind the marker: callers must reset or
+        // rebind the owner before host delivery can resume.
+        if let Some(error) = self.host_event_backpressure {
+            return Err(error);
+        }
+        let wake_owner_loop = self.host_event_mailbox.is_empty()
+            && self.pending_player_notifications.is_empty();
+        if let Err(error) = self.host_event_mailbox.push(event) {
+            // Do not spill into pending_player_notifications: that queue is
+            // intentionally unbounded for evaluator continuations. Record a
+            // single terminal marker so the next detached drain stops this
+            // owner and reports explicit backpressure to its caller.
+            self.host_event_backpressure = Some(error);
+            if wake_owner_loop {
+                let _ = self.queue_tx.try_send(PlayerVMExecutionItem {
+                    command: commands::PlayerVMCommand::PumpPending,
+                    completer: None,
+                });
+            }
+            return Err(error);
+        }
+        if wake_owner_loop {
+            let _ = self.queue_tx.try_send(PlayerVMExecutionItem {
+                command: commands::PlayerVMCommand::PumpPending,
+                completer: None,
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn take_host_events(&mut self) -> Vec<HostEvent> {
+        self.host_event_mailbox.drain()
+    }
+
+    /// Restore detached host events ahead of work queued reentrantly during
+    /// their callback. Overflow remains terminal for this owner generation.
+    pub(crate) fn prepend_host_events(
+        &mut self,
+        events: Vec<HostEvent>,
+    ) -> Result<(), HostEventOverflow> {
+        if events.is_empty() {
+            return Ok(());
+        }
+        if let Some(error) = self.host_event_backpressure {
+            return Err(error);
+        }
+        if let Err(error) = self.host_event_mailbox.prepend(events) {
+            self.host_event_backpressure = Some(error);
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub(crate) fn with_xtra_manager_state<T>(
@@ -917,6 +1188,8 @@ impl DirPlayer {
             member_script_sprite_num: 0,
             pending_cue_events: Vec::new(),
             pending_player_notifications: Vec::new(),
+            host_event_mailbox: HostEventMailbox::default(),
+            host_event_backpressure: None,
             audio_sync_anchor: None,
             enable_stream_status_handler: false,
             stream_status_reported: HashMap::new(),
@@ -931,6 +1204,9 @@ impl DirPlayer {
             flash_frame_buffers: HashMap::new(),
             flash_sprite_loaded: HashSet::new(),
             flash_ready_sprites: HashSet::new(),
+            flash_binding_state: Rc::new(RefCell::new(FlashBindingState::new())),
+            flash_object_counter: 0,
+            flash_scripted_access_pending: Rc::new(Cell::new(false)),
             flash_lc_connections: std::collections::HashMap::new(),
             flash_lc_callbacks: std::collections::HashMap::new(),
             input_polled: false,
@@ -961,6 +1237,9 @@ impl DirPlayer {
             is_getting_property_descriptions: false,
             is_initializing_behavior_props: false,
             last_initialized_frame: None,
+            playback_init_count: 0,
+            playback_frame_count: 0,
+            playback_stop_count: 0,
             current_score_context: ScoreRef::Stage,
             debug_datum_refs: vec![],
             eval_scope_index: None,
@@ -1216,7 +1495,8 @@ impl DirPlayer {
             let tail = (total / 8).max(4);
             let wrapped = prev >= 1 && cur < prev && prev >= total - tail;
             if cur >= total || wrapped {
-                let _ = ruffle_goto_frame_and_stop(cn as i32, &total.to_string());
+                let owner_key = owner_key_string(&self.owner);
+                let _ = ruffle_goto_frame_and_stop_owned(&owner_key, cn as i32, &total.to_string());
                 // …and actually HALT it. `goToFrameAndStop` carries the
                 // `sprite.frame = N` SETTER semantics: it only pins when the
                 // member is `pausedAtStart`. For an animated member (the usual
@@ -1668,9 +1948,20 @@ impl DirPlayer {
         }
 
         let (stage_w, stage_h) = crate::player::stage::stage_canvas_dims(self);
-        crate::js_api::JsApi::dispatch_stage_size_changed(stage_w, stage_h, self.center_stage);
-
-        JsApi::dispatch_movie_loaded(self.movie.file.as_ref().unwrap());
+        if let Err(error) = self.queue_host_event(crate::player::host_events::HostEvent::StageSizeChanged {
+            width: stage_w,
+            height: stage_h,
+            center: self.center_stage,
+        }) {
+            log::error!("host event mailbox overflow: {:?}", error);
+        }
+        let movie = self.movie.file.as_ref().unwrap();
+        if let Err(error) = self.queue_host_event(crate::player::host_events::HostEvent::MovieLoaded {
+            version: movie.version,
+            cast_names: movie.cast_entries.iter().map(|cast| cast.name.clone()).collect(),
+        }) {
+            log::error!("host event mailbox overflow: {:?}", error);
+        }
 
         // Register built-in virtual scripts
         virtual_scripts::register_virtual_scripts(self);
@@ -1678,7 +1969,11 @@ impl DirPlayer {
         if begin_sprites {
             self.begin_all_sprites(symbols);
         }
-        JsApi::dispatch_frame_changed(self.movie.current_frame);
+        if let Err(error) = self.queue_host_event(crate::player::host_events::HostEvent::FrameChanged {
+            frame: self.movie.current_frame,
+        }) {
+            log::error!("host event mailbox overflow: {:?}", error);
+        }
     }
 
     pub(crate) fn load_movie_from_dir_sync(
@@ -2136,7 +2431,11 @@ impl DirPlayer {
 
         // Only dispatch and render if updateLock is off
         if !self.movie.update_lock && prev_frame != self.movie.current_frame {
-            JsApi::dispatch_frame_changed(self.movie.current_frame);
+            if let Err(error) = self.queue_host_event(crate::player::host_events::HostEvent::FrameChanged {
+                frame: self.movie.current_frame,
+            }) {
+                log::error!("host event mailbox overflow: {:?}", error);
+            }
             self.has_player_frame_changed = true;
         }
     }
@@ -2203,12 +2502,15 @@ impl DirPlayer {
         self.bump_scope_invalidation_epoch();
         self.stop();
         self.pending_player_notifications.clear();
+        self.host_event_mailbox.clear();
+        self.host_event_backpressure = None;
 
         // Silence any sound still playing from the movie we're leaving and tear
         // down its Flash/Ruffle instances (their capture RAF loops + SWF audio),
         // so switching movies doesn't leave old sounds looping or leak players.
         self.sound_manager.stop_all();
         self.flash_frame_buffers.clear();
+        self.flash_scripted_access_pending.set(false);
         JsApi::dispatch_flash_reset_all(&owner_key_string(&self.owner));
         self.scene3d_store.reset();
         if global_resources {
@@ -2242,6 +2544,10 @@ impl DirPlayer {
         self.pending_goto_net_movie = None;
         self.goto_wait_active = false;
         self.pending_movie_init = false;
+        self.last_initialized_frame = None;
+        self.playback_init_count = 0;
+        self.playback_frame_count = 0;
+        self.playback_stop_count = 0;
         self.retired_cast_libs.clear();
         self.pending_restart = false;
         self.w3d_dirty_transform_ids.clear();
@@ -2249,6 +2555,12 @@ impl DirPlayer {
         debug!("Resetting allocator");
         // Now it's safe to reset the allocator
         self.owner = self.allocator.reset(&mut self.bitmap_manager);
+        // A reset rotates the owner generation.  Retain the old cell only for
+        // stale capabilities; the replacement generation receives a distinct
+        // cell so an old capability can never change the new player state.
+        self.flash_scripted_access_pending = Rc::new(Cell::new(false));
+        self.flash_binding_state = Rc::new(RefCell::new(FlashBindingState::new()));
+        self.flash_object_counter = 0;
         // The allocator creates a fresh epoch on reset. Keep the teardown
         // queue owned by this player, but bind new instances to that epoch so
         // stale Xtra completions cannot reach a replacement instance.
@@ -2262,7 +2574,11 @@ impl DirPlayer {
             self.scopes.push(Scope::default(i));
         }
 
-        JsApi::dispatch_frame_changed(self.movie.current_frame);
+        if let Err(error) = self.queue_host_event(crate::player::host_events::HostEvent::FrameChanged {
+            frame: self.movie.current_frame,
+        }) {
+            log::error!("host event mailbox overflow: {:?}", error);
+        }
         JsApi::dispatch_scope_list(self);
         JsApi::dispatch_script_error_cleared();
         self.queue_player_notification(PlayerNotificationKind::ScoreChanged);
@@ -4418,6 +4734,12 @@ impl DirPlayer {
         if err.code == ScriptErrorCode::Abort {
             return;
         }
+        // Native owned-playback tests need to distinguish the one production
+        // error-reporting call made by the finalizer from the callback error
+        // that it deliberately carries through StopMovie cleanup. Keep this
+        // probe test-only; the browser callback remains the source of truth.
+        #[cfg(test)]
+        TEST_SCRIPT_ERROR_COUNT.with(|count| count.set(count.get().saturating_add(1)));
         // `console_error!`, not `web_sys::console::error_1`: the raw call takes a
         // `JsValue`, and building one on a native target panics inside
         // wasm-bindgen ("cannot access imported statics on non-wasm targets").
@@ -4948,6 +5270,21 @@ pub(crate) async fn eval_lingo_command_owned(
                             result,
                         );
                     }
+                    crate::player::session::EvalRequestTurn::Flash(request) => {
+                        let result = crate::player::commands::execute_owned_flash_request(
+                            &session,
+                            player_id,
+                            &owner,
+                            request,
+                        )
+                        .await;
+                        turn = session.borrow_mut().resume_eval(
+                            eval_id.clone(),
+                            &action,
+                            &owner,
+                            result,
+                        );
+                    }
                     crate::player::session::EvalRequestTurn::Evaluator(next) => match next {
                         crate::player::eval::EvalTurn::Complete(result) => return result,
                         crate::player::eval::EvalTurn::Pending { request } => {
@@ -5013,6 +5350,7 @@ pub(crate) async fn eval_lingo_command_owned(
                                     crate::player::session::EvalRequestTurn::Evaluator(turn) => Some(turn),
                                     crate::player::session::EvalRequestTurn::Child(_)
                                     | crate::player::session::EvalRequestTurn::MovieAsync(_)
+                                    | crate::player::session::EvalRequestTurn::Flash(_)
                                     | crate::player::session::EvalRequestTurn::ExternalXtra(_)
                                     | crate::player::session::EvalRequestTurn::ExternalXtraLoad(_)
                                     | crate::player::session::EvalRequestTurn::XtraPending(_) => None,
@@ -7504,7 +7842,21 @@ pub async fn run_movie_init_owned_at(
         return Err(error);
     }
     frame_guard.clear_now()?;
-    run_startup_go_owned(session, player_id, owner).await?;
+    run_startup_go_owned(session.clone(), player_id, owner.clone()).await?;
+    session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                return Err(cancelled_scope_error());
+            }
+            // Mark initialization only after every startup phase, including
+            // startup Go, has completed successfully.  A failed or canceled
+            // initializer must be retried by the next owned playback loop.
+            context.player.last_initialized_frame = Some(context.player.movie.current_frame);
+            context.player.playback_init_count = context.player.playback_init_count.saturating_add(1);
+            Ok::<(), ScriptError>(())
+        })
+        .ok_or_else(cancelled_scope_error)??;
     Ok(())
 }
 
@@ -7522,6 +7874,652 @@ pub async fn run_movie_init_owned(
         owner,
         crate::player::testing_shared::now_ms().max(0.0),
     ).await
+}
+
+/// Finish one owner-bound playback loop and decide whether a same-owner replay
+/// may be restarted. Cleanup failures are reported once and consume the replay
+/// request, so a partially torn-down movie cannot be mounted again.
+pub(crate) fn finish_playback_owned(
+    session: RuntimeSessionHandle,
+    player_id: u32,
+    owner: OwnerToken,
+    epoch: u64,
+    result: Result<(), ScriptError>,
+) {
+    let result_ok = result.is_ok();
+    if let Err(error) = result {
+        // Abort is cancellation/control flow. It still consumes a queued
+        // replay below, but must not be surfaced as a script failure while
+        // the captured owner remains live.
+        if error.code != ScriptErrorCode::Abort {
+            let _ = session.borrow_mut().with_player(player_id, |context| {
+                if owner.same_identity(&context.player.owner) && owner.is_arena_live() {
+                    context.player.on_script_error_with_symbols(&error, Some(context.symbols));
+                }
+            });
+        }
+    }
+    let finished = session
+        .borrow_mut()
+        .finish_playback_loop(player_id, &owner, epoch);
+    let replay = if result_ok {
+        session
+            .borrow_mut()
+            .take_playback_replay_request(player_id, &owner, epoch)
+    } else {
+        session
+            .borrow_mut()
+            .discard_playback_replay_request(player_id, &owner, epoch);
+        false
+    };
+    // A loop that ends naturally owns the playing flag; a replacement owner
+    // must never be touched by this finalizer.
+    if finished {
+        let _ = session.borrow_mut().with_player(player_id, |context| {
+            if owner.same_identity(&context.player.owner) {
+                context.player.is_playing = false;
+            }
+        });
+    }
+    if replay && result_ok {
+        // A same-owner play issued while StopMovie/endSprite cleanup was still
+        // running resumes only after the old loop has retired.
+        let _ = start_playback_owned(session, player_id, owner);
+    }
+}
+
+/// Start the canonical playback loop for one captured session owner.
+///
+/// This is the only production entrypoint that creates a movie frame loop for
+/// a handle.  It deliberately uses `spawn_local` directly because the task is
+/// already bound to `(session, player_id, owner)`; it never consults
+/// `ACTIVE_PLAYER_ID`, `PLAYER_OPT`, or `spawn_player_local`.
+pub(crate) fn start_playback_owned(
+    session: RuntimeSessionHandle,
+    player_id: u32,
+    owner: OwnerToken,
+) -> Result<(), ScriptError> {
+    let Some((epoch, cancel_rx)) = session
+        .borrow_mut()
+        .begin_playback_loop(player_id, &owner)?
+    else {
+        return Ok(());
+    };
+    session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                return Err(cancelled_scope_error());
+            }
+            context.player.is_playing = true;
+            context.player.is_script_paused = false;
+            Ok::<(), ScriptError>(())
+        })
+        .ok_or_else(cancelled_scope_error)??;
+
+    spawn_local(async move {
+        let result = run_playback_loop_owned(
+            session.clone(),
+            player_id,
+            owner.clone(),
+            cancel_rx,
+            epoch,
+        )
+        .await;
+        finish_playback_owned(session, player_id, owner, epoch, result);
+    });
+    Ok(())
+}
+
+/// Stop only the loop belonging to the captured owner.  Sending on the
+/// session-held channel wakes pacing, Flash waits, and handler-gap waits; the
+/// owner check prevents a stale stop from cancelling a replacement.
+pub(crate) fn stop_playback_owned(
+    session: RuntimeSessionHandle,
+    player_id: u32,
+    owner: &OwnerToken,
+) -> Result<(), ScriptError> {
+    let mut runtime = session.borrow_mut();
+    let valid = runtime
+        .with_player(player_id, |context| {
+            owner.same_identity(&context.player.owner) && owner.is_arena_live()
+        })
+        .unwrap_or(false);
+    if !valid {
+        return Err(cancelled_scope_error());
+    }
+    runtime.cancel_playback_loop(player_id, owner, true);
+    runtime
+        .with_player(player_id, |context| {
+            context.player.stop();
+            context.player.playback_stop_count = context.player.playback_stop_count.saturating_add(1);
+        })
+        .ok_or_else(cancelled_scope_error)?;
+    Ok(())
+}
+
+/// Select one owned playback operation against the loop's cancellation
+/// channel.  Dropping the losing operation is intentional: the owned frame
+/// and callback guards release their session state on cancellation.
+async fn await_playback_or_cancel<'a, T, F>(
+    cancel_rx: &'a Receiver<()>,
+    operation: F,
+) -> Option<T>
+where
+    F: Future<Output = T> + 'a,
+{
+    match select(cancel_rx.recv().boxed_local(), operation.boxed_local()).await {
+        Either::Left((_cancelled, _operation)) => None,
+        Either::Right((result, _cancelled)) => Some(result),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PlaybackTransitionStopPhase {
+    NotStarted,
+    InProgress,
+    Complete,
+}
+
+struct PlaybackTransitionAwait<T> {
+    result: Option<T>,
+    cancelled: bool,
+}
+
+/// A transition may be cancelled until it enters StopMovie. Once lifecycle
+/// teardown starts, retain the future until that phase has finished so a
+/// cancellation cannot replay already-attempted StopMovie/endSprite callbacks.
+async fn await_playback_transition_or_cancel<'a, T, F>(
+    cancel_rx: &'a Receiver<()>,
+    operation: F,
+    stop_phase: Rc<Cell<PlaybackTransitionStopPhase>>,
+) -> PlaybackTransitionAwait<T>
+where
+    F: Future<Output = T> + 'a,
+{
+    match select(cancel_rx.recv().boxed_local(), operation.boxed_local()).await {
+        Either::Left((_cancelled, operation)) => {
+            if stop_phase.get() == PlaybackTransitionStopPhase::NotStarted {
+                PlaybackTransitionAwait {
+                    result: None,
+                    cancelled: true,
+                }
+            } else {
+                PlaybackTransitionAwait {
+                    result: Some(operation.await),
+                    cancelled: true,
+                }
+            }
+        }
+        Either::Right((result, _cancelled)) => PlaybackTransitionAwait {
+            result: Some(result),
+            cancelled: false,
+        },
+    }
+}
+
+fn flash_loading_owned(
+    session: &RuntimeSessionHandle,
+    player_id: u32,
+    owner: &OwnerToken,
+) -> Result<bool, ScriptError> {
+    session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            if !owner.is_arena_live() || !owner.same_identity(&context.player.owner) {
+                return Err(cancelled_scope_error());
+            }
+            Ok(context.player.flash_scripted_access_pending.get())
+        })
+        .ok_or_else(cancelled_scope_error)?
+}
+
+fn tick_sound_manager_owned(
+    session: &RuntimeSessionHandle,
+    player_id: u32,
+    owner: &OwnerToken,
+    delta: f64,
+) -> Result<(), ScriptError> {
+    session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                return Err(cancelled_scope_error());
+            }
+            // Move the manager out for the duration of the update.  This
+            // gives SoundManager its required mutable player reference without
+            // manufacturing overlapping `&mut SoundManager`/`&mut DirPlayer`
+            // aliases through a raw pointer.
+            let mut sound_manager = std::mem::replace(
+                &mut context.player.sound_manager,
+                SoundManager::empty(),
+            );
+            let result = sound_manager.update(delta, context.player);
+            context.player.sound_manager = sound_manager;
+            result
+        })
+        .ok_or_else(cancelled_scope_error)?
+}
+
+async fn cleanup_after_playback_cancel(
+    session: &RuntimeSessionHandle,
+    player_id: u32,
+    owner: &OwnerToken,
+    epoch: u64,
+) -> Result<(), ScriptError> {
+    let stop_sequence = session
+        .borrow_mut()
+        .take_playback_stop_cleanup(player_id, owner, epoch);
+    if stop_sequence {
+        // Stop is a lifecycle operation, unlike reset/remove cancellation:
+        // finish StopMovie/endSprite against the old owner before its replay
+        // can claim a new loop. Every await remains owner checked.
+        stop_movie_sequence_owned(session.clone(), player_id, owner.clone()).await?;
+    }
+    Ok(())
+}
+
+/// Restore transition bookkeeping when cancellation drops an owned movie
+/// restart/network operation. The operation may have set these flags before
+/// its next await, so its ordinary error path cannot run after `select!`
+/// drops it. The owner fence keeps cancellation from touching a replacement
+/// runtime in the same player slot.
+async fn restore_playback_transition_flags_owned(
+    session: &RuntimeSessionHandle,
+    player_id: u32,
+    owner: &OwnerToken,
+    is_in_transition: bool,
+    is_dispatching_events: bool,
+) {
+    let _ = session.borrow_mut().with_player(player_id, |context| {
+        if owner.same_identity(&context.player.owner) && owner.is_arena_live() {
+            context.player.is_in_transition = is_in_transition;
+            context.player.is_dispatching_events = is_dispatching_events;
+        }
+    });
+}
+
+async fn run_playback_loop_owned(
+    session: RuntimeSessionHandle,
+    player_id: u32,
+    owner: OwnerToken,
+    cancel_rx: Receiver<()>,
+    epoch: u64,
+) -> Result<(), ScriptError> {
+    let mut next_deadline_ms = bench_now_ms();
+    let needs_init = session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                return Err(cancelled_scope_error());
+            }
+            Ok(context.player.last_initialized_frame.is_none())
+        })
+        .ok_or_else(cancelled_scope_error)??;
+    if needs_init {
+        let initial_now_ms = bench_now_ms();
+        match await_playback_or_cancel(
+            &cancel_rx,
+            run_movie_init_owned_at(session.clone(), player_id, owner.clone(), initial_now_ms),
+        )
+        .await
+        {
+            Some(Ok(())) => {}
+            Some(Err(error)) => return Err(error),
+            None => {
+                cleanup_after_playback_cancel(&session, player_id, &owner, epoch).await?;
+                return Ok(());
+            },
+        }
+    }
+
+    loop {
+        let state = session
+            .borrow_mut()
+            .with_player(player_id, |context| {
+                if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                    return Err(cancelled_scope_error());
+                }
+                Ok((
+                    context.player.is_playing,
+                    context.player.is_script_paused,
+                    context.player.pending_restart,
+                    context.player.pending_movie_init && context.player.handler_stack_depth == 0,
+                    context
+                        .player
+                        .pending_goto_net_movie
+                        .as_ref()
+                        .and_then(|(task_id, target)| {
+                            context
+                                .player
+                                .net_manager
+                                .is_task_done(Some(*task_id))
+                                .then(|| (*task_id, target.clone()))
+                        }),
+                    context.player.current_frame_tempo,
+                ))
+        })
+        .ok_or_else(cancelled_scope_error)??;
+        if !state.0 {
+            stop_movie_sequence_owned(session.clone(), player_id, owner.clone()).await?;
+            return Ok(());
+        }
+
+        if state.2 {
+            let transition_flags = session
+                .borrow_mut()
+                .with_player(player_id, |context| {
+                    if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                        return Err(cancelled_scope_error());
+                    }
+                    Ok((context.player.is_in_transition, context.player.is_dispatching_events))
+                })
+                .ok_or_else(cancelled_scope_error)??;
+            let stop_phase = Rc::new(Cell::new(PlaybackTransitionStopPhase::NotStarted));
+            let outcome = await_playback_transition_or_cancel(
+                &cancel_rx,
+                restart_current_movie_owned(
+                    session.clone(),
+                    player_id,
+                    owner.clone(),
+                    stop_phase.clone(),
+                ),
+                stop_phase,
+            )
+            .await;
+            match (outcome.result, outcome.cancelled) {
+                (Some(result), false) => result?,
+                (None, true) => {
+                    let cleanup_result =
+                        cleanup_after_playback_cancel(&session, player_id, &owner, epoch).await;
+                    restore_playback_transition_flags_owned(
+                        &session,
+                        player_id,
+                        &owner,
+                        transition_flags.0,
+                        transition_flags.1,
+                    )
+                    .await;
+                    cleanup_result?;
+                    return Ok(());
+                }
+                (Some(result), true) => {
+                    if result.is_ok() {
+                        let cleanup_result =
+                            cleanup_after_playback_cancel(&session, player_id, &owner, epoch).await;
+                        restore_playback_transition_flags_owned(
+                            &session,
+                            player_id,
+                            &owner,
+                            transition_flags.0,
+                            transition_flags.1,
+                        )
+                        .await;
+                        cleanup_result?;
+                    } else {
+                        restore_playback_transition_flags_owned(
+                            &session,
+                            player_id,
+                            &owner,
+                            transition_flags.0,
+                            transition_flags.1,
+                        )
+                        .await;
+                    }
+                    result?;
+                    return Ok(());
+                }
+                (None, false) => unreachable!("transition await completed without result"),
+            }
+            continue;
+        }
+
+        if state.3 {
+            session
+                .borrow_mut()
+                .with_player(player_id, |context| {
+                    if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                        return Err(cancelled_scope_error());
+                    }
+                    context.player.pending_movie_init = false;
+                    context.player.is_in_transition = false;
+                    context.player.retired_cast_libs.clear();
+                    Ok::<(), ScriptError>(())
+                })
+                .ok_or_else(cancelled_scope_error)??;
+            let now_ms = bench_now_ms();
+            match await_playback_or_cancel(
+                &cancel_rx,
+                run_movie_init_owned_at(session.clone(), player_id, owner.clone(), now_ms),
+            )
+            .await
+            {
+                Some(result) => result?,
+                None => {
+                cleanup_after_playback_cancel(&session, player_id, &owner, epoch).await?;
+                return Ok(());
+            },
+            }
+            continue;
+        }
+
+        if let Some((task_id, target)) = state.4 {
+            let transition_flags = session
+                .borrow_mut()
+                .with_player(player_id, |context| {
+                    if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                        return Err(cancelled_scope_error());
+                    }
+                    Ok((context.player.is_in_transition, context.player.is_dispatching_events))
+                })
+                .ok_or_else(cancelled_scope_error)??;
+            let stop_phase = Rc::new(Cell::new(PlaybackTransitionStopPhase::NotStarted));
+            let outcome = await_playback_transition_or_cancel(
+                &cancel_rx,
+                transition_to_net_movie_owned(
+                    session.clone(),
+                    player_id,
+                    owner.clone(),
+                    task_id,
+                    target,
+                    stop_phase.clone(),
+                ),
+                stop_phase,
+            )
+            .await;
+            match (outcome.result, outcome.cancelled) {
+                (Some(result), false) => result?,
+                (None, true) => {
+                    let cleanup_result =
+                        cleanup_after_playback_cancel(&session, player_id, &owner, epoch).await;
+                    restore_playback_transition_flags_owned(
+                        &session,
+                        player_id,
+                        &owner,
+                        transition_flags.0,
+                        transition_flags.1,
+                    )
+                    .await;
+                    cleanup_result?;
+                    return Ok(());
+                }
+                (Some(result), true) => {
+                    if result.is_ok() {
+                        let cleanup_result =
+                            cleanup_after_playback_cancel(&session, player_id, &owner, epoch).await;
+                        restore_playback_transition_flags_owned(
+                            &session,
+                            player_id,
+                            &owner,
+                            transition_flags.0,
+                            transition_flags.1,
+                        )
+                        .await;
+                        cleanup_result?;
+                    } else {
+                        restore_playback_transition_flags_owned(
+                            &session,
+                            player_id,
+                            &owner,
+                            transition_flags.0,
+                            transition_flags.1,
+                        )
+                        .await;
+                    }
+                    result?;
+                    return Ok(());
+                }
+                (None, false) => unreachable!("transition await completed without result"),
+            }
+            continue;
+        }
+
+        if flash_loading_owned(&session, player_id, &owner)? {
+            for _ in 0..150 {
+                if !flash_loading_owned(&session, player_id, &owner)? {
+                    break;
+                }
+                let wait = timeout(Duration::from_millis(100), future::pending::<()>())
+                    .map(|_| ());
+                if await_playback_or_cancel(&cancel_rx, wait).await.is_none() {
+                    cleanup_after_playback_cancel(&session, player_id, &owner, epoch).await?;
+                    return Ok(());
+                }
+                tick_sound_manager_owned(&session, player_id, &owner, 0.1)?;
+            }
+        }
+
+        let frame_now_ms = bench_now_ms();
+        let frame = await_playback_or_cancel(
+            &cancel_rx,
+            run_single_frame_owned_at(
+                session.clone(),
+                player_id,
+                owner.clone(),
+                frame_now_ms,
+            ),
+        )
+        .await;
+        let (playing, paused) = match frame {
+            Some(result) => result?,
+            None => {
+                cleanup_after_playback_cancel(&session, player_id, &owner, epoch).await?;
+                return Ok(());
+            },
+        };
+        if !playing {
+            continue;
+        }
+        if !paused {
+            match await_playback_or_cancel(
+                &cancel_rx,
+                crate::player::events::player_invoke_global_event_owned(
+                    session.clone(),
+                    player_id,
+                    owner.clone(),
+                    Symbol::builtin(BuiltInSymbol::Idle),
+                    Vec::new(),
+                ),
+            )
+            .await
+            {
+                Some(result) => {
+                    result?;
+                }
+                None => {
+                cleanup_after_playback_cancel(&session, player_id, &owner, epoch).await?;
+                return Ok(());
+            },
+            }
+        }
+
+        let tempo = session
+            .borrow_mut()
+            .with_player(player_id, |context| {
+                if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                    return Err(cancelled_scope_error());
+                }
+                Ok(context.player.current_frame_tempo)
+            })
+            .ok_or_else(cancelled_scope_error)??;
+        let delta = if tempo == 0 { 1.0 / 30.0 } else { 1.0 / tempo as f64 };
+        tick_sound_manager_owned(&session, player_id, &owner, delta)?;
+
+        let cue_events = session
+            .borrow_mut()
+            .with_player(player_id, |context| {
+                if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                    return Err(cancelled_scope_error());
+                }
+                Ok(std::mem::take(&mut context.player.pending_cue_events))
+            })
+            .ok_or_else(cancelled_scope_error)??;
+        for (channel_num, cue_number, cue_name) in cue_events {
+            let (args, cue_symbol) = session
+                .borrow_mut()
+                .with_player(player_id, |context| {
+                    if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                        return Err(cancelled_scope_error());
+                    }
+                    let channel = context.symbols.intern(&format!("sound{}", channel_num));
+                    let channel_ref = context.player.alloc_datum(Datum::Symbol(channel));
+                    let number_ref = context.player.alloc_datum(Datum::Int(cue_number));
+                    let name_ref = context.player.alloc_datum(Datum::String(cue_name));
+                    Ok((vec![channel_ref, number_ref, name_ref], context.symbols.intern("cuePassed")))
+                })
+                .ok_or_else(cancelled_scope_error)??;
+            match await_playback_or_cancel(
+                &cancel_rx,
+                crate::player::events::player_invoke_global_event_owned(
+                    session.clone(),
+                    player_id,
+                    owner.clone(),
+                    cue_symbol,
+                    args,
+                ),
+            )
+            .await
+            {
+                Some(result) => {
+                    result?;
+                }
+                None => {
+                cleanup_after_playback_cancel(&session, player_id, &owner, epoch).await?;
+                return Ok(());
+            },
+            }
+        }
+
+        let target_delay_ms = if tempo == 0 {
+            1000.0 / 30.0
+        } else {
+            1000.0 / tempo as f64
+        };
+        next_deadline_ms += target_delay_ms;
+        let now_ms = bench_now_ms();
+        if next_deadline_ms < now_ms {
+            next_deadline_ms = now_ms;
+        }
+        let wait = wait_until_deadline(next_deadline_ms);
+        if await_playback_or_cancel(&cancel_rx, wait).await.is_none() {
+            cleanup_after_playback_cancel(&session, player_id, &owner, epoch).await?;
+            return Ok(());
+        }
+        match await_playback_or_cancel(
+            &cancel_rx,
+            wait_for_handler_gap_owned(session.clone(), player_id, owner.clone()),
+        )
+        .await
+        {
+            Some(result) => {
+                result?;
+            }
+            None => {
+                cleanup_after_playback_cancel(&session, player_id, &owner, epoch).await?;
+                return Ok(());
+            },
+        }
+    }
 }
 
 /// Advance one owner-bound frame through the canonical movie executor. The
@@ -7655,6 +8653,16 @@ pub async fn run_single_frame_owned_at(
         },
     )
     .await?;
+    session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                return Err(cancelled_scope_error());
+            }
+            context.player.playback_frame_count = context.player.playback_frame_count.saturating_add(1);
+            Ok::<(), ScriptError>(())
+        })
+        .ok_or_else(cancelled_scope_error)??;
     // The timeout-target ExitFrame dispatch is a separate phase in the
     // legacy loop. It follows the frame/movie ExitFrame callbacks and must
     // complete before any go/advance decision is observed.
@@ -7762,9 +8770,10 @@ pub async fn run_single_frame_owned_at(
             session.clone(),
             player_id,
             owner.clone(),
-            ScoreRef::Stage,
-            previous_frame,
-            next_frame,
+        ScoreRef::Stage,
+        previous_frame,
+        next_frame,
+        false,
         ).await?;
         session
             .borrow_mut()
@@ -7834,14 +8843,31 @@ pub async fn run_single_frame_owned_at(
 /// Score dispatch itself can suspend in a script callback, so the callback list
 /// is snapshotted before every await and the owner is revalidated before each
 /// subsequent mutation.
-async fn end_score_sprites_owned(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EndSpriteErrorPolicy {
+    /// Preserve ordinary frame advancement behavior: report a live callback
+    /// error and continue the remaining EndSprite callbacks.
+    ReportAndContinue,
+    /// StopMovie collects the first live callback error and returns it only
+    /// after all callbacks and score-exit bookkeeping have been attempted.
+    CollectForStop,
+}
+
+struct EndScoreSpritesResult {
+    ended_channels: Vec<u32>,
+    first_error: Option<ScriptError>,
+}
+
+async fn end_score_sprites_owned_with_policy(
     session: RuntimeSessionHandle,
     player_id: u32,
     owner: OwnerToken,
     score_ref: ScoreRef,
     previous_frame: u32,
     next_frame: u32,
-) -> Result<Vec<u32>, ScriptError> {
+    end_all_active: bool,
+    error_policy: EndSpriteErrorPolicy,
+) -> Result<EndScoreSpritesResult, ScriptError> {
     let (callbacks, frame_script_ended, ended_channels) = session
         .borrow_mut()
         .with_player(player_id, |context| {
@@ -7861,20 +8887,38 @@ async fn end_score_sprites_owned(
                     }),
             }
             .ok_or_else(cancelled_scope_error)?;
-            let mut ended: Vec<u32> = score
-                .sprite_spans
-                .iter()
-                .filter(|span| {
-                    Score::is_span_in_frame(span, previous_frame)
-                        && !Score::is_span_in_frame(span, next_frame)
-                })
-                .map(|span| span.channel_number)
-                .fold(Vec::new(), |mut channels, channel| {
-                    if !channels.contains(&channel) {
-                        channels.push(channel);
+            let mut ended: Vec<u32> = if end_all_active {
+                Vec::new()
+            } else {
+                score
+                    .sprite_spans
+                    .iter()
+                    .filter(|span| {
+                        Score::is_span_in_frame(span, previous_frame)
+                            && !Score::is_span_in_frame(span, next_frame)
+                    })
+                    .map(|span| span.channel_number)
+                    .fold(Vec::new(), |mut channels, channel| {
+                        if !channels.contains(&channel) {
+                            channels.push(channel);
+                        }
+                        channels
+                    })
+            };
+            if end_all_active {
+                // StopMovie ends every entered/persistent channel in this
+                // score, including D6+ channels synthesized from
+                // channel_initialization_data that have no sprite span.
+                for channel in &score.channels {
+                    if channel.sprite.entered && !channel.sprite.exited
+                    {
+                        let channel_number = channel.number as u32;
+                        if !ended.contains(&channel_number) {
+                            ended.push(channel_number);
+                        }
                     }
-                    channels
-                });
+                }
+            }
             let mut callbacks: Vec<Vec<ScriptInstanceRef>> = Vec::new();
             for channel_number in &ended {
                 if *channel_number == 0 {
@@ -7903,14 +8947,22 @@ async fn end_score_sprites_owned(
         &owner,
         score_ref.clone(),
     )?;
+    let mut first_error = None;
     if frame_script_ended {
-        let _ = crate::player::events::player_invoke_static_event_owned(
+        let static_result = crate::player::events::player_invoke_static_event_owned(
             &session,
             player_id,
             &owner,
             Symbol::builtin(BuiltInSymbol::EndSprite),
             &[],
         ).await;
+        if let Err(error) = static_result {
+            if error.code != ScriptErrorCode::Abort
+                && error_policy == EndSpriteErrorPolicy::CollectForStop
+            {
+                first_error = Some(error);
+            }
+        }
     }
     for behavior_group in callbacks {
         for behavior in behavior_group {
@@ -7941,20 +8993,47 @@ async fn end_score_sprites_owned(
                     Ok(_) | Err(ScriptError { code: ScriptErrorCode::HandlerNotFound, .. }) => {}
                     Err(ScriptError { code: ScriptErrorCode::Abort, .. }) => break,
                     Err(error) => {
-                        let _ = session.borrow_mut().with_player(player_id, |context| {
-                            if owner.same_identity(&context.player.owner) && owner.is_arena_live() {
-                                context.player.on_script_error_with_symbols(
-                                    &error,
-                                    Some(context.symbols),
-                                );
-                            }
-                        });
+                        if error_policy == EndSpriteErrorPolicy::ReportAndContinue {
+                            let _ = session.borrow_mut().with_player(player_id, |context| {
+                                if owner.same_identity(&context.player.owner) && owner.is_arena_live() {
+                                    context.player.on_script_error_with_symbols(
+                                        &error,
+                                        Some(context.symbols),
+                                    );
+                                }
+                            });
+                        } else if first_error.is_none() {
+                            first_error = Some(error);
+                        }
                     }
                 }
             }
         }
     }
-    Ok(ended_channels)
+    Ok(EndScoreSpritesResult { ended_channels, first_error })
+}
+
+async fn end_score_sprites_owned(
+    session: RuntimeSessionHandle,
+    player_id: u32,
+    owner: OwnerToken,
+    score_ref: ScoreRef,
+    previous_frame: u32,
+    next_frame: u32,
+    end_all_active: bool,
+) -> Result<Vec<u32>, ScriptError> {
+    Ok(end_score_sprites_owned_with_policy(
+        session,
+        player_id,
+        owner,
+        score_ref,
+        previous_frame,
+        next_frame,
+        end_all_active,
+        EndSpriteErrorPolicy::ReportAndContinue,
+    )
+    .await?
+    .ended_channels)
 }
 
 /// Advance active film-loop scores after the stage playhead has settled. The
@@ -8006,6 +9085,7 @@ async fn advance_filmloops_owned(
             score_ref.clone(),
             old_frame,
             next_frame,
+            false,
         ).await?;
         let changed = session
             .borrow_mut()
@@ -8056,6 +9136,290 @@ pub async fn run_single_frame_owned(
 
 /// Perform the movie transition for gotoNetMovie.
 /// Called from within the frame loop when the pending fetch is complete.
+
+/// Owner-bound StopMovie/endSprite sequence used by the detached playback
+/// loop. Every callback is dispatched through the captured session owner and
+/// every subsequent mutation revalidates that owner before touching the score.
+pub(crate) async fn stop_movie_sequence_owned(
+    session: RuntimeSessionHandle,
+    player_id: u32,
+    owner: OwnerToken,
+) -> Result<(), ScriptError> {
+    let mut first_error = None;
+    match dispatch_system_event_to_timeouts_owned(
+        session.clone(),
+        player_id,
+        owner.clone(),
+        BuiltInSymbol::StopMovie,
+        Vec::new(),
+    )
+    .await
+    {
+        Ok(()) => {}
+        Err(error) if error.code == ScriptErrorCode::Abort => return Err(error),
+        Err(error) => first_error = Some(error),
+    }
+    session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                return Err(cancelled_scope_error());
+            }
+            context.player.timeout_manager.clear();
+            Ok::<(), ScriptError>(())
+        })
+        .ok_or_else(cancelled_scope_error)??;
+
+    if let Err(error) = crate::player::events::player_invoke_global_event_owned(
+        session.clone(),
+        player_id,
+        owner.clone(),
+        Symbol::builtin(BuiltInSymbol::StopMovie),
+        Vec::new(),
+    )
+    .await
+    {
+        if error.code == ScriptErrorCode::Abort {
+            return Err(error);
+        }
+        if first_error.is_none() {
+            first_error = Some(error);
+        }
+    }
+
+    let (current_frame, next_frame, filmloops) = session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                return Err(cancelled_scope_error());
+            }
+            let current = context.player.movie.current_frame;
+            let next = context.player.get_next_frame();
+            let loops = context.player.active_stage_filmloop_member_refs();
+            Ok((current, next, loops))
+        })
+        .ok_or_else(cancelled_scope_error)??;
+    let stage_result = end_score_sprites_owned_with_policy(
+        session.clone(),
+        player_id,
+        owner.clone(),
+        ScoreRef::Stage,
+        current_frame,
+        next_frame,
+        true,
+        EndSpriteErrorPolicy::CollectForStop,
+    )
+    .await?;
+    if first_error.is_none() {
+        first_error = stage_result.first_error;
+    }
+    let mut ended_scores = vec![(ScoreRef::Stage, stage_result.ended_channels)];
+    for member_ref in filmloops {
+        let frame_result = session
+            .borrow_mut()
+            .with_player(player_id, |context| {
+                if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                    return Err(cancelled_scope_error());
+                }
+                let film_loop = context
+                    .player
+                    .movie
+                    .cast_manager
+                    .find_member_by_ref(&member_ref)
+                    .and_then(|member| member.member_type.as_film_loop())
+                    .ok_or_else(cancelled_scope_error)?;
+                Ok((film_loop.current_frame, film_loop.current_frame + 1))
+            })
+            .ok_or_else(cancelled_scope_error)?;
+        let (old_frame, next_frame) = match frame_result {
+            Ok(frames) => frames,
+            Err(error) if error.code == ScriptErrorCode::Abort => return Err(error),
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+                continue;
+            }
+        };
+        let score_ref = ScoreRef::FilmLoop(member_ref);
+        let film_result = end_score_sprites_owned_with_policy(
+            session.clone(),
+            player_id,
+            owner.clone(),
+            score_ref.clone(),
+            old_frame,
+            next_frame,
+            true,
+            EndSpriteErrorPolicy::CollectForStop,
+        )
+        .await?;
+        if first_error.is_none() {
+            first_error = film_result.first_error;
+        }
+        ended_scores.push((score_ref, film_result.ended_channels));
+    }
+    session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                return Err(cancelled_scope_error());
+            }
+            for (score_ref, sprite_nums) in ended_scores {
+                for sprite_num in sprite_nums {
+                    if let Some(sprite) = get_score_sprite_mut(
+                        &mut context.player.movie,
+                        &score_ref,
+                        sprite_num as i16,
+                    ) {
+                        sprite.exited = true;
+                    }
+                }
+            }
+            Ok::<(), ScriptError>(())
+        })
+        .ok_or_else(cancelled_scope_error)??;
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// Owner-bound network movie transition. The fetched bytes, mounted movie,
+/// target frame, and initialization sequence all remain fenced to one player
+/// generation across every await.
+async fn transition_to_net_movie_owned(
+    session: RuntimeSessionHandle,
+    player_id: u32,
+    owner: OwnerToken,
+    task_id: u32,
+    target: MovieFrameTarget,
+    stop_phase: Rc<Cell<PlaybackTransitionStopPhase>>,
+) -> Result<(), ScriptError> {
+    let (data_bytes, file_name, base_url) = session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                return Err(cancelled_scope_error());
+            }
+            let task = context
+                .player
+                .net_manager
+                .get_task(task_id)
+                .ok_or_else(|| ScriptError::new(format!("Network task {task_id} disappeared")))?;
+            let bytes = context
+                .player
+                .net_manager
+                .get_task_result(Some(task_id))
+                .ok_or_else(|| ScriptError::new(format!("No response received for task {task_id}")))?
+                .map_err(|_| ScriptError::new(format!("Network request failed for task {task_id}")))?;
+            let file_name = task
+                .resolved_url
+                .path_segments()
+                .and_then(|segments| segments.last())
+                .unwrap_or("untitled.dcr")
+                .to_owned();
+            let base_url = get_base_url(&task.resolved_url).to_string();
+            Ok((bytes, file_name, base_url))
+        })
+        .ok_or_else(cancelled_scope_error)??;
+    let dir_file = read_director_file_bytes(&data_bytes, &file_name, &base_url)
+        .map_err(|error| ScriptError::new(format!("Failed to parse movie file '{file_name}': {error}")))?;
+
+    let previous_dispatching = session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                return Err(cancelled_scope_error());
+            }
+            context.player.is_playing = false;
+            context.player.is_in_transition = true;
+            Ok(std::mem::replace(&mut context.player.is_dispatching_events, false))
+        })
+        .ok_or_else(cancelled_scope_error)??;
+    stop_phase.set(PlaybackTransitionStopPhase::InProgress);
+    if let Err(error) = stop_movie_sequence_owned(session.clone(), player_id, owner.clone()).await {
+        let _ = session.borrow_mut().with_player(player_id, |context| {
+            if owner.same_identity(&context.player.owner) && owner.is_arena_live() {
+                context.player.is_dispatching_events = previous_dispatching;
+                context.player.is_in_transition = false;
+            }
+        });
+        return Err(error);
+    }
+    stop_phase.set(PlaybackTransitionStopPhase::Complete);
+    session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                return Err(cancelled_scope_error());
+            }
+            context.player.is_dispatching_events = previous_dispatching;
+            context.player.movie.score.reset();
+            context.player.queue_player_notification(PlayerNotificationKind::ScoreChanged);
+            context.player.clear_script_instance_list_caches();
+            context.player.movie.frame_script_instance = None;
+            context.player.movie.frame_script_member = None;
+            context.player.movie.current_frame = 1;
+            context.player.last_initialized_frame = None;
+            let old_casts = std::mem::take(&mut context.player.movie.cast_manager.casts);
+            context.player.retired_cast_libs.push(old_casts);
+            context.player.is_playing = false;
+            Ok::<(), ScriptError>(())
+        })
+        .ok_or_else(cancelled_scope_error)??;
+    if let Err(error) = DirPlayer::load_movie_from_dir_owned(
+        session.clone(),
+        player_id,
+        owner.clone(),
+        dir_file,
+    )
+    .await {
+        let _ = session.borrow_mut().with_player(player_id, |context| {
+            if owner.same_identity(&context.player.owner) && owner.is_arena_live() {
+                context.player.is_dispatching_events = previous_dispatching;
+                context.player.is_in_transition = false;
+            }
+        });
+        return Err(error);
+    }
+    session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                return Err(cancelled_scope_error());
+            }
+            match target {
+                MovieFrameTarget::Label(label) => {
+                    if let Some(frame) = context
+                        .player
+                        .movie
+                        .score
+                        .frame_labels
+                        .iter()
+                        .find(|entry| entry.label.eq_ignore_ascii_case(&label))
+                        .map(|entry| entry.frame_num as u32)
+                    {
+                        context.player.movie.current_frame = frame;
+                    }
+                }
+                MovieFrameTarget::Frame(frame) => context.player.movie.current_frame = frame,
+                MovieFrameTarget::Default => {}
+            }
+            context.player.pending_goto_net_movie = None;
+            context.player.is_playing = true;
+            context.player.pending_movie_init = false;
+            context.player.movie_mount_generation = context.player.movie_mount_generation.wrapping_add(1);
+            Ok::<(), ScriptError>(())
+        })
+        .ok_or_else(cancelled_scope_error)??;
+    let result = run_movie_init_owned_at(session.clone(), player_id, owner.clone(), bench_now_ms()).await;
+    let _ = session.borrow_mut().with_player(player_id, |context| {
+        if owner.same_identity(&context.player.owner) && owner.is_arena_live() {
+            context.player.is_in_transition = false;
+        }
+    });
+    result
+}
 
 /// Stop the current movie, parse the fetched bytes and MOUNT the new movie —
 /// everything a `go(frame, movie)` transition does EXCEPT running the new
@@ -8236,6 +9600,106 @@ pub(crate) async fn mount_net_movie(task_id: u32, target: MovieFrameTarget, eage
 /// and external params (which belong to the projector/embedding, not the movie file),
 /// matching Director's `play movie`. Used because the net loader often can't re-fetch
 /// the movie by name once it's been loaded.
+async fn restart_current_movie_owned(
+    session: RuntimeSessionHandle,
+    player_id: u32,
+    owner: OwnerToken,
+    stop_phase: Rc<Cell<PlaybackTransitionStopPhase>>,
+) -> Result<(), ScriptError> {
+    let (bytes, file_name, base_url) = session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                return Err(cancelled_scope_error());
+            }
+            context
+                .player
+                .movie_reload_data
+                .clone()
+                .ok_or_else(|| ScriptError::new("current movie bytes are unavailable".to_owned()))
+        })
+        .ok_or_else(cancelled_scope_error)??;
+    let dir_file = read_director_file_bytes(&bytes, &file_name, &base_url)
+        .map_err(|error| ScriptError::new(format!("Failed to re-parse movie bytes: {error}")))?;
+    session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                return Err(cancelled_scope_error());
+            }
+            context.player.pending_restart = false;
+            context.player.bump_scope_invalidation_epoch();
+            context.player.is_playing = false;
+            context.player.is_in_transition = true;
+            Ok::<(), ScriptError>(())
+        })
+        .ok_or_else(cancelled_scope_error)??;
+    stop_phase.set(PlaybackTransitionStopPhase::InProgress);
+    if let Err(error) = stop_movie_sequence_owned(session.clone(), player_id, owner.clone()).await {
+        let _ = session.borrow_mut().with_player(player_id, |context| {
+            if owner.same_identity(&context.player.owner) && owner.is_arena_live() {
+                context.player.is_in_transition = false;
+            }
+        });
+        return Err(error);
+    }
+    stop_phase.set(PlaybackTransitionStopPhase::Complete);
+    session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                return Err(cancelled_scope_error());
+            }
+            context.player.movie.score.reset();
+            context.player.queue_player_notification(PlayerNotificationKind::ScoreChanged);
+            context.player.clear_script_instance_list_caches();
+            context.player.movie.frame_script_instance = None;
+            context.player.movie.frame_script_member = None;
+            context.player.movie.current_frame = 1;
+            context.player.last_initialized_frame = None;
+            for scope in context.player.scopes.iter_mut() {
+                scope.reset();
+            }
+            context.player.scope_count = 0;
+            context.player.is_playing = false;
+            Ok::<(), ScriptError>(())
+        })
+        .ok_or_else(cancelled_scope_error)??;
+    if let Err(error) = DirPlayer::load_movie_from_dir_owned(
+        session.clone(),
+        player_id,
+        owner.clone(),
+        dir_file,
+    )
+    .await {
+        let _ = session.borrow_mut().with_player(player_id, |context| {
+            if owner.same_identity(&context.player.owner) && owner.is_arena_live() {
+                context.player.is_in_transition = false;
+            }
+        });
+        return Err(error);
+    }
+    session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                return Err(cancelled_scope_error());
+            }
+            context.player.movie.current_frame = 1;
+            context.player.pending_restart = false;
+            context.player.is_playing = true;
+            Ok::<(), ScriptError>(())
+        })
+        .ok_or_else(cancelled_scope_error)??;
+    let result = run_movie_init_owned_at(session.clone(), player_id, owner.clone(), bench_now_ms()).await;
+    let _ = session.borrow_mut().with_player(player_id, |context| {
+        if owner.same_identity(&context.player.owner) && owner.is_arena_live() {
+            context.player.is_in_transition = false;
+        }
+    });
+    result
+}
+
 async fn restart_current_movie() {
     let Some(session) = retained_session_handle() else {
         log::warn!("restart_current_movie requires an owner-bound runtime session");
@@ -8343,6 +9807,12 @@ extern "C" {
     fn ruffle_get_current_frame(sprite_num: i32) -> Result<i32, wasm_bindgen::JsValue>;
     #[wasm_bindgen(js_name = "dirplayer_ruffleGoToFrameAndStop", catch)]
     fn ruffle_goto_frame_and_stop(
+        sprite_num: i32,
+        frame_or_label: &str,
+    ) -> Result<(), wasm_bindgen::JsValue>;
+    #[wasm_bindgen(js_name = "dirplayer_ruffleGoToFrameAndStopOwned", catch)]
+    fn ruffle_goto_frame_and_stop_owned(
+        owner_key: &str,
         sprite_num: i32,
         frame_or_label: &str,
     ) -> Result<(), wasm_bindgen::JsValue>;
@@ -10022,6 +11492,18 @@ thread_local! {
     /// Retained production session handle. Interior mutability is confined to
     /// the single player executor thread; no mutable static alias is exposed.
     pub(crate) static PLAYER_SESSION_HANDLE: RefCell<Option<Rc<RefCell<RuntimeSession>>>> = const { RefCell::new(None) };
+    #[cfg(test)]
+    static TEST_SCRIPT_ERROR_COUNT: Cell<u32> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_test_script_error_count() {
+    TEST_SCRIPT_ERROR_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn test_script_error_count() -> u32 {
+    TEST_SCRIPT_ERROR_COUNT.with(|count| count.get())
 }
 // pub static mut PLAYER_NAMES: Option<lasso::Rodeo> = None;
 
@@ -11555,7 +13037,7 @@ mod scope_token_tests {
     use crate::player::cast_lib::{CastLib, CastMemberRef};
     use crate::player::cast_member::{CastMember, CastMemberType, FilmLoopMember};
     use crate::player::geometry::IntRect;
-    use crate::player::score::{Score, SpriteChannel};
+    use crate::player::score::{Score, ScoreSpriteSpan, SpriteChannel};
     use crate::player::script::Script;
     use crate::player::symbols::symbol::Symbol;
     use async_std::channel;
@@ -11696,6 +13178,404 @@ mod scope_token_tests {
                 })
                 .expect("one-shot filmloop hold must preserve owner");
             assert_eq!(held, (Some(2), first.1, first.2, false));
+        });
+    }
+
+    #[test]
+    fn owned_stop_ends_persistent_stage_and_filmloop_spans_once() {
+        async_std::task::block_on(async {
+            let session = RuntimeSession::new(SymbolOwner { session: 78, generation: 1 }).into_handle();
+            assert!(session
+                .borrow_mut()
+                .add_player(1, channel::unbounded().0));
+            let owner = session
+                .borrow_mut()
+                .with_player(1, |context| context.player.owner.clone())
+                .expect("stop test player must exist");
+            let member_ref = CastMemberRef { cast_lib: 1, cast_member: 1 };
+
+            session
+                .borrow_mut()
+                .with_player(1, |context| {
+                    let mut filmloop_score = Score::empty();
+                    filmloop_score.sprite_spans.push(ScoreSpriteSpan {
+                        channel_number: 1,
+                        start_frame: 1,
+                        end_frame: 20,
+                        scripts: Vec::new(),
+                    });
+                    filmloop_score.channels = vec![SpriteChannel::new(0), SpriteChannel::new(1)];
+                    filmloop_score.channels[1].sprite.entered = true;
+                    let filmloop = CastMember::new(
+                        1,
+                        CastMemberType::FilmLoop(FilmLoopMember {
+                            info: FilmLoopInfo {
+                                reg_point: (0, 0),
+                                width: 1,
+                                height: 1,
+                                center: 0,
+                                crop: 0,
+                                sound: 0,
+                                loops: 0,
+                            },
+                            score_chunk: ScoreChunk {
+                                header: ScoreChunkHeader {
+                                    total_length: 0,
+                                    unk1: 0,
+                                    unk2: 0,
+                                    entry_count: 0,
+                                    unk3: 0,
+                                    entry_size_sum: 0,
+                                },
+                                entries: Vec::new(),
+                                frame_intervals: Vec::new(),
+                                frame_data: Default::default(),
+                                sprite_details: std::collections::HashMap::new(),
+                            },
+                            score: filmloop_score,
+                            current_frame: 1,
+                            initial_rect: IntRect { left: 0, top: 0, right: 1, bottom: 1 },
+                            cached_total_frames: Some(20),
+                        }),
+                    );
+                    let mut cast = CastLib::test_external(1, 0);
+                    cast.members.insert(1, filmloop);
+                    context.player.movie.cast_manager.casts.push(cast);
+
+                    let mut stage_channel = SpriteChannel::new(1);
+                    stage_channel.sprite.member = Some(member_ref);
+                    stage_channel.sprite.entered = true;
+                    context.player.movie.score.channels = vec![
+                        SpriteChannel::new(0),
+                        stage_channel,
+                        SpriteChannel::new(2),
+                    ];
+                    context.player.movie.score.channels[2].sprite.entered = true;
+                    context.player.movie.score.channels[2].sprite.exited = true;
+                    context.player.movie.score.sprite_spans.push(ScoreSpriteSpan {
+                        channel_number: 1,
+                        start_frame: 1,
+                        end_frame: 20,
+                        scripts: Vec::new(),
+                    });
+                    context.player.movie.current_frame = 5;
+                    assert_eq!(context.player.active_stage_filmloop_member_refs(), vec![member_ref]);
+                })
+                .expect("stop fixture setup must remain owner-bound");
+
+            let stage_ended = end_score_sprites_owned(
+                session.clone(),
+                1,
+                owner.clone(),
+                ScoreRef::Stage,
+                5,
+                5,
+                true,
+            )
+            .await
+            .expect("stage stop span query must remain owner-bound");
+            assert_eq!(stage_ended, vec![1]);
+            let film_ended = end_score_sprites_owned(
+                session.clone(),
+                1,
+                owner.clone(),
+                ScoreRef::FilmLoop(member_ref.clone()),
+                1,
+                1,
+                true,
+            )
+            .await
+            .expect("filmloop stop span query must remain owner-bound");
+            assert_eq!(film_ended, vec![1]);
+
+            stop_movie_sequence_owned(session.clone(), 1, owner.clone())
+                .await
+                .expect("owned stop sequence must complete");
+            let states = session
+                .borrow_mut()
+                .with_player(1, |context| {
+                    let stage = context.player.movie.score.channels[1].sprite.exited;
+                    let already_ended = context.player.movie.score.channels[2].sprite.exited;
+                    let film = context
+                        .player
+                        .movie
+                        .cast_manager
+                        .find_member_by_ref(&member_ref)
+                        .and_then(|member| match &member.member_type {
+                            CastMemberType::FilmLoop(loop_member) => {
+                                Some(loop_member.score.channels[1].sprite.exited)
+                            }
+                            _ => None,
+                        });
+                    (stage, already_ended, film)
+                })
+                .expect("stop result must remain owner-bound");
+            assert_eq!(states, (true, true, Some(true)));
+        });
+    }
+
+    #[test]
+    fn cancelled_movie_transition_restores_only_the_captured_owner_flags() {
+        async_std::task::block_on(async {
+            let session = RuntimeSession::new(SymbolOwner { session: 79, generation: 1 }).into_handle();
+            assert!(session
+                .borrow_mut()
+                .add_player(1, channel::unbounded().0));
+            let owner = session
+                .borrow_mut()
+                .with_player(1, |context| context.player.owner.clone())
+                .expect("transition test player must exist");
+            let (cancel_tx, cancel_rx) = channel::bounded(1);
+            let (started_tx, started_rx) = channel::bounded(1);
+            let cancel_task = async_std::task::spawn(async move {
+                started_rx.recv().await.expect("transition operation must start");
+                cancel_tx.send(()).await.expect("transition cancellation must be delivered");
+            });
+            let initial_flags = (false, true);
+            let session_for_operation = session.clone();
+            let owner_for_operation = owner.clone();
+            let result = await_playback_or_cancel(
+                &cancel_rx,
+                async move {
+                    session_for_operation
+                        .borrow_mut()
+                        .with_player(1, |context| {
+                            context.player.is_in_transition = true;
+                            context.player.is_dispatching_events = false;
+                        });
+                    started_tx.send(()).await.expect("transition start must be observed");
+                    future::pending::<()>().await;
+                    let _ = owner_for_operation;
+                },
+            )
+            .await;
+            assert!(result.is_none(), "cancellation must drop the pending transition");
+            cancel_task.await;
+            restore_playback_transition_flags_owned(
+                &session,
+                1,
+                &owner,
+                initial_flags.0,
+                initial_flags.1,
+            )
+            .await;
+            assert_eq!(
+                session
+                    .borrow_mut()
+                    .with_player(1, |context| {
+                        (context.player.is_in_transition, context.player.is_dispatching_events)
+                    }),
+                Some(initial_flags),
+            );
+
+            let replacement = session
+                .borrow_mut()
+                .reset_player_owned(1, &owner)
+                .expect("old owner reset must create a replacement");
+            session
+                .borrow_mut()
+                .with_player(1, |context| {
+                    context.player.is_in_transition = true;
+                    context.player.is_dispatching_events = false;
+                })
+                .expect("replacement flags must be writable");
+            restore_playback_transition_flags_owned(
+                &session,
+                1,
+                &owner,
+                initial_flags.0,
+                initial_flags.1,
+            )
+            .await;
+            assert_eq!(
+                session
+                    .borrow_mut()
+                    .with_player(1, |context| {
+                        (context.player.owner.same_identity(&replacement),
+                            context.player.is_in_transition,
+                            context.player.is_dispatching_events)
+                    }),
+                Some((true, true, false)),
+                "stale cancellation must not rewrite replacement flags",
+            );
+        });
+    }
+
+    #[test]
+    fn cancellation_after_stop_boundary_waits_for_transition_without_replaying_old_stop() {
+        async_std::task::block_on(async {
+            let stop_phase = Rc::new(Cell::new(PlaybackTransitionStopPhase::NotStarted));
+            let (cancel_tx, cancel_rx) = channel::bounded(1);
+            let (started_tx, started_rx) = channel::bounded(1);
+            let (release_tx, release_rx) = channel::bounded(1);
+            let operation_phase = stop_phase.clone();
+            let operation = async move {
+                operation_phase.set(PlaybackTransitionStopPhase::InProgress);
+                started_tx
+                    .send(())
+                    .await
+                    .expect("transition stop boundary must be observed");
+                operation_phase.set(PlaybackTransitionStopPhase::Complete);
+                release_rx
+                    .recv()
+                    .await
+                    .expect("transition mount boundary must be released");
+                Ok::<(), ()>(())
+            };
+            let cancellation = async_std::task::spawn(async move {
+                started_rx
+                    .recv()
+                    .await
+                    .expect("transition operation must start");
+                cancel_tx
+                    .send(())
+                    .await
+                    .expect("transition cancellation must be delivered");
+                // Let the transition selector observe cancellation before the
+                // post-StopMovie mount boundary is released.  Releasing both
+                // channels in one poll would make the test depend on select's
+                // tie-breaking when the operation is also ready.
+                async_std::task::yield_now().await;
+                release_tx
+                    .send(())
+                    .await
+                    .expect("transition operation must reach its mount boundary");
+            });
+
+            let outcome = await_playback_transition_or_cancel(&cancel_rx, operation, stop_phase.clone()).await;
+            cancellation.await;
+            assert!(outcome.cancelled);
+            assert!(matches!(outcome.result, Some(Ok(()))));
+            assert_eq!(
+                stop_phase.get(),
+                PlaybackTransitionStopPhase::Complete,
+                "cancellation must not drop the operation between old StopMovie and new mount",
+            );
+        });
+    }
+
+    #[test]
+    fn reset_during_pending_stop_cancels_old_owner_without_touching_replacement() {
+        async_std::task::block_on(async {
+            let session = RuntimeSession::new(SymbolOwner { session: 86, generation: 1 }).into_handle();
+            let (command_tx, _command_rx) = channel::unbounded();
+            assert!(session.borrow_mut().add_player(1, command_tx));
+            let owner = session
+                .borrow_mut()
+                .with_player(1, |context| context.player.owner.clone())
+                .expect("stop owner must exist");
+            let (_epoch, cancel_rx) = session
+                .borrow_mut()
+                .begin_playback_loop(1, &owner)
+                .expect("stop loop must be claimable")
+                .expect("stop loop must be installed");
+            let stop_phase = Rc::new(Cell::new(PlaybackTransitionStopPhase::InProgress));
+            let (started_tx, started_rx) = channel::bounded(1);
+            let (release_tx, release_rx) = channel::bounded(1);
+            let operation_session = session.clone();
+            let operation_owner = owner.clone();
+            let operation = async move {
+                started_tx
+                    .send(())
+                    .await
+                    .expect("pending stop must start");
+                release_rx
+                    .recv()
+                    .await
+                    .expect("pending stop must be released");
+                if !operation_session
+                    .borrow()
+                    .player_owner_matches(1, &operation_owner)
+                {
+                    return Err(cancelled_scope_error());
+                }
+                Ok::<(), ScriptError>(())
+            };
+            let reset_session = session.clone();
+            let reset_owner = owner.clone();
+            let reset_task = async move {
+                started_rx
+                    .recv()
+                    .await
+                    .expect("pending stop must be observable");
+                let replacement = reset_session
+                    .borrow_mut()
+                    .reset_player_owned(1, &reset_owner)
+                    .expect("reset must retire the pending stop owner");
+                reset_session
+                    .borrow_mut()
+                    .with_player(1, |context| {
+                        context.player.is_in_transition = true;
+                        context.player.is_dispatching_events = false;
+                    })
+                    .expect("replacement flags must remain writable");
+                release_tx
+                    .send(())
+                    .await
+                    .expect("pending stop must finish its cancellation path");
+                replacement
+            };
+            let (outcome, replacement) = futures::join!(
+                await_playback_transition_or_cancel(&cancel_rx, operation, stop_phase),
+                reset_task,
+            );
+            assert!(outcome.cancelled);
+            assert!(matches!(outcome.result, Some(Err(ScriptError { code: ScriptErrorCode::Abort, .. }))));
+            assert_eq!(
+                session.borrow_mut().with_player(1, |context| {
+                    (
+                        context.player.owner.same_identity(&replacement),
+                        context.player.is_in_transition,
+                        context.player.is_dispatching_events,
+                    )
+                }),
+                Some((true, true, false)),
+            );
+        });
+    }
+
+    #[test]
+    fn owned_stop_cleanup_error_is_propagated_and_replay_is_consumed() {
+        async_std::task::block_on(async {
+            let session = RuntimeSession::new(SymbolOwner { session: 87, generation: 1 }).into_handle();
+            let (command_tx, _command_rx) = channel::unbounded();
+            assert!(session.borrow_mut().add_player(1, command_tx));
+            let owner = session
+                .borrow_mut()
+                .with_player(1, |context| context.player.owner.clone())
+                .expect("cleanup owner must exist");
+            let (epoch, _cancel_rx) = session
+                .borrow_mut()
+                .begin_playback_loop(1, &owner)
+                .expect("cleanup loop must be claimable")
+                .expect("cleanup loop must be installed");
+            assert_eq!(session.borrow_mut().cancel_playback_loop(1, &owner, true), Some(epoch));
+            assert!(session
+                .borrow_mut()
+                .begin_playback_loop(1, &owner)
+                .expect("same-owner replay must be accepted")
+                .is_none());
+
+            // Keep the cancellation record and replay request, but make the
+            // captured capability stale before cleanup starts.  This reaches
+            // the real owner-bound StopMovie path and proves its error is not
+            // converted into a successful replay.
+            owner.begin_reset();
+            owner.mark_arena_dead();
+            let result = cleanup_after_playback_cancel(&session, 1, &owner, epoch).await;
+            assert!(matches!(
+                result,
+                Err(ScriptError {
+                    code: ScriptErrorCode::Abort,
+                    ..
+                })
+            ));
+            assert!(session
+                .borrow_mut()
+                .discard_playback_replay_request(1, &owner, epoch));
+            assert!(!session
+                .borrow_mut()
+                .take_playback_replay_request(1, &owner, epoch));
         });
     }
 

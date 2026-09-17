@@ -23,8 +23,13 @@ import {
 } from './ruffleBridgeClient';
 
 interface FlashInstance {
+  host: FlashOwnerHost;
   browserHandle: FlashOwnerCapability;
   spriteNum: number;     // Director sprite number this instance belongs to
+  // Monotonic within the owning host/sprite. The runtime owner generation is
+  // not sufficient here: a same-owner replacement can reuse the sprite key
+  // while an older async Ruffle load is still completing.
+  instanceGeneration: number;
   castLib: number;       // SWF source cast member (diagnostics + cleanup)
   castMember: number;
   rufflePlayer: any; // RufflePlayerElement (direct) or stub element (bridge mode)
@@ -63,6 +68,16 @@ interface FlashInstance {
  * non-owning capability; production uses the BrowserPlayerHandle adapter. */
 export interface FlashOwnerCapability {
   owner_identity(): string;
+  /** Reserve an instance generation in the owner-owned Rust binding state.
+   * The returned value is monotonic across host re-registration for the same
+   * capability, so an old host cannot alias a replacement instance. */
+  reserve_flash_instance_generation(spriteNum: number): number;
+  /** Invalidate only the captured generation; a replacement generation is
+   * left untouched when the expected value no longer matches. */
+  invalidate_flash_instance_generation(spriteNum: number, expectedGeneration: number): boolean;
+  /** Check the capability-owned generation authority without borrowing the VM. */
+  is_flash_instance_generation_current(spriteNum: number, expectedGeneration: number): boolean;
+  set_flash_scripted_access_pending(pending: boolean): void;
   update_flash_frame(spriteNum: number, width: number, height: number, rgba: Uint8Array): void;
   trigger_lingo_callback_on_script(
     castLib: number,
@@ -86,6 +101,21 @@ const instances = new Map<string, FlashInstance>();
 // it names exactly one owner; ambiguous numbers are deliberately rejected by
 // legacy Ruffle callbacks instead of being delivered to the wrong provider.
 const spriteIndex = new Map<number, string>();
+
+// Owner-qualified bridge calls resolve through this exact-generation map.
+// Sprite numbers may overlap across BrowserPlayerHandle instances, and a
+// retired generation must never fall through to the numeric legacy index.
+const flashOwnerHosts = new Map<string, FlashOwnerHost>();
+
+const MAX_FLASH_SPRITE_NUMBER = 0x7fff;
+
+function validFlashSpriteNumber(spriteNum: number): boolean {
+  return Number.isInteger(spriteNum) && spriteNum >= 1 && spriteNum <= MAX_FLASH_SPRITE_NUMBER;
+}
+
+function unregisterFlashOwnerHost(host: FlashOwnerHost): void {
+  if (flashOwnerHosts.get(host.ownerKey) === host) flashOwnerHosts.delete(host.ownerKey);
+}
 
 // Track pending Flash instance creations so the WASM frame loop can wait for them
 let flashLoadingCount = 0;
@@ -787,10 +817,11 @@ export async function createFlashInstanceForOwner(
   if (host.disposed) throw new Error(`Flash owner ${ownerKey} is disposed`);
   const key = `${ownerKey}:${spriteNum}`;
 
-  // Skip when Flash is explicitly disabled by the host. The Lingo
-  // bridge functions all early-return on missing instance, so the
-  // movie won't error — Flash sprites just stay invisible / inert.
+  // A disabled replacement still retires any older pending creation. Do this
+  // before the early return so a late load cannot publish into a disabled
+  // sprite slot.
   if (isFlashDisabled()) {
+    destroyFlashInstance(host, spriteNum);
     console.log(
       `[Flash] disableFlash is set; skipping Ruffle instance for ${key} ` +
       `(Lingo Flash calls will safely no-op).`
@@ -800,6 +831,12 @@ export async function createFlashInstanceForOwner(
 
   // Destroy existing instance for this sprite if any.
   destroyFlashInstance(host, spriteNum);
+  // Reserve before the first await. This also supersedes a prior creation
+  // that has not published an instance yet.
+  const instanceGeneration = host.reserveInstanceGeneration(spriteNum);
+  const isCurrentGeneration = () =>
+    host.isCurrentInstanceGeneration(spriteNum, instanceGeneration) &&
+    host.capability === browserHandle;
 
   // Per-sprite frame intent is now owned by the Rust sprite
   // (`flash_asserted_frame`) and threaded in as `assertedFrame`, which we pin
@@ -810,6 +847,7 @@ export async function createFlashInstanceForOwner(
 
   flashLoadingCount++;
   console.log(`[Flash] Instance ${key} creation started (pending: ${flashLoadingCount})`);
+  let currentInstance: FlashInstance | null = null;
 
   try {
 
@@ -854,7 +892,12 @@ export async function createFlashInstanceForOwner(
     if (!(await waitForBridge())) {
       throw new Error('main-world Ruffle bridge did not become ready');
     }
+    if (!isCurrentGeneration()) return;
     bridgeId = await bridgeCreatePlayer(host.ownerKey);
+    if (!isCurrentGeneration()) {
+      if (bridgeId) void bridgeDestroyPlayer(bridgeId);
+      return;
+    }
     const elem = bridgeFindElement(bridgeId);
     if (!elem) throw new Error('bridge created player but DOM element not found: ' + bridgeId);
     player = elem;
@@ -864,6 +907,7 @@ export async function createFlashInstanceForOwner(
   } else {
     // Direct mode (page-loaded polyfill, same world as Ruffle).
     const ruffle = await loadRuffle();
+    if (!isCurrentGeneration()) return;
     player = ruffle.createPlayer();
     if (typeof player.dirplayer_set_owner_key !== 'function') {
       throw new Error('dirplayer Ruffle player does not support owner binding');
@@ -875,8 +919,10 @@ export async function createFlashInstanceForOwner(
   }
 
   const instance: FlashInstance = {
+    host,
     browserHandle,
     spriteNum,
+    instanceGeneration,
     castLib,
     castMember,
     rufflePlayer: player,
@@ -891,11 +937,12 @@ export async function createFlashInstanceForOwner(
     ready: false,
     pausedAtStart,
   };
+  currentInstance = instance;
 
   // The owner may have been reset while Ruffle was loading.  Do not publish
   // a late instance into the replacement runtime; remove the detached player
   // and container while they are still local to this request.
-  if (host.disposed || host.capability !== browserHandle) {
+  if (!isCurrentGeneration()) {
     try { player.remove?.(); } catch { /* stale host cleanup */ }
     container.remove();
     return;
@@ -993,7 +1040,7 @@ export async function createFlashInstanceForOwner(
   // Reset/unregister can race the asynchronous SWF load.  Stop before any
   // post-load callback registration or frame work when this generation is no
   // longer the published owner.
-  if (host.disposed || host.capability !== browserHandle) {
+  if (!isCurrentGeneration()) {
     try { player.remove?.(); } catch { /* stale host cleanup */ }
     container.remove();
     return;
@@ -1021,6 +1068,7 @@ export async function createFlashInstanceForOwner(
       // gotoAndStop to halt there.
       playerExec(instance, 'GotoFrame', [initialPin, false]);
       await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+      if (!isCurrentGeneration()) return;
       playerExec(instance, 'GotoFrame', [initialPin, true]);
       instance.stopped = true;
     } catch (e) {
@@ -1050,6 +1098,10 @@ export async function createFlashInstanceForOwner(
   // Find the internal canvas element that Ruffle renders to
   await new Promise<void>((resolve) => {
     setTimeout(() => {
+      if (!isCurrentGeneration()) {
+        resolve();
+        return;
+      }
       const shadow = player.shadowRoot;
       if (shadow) {
         const canvas = shadow.querySelector('canvas');
@@ -1065,26 +1117,28 @@ export async function createFlashInstanceForOwner(
       resolve();
     }, 500);
   });
+  if (!isCurrentGeneration()) return;
 
   // Give the SWF time to run its ActionScript initialization (ExternalInterface callbacks etc.)
   console.log(`[Flash] Instance ${key} loaded, waiting for SWF ActionScript to initialize...`);
   await new Promise(resolve => setTimeout(resolve, 3000));
+  if (!isCurrentGeneration()) return;
 
   } finally {
     flashLoadingCount--;
-    flashAccessBeforeReady = false;
+    const live = instances.get(key);
+    if (live === currentInstance) flashAccessBeforeReady = false;
     console.log(`[Flash] Instance ${key} fully ready (pending: ${flashLoadingCount})`);
 
-    const live = instances.get(key);
     // Mark ready BEFORE the queue replay so the internal
     // `live.rufflePlayer.GotoFrame(...)` calls aren't seen as targeting
     // a not-yet-ready instance. After this point any Lingo goTo/play/stop
     // calls bypass the queue.
-    if (live && !host.disposed && host.capability === browserHandle) live.ready = true;
+    if (live && isCurrentGeneration() && live.instanceGeneration === instanceGeneration) live.ready = true;
 
     // Replay any beginSprite-time `gotoFrame(sprite,N)` / `play(sprite)` /
     // `stop(sprite)` Lingo calls that arrived before this instance was created.
-    if (!host.disposed && host.capability === browserHandle) {
+    if (live === currentInstance && isCurrentGeneration() && live.instanceGeneration === instanceGeneration) {
       flushPendingGoto(host, spriteNum, key);
     }
 
@@ -1094,10 +1148,11 @@ export async function createFlashInstanceForOwner(
     // the poster survives to `ready` (StoryScramble tiles). Skipped if a queued
     // `play`/`gotoFrame` already resumed the sprite (the flush's stopped flag
     // reflects that).
-    if (assertedFrame >= 0 && live && !host.disposed && host.capability === browserHandle && live.stopped) {
+    if (assertedFrame >= 0 && live && isCurrentGeneration() && live.instanceGeneration === instanceGeneration && live.stopped) {
       try {
         playerExec(live, 'GotoFrame', [assertedFrame, false]);
         await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+        if (!isCurrentGeneration()) return;
         playerExec(live, 'GotoFrame', [assertedFrame, true]);
       } catch (e) {
         console.warn(`[Flash] asserted-frame re-pin failed for ${key}:`, e);
@@ -1216,7 +1271,21 @@ export function destroyFlashInstance(host: FlashOwnerHost, spriteNum: number): v
   const ownerKey = host.ownerKey;
   const key = `${ownerKey}:${spriteNum}`;
   const instance = instances.get(key);
-  if (!instance) return;
+  if (!instance || instance.host !== host) {
+    // There may be a reserved creation that has not published its instance
+    // yet. Invalidate only this host's reservation; never touch another
+    // owner's or replacement host's state.
+    const generation = host.instanceGenerations.get(spriteNum);
+    if (generation !== undefined) host.invalidateInstanceGeneration(spriteNum, generation);
+    return;
+  }
+
+  host.invalidateInstanceGeneration(spriteNum, instance.instanceGeneration);
+
+  // A queued seek microtask may still be waiting when the instance is
+  // replaced. Clear only this generation's pin; never consume a replacement's
+  // same-sprite target.
+  if (host.instances.get(key) === instance) host.pinTargets.delete(spriteNum);
 
   if (instance.animFrameId !== null) {
     cancelAnimationFrame(instance.animFrameId);
@@ -1236,26 +1305,31 @@ export function destroyFlashInstance(host: FlashOwnerHost, spriteNum: number): v
   }
 
   instance.container.remove();
-  instances.delete(key);
-  host.instances.delete(key);
-  if (spriteIndex.get(spriteNum) === key) spriteIndex.delete(spriteNum);
+  if (instances.get(key) === instance) instances.delete(key);
+  if (host.instances.get(key) === instance) host.instances.delete(key);
+  if (spriteIndex.get(spriteNum) === key && !instances.has(key)) spriteIndex.delete(spriteNum);
   syncActiveFlashCount();
 }
 
 export function destroyAllFlashInstances(host: FlashOwnerHost): void {
   const ownerPrefix = `${host.ownerKey}:`;
   host.pendingQueue.clearOwner(host.ownerKey);
+  host.pinTargets.clear();
+  const generations = Array.from(host.instanceGenerations.entries());
+  for (const [spriteNum, generation] of generations) {
+    host.invalidateInstanceGeneration(spriteNum, generation);
+  }
   Array.from(instances.entries()).forEach(([key, instance]) => {
-    if (!key.startsWith(ownerPrefix)) return;
+    if (!key.startsWith(ownerPrefix) || instance.host !== host) return;
     if (instance.animFrameId !== null) cancelAnimationFrame(instance.animFrameId);
     try {
       instance.rufflePlayer.remove();
       if (instance.bridgeId) void bridgeDestroyPlayer(instance.bridgeId);
     } catch { /* owner teardown is best effort */ }
     instance.container.remove();
-    instances.delete(key);
-    host.instances.delete(key);
-    if (spriteIndex.get(instance.spriteNum) === key) spriteIndex.delete(instance.spriteNum);
+    if (instances.get(key) === instance) instances.delete(key);
+    if (host.instances.get(key) === instance) host.instances.delete(key);
+    if (spriteIndex.get(instance.spriteNum) === key && !instances.has(key)) spriteIndex.delete(instance.spriteNum);
   });
   syncActiveFlashCount();
 }
@@ -1363,13 +1437,21 @@ function setVariable(spriteNum: number, path: string, value: string): boolean {
  * beginSprite wins over an inherited sibling frame).
  */
 export type PendingOp =
+  | { kind: 'getVariable'; path: string }
   | { kind: 'goto'; frame: number }
   | { kind: 'gotoLabel'; label: string }
+  | { kind: 'gotoAndStop'; frame: number }
+  | { kind: 'gotoLabelAndStop'; label: string }
   | { kind: 'play' }
   | { kind: 'stop' }
   | { kind: 'rewind' }
   | { kind: 'setVariable'; path: string; value: string }
   | { kind: 'callFunction'; path: string; argsXml: string };
+
+export interface OwnedPendingOp {
+  op: PendingOp;
+  scriptedAccessTicket?: number;
+}
 /**
  * Queues Flash operations until the corresponding Ruffle instance is ready.
  *
@@ -1381,7 +1463,7 @@ export type PendingOp =
  */
 export class FlashPendingQueue {
   private readonly legacy = new Map<number, PendingOp[]>();
-  private readonly owned = new Map<string, PendingOp[]>();
+  private readonly owned = new Map<string, OwnedPendingOp[]>();
 
   enqueueLegacy(spriteNum: number, op: PendingOp): void {
     const list = this.legacy.get(spriteNum) ?? [];
@@ -1389,10 +1471,10 @@ export class FlashPendingQueue {
     this.legacy.set(spriteNum, list);
   }
 
-  enqueueOwned(ownerKey: string, spriteNum: number, op: PendingOp): void {
+  enqueueOwned(ownerKey: string, spriteNum: number, op: PendingOp, scriptedAccessTicket?: number): void {
     const key = `${ownerKey}:${spriteNum}`;
     const list = this.owned.get(key) ?? [];
-    list.push(op);
+    list.push({ op, scriptedAccessTicket });
     this.owned.set(key, list);
   }
 
@@ -1406,11 +1488,14 @@ export class FlashPendingQueue {
     instanceKey: string | undefined,
     ready: boolean,
     legacyTargetMatches: boolean,
-  ): PendingOp[] {
+  ): OwnedPendingOp[] {
     if (!ready) return [];
     const ownedOps = instanceKey ? this.owned.get(instanceKey) : undefined;
     const legacyOps = legacyTargetMatches ? this.legacy.get(spriteNum) : undefined;
-    const drained = [...(legacyOps ?? []), ...(ownedOps ?? [])];
+    const drained: OwnedPendingOp[] = [
+      ...(legacyOps ?? []).map(op => ({ op })),
+      ...(ownedOps ?? []),
+    ];
     if (legacyTargetMatches) this.legacy.delete(spriteNum);
     if (instanceKey) this.owned.delete(instanceKey);
     return drained;
@@ -1437,13 +1522,124 @@ const pendingQueue = new FlashPendingQueue();
 export class FlashOwnerHost {
   readonly instances = new Map<string, FlashInstance>();
   readonly pendingQueue = new FlashPendingQueue();
+  readonly pinTargets = new Map<number, number>();
+  /** The reservation survives before publication, so a replacement can
+   * invalidate an in-flight load that has not reached `instances` yet. */
+  readonly instanceGenerations = new Map<number, number>();
   disposed = false;
+  private readonly scriptedAccessRequests = new Map<number, Set<number>>();
+  private nextScriptedAccessRequest = 1;
 
   constructor(readonly ownerKey: string, readonly capability: FlashOwnerCapability) {}
 
+  reserveInstanceGeneration(spriteNum: number): number {
+    if (this.disposed) throw new Error(`Flash owner ${this.ownerKey} is disposed`);
+    if (!validFlashSpriteNumber(spriteNum)) {
+      throw new Error(`invalid Flash sprite number ${spriteNum}`);
+    }
+    const generation = this.capability.reserve_flash_instance_generation(spriteNum);
+    if (!Number.isSafeInteger(generation) || generation < 1) {
+      throw new Error(`Flash instance generation authority returned an invalid generation for ${this.ownerKey}`);
+    }
+    this.instanceGenerations.set(spriteNum, generation);
+    return generation;
+  }
+
+  isCurrentInstanceGeneration(spriteNum: number, generation: number): boolean {
+    if (this.disposed || this.instanceGenerations.get(spriteNum) !== generation) return false;
+    try {
+      return this.capability.is_flash_instance_generation_current(spriteNum, generation);
+    } catch {
+      return false;
+    }
+  }
+
+  invalidateInstanceGeneration(spriteNum: number, generation: number): void {
+    if (this.instanceGenerations.get(spriteNum) !== generation) return;
+    try {
+      // The capability checks the expected value. Even if this host is stale,
+      // its local mirror is retired while a replacement remains authoritative.
+      this.capability.invalidate_flash_instance_generation(spriteNum, generation);
+    } catch {
+      // A stale capability is already unable to affect the replacement.
+    }
+    if (this.instanceGenerations.get(spriteNum) === generation) {
+      this.instanceGenerations.delete(spriteNum);
+    }
+  }
+
+  private invalidateAllInstanceGenerations(): void {
+    for (const [spriteNum, generation] of Array.from(this.instanceGenerations.entries())) {
+      this.invalidateInstanceGeneration(spriteNum, generation);
+    }
+  }
+
+  private publishScriptedAccessState(): boolean {
+    try {
+      this.capability.set_flash_scripted_access_pending(this.scriptedAccessRequestCount() > 0);
+      return true;
+    } catch {
+      // A stale capability can throw after its Rust owner has been reset. The
+      // request set is cleared by the caller, so no old notification can block
+      // a replacement generation.
+      return false;
+    }
+  }
+
+  private invalidateAfterCapabilityFailure(): void {
+    this.scriptedAccessRequests.clear();
+    this.pendingQueue.clear();
+    this.pinTargets.clear();
+    this.invalidateAllInstanceGenerations();
+    this.disposed = true;
+    unregisterFlashOwnerHost(this);
+    destroyAllFlashInstances(this);
+  }
+
+  beginScriptedAccess(spriteNum: number): number | undefined {
+    if (this.disposed) return undefined;
+    let requests = this.scriptedAccessRequests.get(spriteNum);
+    if (!requests) {
+      requests = new Set<number>();
+      this.scriptedAccessRequests.set(spriteNum, requests);
+    }
+    const ticket = this.nextScriptedAccessRequest++;
+    requests.add(ticket);
+    if (!this.publishScriptedAccessState()) this.invalidateAfterCapabilityFailure();
+    return ticket;
+  }
+
+  completeScriptedAccess(spriteNum: number, ticket?: number): void {
+    if (this.disposed) return;
+    const requests = this.scriptedAccessRequests.get(spriteNum);
+    if (requests) {
+      const request = ticket ?? requests.values().next().value as number | undefined;
+      if (request !== undefined) requests.delete(request);
+      if (requests.size === 0) this.scriptedAccessRequests.delete(spriteNum);
+    }
+    if (!this.publishScriptedAccessState()) this.invalidateAfterCapabilityFailure();
+  }
+
+  scriptedAccessRequestCount(): number {
+    let count = 0;
+    this.scriptedAccessRequests.forEach((requests) => { count += requests.size; });
+    return count;
+  }
+
   dispose(): void {
+    if (this.disposed) {
+      unregisterFlashOwnerHost(this);
+      return;
+    }
+    this.scriptedAccessRequests.clear();
+    // Publish the cleared state while this captured capability can still
+    // validate its owner generation. A stale capability is rejected safely.
+    this.publishScriptedAccessState();
+    this.invalidateAllInstanceGenerations();
     this.disposed = true;
     this.pendingQueue.clear();
+    this.pinTargets.clear();
+    unregisterFlashOwnerHost(this);
   }
 }
 
@@ -1467,8 +1663,8 @@ export interface FlashOwnerRegistration {
   dispose(): void;
 }
 
-/** Create an owner host synchronously. The caller retains this registration
- * in its callback closure; no process-global owner registry is needed. */
+/** Create an owner host synchronously. The caller retains this registration;
+ * the exact-generation map is used only by owner-qualified bridge calls. */
 export function registerFlashOwner(
   ownerKey: string,
   capability: FlashOwnerCapability,
@@ -1476,17 +1672,30 @@ export function registerFlashOwner(
   if (!ownerKey || capability.owner_identity() !== ownerKey) {
     throw new Error(`invalid Flash owner capability ${ownerKey}`);
   }
+  if (
+    typeof capability.reserve_flash_instance_generation !== 'function' ||
+    typeof capability.invalidate_flash_instance_generation !== 'function' ||
+    typeof capability.is_flash_instance_generation_current !== 'function'
+  ) {
+    throw new Error(`Flash owner ${ownerKey} lacks binding-generation authority`);
+  }
+  const existing = flashOwnerHosts.get(ownerKey);
+  if (existing && !existing.disposed) {
+    throw new Error(`Flash owner ${ownerKey} is already registered`);
+  }
+  if (existing) unregisterFlashOwnerHost(existing);
   const host = new FlashOwnerHost(ownerKey, capability);
+  flashOwnerHosts.set(ownerKey, host);
   return {
     host,
     dispose: () => {
-      if (host.disposed) return;
-      host.dispose();
+      if (!host.disposed) host.dispose();
       // Mark the generation closed before invoking Ruffle teardown hooks.
       // Those hooks can synchronously re-enter the bridge; they must observe
       // the closed host and cannot enqueue or publish new work. Resource
       // enumeration remains valid after the flag is set.
       destroyAllFlashInstances(host);
+      unregisterFlashOwnerHost(host);
     },
   };
 }
@@ -1505,7 +1714,11 @@ export function registerFlashOwner(
  * deferred stop before it fires — otherwise the shrink animation gets
  * pinned at its first frame and never advances to frame 21.
  */
-const pinTarget = new Map<number, number>();
+const legacyPinTarget = new Map<number, number>();
+
+function pinTargetFor(instance: FlashInstance): Map<number, number> {
+  return instance.host?.pinTargets ?? legacyPinTarget;
+}
 
 // Fire-and-forget Ruffle player method. In the MV3 extension the player lives in
 // the main world, so its methods are invisible on the isolated-world stub —
@@ -1531,6 +1744,11 @@ function playerGetVar(instance: FlashInstance, path: string): string | null {
   return v ?? null;
 }
 
+function isCurrentOwnerInstance(instance: FlashInstance): boolean {
+  if (instance.host.disposed) return false;
+  return instance.host.instances.get(`${instance.host.ownerKey}:${instance.spriteNum}`) === instance;
+}
+
 /**
  * Numeric seek that LEAVES THE PLAYHEAD RUNNING — matches Director's
  * `sprite(N).gotoFrame(frame)` method semantic (the Flash Asset Xtra's
@@ -1543,7 +1761,7 @@ function applyGotoPlay(instance: FlashInstance, frame: number): void {
   playerExec(instance, 'GotoFrame', [frame, false]);
   // Cancel any pending pin from a previous gotoAndStop on this sprite —
   // play-mode wins over a stale pin target.
-  pinTarget.delete(instance.spriteNum);
+  pinTargetFor(instance).delete(instance.spriteNum);
 }
 
 /**
@@ -1567,7 +1785,7 @@ function applyGotoAndPin(instance: FlashInstance, frame: number): void {
   // paint for already-stopped MovieClips, so a bare gotoAndStop wouldn't show
   // frame N until something else triggered a repaint).
   playerExec(instance, 'GotoFrame', [frame, false]);
-  pinTarget.set(instance.spriteNum, frame);
+  pinTargetFor(instance).set(instance.spriteNum, frame);
   schedulePin(instance, frame);
 }
 
@@ -1578,6 +1796,7 @@ function applyGotoAndPin(instance: FlashInstance, frame: number): void {
 function applyGotoLabelAndPin(instance: FlashInstance, label: string): void {
   playerExec(instance, 'CallFunction', ['_root.gotoAndPlay', [label]]);
   queueMicrotask(() => {
+    if (!isCurrentOwnerInstance(instance)) return;
     playerExec(instance, 'CallFunction', ['_root.stop', []]);
     // Resume the player so the seeked label frame paints — see schedulePin
     // for the full rationale (a movie pinning the sprite via per-frame
@@ -1603,10 +1822,11 @@ function schedulePin(instance: FlashInstance, frame: number): void {
   // tile poster-frame race during rapid hover (`mySprite.frame =
   // tileFrame ± 1`) goes away.
   queueMicrotask(() => {
+    if (!isCurrentOwnerInstance(instance)) return;
     // Only pin if no one (play/stop/rewind, or a later goto to a
     // different frame) cleared / overwrote our target in the meantime.
-    if (pinTarget.get(instance.spriteNum) !== frame) return;
-    pinTarget.delete(instance.spriteNum);
+    if (pinTargetFor(instance).get(instance.spriteNum) !== frame) return;
+    pinTargetFor(instance).delete(instance.spriteNum);
     if (instance.bridgeId) {
       // Bridge mode: fire-and-forget goto+play through the bridge.
       playerExec(instance, 'GotoFrame', [frame, true]);
@@ -1641,9 +1861,9 @@ function queueOp(spriteNum: number, op: PendingOp): void {
   pendingQueue.enqueueLegacy(spriteNum, op);
 }
 
-function queueOwnedOp(host: FlashOwnerHost, spriteNum: number, op: PendingOp): void {
+function queueOwnedOp(host: FlashOwnerHost, spriteNum: number, op: PendingOp, scriptedAccessTicket?: number): void {
   if (host.disposed) return;
-  host.pendingQueue.enqueueOwned(host.ownerKey, spriteNum, op);
+  host.pendingQueue.enqueueOwned(host.ownerKey, spriteNum, op, scriptedAccessTicket);
 }
 
 function flushPendingGoto(host: FlashOwnerHost, spriteNum: number, instanceKeyOverride?: string): void {
@@ -1657,13 +1877,26 @@ function flushPendingGoto(host: FlashOwnerHost, spriteNum: number, instanceKeyOv
   const ops = (ownedKey ? host.pendingQueue : pendingQueue)
     .drainReady(spriteNum, ownedKey, true, isUniqueLegacyTarget);
   if (ops.length === 0) return;
-  for (const op of ops) {
+  for (const entry of ops) {
+    const op = entry.op;
     try {
       switch (op.kind) {
+        case 'getVariable':
+          // The synchronous caller already received its lazy/null result; the
+          // replay keeps the access ordering and warms the requested path once
+          // the owner-specific instance is ready.
+          playerGetVar(instance, translateLevel0(op.path));
+          break;
         case 'goto':
-          applyFrameSetting(instance, spriteNum, String(op.frame), true);
+          applyGotoPlay(instance, op.frame);
           break;
         case 'gotoLabel':
+          applyGotoLabelPlay(instance, op.label);
+          break;
+        case 'gotoAndStop':
+          applyFrameSetting(instance, spriteNum, String(op.frame), true);
+          break;
+        case 'gotoLabelAndStop':
           applyFrameSetting(instance, spriteNum, op.label, false);
           break;
         case 'play':
@@ -1676,7 +1909,7 @@ function flushPendingGoto(host: FlashOwnerHost, spriteNum: number, instanceKeyOv
           // advances, the grab never completes, and the sprite is stuck showing
           // "straw". Playing from `_currentframe` (not a hardcoded 1) means an
           // already-autoplayed clip isn't restarted.
-          pinTarget.delete(spriteNum);
+          pinTargetFor(instance).delete(spriteNum);
           instance.stopped = false;
           {
             playerExec(instance, 'play');
@@ -1693,12 +1926,12 @@ function flushPendingGoto(host: FlashOwnerHost, spriteNum: number, instanceKeyOv
           // paused the player so the frame-116 seek never painted (stale frame
           // on screen even though `sprite(3).frame` read 116). Keeping the
           // player alive lets the seeked frame render.
-          pinTarget.delete(spriteNum);
+          pinTargetFor(instance).delete(spriteNum);
           instance.stopped = true;
           playerExec(instance, 'CallFunction', ['_root.stop', []]);
           break;
         case 'rewind':
-          pinTarget.delete(spriteNum);
+          pinTargetFor(instance).delete(spriteNum);
           instance.stopped = true;
           playerExec(instance, 'GotoFrame', [1, true]);
           break;
@@ -1723,6 +1956,10 @@ function flushPendingGoto(host: FlashOwnerHost, spriteNum: number, instanceKeyOv
       }
     } catch (e) {
       console.warn(`[Flash flush] sprite#${spriteNum} op ${op.kind} error:`, e);
+    } finally {
+      if (ownedKey && entry.scriptedAccessTicket !== undefined) {
+        host.completeScriptedAccess(spriteNum, entry.scriptedAccessTicket);
+      }
     }
   }
 }
@@ -1760,6 +1997,673 @@ function goToFrame(spriteNum: number, frameOrLabel: string): void {
   } else {
     applyGotoLabelPlay(instance, frameOrLabel);
   }
+}
+
+/** Owner-qualified Flash operations. These are called only through the
+ * owner callback registration; they never consult the numeric legacy index. */
+export function getVariableForOwner(host: FlashOwnerHost, spriteNum: number, path: string): string | null {
+  if (host.disposed) return null;
+  const instance = host.instances.get(`${host.ownerKey}:${spriteNum}`);
+  if (!instance || !instance.ready) {
+    const ticket = host.beginScriptedAccess(spriteNum);
+    queueOwnedOp(host, spriteNum, { kind: 'getVariable', path }, ticket);
+    return null;
+  }
+  try {
+    if (instance.bridgeId) return bridgeGetVariableSync(instance.bridgeId, translateLevel0(path));
+    return instance.rufflePlayer.GetVariable(translateLevel0(path));
+  } catch (e) {
+    console.warn(`owner Flash getVariable error:`, e);
+    return null;
+  }
+}
+
+export function setVariableForOwner(
+  host: FlashOwnerHost,
+  spriteNum: number,
+  path: string,
+  value: string,
+): boolean {
+  if (host.disposed) return false;
+  const instance = host.instances.get(`${host.ownerKey}:${spriteNum}`);
+  if (!instance || !instance.ready) {
+    const ticket = host.beginScriptedAccess(spriteNum);
+    queueOwnedOp(host, spriteNum, { kind: 'setVariable', path, value }, ticket);
+    return true;
+  }
+  try {
+    if (instance.bridgeId) return bridgeSetVariableSync(instance.bridgeId, translateLevel0(path), value);
+    return instance.rufflePlayer.SetVariable(translateLevel0(path), value);
+  } catch (e) {
+    console.warn(`owner Flash setVariable error:`, e);
+    return false;
+  }
+}
+
+export function callFunctionForOwner(
+  host: FlashOwnerHost,
+  spriteNum: number,
+  path: string,
+  argsXml: string,
+): unknown {
+  if (host.disposed) return null;
+  const instance = host.instances.get(`${host.ownerKey}:${spriteNum}`);
+  if (!instance || !instance.ready) {
+    const ticket = host.beginScriptedAccess(spriteNum);
+    queueOwnedOp(host, spriteNum, { kind: 'callFunction', path, argsXml }, ticket);
+    return null;
+  }
+  try {
+    const rawArgs: any[] = argsXml ? JSON.parse(argsXml) : [];
+    const args: any[] = rawArgs.map(arg => {
+      if (arg === null) return undefined;
+      if (typeof arg === 'string' && arg.startsWith('__ruffle_path:')) {
+        return { __ruffle_path: arg.substring('__ruffle_path:'.length) };
+      }
+      return arg;
+    });
+    if (instance.bridgeId) return bridgeCallFunctionSync(instance.bridgeId, translateLevel0(path), args);
+    return instance.rufflePlayer.CallFunction(translateLevel0(path), args);
+  } catch (e) {
+    console.warn(`owner Flash callFunction error:`, e);
+    return null;
+  }
+}
+
+export function goToFrameForOwner(host: FlashOwnerHost, spriteNum: number, frameOrLabel: string): void {
+  if (host.disposed) return;
+  const instance = host.instances.get(`${host.ownerKey}:${spriteNum}`);
+  const trimmed = frameOrLabel.trim();
+  const isNumeric = /^-?\d+$/.test(trimmed);
+  if (!instance || !instance.ready) {
+    const ticket = host.beginScriptedAccess(spriteNum);
+    queueOwnedOp(host, spriteNum, isNumeric
+      ? { kind: 'goto', frame: parseInt(trimmed, 10) }
+      : { kind: 'gotoLabel', label: frameOrLabel }, ticket);
+    return;
+  }
+  instance.stopped = false;
+  if (isNumeric) applyGotoPlay(instance, parseInt(trimmed, 10));
+  else applyGotoLabelPlay(instance, frameOrLabel);
+}
+
+export function goToFrameAndStopForOwner(host: FlashOwnerHost, spriteNum: number, frameOrLabel: string): void {
+  if (host.disposed) return;
+  const instance = host.instances.get(`${host.ownerKey}:${spriteNum}`);
+  const trimmed = frameOrLabel.trim();
+  const isNumeric = /^-?\d+$/.test(trimmed);
+  if (!instance || !instance.ready) {
+    const ticket = host.beginScriptedAccess(spriteNum);
+    queueOwnedOp(host, spriteNum, isNumeric
+      ? { kind: 'gotoAndStop', frame: parseInt(trimmed, 10) }
+      : { kind: 'gotoLabelAndStop', label: frameOrLabel }, ticket);
+    return;
+  }
+  applyFrameSetting(instance, spriteNum, frameOrLabel, isNumeric);
+}
+
+export function isFlashInstanceReadyForOwner(host: FlashOwnerHost, spriteNum: number): boolean {
+  if (host.disposed) return false;
+  return !!host.instances.get(`${host.ownerKey}:${spriteNum}`)?.ready;
+}
+
+function ownerInstance(host: FlashOwnerHost, spriteNum: number): FlashInstance | undefined {
+  if (host.disposed) return undefined;
+  return host.instances.get(`${host.ownerKey}:${spriteNum}`);
+}
+
+function stopFlashForOwner(host: FlashOwnerHost, spriteNum: number): void {
+  const instance = ownerInstance(host, spriteNum);
+  if (!instance || !instance.ready) {
+    const ticket = host.beginScriptedAccess(spriteNum);
+    queueOwnedOp(host, spriteNum, { kind: 'stop' }, ticket);
+    return;
+  }
+  pinTargetFor(instance).delete(spriteNum);
+  instance.stopped = true;
+  try {
+    playerExec(instance, 'CallFunction', ['_root.stop', []]);
+  } catch (e) {
+    console.warn(`owner ruffleStop error:`, e);
+  }
+}
+
+function rewindFlashForOwner(host: FlashOwnerHost, spriteNum: number): void {
+  const instance = ownerInstance(host, spriteNum);
+  if (!instance || !instance.ready) {
+    const ticket = host.beginScriptedAccess(spriteNum);
+    queueOwnedOp(host, spriteNum, { kind: 'rewind' }, ticket);
+    return;
+  }
+  pinTargetFor(instance).delete(spriteNum);
+  instance.stopped = true;
+  playerExec(instance, 'GotoFrame', [1, true]);
+}
+
+function isPlayingForOwner(host: FlashOwnerHost, spriteNum: number): boolean {
+  const instance = ownerInstance(host, spriteNum);
+  if (!instance || instance.stopped) return false;
+  if (instance.bridgeId) return true;
+  try { return instance.rufflePlayer.isPlaying ?? false; } catch { return false; }
+}
+
+function getFrameCountForOwner(host: FlashOwnerHost, spriteNum: number): number {
+  const instance = ownerInstance(host, spriteNum);
+  if (!instance) return 0;
+  try { return parseInt(playerGetVar(instance, '/:_totalframes') || '0', 10); } catch { return 0; }
+}
+
+function getCurrentFrameForOwner(host: FlashOwnerHost, spriteNum: number): number {
+  const instance = ownerInstance(host, spriteNum);
+  if (!instance) return 0;
+  try { return parseInt(playerGetVar(instance, '/:_currentframe') || '0', 10); } catch { return 0; }
+}
+
+function callFrameForOwner(host: FlashOwnerHost, spriteNum: number, frame: number): void {
+  const instance = ownerInstance(host, spriteNum);
+  if (!instance || !instance.ready) return;
+  playerExec(instance, 'GotoFrame', [frame, true]);
+}
+
+function findLabelForOwner(host: FlashOwnerHost, spriteNum: number, _label: string): number {
+  // Ruffle exposes no synchronous label lookup API here. Preserve the legacy
+  // bridge's explicit unsupported sentinel instead of pretending this route
+  // resolved a label or consulting another owner's sprite index.
+  return -1;
+}
+
+function hitTestForOwner(host: FlashOwnerHost, spriteNum: number, localX: number, localY: number): number {
+  const instance = ownerInstance(host, spriteNum);
+  if (!instance) return 0;
+  let canvasX = localX;
+  let canvasY = localY;
+  if (instance.canvas) {
+    const rect = instance.canvas.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) {
+      canvasX = (localX / rect.width) * instance.canvas.width;
+      canvasY = (localY / rect.height) * instance.canvas.height;
+    }
+  }
+  if (instance.bridgeId) {
+    const result = bridgeCallMethodSync(instance.bridgeId, 'dirplayer_hitTest', [canvasX, canvasY]);
+    return (typeof result === 'number' ? result : 0) | 0;
+  }
+  const player = instance.rufflePlayer as { dirplayer_hitTest?: (x: number, y: number) => number } | undefined;
+  if (typeof player?.dirplayer_hitTest !== 'function') return 0;
+  try { return player.dirplayer_hitTest(canvasX, canvasY) | 0; } catch { return 0; }
+}
+
+function getFlashPropertyForOwner(
+  host: FlashOwnerHost,
+  spriteNum: number,
+  target: string,
+  propNum: number,
+): string | null {
+  const instance = ownerInstance(host, spriteNum);
+  if (!instance) return null;
+  const propMap: Record<number, string> = {
+    0: '_x', 1: '_y', 2: '_xscale', 3: '_yscale',
+    4: '_currentframe', 5: '_totalframes', 6: '_alpha', 7: '_visible',
+    8: '_width', 9: '_height', 10: '_rotation', 11: '_target',
+    12: '_framesloaded', 13: '_name', 14: '_droptarget', 15: '_url',
+    16: '_highquality', 17: '_focusrect', 18: '_soundbuftime', 19: '_quality',
+    20: '_xmouse', 21: '_ymouse',
+  };
+  const propName = propMap[propNum];
+  if (!propName) return null;
+  try {
+    const path = target ? `${target}:${propName}` : `/:${propName}`;
+    return playerGetVar(instance, path)?.toString() ?? null;
+  } catch { return null; }
+}
+
+function setFlashPropertyForOwner(
+  host: FlashOwnerHost,
+  spriteNum: number,
+  target: string,
+  propNum: number,
+  value: string,
+): boolean {
+  const instance = ownerInstance(host, spriteNum);
+  if (!instance || !instance.ready) return false;
+  const propMap: Record<number, string> = {
+    0: '_x', 1: '_y', 2: '_xscale', 3: '_yscale',
+    6: '_alpha', 7: '_visible', 10: '_rotation', 13: '_name',
+    16: '_highquality', 18: '_soundbuftime',
+  };
+  const propName = propMap[propNum];
+  if (!propName) return false;
+  try {
+    const path = target ? `${target}:${propName}` : `/:${propName}`;
+    playerExec(instance, 'SetVariable', [path, value]);
+    return true;
+  } catch (e) {
+    console.warn(`owner ruffleSetFlashProperty error:`, e);
+    return false;
+  }
+}
+
+function tellTargetForOwner(host: FlashOwnerHost, spriteNum: number, target: string, action: string): void {
+  const instance = ownerInstance(host, spriteNum);
+  if (!instance || !instance.ready) return;
+  if (action === 'play') {
+    playerExec(instance, 'SetVariable', [`${target}:_visible`, '1']);
+  }
+}
+
+function ownerHostForRoute(ownerKey: unknown): FlashOwnerHost | undefined {
+  if (typeof ownerKey !== 'string') return undefined;
+  const host = flashOwnerHosts.get(ownerKey);
+  return host && !host.disposed ? host : undefined;
+}
+
+type FlashOwnedFailureCode = 'unknown-owner' | 'disposed-owner' | 'missing-instance' |
+  'stale-generation' | 'invalid-generation' | 'not-ready' | 'host-error';
+
+type FlashOwnedFailure = {
+  ok: false;
+  code: FlashOwnedFailureCode;
+  generation?: number;
+  message?: string;
+};
+
+export type FlashOwnedResult =
+  | { ok: true; generation: number; value: unknown }
+  | FlashOwnedFailure;
+
+export type FlashReadyResult =
+  | { ok: true; generation: number; ready: boolean }
+  | FlashOwnedFailure;
+
+function validFlashGeneration(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1;
+}
+
+function flashOwnedFailure(
+  code: FlashOwnedFailureCode,
+  message?: string,
+): FlashOwnedFailure {
+  return message ? { ok: false, code, message } : { ok: false, code };
+}
+
+type ReservedGenerationObservation =
+  | { kind: 'missing' }
+  | { kind: 'pending'; generation: number }
+  | { kind: 'published' }
+  | FlashOwnedFailure;
+
+/** Observe a reservation that has not reached host.instances yet.  The
+ * capability check is an external callback and may retire or replace the
+ * reservation reentrantly, so every value used by the pending result is
+ * revalidated before it is returned. */
+function observeReservedGenerationWithoutPublication(
+  host: FlashOwnerHost,
+  spriteNum: number,
+  expectedGeneration: number | null,
+): ReservedGenerationObservation {
+  const key = `${host.ownerKey}:${spriteNum}`;
+  if (host.instances.get(key) !== undefined) return { kind: 'published' };
+  if (instances.get(key) !== undefined) return flashOwnedFailure('stale-generation');
+
+  const reservedGeneration = host.instanceGenerations.get(spriteNum);
+  if (reservedGeneration === undefined) return { kind: 'missing' };
+  if (!validFlashGeneration(reservedGeneration)) {
+    return flashOwnedFailure('invalid-generation');
+  }
+  if (expectedGeneration !== null && expectedGeneration !== reservedGeneration) {
+    return flashOwnedFailure('stale-generation');
+  }
+
+  let isCurrent = false;
+  try {
+    isCurrent = host.isCurrentInstanceGeneration(spriteNum, reservedGeneration);
+  } catch {
+    isCurrent = false;
+  }
+  if (!isCurrent) return flashOwnedFailure('stale-generation');
+
+  // isCurrentInstanceGeneration may re-enter teardown or replacement code.
+  // Do not emit a pending result until the owner registry and reservation are
+  // still the same and no instance was published during that callback.
+  if (
+    host.disposed ||
+    flashOwnerHosts.get(host.ownerKey) !== host ||
+    host.instanceGenerations.get(spriteNum) !== reservedGeneration
+  ) {
+    return flashOwnedFailure('stale-generation');
+  }
+  if (host.instances.get(key) !== undefined) return { kind: 'published' };
+  if (instances.get(key) !== undefined) return flashOwnedFailure('stale-generation');
+  return { kind: 'pending', generation: reservedGeneration };
+}
+
+/** Run one generation-aware operation without consulting the numeric legacy
+ * sprite index. The post-call checks deliberately include the owner registry:
+ * a reentrant callback may replace the host object while retaining the same
+ * owner-key string. */
+function invokeFlashOwnedAtGeneration(
+  host: FlashOwnerHost,
+  spriteNum: number,
+  expectedGeneration: number | null,
+  invoke: (instance: FlashInstance) => unknown,
+): FlashOwnedResult {
+  if (!validFlashSpriteNumber(spriteNum)) {
+    return flashOwnedFailure('host-error', 'invalid Flash sprite number');
+  }
+  if (expectedGeneration !== null && !validFlashGeneration(expectedGeneration)) {
+    return flashOwnedFailure('invalid-generation');
+  }
+  if (host.disposed || flashOwnerHosts.get(host.ownerKey) !== host) {
+    return flashOwnedFailure('disposed-owner');
+  }
+  const key = `${host.ownerKey}:${spriteNum}`;
+  let instance = host.instances.get(key);
+  if (!instance) {
+    const reservation = observeReservedGenerationWithoutPublication(
+      host,
+      spriteNum,
+      expectedGeneration,
+    );
+    if ('ok' in reservation) return reservation;
+    if (reservation.kind === 'missing') return flashOwnedFailure('missing-instance');
+    if (reservation.kind === 'pending') {
+      return { ok: false, code: 'not-ready', generation: reservation.generation };
+    }
+    instance = host.instances.get(key);
+    if (!instance) return flashOwnedFailure('stale-generation');
+  }
+  const generation = instance.instanceGeneration;
+  if (!validFlashGeneration(generation)) {
+    return flashOwnedFailure('invalid-generation', 'Flash instance has no safe generation');
+  }
+  if (expectedGeneration !== null && expectedGeneration !== generation) {
+    return flashOwnedFailure('stale-generation');
+  }
+  const isStillCurrent = () =>
+    !host.disposed &&
+    flashOwnerHosts.get(host.ownerKey) === host &&
+    host.isCurrentInstanceGeneration(spriteNum, generation) &&
+    host.instances.get(key) === instance &&
+    instances.get(key) === instance;
+
+  if (!isStillCurrent()) return flashOwnedFailure('stale-generation');
+
+  if (!instance.ready) {
+    return { ok: false, code: 'not-ready', generation };
+  }
+
+  const hostError = (error: unknown): FlashOwnedResult => {
+    if (!isStillCurrent()) return flashOwnedFailure('stale-generation');
+    let message: string;
+    try {
+      message = error instanceof Error ? error.message : String(error);
+    } catch {
+      message = 'Flash host operation failed';
+    }
+    // Error formatting can invoke user-defined getters/toString methods.
+    if (!isStillCurrent()) return flashOwnedFailure('stale-generation');
+    return flashOwnedFailure('host-error', message);
+  };
+
+  try {
+    const value = invoke(instance);
+    let isThenable = false;
+    try {
+      // Read the property exactly once. A host result may expose a getter that
+      // synchronously retires/replaces the instance while being inspected.
+      isThenable = value != null && typeof (value as { then?: unknown }).then === 'function';
+    } catch (error) {
+      return hostError(error);
+    }
+    if (!isStillCurrent()) return flashOwnedFailure('stale-generation');
+    if (isThenable) return flashOwnedFailure('host-error', 'Flash operation must complete synchronously');
+    return { ok: true, generation, value };
+  } catch (error) {
+    return hostError(error);
+  }
+}
+
+/** Read readiness through the same owner, instance, generation, and registry
+ * fences as an owned Flash operation. This route is deliberately observational:
+ * it never queues work or invokes a Ruffle method. */
+function readFlashReadyAtGeneration(
+  host: FlashOwnerHost,
+  spriteNum: number,
+  expectedGeneration: number,
+): FlashReadyResult {
+  if (!validFlashSpriteNumber(spriteNum)) {
+    return flashOwnedFailure('host-error', 'invalid Flash sprite number');
+  }
+  if (!validFlashGeneration(expectedGeneration)) {
+    return flashOwnedFailure('invalid-generation');
+  }
+  if (host.disposed || flashOwnerHosts.get(host.ownerKey) !== host) {
+    return flashOwnedFailure('disposed-owner');
+  }
+  const key = `${host.ownerKey}:${spriteNum}`;
+  let instance = host.instances.get(key);
+  if (!instance) {
+    const reservation = observeReservedGenerationWithoutPublication(
+      host,
+      spriteNum,
+      expectedGeneration,
+    );
+    if ('ok' in reservation) return reservation;
+    if (reservation.kind === 'missing') return flashOwnedFailure('missing-instance');
+    if (reservation.kind === 'pending') {
+      return { ok: true, generation: reservation.generation, ready: false };
+    }
+    instance = host.instances.get(key);
+    if (!instance) return flashOwnedFailure('stale-generation');
+  }
+  const generation = instance.instanceGeneration;
+  if (!validFlashGeneration(generation)) {
+    return flashOwnedFailure('invalid-generation', 'Flash instance has no safe generation');
+  }
+  if (expectedGeneration !== generation) return flashOwnedFailure('stale-generation');
+  const isStillCurrent = () =>
+    !host.disposed &&
+    flashOwnerHosts.get(host.ownerKey) === host &&
+    host.isCurrentInstanceGeneration(spriteNum, generation) &&
+    host.instances.get(key) === instance &&
+    instances.get(key) === instance;
+  if (!isStillCurrent()) return flashOwnedFailure('stale-generation');
+
+  let ready: boolean;
+  try {
+    ready = !!instance.ready;
+  } catch (error) {
+    if (!isStillCurrent()) return flashOwnedFailure('stale-generation');
+    let message: string;
+    try {
+      message = error instanceof Error ? error.message : String(error);
+    } catch {
+      message = 'Flash readiness query failed';
+    }
+    if (!isStillCurrent()) return flashOwnedFailure('stale-generation');
+    return flashOwnedFailure('host-error', message);
+  }
+  if (!isStillCurrent()) return flashOwnedFailure('stale-generation');
+  return { ok: true, generation, ready };
+}
+
+function installGenerationAwareFlashRoutes(win: any): void {
+  const unknownOwner = () => flashOwnedFailure('unknown-owner');
+  win.dirplayer_ruffleGetVariableOwnedForBinding = (
+    ownerKey: string,
+    spriteNum: number,
+    path: string,
+    returnAsObject: boolean,
+  ): FlashOwnedResult => {
+    // The return mode is part of the Rust ABI. Keep the host value raw here;
+    // Rust applies scalar coercion versus FlashObjectRef identity decoding.
+    void returnAsObject;
+    const host = ownerHostForRoute(ownerKey);
+    if (!host) return unknownOwner();
+    return invokeFlashOwnedAtGeneration(
+      host,
+      spriteNum,
+      null,
+      instance => instance.bridgeId
+        ? bridgeGetVariableSync(instance.bridgeId, translateLevel0(path))
+        : instance.rufflePlayer.GetVariable(translateLevel0(path)),
+    );
+  };
+
+  win.dirplayer_ruffleGetVariableOwnedAtGeneration = (
+    ownerKey: string,
+    spriteNum: number,
+    generation: number,
+    path: string,
+    returnAsObject: boolean,
+  ): FlashOwnedResult => {
+    // The return mode is part of the Rust ABI. Keep the host value raw here;
+    // Rust applies scalar coercion versus FlashObjectRef identity decoding.
+    void returnAsObject;
+    const host = ownerHostForRoute(ownerKey);
+    if (!host) return unknownOwner();
+    if (!validFlashGeneration(generation)) return flashOwnedFailure('invalid-generation');
+    return invokeFlashOwnedAtGeneration(
+      host,
+      spriteNum,
+      generation,
+      instance => instance.bridgeId
+        ? bridgeGetVariableSync(instance.bridgeId, translateLevel0(path))
+        : instance.rufflePlayer.GetVariable(translateLevel0(path)),
+    );
+  };
+
+  win.dirplayer_ruffleSetVariableOwnedAtGeneration = (
+    ownerKey: string,
+    spriteNum: number,
+    generation: number,
+    path: string,
+    value: string,
+  ): FlashOwnedResult => {
+    const host = ownerHostForRoute(ownerKey);
+    if (!host) return unknownOwner();
+    if (!validFlashGeneration(generation)) return flashOwnedFailure('invalid-generation');
+    return invokeFlashOwnedAtGeneration(
+      host,
+      spriteNum,
+      generation,
+      instance => instance.bridgeId
+        ? bridgeSetVariableSync(instance.bridgeId, translateLevel0(path), value)
+        : instance.rufflePlayer.SetVariable(translateLevel0(path), value),
+    );
+  };
+
+  win.dirplayer_ruffleCallFunctionOwnedAtGeneration = (
+    ownerKey: string,
+    spriteNum: number,
+    generation: number,
+    path: string,
+    argsXml: string,
+  ): FlashOwnedResult => {
+    const host = ownerHostForRoute(ownerKey);
+    if (!host) return unknownOwner();
+    if (!validFlashGeneration(generation)) return flashOwnedFailure('invalid-generation');
+    return invokeFlashOwnedAtGeneration(
+      host,
+      spriteNum,
+      generation,
+      instance => {
+        const rawArgs: any[] = argsXml ? JSON.parse(argsXml) : [];
+        const args: any[] = rawArgs.map(arg => {
+          if (arg === null) return undefined;
+          if (typeof arg === 'string' && arg.startsWith('__ruffle_path:')) {
+            return { __ruffle_path: arg.substring('__ruffle_path:'.length) };
+          }
+          return arg;
+        });
+        return instance.bridgeId
+          ? bridgeCallFunctionSync(instance.bridgeId, translateLevel0(path), args)
+          : instance.rufflePlayer.CallFunction(translateLevel0(path), args);
+      },
+    );
+  };
+}
+
+/** Install stable owner-first routes. Every lookup is exact and retired or
+ * unknown owners return the operation's safe failure value. */
+function installOwnerFlashRoutes(win: any): void {
+  win.dirplayer_ruffleGetVariableOwned = (ownerKey: string, spriteNum: number, path: string) => {
+    const host = ownerHostForRoute(ownerKey);
+    return host ? getVariableForOwner(host, spriteNum, path) : null;
+  };
+  win.dirplayer_ruffleSetVariableOwned = (ownerKey: string, spriteNum: number, path: string, value: string) => {
+    const host = ownerHostForRoute(ownerKey);
+    return host ? setVariableForOwner(host, spriteNum, path, value) : false;
+  };
+  win.dirplayer_ruffleCallFunctionOwned = (ownerKey: string, spriteNum: number, path: string, argsXml: string) => {
+    const host = ownerHostForRoute(ownerKey);
+    return host ? callFunctionForOwner(host, spriteNum, path, argsXml) : null;
+  };
+  installGenerationAwareFlashRoutes(win);
+  win.dirplayer_ruffleGoToFrameOwned = (ownerKey: string, spriteNum: number, frameOrLabel: string) => {
+    const host = ownerHostForRoute(ownerKey);
+    if (host) goToFrameForOwner(host, spriteNum, frameOrLabel);
+  };
+  win.dirplayer_ruffleGoToFrameAndStopOwned = (ownerKey: string, spriteNum: number, frameOrLabel: string) => {
+    const host = ownerHostForRoute(ownerKey);
+    if (host) goToFrameAndStopForOwner(host, spriteNum, frameOrLabel);
+  };
+  win.dirplayer_ruffleStopOwned = (ownerKey: string, spriteNum: number) => {
+    const host = ownerHostForRoute(ownerKey);
+    if (host) stopFlashForOwner(host, spriteNum);
+  };
+  win.dirplayer_rufflePlayOwned = (ownerKey: string, spriteNum: number) => {
+    const host = ownerHostForRoute(ownerKey);
+    if (host) playFlashForOwner(host, spriteNum);
+  };
+  win.dirplayer_ruffleRewindOwned = (ownerKey: string, spriteNum: number) => {
+    const host = ownerHostForRoute(ownerKey);
+    if (host) rewindFlashForOwner(host, spriteNum);
+  };
+  win.dirplayer_ruffleIsPlayingOwned = (ownerKey: string, spriteNum: number) => {
+    const host = ownerHostForRoute(ownerKey);
+    return host ? isPlayingForOwner(host, spriteNum) : false;
+  };
+  win.dirplayer_ruffleGetFrameCountOwned = (ownerKey: string, spriteNum: number) => {
+    const host = ownerHostForRoute(ownerKey);
+    return host ? getFrameCountForOwner(host, spriteNum) : 0;
+  };
+  win.dirplayer_ruffleGetCurrentFrameOwned = (ownerKey: string, spriteNum: number) => {
+    const host = ownerHostForRoute(ownerKey);
+    return host ? getCurrentFrameForOwner(host, spriteNum) : 0;
+  };
+  win.dirplayer_ruffleCallFrameOwned = (ownerKey: string, spriteNum: number, frame: number) => {
+    const host = ownerHostForRoute(ownerKey);
+    if (host) callFrameForOwner(host, spriteNum, frame);
+  };
+  win.dirplayer_ruffleFindLabelOwned = (ownerKey: string, spriteNum: number, label: string) => {
+    const host = ownerHostForRoute(ownerKey);
+    return host ? findLabelForOwner(host, spriteNum, label) : -1;
+  };
+  win.dirplayer_ruffleHitTestOwned = (ownerKey: string, spriteNum: number, x: number, y: number) => {
+    const host = ownerHostForRoute(ownerKey);
+    return host ? hitTestForOwner(host, spriteNum, x, y) : 0;
+  };
+  win.dirplayer_ruffleGetFlashPropertyOwned = (ownerKey: string, spriteNum: number, target: string, propNum: number) => {
+    const host = ownerHostForRoute(ownerKey);
+    return host ? getFlashPropertyForOwner(host, spriteNum, target, propNum) : null;
+  };
+  win.dirplayer_ruffleSetFlashPropertyOwned = (ownerKey: string, spriteNum: number, target: string, propNum: number, value: string) => {
+    const host = ownerHostForRoute(ownerKey);
+    return host ? setFlashPropertyForOwner(host, spriteNum, target, propNum, value) : false;
+  };
+  win.dirplayer_ruffleTellTargetOwned = (ownerKey: string, spriteNum: number, target: string, action: string) => {
+    const host = ownerHostForRoute(ownerKey);
+    if (host) tellTargetForOwner(host, spriteNum, target, action);
+  };
+  win.dirplayer_isFlashInstanceReadyOwned = (
+    ownerKey: string,
+    spriteNum: number,
+    generation: number,
+  ): FlashReadyResult => {
+    const host = ownerHostForRoute(ownerKey);
+    return host ? readFlashReadyAtGeneration(host, spriteNum, generation) : flashOwnedFailure('unknown-owner');
+  };
 }
 
 /**
@@ -1836,7 +2740,7 @@ function applyFrameSetting(
     // can leave it frozen — so flip play() first, then GotoFrame to clear the
     // MovieClip's own stopped flag and advance from N.
     instance.stopped = false;
-    pinTarget.delete(spriteNum);
+    pinTargetFor(instance).delete(spriteNum);
     playerExec(instance, 'play');
     if (isNumeric) {
       applyGotoPlay(instance, parseInt(trimmed, 10));
@@ -1901,7 +2805,7 @@ function stopFlash(spriteNum: number): void {
     queueOp(spriteNum, { kind: 'stop' });
     return;
   }
-  pinTarget.delete(spriteNum);
+  pinTargetFor(instance).delete(spriteNum);
   instance.stopped = true;
   try {
     // Stop the root TIMELINE, not the whole player. `player.pause()` suspends
@@ -1941,7 +2845,7 @@ function playFlashInstance(instance: FlashInstance, spriteNum: number, host?: Fl
   // Cancel any in-flight pin from a `mySprite.frame = N` call earlier
   // in this same Lingo dispatch — otherwise the scheduled RAF stop
   // would undo our play() a frame later (BS69 shrink animation).
-  pinTarget.delete(spriteNum);
+  pinTargetFor(instance).delete(spriteNum);
   instance.stopped = false;
   playerExec(instance, 'play');
   const cur = parseInt(playerGetVar(instance, '/:_currentframe') || '1', 10) || 1;
@@ -1976,7 +2880,7 @@ function rewindFlash(spriteNum: number): void {
     queueOp(spriteNum, { kind: 'rewind' });
     return;
   }
-  pinTarget.delete(spriteNum);
+  pinTargetFor(instance).delete(spriteNum);
   instance.stopped = true;
   playerExec(instance, 'GotoFrame', [1, true]);
 }
@@ -2296,6 +3200,7 @@ export function initFlashBridge(
   win.dirplayer_ruffleSetFlashProperty = setFlashProperty;
   win.dirplayer_ruffleTellTarget = tellTarget;
   win.dirplayer_ruffleRegisterLingoCallback_dirplayer = registerLingoCallback;
+  installOwnerFlashRoutes(win);
 
   // Expose dirplayer's WASM exports as window.wasmModule so that Ruffle's
   // wasm_bindgen extern (js_namespace = wasmModule) can resolve

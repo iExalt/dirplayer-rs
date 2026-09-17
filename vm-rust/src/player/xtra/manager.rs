@@ -54,13 +54,13 @@ pub(crate) struct FileIoOpenRequest {
     pub(crate) mode: i32,
 }
 
-use super::budapi::BudApiXtra;
+use super::budapi::{BudApiHostIntent, BudApiState, BudApiXtra};
 use super::curl::{CurlXtra, CurlXtraManager};
 use super::external;
 use super::fileio::FileIoXtraManager;
 use super::leechprotection::LeechProtectionXtra;
 use super::multiuser::MultiuserXtraManager;
-use super::openurl::OpenUrlXtra;
+use super::openurl::{OpenUrlHostIntent, OpenUrlXtra};
 use super::sysmenu::{SysMenuHostIntent, SysMenuManager, SysMenuXtra};
 use super::xmlparser::XmlParserXtraManager;
 
@@ -90,6 +90,8 @@ pub(crate) enum XtraPendingIntent {
     },
     FileIoOpen(FileIoOpenRequest),
     SysMenu(SysMenuHostIntent),
+    BudApi(BudApiHostIntent),
+    OpenUrl(OpenUrlHostIntent),
 }
 
 pub(crate) enum XtraPendingOrValue {
@@ -105,6 +107,8 @@ impl XtraPendingIntent {
             | Self::CurlExec { owner, .. } => owner,
             Self::FileIoOpen(request) => &request.owner,
             Self::SysMenu(request) => request.owner(),
+            Self::BudApi(request) => request.owner(),
+            Self::OpenUrl(request) => &request.owner,
         }
     }
 
@@ -114,7 +118,7 @@ impl XtraPendingIntent {
             | Self::MultiuserSend { instance_id, generation, .. }
             | Self::CurlExec { instance_id, generation, .. } => (*instance_id, *generation),
             Self::FileIoOpen(request) => (request.instance_id, request.generation),
-            Self::SysMenu(_) => (0, 0),
+            Self::SysMenu(_) | Self::BudApi(_) | Self::OpenUrl(_) => (0, 0),
         }
     }
 
@@ -125,7 +129,8 @@ impl XtraPendingIntent {
     pub(crate) fn invalidated(&self, owner: &OwnerToken, generation: u64) -> bool {
         !self.owner().same_identity(owner)
             || !self.owner().is_arena_live()
-            || (self.instance().1 != generation && !matches!(self, Self::SysMenu(_)))
+            || (self.instance().1 != generation
+                && !matches!(self, Self::SysMenu(_) | Self::BudApi(_) | Self::OpenUrl(_)))
     }
 }
 
@@ -158,24 +163,28 @@ impl Drop for XtraTeardownRequest {
 /// Xtra state bound to one player owner. Instance numbers are only meaningful
 /// inside this state; canonical dispatch never consults a process-global map.
 pub struct XtraManagerState {
+    pub(crate) owner: OwnerToken,
     pub(crate) external: external::ExternalXtraState,
     pub(crate) multiuser: MultiuserXtraManager,
     pub(crate) curl: CurlXtraManager,
     pub(crate) fileio: FileIoXtraManager,
     pub(crate) xmlparser: XmlParserXtraManager,
     pub(crate) sysmenu: SysMenuManager,
+    pub(crate) budapi: BudApiState,
     pub(crate) teardown_requests: Vec<XtraTeardownRequest>,
 }
 
 impl XtraManagerState {
     pub(crate) fn new(owner: OwnerToken) -> Self {
         Self {
+            owner: owner.clone(),
             external: external::ExternalXtraState::default(),
             multiuser: MultiuserXtraManager::new_with_owner(owner.clone()),
             curl: CurlXtraManager::new_with_owner(owner.clone()),
             fileio: FileIoXtraManager::new_with_owner(owner.clone()),
             xmlparser: XmlParserXtraManager::new_with_owner(owner.clone()),
             sysmenu: SysMenuManager::new(owner),
+            budapi: BudApiState::default(),
             teardown_requests: Vec::new(),
         }
     }
@@ -187,18 +196,21 @@ impl XtraManagerState {
         self.fileio.reset();
         self.xmlparser.reset();
         self.sysmenu.reset();
+        self.budapi = BudApiState::default();
         self.teardown_requests
             .extend(self.multiuser.take_teardown_requests());
         self.teardown_requests.extend(self.curl.take_teardown_requests());
     }
 
     pub(crate) fn rebind_owner(&mut self, owner: OwnerToken) {
+        self.owner = owner.clone();
         self.external.cancel_pending_loads();
         self.multiuser.rebind_owner(owner.clone());
         self.curl.rebind_owner(owner.clone());
         self.fileio.rebind_owner(owner.clone());
         self.xmlparser.rebind_owner(owner.clone());
         self.sysmenu.rebind_owner(owner);
+        self.budapi = BudApiState::default();
     }
 
     pub(crate) fn take_teardown_requests(&mut self) -> Vec<XtraTeardownRequest> {
@@ -240,12 +252,34 @@ impl XtraManagerState {
                 self.fileio.instance_generation(request.instance_id),
             ),
             XtraPendingIntent::SysMenu(request) => {
-                if !self.sysmenu.owner.same_identity(request.owner())
-                    || !self.sysmenu.owner.is_arena_live()
+                if !self.owner.same_identity(request.owner())
+                    || !request.owner().is_arena_live()
                 {
                     return Err(ScriptError::new_code(
                         crate::player::ScriptErrorCode::InvalidReference,
                         "stale or foreign SysMenu pending intent".to_owned(),
+                    ));
+                }
+                return Ok(());
+            }
+            XtraPendingIntent::BudApi(request) => {
+                if !self.owner.same_identity(request.owner())
+                    || !request.owner().is_arena_live()
+                {
+                    return Err(ScriptError::new_code(
+                        crate::player::ScriptErrorCode::InvalidReference,
+                        "stale BudAPI host intent".to_owned(),
+                    ));
+                }
+                return Ok(());
+            }
+            XtraPendingIntent::OpenUrl(request) => {
+                if !self.owner.same_identity(&request.owner)
+                    || !request.owner.is_arena_live()
+                {
+                    return Err(ScriptError::new_code(
+                        crate::player::ScriptErrorCode::InvalidReference,
+                        "stale OpenURL host intent".to_owned(),
                     ));
                 }
                 return Ok(());
@@ -433,6 +467,184 @@ where
         .unwrap_or_else(|| Err(crate::player::cancelled_scope_error()))
 }
 
+pub(crate) fn execute_budapi_host_intent_with<F>(
+    session: &std::rc::Rc<std::cell::RefCell<crate::player::session::RuntimeSession>>,
+    player_id: crate::player::session::PlayerId,
+    intent: BudApiHostIntent,
+    host: F,
+) -> Result<DatumRef, ScriptError>
+where
+    F: FnOnce(&BudApiHostIntent) -> bool,
+{
+    let pending = XtraPendingIntent::BudApi(intent.clone());
+    let valid = session.borrow_mut().with_player(player_id, |context| {
+        context.player.xtra_manager_state.validate_pending_intent(&pending)
+    });
+    match valid {
+        Some(Ok(())) => {}
+        Some(Err(error)) => return Err(error),
+        None => return Err(crate::player::cancelled_scope_error()),
+    }
+    let success = host(&intent);
+    session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            if !intent.owner().same_identity(&context.player.owner)
+                || !intent.owner().is_arena_live()
+            {
+                return Err(crate::player::cancelled_scope_error());
+            }
+            Ok(context.player.alloc_datum(Datum::Int(if success { 1 } else { 0 })))
+        })
+        .unwrap_or_else(|| Err(crate::player::cancelled_scope_error()))
+}
+
+fn execute_budapi_clipboard_read(
+    session: &std::rc::Rc<std::cell::RefCell<crate::player::session::RuntimeSession>>,
+    player_id: crate::player::session::PlayerId,
+    intent: BudApiHostIntent,
+) -> Result<DatumRef, ScriptError> {
+    let pending = XtraPendingIntent::BudApi(intent.clone());
+    let valid = session.borrow_mut().with_player(player_id, |context| {
+        context.player.xtra_manager_state.validate_pending_intent(&pending)
+    });
+    match valid {
+        Some(Ok(())) => {}
+        Some(Err(error)) => return Err(error),
+        None => return Err(crate::player::cancelled_scope_error()),
+    }
+    session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            if !intent.owner().same_identity(&context.player.owner)
+                || !intent.owner().is_arena_live()
+            {
+                return Err(crate::player::cancelled_scope_error());
+            }
+            let text = context.player.xtra_manager_state.budapi.clipboard_text.clone();
+            Ok(context.player.alloc_datum(Datum::String(text)))
+        })
+        .unwrap_or_else(|| Err(crate::player::cancelled_scope_error()))
+}
+
+async fn execute_budapi_clipboard_write(
+    session: &std::rc::Rc<std::cell::RefCell<crate::player::session::RuntimeSession>>,
+    player_id: crate::player::session::PlayerId,
+    intent: BudApiHostIntent,
+) -> Result<DatumRef, ScriptError> {
+    let pending = XtraPendingIntent::BudApi(intent.clone());
+    let valid = session.borrow_mut().with_player(player_id, |context| {
+        context.player.xtra_manager_state.validate_pending_intent(&pending)
+    });
+    match valid {
+        Some(Ok(())) => {}
+        Some(Err(error)) => return Err(error),
+        None => return Err(crate::player::cancelled_scope_error()),
+    }
+    #[cfg(target_arch = "wasm32")]
+    let _clipboard_ok = {
+        let text = match &intent {
+            BudApiHostIntent::ClipboardWrite { text, .. } => text,
+            _ => unreachable!("clipboard write executor received another intent"),
+        };
+        // The owner-local fallback is committed only after the host promise
+        // settles and the owner fence below succeeds. This keeps a retired
+        // generation from writing clipboard state into its replacement.
+        write_clipboard_best_effort(text).await
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = intent;
+        return Err(ScriptError::new(
+            "BudAPI clipboard write requires the browser host executor".to_owned(),
+        ));
+    }
+    #[cfg(target_arch = "wasm32")]
+    session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            if !intent.owner().same_identity(&context.player.owner)
+                || !intent.owner().is_arena_live()
+            {
+                return Err(crate::player::cancelled_scope_error());
+            }
+            let text = match &intent {
+                BudApiHostIntent::ClipboardWrite { text, .. } => text.clone(),
+                _ => unreachable!("clipboard write executor received another intent"),
+            };
+            context.player.xtra_manager_state.budapi.clipboard_text = text;
+            Ok(context.player.alloc_datum(Datum::Int(1)))
+        })
+        .unwrap_or_else(|| Err(crate::player::cancelled_scope_error()))
+}
+
+/// Call the browser clipboard API without allowing a missing/insecure
+/// capability to throw through the WASM boundary.  The owner-local fallback
+/// is committed by the caller only after this operation and its owner fence.
+#[cfg(target_arch = "wasm32")]
+async fn write_clipboard_best_effort(text: &str) -> bool {
+    use wasm_bindgen::{JsCast, JsValue};
+
+    let Some(window) = web_sys::window() else {
+        return false;
+    };
+    let navigator = window.navigator();
+    let clipboard = match js_sys::Reflect::get(
+        navigator.as_ref(),
+        &JsValue::from_str("clipboard"),
+    ) {
+        Ok(value) if !value.is_null() && !value.is_undefined() => value,
+        _ => return false,
+    };
+    let write_text = match js_sys::Reflect::get(&clipboard, &JsValue::from_str("writeText"))
+        .ok()
+        .and_then(|value| value.dyn_into::<js_sys::Function>().ok())
+    {
+        Some(function) => function,
+        None => return false,
+    };
+    let promise = match write_text.call1(&clipboard, &JsValue::from_str(text)) {
+        Ok(value) => match value.dyn_into::<js_sys::Promise>() {
+            Ok(promise) => promise,
+            Err(_) => return false,
+        },
+        Err(_) => return false,
+    };
+    wasm_bindgen_futures::JsFuture::from(promise).await.is_ok()
+}
+
+pub(crate) fn execute_openurl_host_intent_with<F>(
+    session: &std::rc::Rc<std::cell::RefCell<crate::player::session::RuntimeSession>>,
+    player_id: crate::player::session::PlayerId,
+    intent: OpenUrlHostIntent,
+    host: F,
+) -> Result<DatumRef, ScriptError>
+where
+    F: FnOnce(&OpenUrlHostIntent) -> bool,
+{
+    let pending = XtraPendingIntent::OpenUrl(intent.clone());
+    let valid = session.borrow_mut().with_player(player_id, |context| {
+        context.player.xtra_manager_state.validate_pending_intent(&pending)
+    });
+    match valid {
+        Some(Ok(())) => {}
+        Some(Err(error)) => return Err(error),
+        None => return Err(crate::player::cancelled_scope_error()),
+    }
+    let success = host(&intent);
+    session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            if !intent.owner.same_identity(&context.player.owner)
+                || !intent.owner.is_arena_live()
+            {
+                return Err(crate::player::cancelled_scope_error());
+            }
+            Ok(context.player.alloc_datum(Datum::Int(if success { 1 } else { 0 })))
+        })
+        .unwrap_or_else(|| Err(crate::player::cancelled_scope_error()))
+}
+
 /// Execute an owner-validated transport intent outside the VM borrow.  The
 /// command/evaluator layer owns the await boundary; this function is the one
 /// place where the typed intent is handed to a transport implementation.
@@ -467,6 +679,61 @@ pub(crate) async fn execute_pending_intent(
                     #[cfg(not(target_arch = "wasm32"))]
                     log::info!("[SysMenu message box] {}", text);
                 }
+            })
+        }
+        XtraPendingIntent::BudApi(request) => {
+            if matches!(&request, BudApiHostIntent::ClipboardRead { .. }) {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let _ = request;
+                    return Err(ScriptError::new(
+                        "BudAPI clipboard read requires the browser host executor".to_owned(),
+                    ));
+                }
+                #[cfg(target_arch = "wasm32")]
+                return execute_budapi_clipboard_read(session, player_id, request);
+            }
+            if matches!(&request, BudApiHostIntent::ClipboardWrite { .. }) {
+                return execute_budapi_clipboard_write(session, player_id, request).await;
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                return Err(ScriptError::new(
+                    "BudAPI browser host effect requires the browser executor".to_owned(),
+                ));
+            }
+            execute_budapi_host_intent_with(session, player_id, request, |request| match request {
+                BudApiHostIntent::Open { target, .. } => {
+                    #[cfg(target_arch = "wasm32")]
+                    { web_sys::window().map(|window| window.open_with_url_and_target(target, "_blank").is_ok()).unwrap_or(false) }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    { let _ = target; unreachable!("BudAPI open requires the browser executor") }
+                }
+                BudApiHostIntent::Alert { text, .. } => {
+                    #[cfg(target_arch = "wasm32")]
+                    { web_sys::window().map(|window| window.alert_with_message(text).is_ok()).unwrap_or(false) }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    { let _ = text; unreachable!("BudAPI alert requires the browser executor") }
+                }
+                BudApiHostIntent::ClipboardWrite { text, .. } => {
+                    let _ = text;
+                    unreachable!("clipboard writes use their async completion path")
+                }
+                BudApiHostIntent::ClipboardRead { .. } => unreachable!("clipboard reads use their string completion path"),
+            })
+        }
+        XtraPendingIntent::OpenUrl(request) => {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let _ = request;
+                return Err(ScriptError::new(
+                    "OpenURL browser host effect requires the browser executor".to_owned(),
+                ));
+            }
+            #[cfg(target_arch = "wasm32")]
+            execute_openurl_host_intent_with(session, player_id, request, |request| {
+                #[cfg(target_arch = "wasm32")]
+                { web_sys::window().map(|window| window.open_with_url_and_target(&request.url, "_blank").is_ok()).unwrap_or(false) }
             })
         }
         XtraPendingIntent::CurlExec {
@@ -756,6 +1023,32 @@ pub(crate) fn prepare_sysmenu_handler_explicit(
     }))
 }
 
+pub(crate) fn prepare_budapi_handler_explicit(
+    player: &mut crate::player::DirPlayer,
+    symbols: &crate::player::symbols::symbol_table::SymbolTable,
+    name: &str,
+    args: &[DatumRef],
+) -> Option<Result<XtraPendingOrValue, ScriptError>> {
+    if !BudApiXtra::has_handler(name) {
+        return None;
+    }
+    Some(player.with_xtra_manager_state(|state, player| {
+        BudApiXtra::prepare_handler(player, &mut state.budapi, symbols, name, args)
+    }))
+}
+
+pub(crate) fn prepare_openurl_handler_explicit(
+    player: &mut crate::player::DirPlayer,
+    symbols: &crate::player::symbols::symbol_table::SymbolTable,
+    name: &str,
+    args: &[DatumRef],
+) -> Option<Result<XtraPendingOrValue, ScriptError>> {
+    if !OpenUrlXtra::has_handler(name) {
+        return None;
+    }
+    Some(OpenUrlXtra::prepare_handler(player, name, args, symbols))
+}
+
 pub fn is_xtra_registered(player: &crate::player::DirPlayer, name: &str) -> bool {
     let name_lower = name.to_lowercase();
     // External plugin xtras win over built-ins (per the spec). This is
@@ -803,7 +1096,9 @@ pub fn try_call_xtra_static_handler_with_symbols(
     symbols: &mut crate::player::symbols::symbol_table::SymbolTable,
 ) -> Option<Result<DatumRef, ScriptError>> {
     if OpenUrlXtra::has_handler(name) {
-        return Some(OpenUrlXtra::call_handler(name, args, symbols));
+        return Some(Err(ScriptError::new(
+            "OpenURL browser effect requires the owner host executor".to_owned(),
+        )));
     }
     if SysMenuXtra::has_handler(name) {
         return Some(player.with_xtra_manager_state(|state, player| {
@@ -811,29 +1106,14 @@ pub fn try_call_xtra_static_handler_with_symbols(
         }));
     }
     if BudApiXtra::has_handler(name) {
-        return Some(BudApiXtra::call_handler(player, name, args, symbols));
+        return Some(player.with_xtra_manager_state(|state, player| {
+            BudApiXtra::call_handler(player, &mut state.budapi, name, args, symbols)
+        }));
     }
     if CurlXtra::has_static_handler(name) {
         return Some(CurlXtra::call_static_handler_explicit(player, symbols, name, args));
     }
     None
-}
-
-pub fn has_xtra_static_async_handler(name: &str) -> bool {
-    CurlXtra::has_static_async_handler(name)
-}
-
-pub async fn call_xtra_static_async_handler(
-    name: &str,
-    args: &Vec<DatumRef>,
-) -> Result<DatumRef, ScriptError> {
-    if CurlXtra::has_static_async_handler(name) {
-        return CurlXtra::call_static_async_handler(name, args).await;
-    }
-    Err(ScriptError::new(format!(
-        "No async static handler {} found in any Xtra",
-        name
-    )))
 }
 
 #[cfg(test)]
@@ -1586,6 +1866,210 @@ mod tests {
         assert_eq!(execute_failed_fileio_open(1), -43);
         assert_eq!(execute_failed_fileio_open(0), 0);
         assert_eq!(execute_failed_fileio_open(2), 0);
+    }
+
+    #[test]
+    fn budapi_state_is_owner_local_and_foreign_args_are_rejected() {
+        use async_std::channel;
+        use std::{cell::RefCell, rc::Rc};
+        use crate::director::lingo::datum::Datum;
+        use crate::player::session::RuntimeSession;
+        use crate::player::symbols::symbol_table::SymbolOwner;
+
+        let session = Rc::new(RefCell::new(RuntimeSession::new(SymbolOwner {
+            session: 915,
+            generation: 1,
+        })));
+        let (tx_a, _rx_a) = channel::unbounded();
+        let (tx_b, _rx_b) = channel::unbounded();
+        assert!(session.borrow_mut().add_player(1, tx_a));
+        assert!(session.borrow_mut().add_player(2, tx_b));
+
+        session.borrow_mut().with_player(1, |context| {
+            let receiver = context.player.alloc_datum(Datum::Void);
+            let value = context.player.alloc_datum(Datum::Int(37));
+            let symbols = &*context.symbols;
+            context.player.with_xtra_manager_state(|state, player| {
+                BudApiXtra::call_handler(
+                    player,
+                    &mut state.budapi,
+                    "baSetVolume",
+                    &vec![receiver, value],
+                    symbols,
+                )
+            }).unwrap();
+        });
+        session.borrow_mut().with_player(2, |context| {
+            let receiver = context.player.alloc_datum(Datum::Void);
+            let value = context.player.alloc_datum(Datum::Int(91));
+            let symbols = &*context.symbols;
+            context.player.with_xtra_manager_state(|state, player| {
+                BudApiXtra::call_handler(
+                    player,
+                    &mut state.budapi,
+                    "baSetVolume",
+                    &vec![receiver, value],
+                    symbols,
+                )
+            })
+        }).unwrap();
+        let volume_a = session
+            .borrow_mut()
+            .with_player(1, |context| context.player.xtra_manager_state.budapi.sound_volume)
+            .unwrap();
+        let volume_b = session
+            .borrow_mut()
+            .with_player(2, |context| context.player.xtra_manager_state.budapi.sound_volume)
+            .unwrap();
+        let volumes = (volume_a, volume_b);
+        assert_eq!(volumes, (37, 91));
+
+        let owner_a = session
+            .borrow_mut()
+            .with_player(1, |context| context.player.owner.clone())
+            .unwrap();
+        session
+            .borrow_mut()
+            .reset_player_owned(1, &owner_a)
+            .expect("owner A reset should succeed");
+        let reset_volume_a = session
+            .borrow_mut()
+            .with_player(1, |context| context.player.xtra_manager_state.budapi.sound_volume)
+            .unwrap();
+        let reset_volume_b = session
+            .borrow_mut()
+            .with_player(2, |context| context.player.xtra_manager_state.budapi.sound_volume)
+            .unwrap();
+        let reset_volumes = (reset_volume_a, reset_volume_b);
+        assert_eq!(reset_volumes, (100, 91), "reset must clear only owner A BudAPI state");
+
+        let owner_a_after_reset = session.borrow_mut().with_player(1, |context| {
+            context.player.xtra_manager_state.budapi.clipboard_text = "A clipboard".to_owned();
+            context.player.owner.clone()
+        }).unwrap();
+        let owner_b = session.borrow_mut().with_player(2, |context| {
+            context.player.xtra_manager_state.budapi.clipboard_text = "B clipboard".to_owned();
+            context.player.owner.clone()
+        }).unwrap();
+        let read_clipboard = |player_id, owner: OwnerToken| {
+            let value = execute_budapi_clipboard_read(
+                &session,
+                player_id,
+                BudApiHostIntent::ClipboardRead { owner },
+            ).expect("owner-local clipboard read should succeed");
+            session.borrow_mut().with_player(player_id, |context| {
+                match context.player.allocator.try_get_datum(&value) {
+                    Some(Datum::String(text)) => text.clone(),
+                    _ => panic!("unexpected clipboard datum"),
+                }
+            }).unwrap()
+        };
+        assert_eq!(read_clipboard(1, owner_a_after_reset.clone()), "A clipboard");
+        assert_eq!(read_clipboard(2, owner_b), "B clipboard");
+        session.borrow_mut().reset_player_owned(1, &owner_a_after_reset)
+            .expect("owner A reset should succeed");
+        let owner_a_replacement = session.borrow_mut().with_player(1, |context| context.player.owner.clone()).unwrap();
+        assert_eq!(read_clipboard(1, owner_a_replacement), "");
+        let owner_b_replacement = session.borrow_mut().with_player(2, |context| context.player.owner.clone()).unwrap();
+        assert_eq!(read_clipboard(2, owner_b_replacement), "B clipboard");
+
+        let foreign_arg = session
+            .borrow_mut()
+            .with_player(1, |context| context.player.alloc_datum(Datum::String("foreign".to_owned())))
+            .unwrap();
+        let rejected = session.borrow_mut().with_player(2, |context| {
+            prepare_openurl_handler_explicit(context.player, context.symbols, "gsOpenURL", &[foreign_arg])
+                .expect("OpenURL handler should be recognized")
+        });
+        assert!(matches!(rejected, Some(Err(error)) if error.code == crate::player::ScriptErrorCode::InvalidReference));
+    }
+
+    #[test]
+    fn budapi_host_intent_reentry_is_borrow_free_and_reset_rejects_late_result() {
+        use async_std::channel;
+        use std::{cell::{Cell, RefCell}, rc::Rc};
+        use crate::director::lingo::datum::Datum;
+        use crate::player::session::RuntimeSession;
+        use crate::player::symbols::symbol_table::SymbolOwner;
+
+        let session = Rc::new(RefCell::new(RuntimeSession::new(SymbolOwner {
+            session: 916,
+            generation: 1,
+        })));
+        let (tx, _rx) = channel::unbounded();
+        assert!(session.borrow_mut().add_player(1, tx));
+        let (intent, owner) = session
+            .borrow_mut()
+            .with_player(1, |context| {
+                let message = context.player.alloc_datum(Datum::String("owned".to_owned()));
+                let outcome = prepare_budapi_handler_explicit(
+                    context.player,
+                    context.symbols,
+                    "baMsgBox",
+                    &[message],
+                )
+                .expect("BudAPI handler should be recognized")
+                .expect("BudAPI message box should prepare");
+                let intent = match outcome {
+                    XtraPendingOrValue::Pending(XtraPendingIntent::BudApi(intent)) => intent,
+                    _ => panic!("message box did not produce a typed BudAPI intent"),
+                };
+                (intent, context.player.owner.clone())
+            })
+            .unwrap();
+        let reentered = Rc::new(Cell::new(false));
+        let reentered_for_host = reentered.clone();
+        let result = execute_budapi_host_intent_with(&session, 1, intent, |request| {
+            assert!(session.try_borrow_mut().is_ok());
+            reentered_for_host.set(true);
+            session
+                .borrow_mut()
+                .reset_player_owned(1, &owner)
+                .expect("host reset should succeed");
+            let _ = request;
+            true
+        });
+        assert!(reentered.get());
+        assert!(result.is_err(), "completion after owner reset must be rejected");
+    }
+
+    #[test]
+    fn budapi_host_intent_cannot_cross_players() {
+        use async_std::channel;
+        use std::{cell::{Cell, RefCell}, rc::Rc};
+        use crate::director::lingo::datum::Datum;
+        use crate::player::session::RuntimeSession;
+        use crate::player::symbols::symbol_table::SymbolOwner;
+
+        let session = Rc::new(RefCell::new(RuntimeSession::new(SymbolOwner {
+            session: 917,
+            generation: 1,
+        })));
+        let (tx_a, _rx_a) = channel::unbounded();
+        let (tx_b, _rx_b) = channel::unbounded();
+        assert!(session.borrow_mut().add_player(1, tx_a));
+        assert!(session.borrow_mut().add_player(2, tx_b));
+        let intent = session
+            .borrow_mut()
+            .with_player(1, |context| {
+                let message = context.player.alloc_datum(Datum::String("cross-owner".to_owned()));
+                match prepare_budapi_handler_explicit(context.player, context.symbols, "baMsgBox", &[message])
+                    .expect("BudAPI handler should be recognized")
+                    .expect("BudAPI message box should prepare")
+                {
+                    XtraPendingOrValue::Pending(XtraPendingIntent::BudApi(intent)) => intent,
+                    _ => panic!("message box did not produce a typed BudAPI intent"),
+                }
+            })
+            .unwrap();
+        let invoked = Rc::new(Cell::new(false));
+        let invoked_by_host = invoked.clone();
+        let result = execute_budapi_host_intent_with(&session, 2, intent, |_request| {
+            invoked_by_host.set(true);
+            true
+        });
+        assert!(result.is_err(), "foreign player must reject the host intent");
+        assert!(!invoked.get(), "foreign host intent must not invoke the browser");
     }
 }
 
