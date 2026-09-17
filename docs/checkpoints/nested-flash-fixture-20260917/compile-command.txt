@@ -1,0 +1,1 @@
+CARGO_TARGET_DIR=/private/tmp/dirplayer-parser-review-build/target CARGO_INCREMENTAL=0 mise exec -- cargo test --manifest-path vm-rust/Cargo.toml --test mod test_nested_flash_fixture_uses_production_director_parser --no-run --locked --offline --message-format=json

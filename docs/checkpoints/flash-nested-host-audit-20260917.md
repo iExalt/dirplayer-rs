@@ -50,3 +50,57 @@ Acceptance requires real Ruffle first access, correct child frame destination,
 continued operation after child reset, failed-startup cleanup, and stale
 publication/callback rejection without affecting the other root. Instance-origin
 callback work beyond this boundary remains the separate Stage 2.7 requirement.
+
+## Retirement paths requiring final verification
+
+The resumed review after published `3073bf6b` identified a separate callback
+cleanup boundary in the local child implementation. Normal provider teardown
+calls `FlashOwnerController.disposeNestedTree` before disposing its root host,
+but `FlashOwnerHost.invalidateAfterCapabilityFailure` and direct host disposal
+recurse through `disposeNestedFlashHosts`. That helper disposes child hosts
+without removing the controller registrations or owner-qualified VM callback
+tables. Host liveness checks alone do not prove callback-registration reclamation.
+
+The child component must route every retirement path through exact subtree
+callback cleanup, including capability failure after descendants are registered.
+Verification should use the production controller and real VM registrar, inject
+a failing captured capability, and demonstrate retired descendant callback
+removal while an independent root and reentrant replacement survive. This is an
+open review finding, not an accepted repair or passing test claim.
+
+The direct-reset regression must also prove both replacement loops execute.
+Command completion can use its existing completion future; event verification
+must observe consumption or an effect without depending on a scheduler-specific
+instantaneous queue length. A closed old queue can still contain pre-close work,
+so retirement assertions drain it before checking its terminal closed state.
+
+### Local retirement repair reviewed
+
+The local repair now attaches both parent-subtree and exact-host retirement
+hooks. An individual child's capability failure removes that child's callback
+registration as well as its descendants; parent failure removes its subtree.
+Hooks retain host identity and capability-scoped callback disposers, protecting
+replacement registrations. The navigator reviewed the critical interfaces at:
+
+- `src/services/flashPlayerManager.ts`: SHA-256 `fc694774a0df235d552be6ee4295fd3f735cf34b16bcdbc8e35b4665006c65eb`.
+- `src/services/flashPlayerManager.test.ts`: SHA-256 `5a2a9305cc078addaf1ad1bb6a155bc9192054f11dd5106ac2b40579c0c163fe`.
+
+The implementation pilot reports one passing suite with nine tests using
+`CI=true mise exec -- npm test -- --watchAll=false --runInBand src/services/flashPlayerManager.test.ts`.
+The lead supplied the terminal result, but no durable raw log was retained for
+this run. Tests use the real VM callback registrar and cover a failed child and
+grandchild, unaffected sibling and independent root, and a stale disposer after
+replacement. This is bounded frontend evidence, not acceptance of the complete
+child lifecycle. Production Director parsing subsequently passed its one named
+integration test (see `nested-flash-fixture-20260917/`). Native reset execution
+and the real two-root child Ruffle browser gate remain pending.
+
+### Publication boundary
+
+This documentation checkpoint publishes review findings and bounded historical
+evidence only. Child Flash and MouseDown runtime changes, frontend changes,
+fixture sources and browser tests remain unpublished working-tree changes.
+The latest native direct-reset regression failed; the subsequent MouseDown
+repair is incomplete. The last WASM compilation failed; its local mechanical
+repairs have not yet passed a fresh combined build. No child lifecycle acceptance
+or Stage 2 completion is claimed.

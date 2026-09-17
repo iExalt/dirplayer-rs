@@ -77,3 +77,26 @@ all 419 source hashes and the live manager hash.
 source and artifact identity, outputs and limits. The three-branch component is
 accepted locally. Browser execution is not claimed by this isolated check, and
 full Stage 2.2 remains open.
+
+## Current cooperative accounting
+
+A follow-up source search at `3073bf6b` found `total_backjumps` initialized and
+incremented in `DriverContinuation`, but no production reader of that field.
+The compiled runner's comment about an existing runaway watchdog therefore does
+not establish that the current owned driver enforces one. `IrExit::BackJump`
+also carries no count, although its runner may have processed 4096 jumps before
+returning. The production integration needs an explicit, tested accounting and
+yield policy; copying the old comment or incrementing once per batch is not
+evidence of equivalent responsiveness or runaway-loop handling. This is a
+source finding for the pending compiled-execution component, not an implemented
+watchdog or a new acceptance result.
+
+The same production-entry review found no construction of `BreakpointRequest`
+in the owned driver and no consumer of `find_breakpoint_for_bytecode`.
+`commands.rs` can execute and retain a `PendingAction::Breakpoint`, but that
+plumbing alone does not cause a pause. IR breakpoint escapes must be paired with
+an actual owned-driver breakpoint/step check and a production continuation test.
+The proposal also needs to examine the owner-specific breakpoint instrumentation
+cached on `Rc<HandlerDef>` under a numeric breakpoint generation: sharing a
+handler between owners must not reuse another owner's breakpoint decisions,
+and changing breakpoints while a frame is suspended must be handled explicitly.
