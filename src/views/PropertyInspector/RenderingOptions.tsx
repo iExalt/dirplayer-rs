@@ -1,26 +1,24 @@
 import { useState } from "react";
 import {
-  get_renderer_backend,
-  set_renderer_backend,
   is_webgl2_supported,
-  get_pfr_font_enabled,
-  set_pfr_font_enabled,
 } from "vm-rust";
+import { useVMHandle } from "../../components/VMProvider";
 import styles from "./styles.module.css";
 
 const STORAGE_KEY_BACKEND = "dirplayer_renderer_backend";
 const STORAGE_KEY_PFR = "dirplayer_pfr_enabled";
 
 export default function RenderingOptions() {
-  const [backend, setBackend] = useState(() => get_renderer_backend());
-  const [pfrEnabled, setPfrEnabled] = useState(() => get_pfr_font_enabled());
+  const handle = useVMHandle();
+  const [backend, setBackend] = useState(() => handle.renderer_backend());
+  const [pfrEnabled, setPfrEnabled] = useState(() => handle.pfr_font_enabled());
   const webgl2Supported = is_webgl2_supported();
 
   const handleBackendChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const value = e.target.value;
     try {
-      set_renderer_backend(value);
-      const actual = get_renderer_backend();
+      handle.set_renderer_backend(value);
+      const actual = handle.renderer_backend();
       setBackend(actual);
       localStorage.setItem(STORAGE_KEY_BACKEND, actual);
     } catch (err) {
@@ -30,7 +28,7 @@ export default function RenderingOptions() {
 
   const handlePfrToggle = (e: React.ChangeEvent<HTMLInputElement>) => {
     const enabled = e.target.checked;
-    set_pfr_font_enabled(enabled);
+    handle.set_pfr_font_enabled(enabled);
     setPfrEnabled(enabled);
     localStorage.setItem(STORAGE_KEY_PFR, String(enabled));
   };

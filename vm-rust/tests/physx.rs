@@ -19,7 +19,7 @@ use vm_rust::player::cast_member::{
     PhysXBodyType, PhysXConstraint, PhysXConstraintKind, PhysXPhysicsState, PhysXRigidBody,
     PhysXShapeKind, PhysXTerrain,
 };
-use vm_rust::player::symbols::symbol::Symbol;
+use vm_rust::player::symbols::symbol_table::SymbolTable;
 use vm_rust::player::handlers::datum_handlers::cast_member::{
     physx_gu_heightfield::GuHeightField,
     physx_gu_mesh::{box_vs_mesh, capsule_vs_mesh, sphere_vs_mesh, GuTriangleMesh},
@@ -59,9 +59,9 @@ fn build_floor_mesh(grid: usize) -> GuTriangleMesh {
     GuTriangleMesh::build(verts, tris)
 }
 
-fn make_dynamic_sphere(name: &str, pos: [f64; 3], radius: f64, mass: f64) -> PhysXRigidBody {
+fn make_dynamic_sphere(symbols: &mut SymbolTable, name: &str, pos: [f64; 3], radius: f64, mass: f64) -> PhysXRigidBody {
     let mut b = PhysXRigidBody::default();
-    b.name = Symbol::from_str(name);
+    b.name = symbols.intern(name);
     b.body_type = PhysXBodyType::Dynamic;
     b.shape = PhysXShapeKind::Sphere;
     b.position = pos;
@@ -72,9 +72,9 @@ fn make_dynamic_sphere(name: &str, pos: [f64; 3], radius: f64, mass: f64) -> Phy
     b
 }
 
-fn make_static_box(name: &str, pos: [f64; 3], half_extents: [f64; 3]) -> PhysXRigidBody {
+fn make_static_box(symbols: &mut SymbolTable, name: &str, pos: [f64; 3], half_extents: [f64; 3]) -> PhysXRigidBody {
     let mut b = PhysXRigidBody::default();
-    b.name = Symbol::from_str(name);
+    b.name = symbols.intern(name);
     b.body_type = PhysXBodyType::Static;
     b.shape = PhysXShapeKind::Box;
     b.position = pos;
@@ -85,9 +85,9 @@ fn make_static_box(name: &str, pos: [f64; 3], half_extents: [f64; 3]) -> PhysXRi
     b
 }
 
-fn make_static_concave_mesh_body(name: &str, mesh: GuTriangleMesh) -> PhysXRigidBody {
+fn make_static_concave_mesh_body(symbols: &mut SymbolTable, name: &str, mesh: GuTriangleMesh) -> PhysXRigidBody {
     let mut b = PhysXRigidBody::default();
-    b.name = Symbol::from_str(name);
+    b.name = symbols.intern(name);
     b.body_type = PhysXBodyType::Static;
     b.shape = PhysXShapeKind::ConcaveShape;
     b.triangle_mesh = Some(mesh);
@@ -97,10 +97,10 @@ fn make_static_concave_mesh_body(name: &str, mesh: GuTriangleMesh) -> PhysXRigid
     b
 }
 
-fn make_terrain(name: &str, hf: GuHeightField) -> PhysXTerrain {
+fn make_terrain(symbols: &mut SymbolTable, name: &str, hf: GuHeightField) -> PhysXTerrain {
     PhysXTerrain {
         id: 1,
-        name: Symbol::from_str(name),
+        name: symbols.intern(name),
         height_field: hf,
         friction: 0.5,
         restitution: 0.2,
@@ -109,11 +109,11 @@ fn make_terrain(name: &str, hf: GuHeightField) -> PhysXTerrain {
     }
 }
 
-fn run_seconds(state: &mut PhysXPhysicsState, secs: f64) {
+fn run_seconds(state: &mut PhysXPhysicsState, secs: f64, symbols: &SymbolTable) {
     let dt = 1.0 / 60.0;
     let frames = (secs / dt) as u32;
     for _ in 0..frames {
-        step_native(state, dt, 1);
+        step_native(state, dt, 1, symbols).expect("PhysX native step should succeed");
     }
 }
 
@@ -125,16 +125,17 @@ fn run_seconds(state: &mut PhysXPhysicsState, secs: f64) {
 #[ignore = "physx parity test — enable with `cargo test -- --ignored`"]
 fn sphere_drops_onto_static_box() {
     let mut state = PhysXPhysicsState::default();
+    let mut symbols = SymbolTable::new();
     state.initialized = true;
     state.gravity = [0.0, -9.81, 0.0];
-    let mut box_body = make_static_box("box", [0.0; 3], [2.0, 0.5, 2.0]);
+    let mut box_body = make_static_box(&mut symbols, "box", [0.0; 3], [2.0, 0.5, 2.0]);
     box_body.restitution = 0.0;
     state.bodies.push(box_body);
-    let mut ball = make_dynamic_sphere("ball", [0.0, 5.0, 0.0], 0.5, 1.0);
+    let mut ball = make_dynamic_sphere(&mut symbols, "ball", [0.0, 5.0, 0.0], 0.5, 1.0);
     ball.restitution = 0.0;
     state.bodies.push(ball);
 
-    run_seconds(&mut state, 3.0);
+    run_seconds(&mut state, 3.0, &symbols);
     let y = state.bodies[1].position[1];
     assert!((y - 1.0).abs() < 0.1, "sphere should rest at y≈1.0, got {y}");
 }
@@ -143,21 +144,22 @@ fn sphere_drops_onto_static_box() {
 #[ignore = "physx parity test"]
 fn sphere_drops_onto_static_sphere() {
     let mut state = PhysXPhysicsState::default();
+    let mut symbols = SymbolTable::new();
     state.initialized = true;
     state.gravity = [0.0, -9.81, 0.0];
     let mut ground = PhysXRigidBody::default();
-    ground.name = "ground".into();
+    ground.name = symbols.intern("ground");
     ground.body_type = PhysXBodyType::Static;
     ground.shape = PhysXShapeKind::Sphere;
     ground.radius = 5.0;
     ground.mass = 0.0;
     ground.restitution = 0.0;
     state.bodies.push(ground);
-    let mut ball = make_dynamic_sphere("ball", [0.0, 8.0, 0.0], 0.5, 1.0);
+    let mut ball = make_dynamic_sphere(&mut symbols, "ball", [0.0, 8.0, 0.0], 0.5, 1.0);
     ball.restitution = 0.0;
     state.bodies.push(ball);
 
-    run_seconds(&mut state, 3.0);
+    run_seconds(&mut state, 3.0, &symbols);
     let y = state.bodies[1].position[1];
     assert!((y - 5.5).abs() < 0.15, "sphere should rest at y≈5.5, got {y}");
 }
@@ -166,13 +168,14 @@ fn sphere_drops_onto_static_sphere() {
 #[ignore = "physx parity test"]
 fn box_drops_onto_static_box() {
     let mut state = PhysXPhysicsState::default();
+    let mut symbols = SymbolTable::new();
     state.initialized = true;
     state.gravity = [0.0, -9.81, 0.0];
-    let mut floor = make_static_box("floor", [0.0; 3], [2.0, 0.5, 2.0]);
+    let mut floor = make_static_box(&mut symbols, "floor", [0.0; 3], [2.0, 0.5, 2.0]);
     floor.restitution = 0.0;
     state.bodies.push(floor);
     let mut crate_box = PhysXRigidBody::default();
-    crate_box.name = "crate".into();
+    crate_box.name = symbols.intern("crate");
     crate_box.body_type = PhysXBodyType::Dynamic;
     crate_box.shape = PhysXShapeKind::Box;
     crate_box.position = [0.0, 5.0, 0.0];
@@ -182,7 +185,7 @@ fn box_drops_onto_static_box() {
     crate_box.restitution = 0.0;
     state.bodies.push(crate_box);
 
-    run_seconds(&mut state, 3.0);
+    run_seconds(&mut state, 3.0, &symbols);
     let y = state.bodies[1].position[1];
     assert!((y - 1.0).abs() < 0.1, "box should rest at y≈1.0, got {y}");
 }
@@ -191,10 +194,11 @@ fn box_drops_onto_static_box() {
 #[ignore = "physx parity test"]
 fn sphere_drops_onto_static_capsule() {
     let mut state = PhysXPhysicsState::default();
+    let mut symbols = SymbolTable::new();
     state.initialized = true;
     state.gravity = [0.0, -9.81, 0.0];
     let mut caps = PhysXRigidBody::default();
-    caps.name = "caps".into();
+    caps.name = symbols.intern("caps");
     caps.body_type = PhysXBodyType::Static;
     caps.shape = PhysXShapeKind::Capsule;
     caps.position = [0.0, 0.0, 0.0];
@@ -203,11 +207,11 @@ fn sphere_drops_onto_static_capsule() {
     caps.mass = 0.0;
     caps.restitution = 0.0;
     state.bodies.push(caps);
-    let mut ball = make_dynamic_sphere("ball", [0.0, 5.0, 0.0], 0.5, 1.0);
+    let mut ball = make_dynamic_sphere(&mut symbols, "ball", [0.0, 5.0, 0.0], 0.5, 1.0);
     ball.restitution = 0.0;
     state.bodies.push(ball);
 
-    run_seconds(&mut state, 3.0);
+    run_seconds(&mut state, 3.0, &symbols);
     let y = state.bodies[1].position[1];
     assert!((y - 1.0).abs() < 0.15, "sphere should rest at y≈1.0 on capsule, got {y}");
 }
@@ -216,13 +220,14 @@ fn sphere_drops_onto_static_capsule() {
 #[ignore = "physx parity test"]
 fn capsule_drops_onto_static_box() {
     let mut state = PhysXPhysicsState::default();
+    let mut symbols = SymbolTable::new();
     state.initialized = true;
     state.gravity = [0.0, -9.81, 0.0];
-    let mut floor = make_static_box("floor", [0.0; 3], [2.0, 0.5, 2.0]);
+    let mut floor = make_static_box(&mut symbols, "floor", [0.0; 3], [2.0, 0.5, 2.0]);
     floor.restitution = 0.0;
     state.bodies.push(floor);
     let mut caps = PhysXRigidBody::default();
-    caps.name = "caps".into();
+    caps.name = symbols.intern("caps");
     caps.body_type = PhysXBodyType::Dynamic;
     caps.shape = PhysXShapeKind::Capsule;
     caps.position = [0.0, 5.0, 0.0];
@@ -233,7 +238,7 @@ fn capsule_drops_onto_static_box() {
     caps.restitution = 0.0;
     state.bodies.push(caps);
 
-    run_seconds(&mut state, 3.0);
+    run_seconds(&mut state, 3.0, &symbols);
     let y = state.bodies[1].position[1];
     assert!((y - 0.9).abs() < 0.15, "capsule should rest at y≈0.9 on box, got {y}");
 }
@@ -242,10 +247,11 @@ fn capsule_drops_onto_static_box() {
 #[ignore = "physx parity test"]
 fn capsule_drops_onto_static_capsule() {
     let mut state = PhysXPhysicsState::default();
+    let mut symbols = SymbolTable::new();
     state.initialized = true;
     state.gravity = [0.0, -9.81, 0.0];
     let mut ground_caps = PhysXRigidBody::default();
-    ground_caps.name = "ground".into();
+    ground_caps.name = symbols.intern("ground");
     ground_caps.body_type = PhysXBodyType::Static;
     ground_caps.shape = PhysXShapeKind::Capsule;
     ground_caps.position = [0.0, 0.0, 0.0];
@@ -256,7 +262,7 @@ fn capsule_drops_onto_static_capsule() {
     state.bodies.push(ground_caps);
 
     let mut top_caps = PhysXRigidBody::default();
-    top_caps.name = "top".into();
+    top_caps.name = symbols.intern("top");
     top_caps.body_type = PhysXBodyType::Dynamic;
     top_caps.shape = PhysXShapeKind::Capsule;
     top_caps.position = [0.0, 4.0, 0.0];
@@ -266,7 +272,7 @@ fn capsule_drops_onto_static_capsule() {
     top_caps.restitution = 0.0;
     state.bodies.push(top_caps);
 
-    run_seconds(&mut state, 3.0);
+    run_seconds(&mut state, 3.0, &symbols);
     let y = state.bodies[1].position[1];
     assert!((y - 1.0).abs() < 0.2, "top capsule should rest at y≈1.0, got {y}");
 }
@@ -279,12 +285,13 @@ fn capsule_drops_onto_static_capsule() {
 #[ignore = "physx parity test"]
 fn sphere_drops_onto_concave_mesh_floor() {
     let mut state = PhysXPhysicsState::default();
+    let mut symbols = SymbolTable::new();
     state.initialized = true;
     state.gravity = [0.0, -9.81, 0.0];
-    state.bodies.push(make_static_concave_mesh_body("floor", build_floor_mesh(8)));
-    state.bodies.push(make_dynamic_sphere("ball", [0.3, 5.0, 0.4], 0.5, 1.0));
+    state.bodies.push(make_static_concave_mesh_body(&mut symbols, "floor", build_floor_mesh(8)));
+    state.bodies.push(make_dynamic_sphere(&mut symbols, "ball", [0.3, 5.0, 0.4], 0.5, 1.0));
 
-    run_seconds(&mut state, 2.0);
+    run_seconds(&mut state, 2.0, &symbols);
     let y = state.bodies[1].position[1];
     assert!((y - 0.5).abs() < 0.05,
             "sphere should rest at y≈0.5 on triangle floor, got {y}");
@@ -298,6 +305,7 @@ fn sphere_drops_onto_concave_mesh_floor() {
 #[ignore = "physx parity test"]
 fn sphere_drops_onto_flat_heightfield() {
     let mut state = PhysXPhysicsState::default();
+    let mut symbols = SymbolTable::new();
     state.initialized = true;
     state.gravity = [0.0, -9.81, 0.0];
     let n = 16usize;
@@ -306,10 +314,10 @@ fn sphere_drops_onto_flat_heightfield() {
         n, n, heights, 1.0, 1.0, 1.0,
         [-(n as f32) * 0.5, 0.0, -(n as f32) * 0.5],
     );
-    state.terrains.push(make_terrain("flat", hf));
-    state.bodies.push(make_dynamic_sphere("ball", [0.3, 5.0, 0.4], 0.5, 1.0));
+    state.terrains.push(make_terrain(&mut symbols, "flat", hf));
+    state.bodies.push(make_dynamic_sphere(&mut symbols, "ball", [0.3, 5.0, 0.4], 0.5, 1.0));
 
-    run_seconds(&mut state, 2.0);
+    run_seconds(&mut state, 2.0, &symbols);
     let y = state.bodies[0].position[1];
     assert!((y - 0.5).abs() < 0.05,
             "sphere should rest at y≈0.5 on flat HF, got {y}");
@@ -319,6 +327,7 @@ fn sphere_drops_onto_flat_heightfield() {
 #[ignore = "physx parity test"]
 fn sphere_slides_down_tilted_heightfield() {
     let mut state = PhysXPhysicsState::default();
+    let mut symbols = SymbolTable::new();
     state.initialized = true;
     state.gravity = [0.0, -9.81, 0.0];
     let n = 16usize;
@@ -332,17 +341,17 @@ fn sphere_slides_down_tilted_heightfield() {
         n, n, heights, 1.0, 1.0, 1.0,
         [-(n as f32) * 0.5, 0.0, -(n as f32) * 0.5],
     );
-    let mut terrain = make_terrain("slope", hf);
+    let mut terrain = make_terrain(&mut symbols, "slope", hf);
     terrain.friction = 0.05;
     terrain.restitution = 0.0;
     state.terrains.push(terrain);
-    let mut ball = make_dynamic_sphere("ball", [0.0, 5.0, 0.0], 0.5, 1.0);
+    let mut ball = make_dynamic_sphere(&mut symbols, "ball", [0.0, 5.0, 0.0], 0.5, 1.0);
     ball.friction = 0.05;
     ball.restitution = 0.0;
     state.bodies.push(ball);
 
     let start_x = state.bodies[0].position[0];
-    run_seconds(&mut state, 3.0);
+    run_seconds(&mut state, 3.0, &symbols);
     let dx = state.bodies[0].position[0] - start_x;
     assert!(dx < -0.5, "sphere should slide in -X (down the slope), got dx={dx}");
 }
@@ -356,13 +365,16 @@ fn sphere_slides_down_tilted_heightfield() {
 fn soa_solver_parity_with_aos_solver() {
     fn run_with(use_soa: bool) -> [f64; 3] {
         let mut state = PhysXPhysicsState::default();
+        let mut symbols = SymbolTable::new();
         state.initialized = true;
         state.gravity = [0.0, -9.81, 0.0];
         state.use_soa_solver = use_soa;
-        state.bodies.push(make_static_box("box", [0.0; 3], [2.0, 0.5, 2.0]));
-        state.bodies.push(make_dynamic_sphere("ball", [0.0, 5.0, 0.0], 0.5, 1.0));
+        state.bodies.push(make_static_box(&mut symbols, "box", [0.0; 3], [2.0, 0.5, 2.0]));
+        state.bodies.push(make_dynamic_sphere(&mut symbols, "ball", [0.0, 5.0, 0.0], 0.5, 1.0));
         let dt = 1.0 / 60.0;
-        for _ in 0..120 { step_native(&mut state, dt, 1); }
+        for _ in 0..120 {
+            step_native(&mut state, dt, 1, &symbols).expect("PhysX native step should succeed");
+        }
         state.bodies[1].position
     }
     let aos = run_with(false);
@@ -381,14 +393,15 @@ fn soa_solver_parity_with_aos_solver() {
 #[ignore = "physx parity test"]
 fn pinned_body_does_not_move() {
     let mut state = PhysXPhysicsState::default();
+    let mut symbols = SymbolTable::new();
     state.initialized = true;
     state.gravity = [0.0, -9.81, 0.0];
-    let mut ball = make_dynamic_sphere("pinned", [0.0, 3.0, 0.0], 0.5, 1.0);
+    let mut ball = make_dynamic_sphere(&mut symbols, "pinned", [0.0, 3.0, 0.0], 0.5, 1.0);
     ball.pinned = true;
     let initial_pos = ball.position;
     state.bodies.push(ball);
 
-    run_seconds(&mut state, 1.0);
+    run_seconds(&mut state, 1.0, &symbols);
     let pos = state.bodies[0].position;
     assert!(pos[0] == initial_pos[0] && pos[1] == initial_pos[1] && pos[2] == initial_pos[2],
             "pinned body should not move, got {:?}", pos);
@@ -400,12 +413,13 @@ fn pinned_body_does_not_move() {
 #[ignore = "physx parity test"]
 fn hanging_spring_extends_under_gravity() {
     let mut state = PhysXPhysicsState::default();
+    let mut symbols = SymbolTable::new();
     state.initialized = true;
     state.gravity = [0.0, -9.81, 0.0];
 
     let mut anchor = PhysXRigidBody::default();
     anchor.id = 1;
-    anchor.name = "anchor".into();
+    anchor.name = symbols.intern("anchor");
     anchor.body_type = PhysXBodyType::Static;
     anchor.shape = PhysXShapeKind::Sphere;
     anchor.radius = 0.1;
@@ -414,7 +428,7 @@ fn hanging_spring_extends_under_gravity() {
     state.bodies.push(anchor);
 
     let mass = 1.0f64;
-    let mut ball = make_dynamic_sphere("ball", [0.0, 4.0, 0.0], 0.2, mass);
+    let mut ball = make_dynamic_sphere(&mut symbols, "ball", [0.0, 4.0, 0.0], 0.2, mass);
     ball.id = 2;
     ball.restitution = 0.0;
     ball.linear_damping = 1.0;
@@ -424,7 +438,7 @@ fn hanging_spring_extends_under_gravity() {
     let rest_length = 1.0f64;
     let mut spring = PhysXConstraint::default();
     spring.id = 1;
-    spring.name = "rope".into();
+    spring.name = symbols.intern("rope");
     spring.kind = PhysXConstraintKind::Spring;
     spring.body_a = Some(state.bodies[0].id);
     spring.body_b = Some(state.bodies[1].id);
@@ -435,7 +449,7 @@ fn hanging_spring_extends_under_gravity() {
     spring.rest_length = rest_length;
     state.constraints.push(spring);
 
-    run_seconds(&mut state, 5.0);
+    run_seconds(&mut state, 5.0, &symbols);
     let y = state.bodies[1].position[1];
     let expected = 5.0 - (rest_length + mass * 9.81 / stiffness);
     assert!((y - expected).abs() < 0.2,
@@ -446,18 +460,19 @@ fn hanging_spring_extends_under_gravity() {
 #[ignore = "physx parity test"]
 fn collision_pair_filter_lets_sphere_pass_through_box() {
     let mut state = PhysXPhysicsState::default();
+    let mut symbols = SymbolTable::new();
     state.initialized = true;
     state.gravity = [0.0, -9.81, 0.0];
-    state.bodies.push(make_static_box("floor", [0.0; 3], [10.0, 0.5, 10.0]));
-    state.bodies.push(make_dynamic_sphere("ball", [0.0, 5.0, 0.0], 0.5, 1.0));
+    state.bodies.push(make_static_box(&mut symbols, "floor", [0.0; 3], [10.0, 0.5, 10.0]));
+    state.bodies.push(make_dynamic_sphere(&mut symbols, "ball", [0.0, 5.0, 0.0], 0.5, 1.0));
     let key = if "ball" < "floor" {
-        (Symbol::from_str("ball"), Symbol::from_str("floor"))
+        (symbols.intern("ball"), symbols.intern("floor"))
     } else {
-        (Symbol::from_str("floor"), Symbol::from_str("ball"))
+        (symbols.intern("floor"), symbols.intern("ball"))
     };
     state.disabled_collision_pairs.insert(key);
 
-    run_seconds(&mut state, 2.0);
+    run_seconds(&mut state, 2.0, &symbols);
     let y = state.bodies[1].position[1];
     assert!(y < -5.0,
             "ball should pass through floor when pair disabled, got y={y}");

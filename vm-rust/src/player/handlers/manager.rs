@@ -6,11 +6,10 @@ use super::{
     datum_handlers::{
         bitmap::BitmapDatumHandlers,
         list_handlers::ListDatumHandlers,
-        player_call_datum_handler,
         point::PointDatumHandlers,
         prop_list::PropListDatumHandlers,
         rect::RectDatumHandlers,
-        script_instance::{ScriptInstanceDatumHandlers, ScriptInstanceUtils},
+        script_instance::ScriptInstanceDatumHandlers,
         sound_channel::SoundChannelDatumHandlers,
     },
     movie::MovieHandlers,
@@ -26,7 +25,7 @@ use crate::{
     director::lingo::datum::{Datum, DatumType, datum_bool},
     js_api::JsApi,
     player::{
-        DatumRef, DirPlayer, ScriptError, ScriptErrorCode, bitmap::bitmap::{Bitmap, PaletteRef, get_system_default_palette}, datum_formatting::{format_concrete_datum, format_datum}, geometry::IntRect, handlers::datum_handlers::xml::XmlHelper, keyboard_map, player_alloc_datum, player_call_script_handler, reserve_player_mut, reserve_player_ref, score::{get_concrete_sprite_rect, get_sprite_rect_in_context}, script_ref::ScriptInstanceRef, trace_output, xtra::manager::call_xtra_instance_handler
+        DatumRef, DirPlayer, ScriptError, ScriptErrorCode, bitmap::bitmap::{Bitmap, PaletteRef, get_system_default_palette}, datum_formatting::{format_concrete_datum, format_datum}, geometry::IntRect, handlers::datum_handlers::xml::XmlHelper, keyboard_map, owner_key_string, reserve_player_mut, reserve_player_ref, score::{get_concrete_sprite_rect, get_sprite_rect_in_context}, session::ExecutionContext, symbols::symbol_table::SymbolTable, trace_output, xtra::manager::call_xtra_instance_handler
     },
 };
 
@@ -57,8 +56,8 @@ extern "C" {
     #[wasm_bindgen(js_name = "dirplayer_ruffleStop")]
     fn ruffle_stop(sprite_num: i32);
 
-    #[wasm_bindgen(js_name = "dirplayer_rufflePlay")]
-    fn ruffle_play(sprite_num: i32);
+    #[wasm_bindgen(js_name = "dirplayer_rufflePlayOwned")]
+    fn ruffle_play_owned(owner_key: &str, sprite_num: i32);
 
     #[wasm_bindgen(js_name = "dirplayer_ruffleRewind")]
     fn ruffle_rewind(sprite_num: i32);
@@ -89,7 +88,302 @@ extern "C" {
 
 pub struct BuiltInHandlerManager {}
 
+pub(crate) enum CallPreparation {
+    Complete(DatumRef),
+    Broadcast(crate::player::driver::BroadcastPlan),
+    Single {
+        receiver: DatumRef,
+        handler_name: Symbol,
+        args: Vec<DatumRef>,
+    },
+}
+
 impl BuiltInHandlerManager {
+    /// Prepare the global `call` verb while the explicit session context is
+    /// borrowed.  Collection receivers retain ordered child descriptors;
+    /// scalar receivers are handed to the canonical datum dispatcher by the
+    /// session, so unsupported Xtra/network work remains an owned request.
+    pub(crate) fn prepare_call(
+        runtime: &mut ExecutionContext<'_>,
+        args: &[DatumRef],
+    ) -> Result<CallPreparation, ScriptError> {
+        if args.len() < 2 {
+            return Err(ScriptError::new("call requires a handler and receiver".to_owned()));
+        }
+        let name_datum = Self::checked_sync_datum(runtime, &args[0])?.clone();
+        if matches!(name_datum, Datum::Void) {
+            return Ok(CallPreparation::Complete(DatumRef::Void));
+        }
+        if !name_datum.is_symbol() && !name_datum.is_string() {
+            return Err(ScriptError::new(format!(
+                "Handler name must be a symbol (got {}: {:?})",
+                name_datum.type_str(),
+                name_datum.string_value(runtime.symbols).unwrap_or_default(),
+            )));
+        }
+        let handler_name = name_datum.symbol_value(runtime.symbols)?;
+        let receiver = args[1].clone();
+        let receiver_datum = Self::checked_sync_datum(runtime, &receiver)?.clone();
+        let child_args = args[2..].to_vec();
+        let mut receivers = Vec::new();
+        match receiver_datum {
+            Datum::PropList(entries, ..) => {
+                for (_, value_ref) in entries {
+                    Self::append_call_receivers(runtime, &value_ref, &mut receivers)?;
+                }
+            }
+            Datum::List(_, entries, _) => {
+                for value_ref in entries {
+                    Self::append_call_receivers(runtime, &value_ref, &mut receivers)?;
+                }
+            }
+            _ => {
+                return Ok(CallPreparation::Single {
+                    receiver,
+                    handler_name,
+                    args: child_args,
+                });
+            }
+        }
+        let mut calls = Vec::new();
+        for receiver in receivers {
+            calls.push(crate::player::handlers::types::AncestorCall {
+                receiver: receiver.clone(),
+                source: receiver,
+                handler_name: handler_name.clone(),
+                args: child_args.clone(),
+            });
+        }
+        Ok(CallPreparation::Broadcast(crate::player::driver::BroadcastPlan {
+            calls,
+            fallback: Vec::new(),
+            initial_return: runtime.player.alloc_datum(Datum::Null),
+            handled: true,
+            continue_on_error: false,
+        }))
+    }
+
+    fn append_call_receivers(
+        runtime: &mut ExecutionContext<'_>,
+        value_ref: &DatumRef,
+        out: &mut Vec<crate::player::script_ref::ScriptInstanceRef>,
+    ) -> Result<(), ScriptError> {
+        use crate::player::allocator::ScriptInstanceAllocatorTrait;
+        let value = Self::checked_sync_datum(runtime, value_ref)?.clone();
+        match value {
+            Datum::ScriptInstanceRef(instance_ref) => {
+                runtime.player.allocator.get_script_instance_opt(&instance_ref)
+                    .ok_or_else(|| ScriptError::new_code(ScriptErrorCode::InvalidReference, "stale call receiver".to_owned()))?;
+                out.push(instance_ref);
+            }
+            Datum::SpriteRef(sprite_id) => {
+                let fallback = runtime.player.movie.score.get_sprite(sprite_id)
+                    .map(|sprite| sprite.script_instance_list.clone()).unwrap_or_default();
+                out.extend(crate::player::session::checked_sprite_script_instance_ids(
+                    runtime, sprite_id, fallback.as_slice(),
+                )?);
+            }
+            Datum::Int(_) => {}
+            _ => {}
+        }
+        Ok(())
+    }
+    /// Prepare the ordered child calls made by `sendSprite`.  This is the
+    /// synchronous half of the legacy async implementation: all consumed
+    /// handles are checked while the owning session is borrowed, then the
+    /// driver mounts each child in order after this borrow ends.
+    pub(crate) fn prepare_send_sprite(
+        runtime: &mut ExecutionContext<'_>,
+        args: &[DatumRef],
+    ) -> Result<crate::player::driver::BroadcastPlan, ScriptError> {
+        if args.len() < 2 {
+            return Err(ScriptError::new(
+                "sendSprite requires a sprite number and message".to_owned(),
+            ));
+        }
+        let sprite_num = Self::checked_sync_datum(runtime, &args[0])?.int_value()? as i16;
+        let message_datum = Self::checked_sync_datum(runtime, &args[1])?.clone();
+        let message = message_datum.symbol_value(runtime.symbols)?;
+        let fallback = runtime
+            .player
+            .movie
+            .score
+            .get_sprite(sprite_num)
+            .ok_or_else(|| ScriptError::new(format!("sendSprite: sprite {sprite_num} not found")))?
+            .script_instance_list
+            .clone();
+        let receivers = crate::player::session::checked_sprite_script_instance_ids(
+            runtime,
+            sprite_num,
+            fallback.as_slice(),
+        )?;
+        let calls = Self::prepare_ordered_child_calls(runtime, message.clone(), &args[2..], receivers)?;
+        let fallback = Self::prepare_static_event_calls(runtime, message, &args[2..])?;
+        Ok(crate::player::driver::BroadcastPlan {
+            calls,
+            fallback,
+            initial_return: DatumRef::Void,
+            handled: false,
+            continue_on_error: true,
+        })
+    }
+
+    /// Prepare the stage and active film-loop receiver order used by
+    /// `sendAllSprites`.  Receiver lookup stays lazy at execution time, but
+    /// every retained receiver is checked before it can leave the session.
+    pub(crate) fn prepare_send_all_sprites(
+        runtime: &mut ExecutionContext<'_>,
+        args: &[DatumRef],
+    ) -> Result<crate::player::driver::BroadcastPlan, ScriptError> {
+        if args.is_empty() {
+            return Err(ScriptError::new(
+                "sendAllSprites requires a message".to_owned(),
+            ));
+        }
+        let message_datum = Self::checked_sync_datum(runtime, &args[0])?.clone();
+        let message = message_datum.symbol_value(runtime.symbols)?;
+        let mut receivers = crate::player::session::active_stage_script_instance_ids_checked(runtime)?;
+        for (member_ref, filmloop_frame) in runtime.player.get_active_filmloop_scores() {
+            if let Some(filmloop_score) = runtime
+                .player
+                .movie
+                .cast_manager
+                .find_member_by_ref(&member_ref)
+                .and_then(|member| match &member.member_type {
+                    crate::player::cast_member::CastMemberType::FilmLoop(film_loop) => {
+                        Some(&film_loop.score)
+                    }
+                    _ => None,
+                })
+            {
+                receivers.extend(
+                    filmloop_score.get_active_script_instance_list_for_frame(filmloop_frame),
+                );
+            }
+        }
+        let calls = Self::prepare_ordered_child_calls(runtime, message.clone(), &args[1..], receivers)?;
+        let fallback = Self::prepare_static_event_calls(runtime, message, &args[1..])?;
+        Ok(crate::player::driver::BroadcastPlan {
+            calls,
+            fallback,
+            initial_return: DatumRef::Void,
+            handled: false,
+            continue_on_error: true,
+        })
+    }
+
+    fn prepare_static_event_calls(
+        runtime: &mut ExecutionContext<'_>,
+        message: Symbol,
+        args: &[DatumRef],
+    ) -> Result<Vec<crate::player::driver::StaticEventCall>, ScriptError> {
+        let frame_ref = runtime.player.movie.score.get_script_in_frame(runtime.player.movie.current_frame)
+            .map(|member| crate::player::cast_lib::CastMemberRef {
+                cast_lib: member.cast_lib.into(),
+                cast_member: member.cast_member.into(),
+            });
+        let movie_scripts = runtime.player.movie.cast_manager.get_movie_scripts();
+        let movie_scripts = movie_scripts.as_ref().ok_or_else(|| ScriptError::new(
+            "active movie scripts are unavailable".to_owned(),
+        ))?;
+        let mut calls = Vec::new();
+        if let Some(member_ref) = frame_ref {
+            calls.push(crate::player::driver::StaticEventCall {
+                receiver: runtime.player.movie.frame_script_instance.clone(),
+                member_ref,
+                handler_name: message.clone(),
+                args: args.to_vec(),
+            });
+        }
+        for script in movie_scripts {
+            calls.push(crate::player::driver::StaticEventCall {
+                receiver: None,
+                member_ref: script.member_ref.clone(),
+                handler_name: message.clone(),
+                args: args.to_vec(),
+            });
+        }
+        Ok(calls)
+    }
+
+    fn prepare_ordered_child_calls(
+        runtime: &mut ExecutionContext<'_>,
+        message: Symbol,
+        args: &[DatumRef],
+        receivers: Vec<crate::player::script_ref::ScriptInstanceRef>,
+    ) -> Result<Vec<crate::player::handlers::types::AncestorCall>, ScriptError> {
+        use crate::player::allocator::ScriptInstanceAllocatorTrait;
+        let mut calls = Vec::new();
+        for receiver in receivers {
+            runtime
+                .player
+                .allocator
+                .get_script_instance_opt(&receiver)
+                .ok_or_else(|| ScriptError::new_code(
+                    ScriptErrorCode::InvalidReference,
+                    format!("send receiver {receiver} is stale"),
+                ))?;
+            calls.push(crate::player::handlers::types::AncestorCall {
+                receiver: receiver.clone(),
+                source: receiver,
+                handler_name: message.clone(),
+                args: args.to_vec(),
+            });
+            // The deferred resolver performs the lookup immediately before
+            // each child, preserving mutation-sensitive handler discovery.
+        }
+        Ok(calls)
+    }
+
+    fn checked_sync_datum<'a>(
+        runtime: &'a ExecutionContext<'_>,
+        datum_ref: &DatumRef,
+    ) -> Result<&'a Datum, ScriptError> {
+        let datum = match datum_ref {
+            DatumRef::Void => &Datum::Void,
+            _ => runtime
+                .player
+                .allocator
+                .try_get_datum(datum_ref)
+                .ok_or_else(|| ScriptError::new_code(
+                    ScriptErrorCode::InvalidReference,
+                    format!("invalid datum reference {datum_ref}"),
+                ))?,
+        };
+        crate::player::compare::validate_direct_symbol_fields(datum, runtime.symbols)?;
+        Ok(datum)
+    }
+
+    /// Dispatch a global collection verb after resolving its receiver through
+    /// the session-owned allocator. `list_allowed` and `prop_list_allowed`
+    /// preserve the old dispatcher branches; some verbs intentionally support
+    /// only one collection kind.
+    fn try_collection_call(
+        runtime: &mut ExecutionContext<'_>,
+        handler_name: Symbol,
+        args: &Vec<DatumRef>,
+        list_allowed: bool,
+        prop_list_allowed: bool,
+    ) -> Result<Option<DatumRef>, ScriptError> {
+        let Some(receiver) = args.first() else {
+            return Err(ScriptError::new(format!(
+                "{} requires a receiver",
+                runtime.symbols.display(&handler_name).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
+            )));
+        };
+        let receiver_type = Self::checked_sync_datum(runtime, receiver)?.type_enum();
+        let call_args = args[1..].to_vec();
+        match receiver_type {
+            DatumType::List | DatumType::XmlChildNodes if list_allowed => Ok(Some(
+                ListDatumHandlers::call(runtime, receiver, handler_name, &call_args)?
+            )),
+            DatumType::PropList if prop_list_allowed => Ok(Some(
+                PropListDatumHandlers::call(runtime, receiver, handler_name, &call_args)?
+            )),
+            _ => Ok(None),
+        }
+    }
+
     /// Resolve a sprite/integer datum to its sprite number for Flash bridge
     /// calls. Per-sprite Ruffle instances mean sprite_num is the lookup
     /// key; cast_lib/cast_member are returned alongside for callers that
@@ -152,107 +446,119 @@ impl BuiltInHandlerManager {
         })
     }
 
-    fn param(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_ref(|player| {
-            let param_number = player.get_datum(&args[0]).int_value()?;
-            let scope_ref = player.current_scope_ref();
-            let scope = player.scopes.get(scope_ref).unwrap();
-            Ok(scope.args[(param_number - 1) as usize].clone())
-        })
+    fn param(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let param_number = Self::checked_sync_datum(runtime, &args[0])?.int_value()?;
+        let scope_ref = runtime.player.current_scope_ref();
+        let scope = runtime.player.scopes.get(scope_ref).unwrap();
+        let result = scope.args[(param_number - 1) as usize].clone();
+        Self::checked_sync_datum(runtime, &result)?;
+        Ok(result)
     }
 
     /// `the paramCount` — Director 11.5 Scripting Dictionary: "indicates the
     /// number of parameters sent to the current handler". Counted over the same
     /// scope `param()` indexes into, so a method's `me` counts as parameter 1
     /// and `paramCount` agrees with the highest valid `param(n)`.
-    fn param_count(_args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let scope_ref = player.current_scope_ref();
-            let count = player.scopes.get(scope_ref).map_or(0, |scope| scope.args.len());
-            Ok(player.alloc_datum(Datum::Int(count as i32)))
-        })
+    fn param_count(runtime: &mut ExecutionContext<'_>, _args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let scope_ref = runtime.player.current_scope_ref();
+        let count = runtime.player.scopes.get(scope_ref).map_or(0, |scope| scope.args.len());
+        Ok(runtime.player.alloc_datum(Datum::Int(count as i32)))
     }
 
-    fn count(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let obj = player.get_datum(&args[0]);
-            match obj {
-                Datum::List(_, list, ..) => Ok(player.alloc_datum(Datum::Int(list.len() as i32))),
-                Datum::PropList(prop_list, ..) => {
-                    Ok(player.alloc_datum(Datum::Int(prop_list.len() as i32)))
-                }
-                // Director treats count(VOID) as 0 - this allows "repeat with i in VOID" to not iterate
-                Datum::Void => Ok(player.alloc_datum(Datum::Int(0))),
-                _ => {
-                    Err(ScriptError::new(format!(
-                        "Cannot get count of non-list (type: {})",
-                        obj.type_str()
-                    )))
-                }
+    fn count(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let obj = Self::checked_sync_datum(runtime, &args[0])?;
+        match obj {
+            Datum::Void => Ok(runtime.player.alloc_datum(Datum::Int(0))),
+            Datum::List(_, list, ..) => {
+                Ok(runtime.player.alloc_datum(Datum::Int(list.len() as i32)))
             }
-        })
+            Datum::PropList(prop_list, ..) => {
+                Ok(runtime.player.alloc_datum(Datum::Int(prop_list.len() as i32)))
+            }
+            _ => Err(ScriptError::new(format!(
+                "Cannot get count of non-list (type: {})",
+                obj.type_str()
+            ))),
+        }
     }
 
-    fn forward_bitmap_handler(handler_name: &str, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    fn forward_bitmap_handler(runtime: &mut ExecutionContext<'_>, handler_name: Symbol, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let handler_display = runtime
+            .symbols
+            .display(&handler_name)
+            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
+            .to_owned();
         let Some(bitmap_ref) = args.first() else {
             return Err(ScriptError::new(format!(
                 "{} requires an image argument",
-                handler_name
+                handler_display
             )));
         };
         let handler_args = args[1..].to_vec();
-        BitmapDatumHandlers::call(bitmap_ref, crate::player::symbols::symbol::Symbol::from_str(handler_name), &handler_args)
+        BitmapDatumHandlers::call(
+            runtime.player,
+            runtime.symbols,
+            bitmap_ref,
+            handler_name,
+            &handler_args,
+        )
     }
 
-    fn get_pos_global(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    fn get_pos_global(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         // getPos(list, value) - find position of value in list.
         // Uses the looser membership equality so Symbol/String pairs with
         // matching text match each other, mirroring Director — verified with
         // `put getPos([#foo, #bar], "foo")` returning 1 in Director 11.5.
         use crate::player::compare::datum_equals_member;
-        reserve_player_mut(|player| {
-            let list_datum = player.get_datum(&args[0]);
-            let search_ref = &args[1];
-            match list_datum {
-                Datum::List(_, items, _) => {
-                    let items = items.clone();
-                    for (i, item_ref) in items.iter().enumerate() {
-                        let item = player.get_datum(item_ref);
-                        let search = player.get_datum(search_ref);
-                        if datum_equals_member(item, search, &player.allocator)? {
-                            return Ok(player.alloc_datum(Datum::Int((i + 1) as i32)));
-                        }
+        let list_datum = Self::checked_sync_datum(runtime, &args[0])?;
+        let search_ref = &args[1];
+        let found = match list_datum {
+            Datum::List(_, items, _) => {
+                let items = items.clone();
+                let mut found = None;
+                for (i, item_ref) in items.iter().enumerate() {
+                    let item = Self::checked_sync_datum(runtime, item_ref)?;
+                    let search = Self::checked_sync_datum(runtime, search_ref)?;
+                    if datum_equals_member(item, search, &runtime.player.allocator, runtime.symbols)? {
+                        found = Some(i + 1);
+                        break;
                     }
-                    Ok(player.alloc_datum(Datum::Int(0)))
                 }
-                Datum::PropList(pairs, _) => {
-                    let pairs = pairs.clone();
-                    for (i, (_, val_ref)) in pairs.iter().enumerate() {
-                        let val = player.get_datum(val_ref);
-                        let search = player.get_datum(search_ref);
-                        if datum_equals_member(val, search, &player.allocator)? {
-                            return Ok(player.alloc_datum(Datum::Int((i + 1) as i32)));
-                        }
-                    }
-                    Ok(player.alloc_datum(Datum::Int(0)))
-                }
-                _ => Err(ScriptError::new(format!("getPos: not a list")))
+                found
             }
-        })
+            Datum::PropList(pairs, _) => {
+                let pairs = pairs.clone();
+                let mut found = None;
+                for (i, (_, val_ref)) in pairs.iter().enumerate() {
+                    let val = Self::checked_sync_datum(runtime, val_ref)?;
+                    let search = Self::checked_sync_datum(runtime, search_ref)?;
+                    if datum_equals_member(val, search, &runtime.player.allocator, runtime.symbols)? {
+                        found = Some(i + 1);
+                        break;
+                    }
+                }
+                found
+            }
+            _ => return Err(ScriptError::new("getPos: not a list".to_owned())),
+        };
+        Ok(runtime.player.alloc_datum(Datum::Int(found.unwrap_or(0) as i32)))
     }
 
-    fn get_at(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        // Check if it's a FlashObjectRef first (needs special handling to avoid nested locks)
-        let flash_info = reserve_player_ref(|player| {
-            let obj = player.get_datum(&args[0]);
-            if let Datum::FlashObjectRef(flash_ref) = obj {
-                Some((flash_ref.clone(), player.get_datum(&args[1]).int_value().unwrap_or(0)))
-            } else {
-                None
-            }
-        });
+    fn get_at(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let object_ref = args.first().ok_or_else(|| ScriptError::new("getAt requires a receiver".to_string()))?;
+        let index_ref = args.get(1).ok_or_else(|| ScriptError::new("getAt requires an index".to_string()))?;
+        let object_type = Self::checked_sync_datum(runtime, object_ref)?.type_enum();
+        let index_datum = Self::checked_sync_datum(runtime, index_ref)?;
 
-        if let Some((flash_ref, position)) = flash_info {
+        // Check if it's a FlashObjectRef first (needs special handling to avoid nested locks)
+        if object_type == DatumType::FlashObjectRef {
+            let position = index_datum.int_value().unwrap_or(0);
+            let flash_ref = reserve_player_ref(|player| {
+                match player.get_datum(object_ref) {
+                    Datum::FlashObjectRef(flash_ref) => flash_ref.clone(),
+                    _ => unreachable!(),
+                }
+            });
             // Flash arrays use 0-based indexing
             let prop_name = position.to_string();
             let prop_ref = reserve_player_mut(|player| {
@@ -269,38 +575,30 @@ impl BuiltInHandlerManager {
         // integer gave position 0 and raised "Index 0 out of bounds". A non-numeric
         // key on a property list is a key lookup; integer keys keep their positional
         // meaning, so `getAt(propList, 2)` is unchanged.
-        let prop_lookup = reserve_player_ref(|player| {
-            matches!(player.get_datum(&args[0]), Datum::PropList(..))
-                && !matches!(
-                    player.get_datum(&args[1]),
-                    Datum::Int(_) | Datum::Float(_)
-                )
-        });
+        let prop_lookup = object_type == DatumType::PropList
+            && !matches!(Self::checked_sync_datum(runtime, index_ref)?, Datum::Int(_) | Datum::Float(_));
         if prop_lookup {
-            return reserve_player_mut(|player| {
-                let (prop_list, is_sorted) = match player.get_datum(&args[0]) {
+            return runtime.with_player_and_symbols(|player, symbols| {
+                let (prop_list, is_sorted) = match player.get_datum(object_ref) {
                     Datum::PropList(pl, sorted) => (pl.clone(), *sorted),
                     _ => unreachable!(),
                 };
                 crate::player::handlers::datum_handlers::prop_list::PropListUtils::get_at(
                     &prop_list,
-                    &args[1],
+                    index_ref,
                     &player.allocator,
+                    symbols,
                     is_sorted,
                 )
+            }).and_then(|result| {
+                Self::checked_sync_datum(runtime, &result).map(|_| result)
             });
         }
 
-        reserve_player_mut(|player| {
-            let obj = player.get_datum(&args[0]);
-            let position = player.get_datum(&args[1]).int_value()?;
+        let position = index_datum.int_value()?;
+        let result = runtime.with_player_and_symbols(|player, symbols| {
+            let obj = player.get_datum(object_ref);
             let index = (position - 1) as usize;
-
-            debug!(
-                "getAt: list={}, index={}",
-                format_concrete_datum(obj, player),
-                position
-            );
 
             match obj {
                 Datum::Point(vals, flags) => {
@@ -337,11 +635,6 @@ impl BuiltInHandlerManager {
                     }
                     let result = list[index].clone();
 
-                    debug!(
-                        "getAt returned: {}",
-                        format_concrete_datum(player.get_datum(&result), player)
-                    );
-
                     Ok(result)
                 }
                 Datum::PropList(prop_list, ..) => {
@@ -355,11 +648,6 @@ impl BuiltInHandlerManager {
                     }
                     let result = prop_list[index].1.clone();
 
-                    debug!(
-                        "getAt returned (from PropList): {}",
-                        format_concrete_datum(player.get_datum(&result), player)
-                    );
-
                     Ok(result)
                 }
                 _ => {
@@ -369,31 +657,35 @@ impl BuiltInHandlerManager {
                     )))
                 }
             }
-        })
+        })?;
+        Self::checked_sync_datum(runtime, &result).map(|_| result)
     }
 
-    fn get_last(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let obj = player.get_datum(&args[0]);
-            match obj {
-                Datum::List(_, list, ..) => {
-                    Ok(list.back().cloned().unwrap_or(DatumRef::Void))
-                }
-                Datum::PropList(prop_list, ..) => {
-                    Ok(prop_list.back().map(|(_, v)| v.clone()).unwrap_or(DatumRef::Void))
-                }
-                _ => {
-                    Err(ScriptError::new(format!(
-                        "Cannot getLast of non-list (type: {})",
-                        obj.type_str()
-                    )))
-                }
-            }
-        })
+    fn get_last(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let obj = Self::checked_sync_datum(runtime, &args[0])?;
+        let result = match obj {
+            Datum::List(_, list, ..) => list.back().cloned().unwrap_or(DatumRef::Void),
+            Datum::PropList(prop_list, ..) => prop_list
+                .back()
+                .map(|(_, value_ref)| value_ref.clone())
+                .unwrap_or(DatumRef::Void),
+            _ => return Err(ScriptError::new(format!(
+                "Cannot getLast of non-list (type: {})",
+                obj.type_str()
+            ))),
+        };
+        Self::checked_sync_datum(runtime, &result)?;
+        Ok(result)
     }
 
-    fn set_at(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    fn set_at(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let list_ref = args.first().ok_or_else(|| ScriptError::new("setAt requires a receiver".to_string()))?;
+        let index_ref = args.get(1).ok_or_else(|| ScriptError::new("setAt requires an index".to_string()))?;
+        let value_ref = args.get(2).ok_or_else(|| ScriptError::new("setAt requires a value".to_string()))?;
+        Self::checked_sync_datum(runtime, list_ref)?;
+        Self::checked_sync_datum(runtime, index_ref)?;
+        Self::checked_sync_datum(runtime, value_ref)?;
+        runtime.with_player_and_symbols(|player, symbols| {
             let list_ref = &args[0];
             // `setAt` on a PROPERTY list accepts a property KEY (string/symbol),
             // not only an integer position — Director's Hey-Arnold gObstacles does
@@ -408,21 +700,21 @@ impl BuiltInHandlerManager {
             let is_prop_list = matches!(player.get_datum(list_ref), Datum::PropList(..));
             if is_prop_list && key_is_name {
                 crate::player::handlers::datum_handlers::prop_list::PropListUtils::set_at(
-                    player, list_ref, &args[1], &args[2],
+                    player, symbols, list_ref, index_ref, value_ref,
                 )?;
                 return Ok(());
             }
-            let position = player.get_datum(&args[1]).int_value()?;
-            let new_value = args[2].clone();
+            let position = player.get_datum(index_ref).int_value()?;
+            let new_value = value_ref.clone();
             let is_zero_based = matches!(player.get_datum(list_ref), Datum::List(crate::director::lingo::datum::DatumType::XmlChildNodes, ..));
             let index = if is_zero_based { position as usize } else { (position - 1) as usize };
             
             let list_datum = player.get_datum(list_ref);
             debug!(
                 "setAt: list={}, index={}, new_value={}", 
-                format_concrete_datum(list_datum, player),
+                format_concrete_datum(list_datum, symbols, player)?,
                 position,
-                format_concrete_datum(player.get_datum(&new_value), player)
+                format_concrete_datum(player.get_datum(&new_value), symbols, player)?,
             );
             
             // Validate the new_value type BEFORE taking mutable borrow
@@ -511,75 +803,85 @@ impl BuiltInHandlerManager {
         Ok(DatumRef::Void)
     }
 
-    pub fn put(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_ref(|player| {
-            if args.is_empty() {
-                trace_output(player, "--");
-                return Ok(());
+    pub fn put(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        if args.is_empty() {
+            trace_output(runtime.player, "--");
+            return Ok(DatumRef::Void);
+        }
+
+        let output = if args.len() == 1 {
+            let first_arg = Self::checked_sync_datum(runtime, &args[0])?;
+            Self::format_for_put(first_arg, runtime)?
+        } else {
+            let mut parts = Vec::with_capacity(args.len());
+            for arg in args {
+                let datum = Self::checked_sync_datum(runtime, arg)?;
+                parts.push(match datum {
+                    Datum::String(s) => s.clone(),
+                    _ => crate::player::datum_formatting::format_concrete_datum(
+                        datum,
+                        runtime.symbols,
+                        runtime.player,
+                    )?,
+                });
             }
-            
-            // Format the first argument to determine output
-            let first_arg = player.get_datum(&args[0]);
-            let output = if args.len() == 1 {
-                // Single argument
-                Self::format_for_put(first_arg, player)
-            } else {
-                // Multiple arguments - join with spaces
-                let parts: Vec<String> = args
-                    .iter()
-                    .map(|arg| {
-                        let datum = player.get_datum(arg);
-                        // For multi-arg put, use string representation
-                        match datum {
-                            Datum::String(s) => s.clone(),
-                            _ => format_concrete_datum(datum, player),
-                        }
-                    })
-                    .collect();
-                parts.join(" ")
-            };
-            
-            trace_output(player, &format!("-- {}", output));
-            Ok(())
-        })?;
+            parts.join(" ")
+        };
+
+        trace_output(runtime.player, &format!("-- {}", output));
         Ok(DatumRef::Void)
     }
 
-    fn format_for_put(datum: &Datum, player: &DirPlayer) -> String {
+    fn format_for_put(
+        datum: &Datum,
+        runtime: &ExecutionContext<'_>,
+    ) -> Result<String, ScriptError> {
         match datum {
             // Strings are output with quotes
-            Datum::String(s) => format!("\"{}\"", s),
+            Datum::String(s) => Ok(format!("\"{}\"", s)),
             
             // Numbers are output without quotes
-            Datum::Int(i) => i.to_string(),
+            Datum::Int(i) => Ok(i.to_string()),
             
             // Symbols are output with # prefix
-            Datum::Symbol(s) => format!("#{}", s),
+            Datum::Symbol(s) => Ok(format!(
+                "#{}",
+                runtime
+                    .symbols
+                    .display(s)
+                    .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
+            )),
             
             // Void outputs as <Void>
-            Datum::Void | Datum::Null => "<Void>".to_string(),
+            Datum::Void | Datum::Null => Ok("<Void>".to_string()),
             
             // Lists
             Datum::List(_, list, _) => {
-                let items: Vec<String> = list
-                    .iter()
-                    .map(|r| Self::format_for_put(player.get_datum(r), player))
-                    .collect();
-                format!("[{}]", items.join(", "))
+                let mut items = Vec::with_capacity(list.len());
+                for datum_ref in list {
+                    let item = Self::checked_sync_datum(runtime, datum_ref)?;
+                    items.push(Self::format_for_put(item, runtime)?);
+                }
+                Ok(format!("[{}]", items.join(", ")))
             },
             
             // Everything else uses default formatting
-            _ => format_concrete_datum(datum, player),
+            _ => crate::player::datum_formatting::format_concrete_datum(
+                datum,
+                runtime.symbols,
+                runtime.player,
+            ),
         }
     }
 
-    pub fn inspect(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn inspect(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         if args.len() != 1 {
             return Err(ScriptError::new(
                 "inspect requires exactly 1 argument".to_string(),
             ));
         }
-        reserve_player_mut(|player| {
+        Self::checked_sync_datum(runtime, &args[0])?;
+        runtime.with_player_and_symbols(|player, symbols| {
             let datum = player.get_datum(&args[0]);
             match datum {
                 Datum::BitmapRef(bitmap_ref) => {
@@ -598,7 +900,7 @@ impl BuiltInHandlerManager {
                     JsApi::dispatch_debug_bitmap(w as u32, h as u32, &dest.data);
                 }
                 Datum::List(..) | Datum::PropList(..) | Datum::ScriptInstanceRef(..) => {
-                    JsApi::dispatch_debug_datum(&args[0], player);
+                    JsApi::dispatch_debug_datum(&args[0], symbols, player);
                     player.debug_datum_refs.push(args[0].clone());
                 }
                 _ => {
@@ -613,16 +915,14 @@ impl BuiltInHandlerManager {
         Ok(DatumRef::Void)
     }
 
-    fn clear_globals(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            player.globals.clear();
-            player.initialize_globals();
-            Ok(DatumRef::Void)
-        })
+    fn clear_globals(runtime: &mut ExecutionContext<'_>, _args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.player.globals.clear();
+        runtime.player.initialize_globals();
+        Ok(DatumRef::Void)
     }
 
-    fn random(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    fn random(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        {
             // The Director 11.5 Scripting Dictionary documents only the
             // single-arg form random(n) → a random integer in 1..n. Many
             // shipped Shockwave games also rely on an undocumented two-arg
@@ -633,383 +933,62 @@ impl BuiltInHandlerManager {
             // rather than forbidding it, so we support both. Inferred from the
             // calling movie, not the 11.5 dictionary.
             if args.len() >= 2 {
-                let a = player.get_datum(&args[0]).int_value()?;
-                let b = player.get_datum(&args[1]).int_value()?;
+                let a = Self::checked_sync_datum(runtime, &args[0])?.int_value()?;
+                let b = Self::checked_sync_datum(runtime, &args[1])?.int_value()?;
                 let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
                 let span = hi - lo + 1; // inclusive range size, always >= 1
                 // next_random_int(n) returns 1..n from the seeded sequence;
                 // rebase it into [lo, hi] so deterministic replay still holds.
-                let value = match player.movie.next_random_int(span) {
+                let value = match runtime.player.movie.next_random_int(span) {
                     Some(v) => lo + (v - 1),
-                    None => player.rng.random_range(lo..=hi),
+                    None => runtime.player.rng.random_range(lo..=hi),
                 };
-                return Ok(player.alloc_datum(Datum::Int(value)));
+                return Ok(runtime.player.alloc_datum(Datum::Int(value)));
             }
 
-            let max = player.get_datum(&args[0]).int_value()?;
+            let max = Self::checked_sync_datum(runtime, &args[0])?.int_value()?;
             if max <= 0 {
-                return Ok(player.alloc_datum(Datum::Int(0)));
+                return Ok(runtime.player.alloc_datum(Datum::Int(0)));
             }
 
             // Director's random(n) returns a value from 1 to n (inclusive)
-            let random_int = match player.movie.next_random_int(max) {
+            let random_int = match runtime.player.movie.next_random_int(max) {
                 Some(value) => value,
                 None => {
-                    player.rng.random_range(1..=max)
+                    runtime.player.rng.random_range(1..=max)
                 }
             };
 
-            Ok(player.alloc_datum(Datum::Int(random_int)))
-        })
+            Ok(runtime.player.alloc_datum(Datum::Int(random_int)))
+        }
     }
 
     /// `randomVector()` (Director 11.5 dictionary): top-level function returning a
     /// unit vector — a uniformly random point on the surface of the unit sphere,
     /// guaranteed length 1. No parameters. Uses the cylinder/Archimedes method
     /// (z uniform in [-1,1], azimuth uniform in [0, 2pi)) which is exactly uniform.
-    fn random_vector(_args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let z: f64 = player.rng.random_range(-1.0..1.0);
-            let phi: f64 = player.rng.random_range(0.0..std::f64::consts::TAU);
-            let r = (1.0 - z * z).max(0.0).sqrt();
-            Ok(player.alloc_datum(Datum::Vector([r * phi.cos(), r * phi.sin(), z])))
-        })
+    fn random_vector(runtime: &mut ExecutionContext<'_>, _args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let z: f64 = runtime.player.rng.random_range(-1.0..1.0);
+        let phi: f64 = runtime.player.rng.random_range(0.0..std::f64::consts::TAU);
+        let r = (1.0 - z * z).max(0.0).sqrt();
+        Ok(runtime.player.alloc_datum(Datum::Vector([r * phi.cos(), r * phi.sin(), z])))
     }
 
-    fn bit_and(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let a = player.get_datum(&args[0]).int_value()?;
-            let b = player.get_datum(&args[1]).int_value()?;
-            Ok(player.alloc_datum(Datum::Int(a & b)))
-        })
+    fn bit_and(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let a = Self::checked_sync_datum(runtime, &args[0])?.int_value()?;
+        let b = Self::checked_sync_datum(runtime, &args[1])?.int_value()?;
+        Ok(runtime.player.alloc_datum(Datum::Int(a & b)))
     }
 
-    fn bit_or(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let a = player.get_datum(&args[0]).int_value()?;
-            let b = player.get_datum(&args[1]).int_value()?;
-            Ok(player.alloc_datum(Datum::Int(a | b)))
-        })
+    fn bit_or(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let a = Self::checked_sync_datum(runtime, &args[0])?.int_value()?;
+        let b = Self::checked_sync_datum(runtime, &args[1])?.int_value()?;
+        Ok(runtime.player.alloc_datum(Datum::Int(a | b)))
     }
 
-    fn bit_not(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let a = player.get_datum(&args[0]).int_value()?;
-            Ok(player.alloc_datum(Datum::Int(!a)))
-        })
-    }
-
-    async fn call(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        let receiver_ref = &args[1];
-        // A VOID name names no handler, so there is no message to send —
-        // quietly do nothing rather than raise. Director 11.5 documents the
-        // parameter as "a symbol that specifies the handler to activate", but
-        // the name is routinely read out of a property list that may not have
-        // the entry yet. Agent Free Ride's FSM (`BehaviorScript 116 - FSM
-        // object`) does exactly this on every transition:
-        //
-        //   lOldStateProps = pFSM.GetStateProperties(pOldState)
-        //   call(lOldStateProps.exit, lOldStateProps.callbackScript, ...)
-        //
-        // and on the FIRST ChangeState pOldState has no registered state, so
-        // `.exit` is VOID. Raising there killed the movie as gameplay started.
-        if reserve_player_ref(|player| player.get_datum(&args[0]).is_void()) {
-            return Ok(DatumRef::Void);
-        }
-        let (handler_name, args, instance_ids, list_count) = reserve_player_mut(|player| {
-            let handler_name = player.get_datum(&args[0]);
-            let receiver_clone = player.get_datum(receiver_ref).clone();
-            let args = args[2..].to_vec();
-            if !handler_name.is_symbol() && !handler_name.is_string() {
-                return Err(ScriptError::new(format!(
-                    "Handler name must be a symbol (got {}: {:?})",
-                    handler_name.type_str(),
-                    handler_name.string_value().unwrap_or_default(),
-                )));
-            }
-            let handler_name = handler_name.symbol_value()?;
-
-            let (instance_ids, list_count) = match receiver_clone {
-                // A LIST receiver is the lenient form: "the message is sent to
-                // each item in the list in turn; if the handler is not defined
-                // in the ancestor script, no alert is generated" (Director 11.5
-                // Scripting Dictionary, `call`) — only the single-instance form
-                // raises. So an item that can't receive a message at all is
-                // skipped, not an error. Merlin's Revenge 3 keeps unused room
-                // layers as `#none`:
-                //
-                //   pTileLayers -- [#backgroundPassive: <objTileLayer>,
-                //                   #actors: #none, ...]
-                //   call(#finish, pTileLayers)
-                Datum::PropList(prop_list, ..) => {
-                    let mut instance_ids = vec![];
-                    let count = prop_list.len();
-                    for (_, value_ref) in prop_list {
-                        if let Ok(ids) = get_datum_script_instance_ids(&value_ref, player) {
-                            instance_ids.extend(ids);
-                        }
-                    }
-                    (Ok(Some(instance_ids)), count)
-                }
-                Datum::List(_, list, _) => {
-                    let mut instance_ids = vec![];
-                    let count = list.len();
-                    for value_ref in list {
-                        if let Ok(ids) = get_datum_script_instance_ids(&value_ref, player) {
-                            instance_ids.extend(ids);
-                        }
-                    }
-                    (Ok(Some(instance_ids)), count)
-                }
-                _ => (Ok(None), 0),
-            };
-
-            Ok((handler_name, args, instance_ids?, list_count))
-        })?;
-
-        if instance_ids.is_none() {
-            return player_call_datum_handler(&receiver_ref, handler_name, &args).await;
-        }
-        let instance_refs = instance_ids.unwrap();
-
-        let mut result = player_alloc_datum(Datum::Null);
-        for instance_ref in instance_refs {
-            let handler = reserve_player_ref(|player| {
-                ScriptInstanceUtils::get_script_instance_handler(
-                    handler_name,
-                    &instance_ref,
-                    player,
-                )
-            })?;
-            if let Some(handler) = handler {
-                let scope = player_call_script_handler(Some(instance_ref), handler, &args).await?;
-                if scope.return_value != DatumRef::Void {
-                    result = scope.return_value;
-                }
-            }
-        }
-
-        Ok(result)
-    }
-
-    /// `importFileInto member, fileOrUrl, propertyList` — replaces the content
-    /// of `member` with the decoded contents of `fileOrUrl`. Accepts both
-    /// forms: the old-Lingo global verb (`args[0]` = member ref) and the
-    /// method-form `member.importFileInto(...)` (forwarded from
-    /// `CastMemberRefHandlers::call_async` with the receiver prepended).
-    ///
-    /// v1 only handles bitmap members: PNG/JPG/GIF/etc. (anything the
-    /// `image` crate decodes) → a 32-bit RGBA Bitmap that replaces the
-    /// existing BitmapRef. The fetch goes through `NetManager`, so URLs
-    /// are resolved against `base_path` and respect any `override_base_path`
-    /// (the fake-movie-root used by tests). Returns Director's documented
-    /// integer status: 0 = success, negative = failure.
-    ///
-    /// propertyList properties honored:
-    ///   #trimWhiteSpace — non-zero stores `trim_white_space = true` on the
-    ///       Bitmap so the renderer auto-trims (matching the parsed-asset path).
-    /// Properties accepted but unused (Director defaults pass through):
-    ///   #dither, #linked, #remapImageToStage.
-    async fn import_file_into(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        use crate::player::bitmap::bitmap::{BuiltInPalette};
-        use crate::player::cast_member::CastMemberType;
-
-        if args.is_empty() {
-            return Err(ScriptError::new(
-                "importFileInto: missing member argument".to_string(),
-            ));
-        }
-        let receiver = args[0].clone();
-
-        // Phase 1 — pull args + member ref out of the player lock.
-        let (member_ref, file_or_url, trim_white_space) = reserve_player_mut(|player| {
-            let member_ref = match player.get_datum(&receiver) {
-                Datum::CastMember(r) => r.to_owned(),
-                _ => return Err(ScriptError::new(
-                    "importFileInto: receiver must be a cast member".to_string(),
-                )),
-            };
-            if args.len() < 2 {
-                return Err(ScriptError::new(
-                    "importFileInto requires a file path or URL".to_string(),
-                ));
-            }
-            let file_or_url = player.get_datum(&args[1]).string_value()?;
-            // Optional property list — Director #trimWhiteSpace defaults TRUE.
-            let mut trim_white_space = true;
-            if let Some(prop_ref) = args.get(2) {
-                if let Datum::PropList(pairs, _) = player.get_datum(prop_ref) {
-                    let pairs = pairs.clone();
-                    for (k_ref, v_ref) in pairs.iter() {
-                        let key = player.get_datum(k_ref).string_value().unwrap_or_default();
-                        if key.eq_ignore_ascii_case("trimWhiteSpace") {
-                            let v = player.get_datum(v_ref).int_value().unwrap_or(1);
-                            trim_white_space = v != 0;
-                        }
-                        // #dither / #linked / #remapImageToStage accepted but
-                        // unused — the decode path always produces 32-bit
-                        // RGBA so dither/remap have no effect, and we don't
-                        // track "linked" status on members yet.
-                    }
-                }
-            }
-            Ok((member_ref, file_or_url, trim_white_space))
-        })?;
-
-        // Determine the target member kind up front so we don't fetch for a
-        // member type we can't import into. importFileInto replaces a member's
-        // content with the named file (Director 11.5 Scripting Dictionary,
-        // `importFileInto()`); we support bitmap and sound members.
-        enum ImportTarget {
-            Bitmap(crate::player::bitmap::manager::BitmapRef),
-            Sound,
-        }
-        let import_target = reserve_player_ref(|player| {
-            let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
-            match member.map(|m| &m.member_type) {
-                Some(CastMemberType::Bitmap(b)) => Some(ImportTarget::Bitmap(b.image_ref)),
-                Some(CastMemberType::Sound(_)) => Some(ImportTarget::Sound),
-                _ => None,
-            }
-        });
-        let import_target = match import_target {
-            Some(t) => t,
-            None => {
-                warn!(
-                    "importFileInto: member ({}, {}) is not a bitmap or sound (v1 scope)",
-                    member_ref.cast_lib, member_ref.cast_member
-                );
-                return reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Int(-2))));
-            }
-        };
-
-        // Phase 2 — kick off the fetch via NetManager and await the result.
-        let task_id = reserve_player_mut(|player| {
-            player.net_manager.preload_net_thing(file_or_url.clone())
-        });
-        {
-            let player = unsafe { crate::player::player_mut() };
-            if !player.net_manager.is_task_done(Some(task_id)) {
-                player.net_manager.await_task(task_id).await;
-            }
-        }
-        let bytes = reserve_player_ref(|player| {
-            player.net_manager.get_task_result(Some(task_id))
-        });
-        let bytes = match bytes {
-            Some(Ok(b)) if !b.is_empty() => b,
-            Some(Ok(_)) | None => {
-                warn!("importFileInto: empty/no result for '{}'", file_or_url);
-                return reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Int(-200))));
-            }
-            Some(Err(code)) => {
-                warn!("importFileInto: net fetch failed ({}) for '{}'", code, file_or_url);
-                return reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Int(-200))));
-            }
-        };
-
-        // Sound members: store the downloaded media verbatim. The playback
-        // path (sound_channel.rs) sniffs MP3 frames and hands compressed data
-        // to the browser's decodeAudioData, so the raw file bytes are exactly
-        // what it expects — no eager decode here. Sample metadata stays at
-        // defaults until the browser decodes the buffer at play time.
-        let existing_bitmap_ref = match import_target {
-            ImportTarget::Bitmap(r) => r,
-            ImportTarget::Sound => {
-                use crate::director::chunks::sound::SoundChunk;
-                let byte_len = bytes.len();
-                return reserve_player_mut(|player| {
-                    if let Some(member) =
-                        player.movie.cast_manager.find_mut_member_by_ref(&member_ref)
-                    {
-                        if let CastMemberType::Sound(s) = &mut member.member_type {
-                            s.sound = SoundChunk::new(bytes);
-                        }
-                    }
-                    debug!(
-                        "importFileInto: imported '{}' ({} bytes) into sound member ({}, {})",
-                        file_or_url, byte_len, member_ref.cast_lib, member_ref.cast_member
-                    );
-                    JsApi::dispatch_cast_member_changed(member_ref.clone());
-                    Ok(player.alloc_datum(Datum::Int(0)))
-                });
-            }
-        };
-
-        // Phase 3 — decode to RGBA8. `image::load_from_memory` sniffs
-        // PNG/JPG/GIF/BMP/TIFF/WebP/etc. by header magic.
-        let img = match image::load_from_memory(&bytes) {
-            Ok(img) => img.to_rgba8(),
-            Err(e) => {
-                let head: Vec<String> = bytes.iter().take(8).map(|b| format!("{:02X}", b)).collect();
-                warn!(
-                    "importFileInto: decode failed for '{}' ({} bytes, head=[{}]): {}",
-                    file_or_url, bytes.len(), head.join(" "), e
-                );
-                return reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Int(-120))));
-            }
-        };
-        let (w, h) = (img.width() as u16, img.height() as u16);
-        if w == 0 || h == 0 {
-            return reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Int(-120))));
-        }
-        let rgba = img.into_raw();
-
-        // Phase 4 — build the Bitmap and swap it in. We always produce
-        // 32-bit RGBA (the decode path doesn't preserve original depth),
-        // which matches what `newMember(#bitmap)` initializes to.
-        let mut bitmap = Bitmap::new(
-            w, h,
-            32, 32, 8,
-            PaletteRef::BuiltIn(BuiltInPalette::SystemWin),
-        );
-        bitmap.data = rgba;
-        bitmap.trim_white_space = trim_white_space;
-
-        debug!(
-            "importFileInto: imported '{}' ({}x{}) into member ({}, {})",
-            file_or_url, w, h, member_ref.cast_lib, member_ref.cast_member
-        );
-
-        reserve_player_mut(|player| {
-            // Mirror new dimensions into the BitmapMember's info so getters
-            // like `member.width` / `member.height` return the imported size.
-            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
-                if let CastMemberType::Bitmap(b) = &mut member.member_type {
-                    b.info.width = w;
-                    b.info.height = h;
-                    b.info.bit_depth = 32;
-                    b.info.pitch = w.saturating_mul(4);
-                    b.info.trim_white_space = trim_white_space;
-                    // Director centers a bitmap member's regPoint on its image
-                    // when content is (re)imported — the same rule the
-                    // `member.image = ...` setter applies. Without this, a
-                    // `new(#bitmap)` member filled via importFileInto keeps its
-                    // (0,0) regPoint, so its sprite renders offset by half the
-                    // image. (Tetris imports bgpicture.jpg into member 18 and its
-                    // full-stage sprite drew shifted down-right by ~180x200.)
-                    b.reg_point = ((w as i32 / 2) as i16, (h as i32 / 2) as i16);
-                }
-                member.reg_point = (w as i32 / 2, h as i32 / 2);
-            }
-            player.bitmap_manager.replace_bitmap(existing_bitmap_ref, bitmap);
-            JsApi::dispatch_cast_member_changed(member_ref.clone());
-            Ok(player.alloc_datum(Datum::Int(0)))
-        })
-    }
-
-    async fn do_command(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        // Get the code string from the first argument
-        let code = reserve_player_ref(|player| player.get_datum(&args[0]).string_value())?;
-        let code = code.trim().to_string();
-        debug!("do: executing code: {}", code);
-
-        if code.is_empty() || code == "nothing" {
-            return Ok(DatumRef::Void);
-        }
-
-        use crate::player::eval::eval_lingo_command;
-        eval_lingo_command(code).await
+    fn bit_not(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let a = Self::checked_sync_datum(runtime, &args[0])?.int_value()?;
+        Ok(runtime.player.alloc_datum(Datum::Int(!a)))
     }
 
     pub fn has_async_handler(name: Symbol) -> bool {
@@ -1042,97 +1021,24 @@ impl BuiltInHandlerManager {
         }
     }
 
-    pub async fn call_async_handler(
+    pub fn call_handler(
+        runtime: &mut ExecutionContext<'_>,
         name: Symbol,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        // Case-insensitive to match `has_async_handler` and Lingo semantics.
-        match name.into_builtin() {
-            Some(BuiltInSymbol::Call) => Self::call(args).await,
-            Some(BuiltInSymbol::New) => TypeHandlers::new(args).await,
-            Some(BuiltInSymbol::NewObject) => TypeHandlers::new_object(args).await,
-            Some(BuiltInSymbol::CallAncestor) => TypeHandlers::call_ancestor(args).await,
-            Some(BuiltInSymbol::SendSprite) => MovieHandlers::send_sprite(args).await,
-            Some(BuiltInSymbol::SendAllSprites) => MovieHandlers::send_all_sprites(args).await,
-            Some(BuiltInSymbol::Value) => TypeHandlers::value(args).await,
-            Some(BuiltInSymbol::Do) => Self::do_command(args).await,
-            Some(BuiltInSymbol::UpdateStage) => MovieHandlers::update_stage(args).await,
-            Some(BuiltInSymbol::Go) => MovieHandlers::go(args).await,
-            // The global `play` command. `play movie X` / `play frame X of movie Y`
-            // compile to play(frame, movie) — the SAME arg shape as `go`, so route the
-            // 2-arg form to the movie-load path. `play movie the movieName` (the current
-            // movie) reloads it = restart (frog01's game-over "hit enter to restart").
-            // The 1-arg form is the Ruffle/Flash sprite play (sprite.play() global form).
-            Some(BuiltInSymbol::Play) => {
-                if args.len() >= 2 {
-                    // `play movie X`. If X is the CURRENT movie → in-place restart
-                    // (the net loader often can't re-fetch the movie by name once
-                    // it's loaded; frog01's "hit enter to restart" does exactly this).
-                    // Otherwise load X like `go frame N of movie X`.
-                    let restart = reserve_player_mut(|player| {
-                        let name = player.get_datum(&args[1]).string_value().unwrap_or_default();
-                        fn base(s: &str) -> String {
-                            s.rsplit(|c| c == '/' || c == '\\').next().unwrap_or(s)
-                                .split('.').next().unwrap_or(s).to_ascii_lowercase()
-                        }
-                        let cur = player.movie.file_name.clone();
-                        let has_bytes = player.movie_reload_data.is_some();
-                        // Restart when the target IS the current movie. `the movieName` /
-                        // file_name are frequently EMPTY here (the loader didn't set a
-                        // usable filename), so treat an empty name or empty current file as
-                        // "the current movie" and restart from the retained bytes. Only a
-                        // clearly-different *named* movie (both names present, not matching)
-                        // falls through to `go`.
-                        let m = has_bytes
-                            && (name.is_empty() || cur.is_empty() || base(&name) == base(&cur));
-                        if m { player.pending_restart = true; }
-                        m
-                    });
-                    if restart {
-                        Ok(DatumRef::Void)
-                    } else {
-                        MovieHandlers::go(args).await
-                    }
-                } else {
-                    if !args.is_empty() {
-                        if let Some(sn) = Self::resolve_flash_sprite_strict(&args[0])? {
-                            // play(sprite) overrides a prior `sprite.frame = N`
-                            // hold — clear the asserted frame so a freshly
-                            // (re)created instance PLAYS from the current frame
-                            // instead of pinning+stopping at the held one. This
-                            // mirrors the `sprite(x).play()` method arm
-                            // (datum_handlers/sprite.rs). bogey_nights' #pickit
-                            // does `frame = 1; member = "straw"; play(sprite)`,
-                            // and the member swap recreates the instance on the
-                            // next frame — without clearing here, straw loads
-                            // pinned+stopped at frame 1 (assertedFrame=1) and
-                            // never animates or advances (the grab machine then
-                            // reads a frozen frame and stalls into #retreat).
-                            reserve_player_mut(|player| {
-                                player.movie.score.get_sprite_mut(sn as i16).flash_asserted_frame = None;
-                            });
-                            ruffle_play(sn);
-                        }
-                    }
-                    Ok(DatumRef::Void)
-                }
-            }
-            Some(BuiltInSymbol::Nothing) => MovieHandlers::nothing_async(args).await,
-            Some(BuiltInSymbol::ImportFileInto) => Self::import_file_into(args).await,
-            _ => {
-                let msg = format!("No built-in async handler: {}", name);
-                return Err(ScriptError::new(msg));
-            }
-        }
-    }
-
-    pub fn call_handler(name: Symbol, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        // Validate the handler symbol against this session before dispatching.
+        // Builtin identity lookup alone only understands builtin-tagged symbols;
+        // the authoritative table still must reject a foreign dynamic symbol.
+        runtime
+            .symbols
+            .display(&name)
+            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
         match name.into_builtin() {
             Some(BuiltInSymbol::CastLib) => CastHandlers::cast_lib(args),
             Some(BuiltInSymbol::FindEmpty) => CastHandlers::find_empty(args),
-            Some(BuiltInSymbol::PreloadNetThing) => NetHandlers::preload_net_thing(args),
-            Some(BuiltInSymbol::NetDone) => NetHandlers::net_done(args),
-            Some(BuiltInSymbol::NetAbort) => NetHandlers::net_abort(args),
+            Some(BuiltInSymbol::PreloadNetThing) => NetHandlers::preload_net_thing(runtime.player, runtime.symbols, args),
+            Some(BuiltInSymbol::NetDone) => NetHandlers::net_done(runtime.player, runtime.symbols, args),
+            Some(BuiltInSymbol::NetAbort) => NetHandlers::net_abort(runtime.player, runtime.symbols, args),
             // Cast/movie preload + unload commands: dirplayer loads everything
             // synchronously up front, so there is nothing to (un)cache. Accept
             // as no-ops (netjack startMovie calls preLoadCast).
@@ -1140,83 +1046,72 @@ impl BuiltInHandlerManager {
             // Director's flushInputEvents() discards queued mouse/key events;
             // the browser player has no such queue to flush.
             Some(BuiltInSymbol::FlushInputEvents) => Ok(DatumRef::Void),
-            Some(BuiltInSymbol::PuppetTempo) => MovieHandlers::puppet_tempo(args),
-            Some(BuiltInSymbol::Objectp) => TypeHandlers::objectp(args),
-            Some(BuiltInSymbol::Voidp) => TypeHandlers::voidp(args),
-            Some(BuiltInSymbol::Listp) => TypeHandlers::listp(args),
-            Some(BuiltInSymbol::Symbolp) => TypeHandlers::symbolp(args),
-            Some(BuiltInSymbol::Stringp) => TypeHandlers::stringp(args),
-            Some(BuiltInSymbol::Integerp) => TypeHandlers::integerp(args),
-            Some(BuiltInSymbol::Floatp) => TypeHandlers::floatp(args),
-            Some(BuiltInSymbol::Offset) => StringHandlers::offset(args),
-            Some(BuiltInSymbol::Length) => StringHandlers::length(args),
-            Some(BuiltInSymbol::Script) => MovieHandlers::script(args),
+            Some(BuiltInSymbol::PuppetTempo) => MovieHandlers::puppet_tempo(runtime, args),
+            Some(BuiltInSymbol::Objectp) => TypeHandlers::objectp(runtime, args),
+            Some(BuiltInSymbol::Voidp) => TypeHandlers::voidp(runtime, args),
+            Some(BuiltInSymbol::Listp) => TypeHandlers::listp(runtime, args),
+            Some(BuiltInSymbol::Symbolp) => TypeHandlers::symbolp(runtime, args),
+            Some(BuiltInSymbol::Stringp) => TypeHandlers::stringp(runtime, args),
+            Some(BuiltInSymbol::Integerp) => TypeHandlers::integerp(runtime, args),
+            Some(BuiltInSymbol::Floatp) => TypeHandlers::floatp(runtime, args),
+            Some(BuiltInSymbol::Offset) => StringHandlers::offset(runtime, args),
+            Some(BuiltInSymbol::Length) => StringHandlers::length(runtime, args),
+            Some(BuiltInSymbol::Script) => MovieHandlers::script(runtime, args),
             Some(BuiltInSymbol::Void) => TypeHandlers::void(args),
-            Some(BuiltInSymbol::Param) => Self::param(args),
-            Some(BuiltInSymbol::ParamCount) => Self::param_count(args),
-            Some(BuiltInSymbol::Count) => Self::count(args),
-            Some(BuiltInSymbol::CreateMask) => Self::forward_bitmap_handler("createMask", args),
-            Some(BuiltInSymbol::CreateMatte) => Self::forward_bitmap_handler("createMatte", args),
-            Some(BuiltInSymbol::GetAt) => Self::get_at(args),
-            Some(BuiltInSymbol::GetLast) => Self::get_last(args),
-            Some(BuiltInSymbol::GetPos) => Self::get_pos_global(args),
-            Some(BuiltInSymbol::SetAt) => Self::set_at(args),
-            Some(BuiltInSymbol::Ilk) => TypeHandlers::ilk(args),
-            Some(BuiltInSymbol::Member) => MovieHandlers::member(args),
+            Some(BuiltInSymbol::Param) => Self::param(runtime, args),
+            Some(BuiltInSymbol::ParamCount) => Self::param_count(runtime, args),
+            Some(BuiltInSymbol::Count) => Self::count(runtime, args),
+            Some(BuiltInSymbol::CreateMask) => Self::forward_bitmap_handler(runtime, Symbol::builtin(BuiltInSymbol::CreateMask), args),
+            Some(BuiltInSymbol::CreateMatte) => Self::forward_bitmap_handler(runtime, Symbol::builtin(BuiltInSymbol::CreateMatte), args),
+            Some(BuiltInSymbol::GetAt) => Self::get_at(runtime, args),
+            Some(BuiltInSymbol::GetLast) => {
+                Self::get_last(runtime, args)
+            }
+            Some(BuiltInSymbol::GetPos) => Self::get_pos_global(runtime, args),
+            Some(BuiltInSymbol::SetAt) => Self::set_at(runtime, args),
+            Some(BuiltInSymbol::Ilk) => TypeHandlers::ilk(runtime, args),
+            Some(BuiltInSymbol::Member) => MovieHandlers::member(runtime, args),
             // Director 4 syntax: `cast(N)` / `the X of cast(N)` references a
             // member in the single (internal) cast. Equivalent to `member(N)`
             // in D5+. Movies authored in D4 still use it.
-            Some(BuiltInSymbol::Cast) => MovieHandlers::member(args),
-            Some(BuiltInSymbol::Space) => StringHandlers::space(args),
-            Some(BuiltInSymbol::Integer) => TypeHandlers::integer(args),
-            Some(BuiltInSymbol::String) => StringHandlers::string(args),
-            Some(BuiltInSymbol::CharToNum) => StringHandlers::char_to_num(args),
-            Some(BuiltInSymbol::NumToChar) => StringHandlers::num_to_char(args),
-            Some(BuiltInSymbol::Float) => TypeHandlers::float(args),
-            Some(BuiltInSymbol::Put) => Self::put(args),
-            Some(BuiltInSymbol::Inspect) => Self::inspect(args),
-            Some(BuiltInSymbol::Random) => Self::random(args),
-            Some(BuiltInSymbol::RandomVector) => Self::random_vector(args),
-            Some(BuiltInSymbol::BitAnd) => Self::bit_and(args),
-            Some(BuiltInSymbol::BitOr) => Self::bit_or(args),
-            Some(BuiltInSymbol::BitNot) => Self::bit_not(args),
-            Some(BuiltInSymbol::Symbol) => TypeHandlers::symbol(args),
-            Some(BuiltInSymbol::PuppetSprite) => MovieHandlers::puppet_sprite(args),
-            Some(BuiltInSymbol::ClearGlobals) => Self::clear_globals(args),
-            Some(BuiltInSymbol::Sprite) => MovieHandlers::sprite(args),
-            Some(BuiltInSymbol::Point) => TypeHandlers::point(args),
-            Some(BuiltInSymbol::ClickLoc) => {
-                reserve_player_mut(|player| {
-                    Ok(player.alloc_datum(Datum::Point([player.movie.click_loc.0 as f64, player.movie.click_loc.1 as f64], 0)))
-                })
-            }
+            Some(BuiltInSymbol::Cast) => MovieHandlers::member(runtime, args),
+            Some(BuiltInSymbol::Space) => StringHandlers::space(runtime, args),
+            Some(BuiltInSymbol::Integer) => TypeHandlers::integer(runtime, args),
+            Some(BuiltInSymbol::String) => StringHandlers::string(runtime, args),
+            Some(BuiltInSymbol::CharToNum) => StringHandlers::char_to_num(runtime, args),
+            Some(BuiltInSymbol::NumToChar) => StringHandlers::num_to_char(runtime, args),
+            Some(BuiltInSymbol::Float) => TypeHandlers::float(runtime, args),
+            Some(BuiltInSymbol::Put) => Self::put(runtime, args),
+            Some(BuiltInSymbol::Inspect) => Self::inspect(runtime, args),
+            Some(BuiltInSymbol::Random) => Self::random(runtime, args),
+            Some(BuiltInSymbol::RandomVector) => Self::random_vector(runtime, args),
+            Some(BuiltInSymbol::BitAnd) => Self::bit_and(runtime, args),
+            Some(BuiltInSymbol::BitOr) => Self::bit_or(runtime, args),
+            Some(BuiltInSymbol::BitNot) => Self::bit_not(runtime, args),
+            Some(BuiltInSymbol::Symbol) => TypeHandlers::symbol(runtime, args),
+            Some(BuiltInSymbol::PuppetSprite) => MovieHandlers::puppet_sprite(runtime, args),
+            Some(BuiltInSymbol::ClearGlobals) => Self::clear_globals(runtime, args),
+            Some(BuiltInSymbol::Sprite) => MovieHandlers::sprite(runtime, args),
+            Some(BuiltInSymbol::Point) => TypeHandlers::point(runtime, args),
+            Some(BuiltInSymbol::ClickLoc) => Ok(runtime.player.alloc_datum(Datum::Point([
+                runtime.player.movie.click_loc.0 as f64,
+                runtime.player.movie.click_loc.1 as f64,
+            ], 0))),
             Some(BuiltInSymbol::ConstrainH) => {
-                reserve_player_mut(|player| {
-                    let sprite_num = player.get_datum(&args[0]).int_value()? as i16;
-                    let posn = player.get_datum(&args[1]).int_value()?;
-                    let sprite = player.movie.score.get_sprite(sprite_num);
-                    let (left, right) = if let Some(sprite) = sprite {
-                        let rect = get_concrete_sprite_rect(player, sprite);
-                        (rect.left, rect.right)
-                    } else {
-                        (0, 0)
-                    };
-                    Ok(player.alloc_datum(Datum::Int(posn.max(left).min(right))))
-                })
+                let sprite_num = Self::checked_sync_datum(runtime, &args[0])?.int_value()? as i16;
+                let posn = Self::checked_sync_datum(runtime, &args[1])?.int_value()?;
+                let (left, right) = runtime.player.movie.score.get_sprite(sprite_num)
+                    .map(|sprite| { let rect = get_concrete_sprite_rect(runtime.player, sprite); (rect.left, rect.right) })
+                    .unwrap_or((0, 0));
+                Ok(runtime.player.alloc_datum(Datum::Int(posn.max(left).min(right))))
             }
             Some(BuiltInSymbol::ConstrainV) => {
-                reserve_player_mut(|player| {
-                    let sprite_num = player.get_datum(&args[0]).int_value()? as i16;
-                    let posn = player.get_datum(&args[1]).int_value()?;
-                    let sprite = player.movie.score.get_sprite(sprite_num);
-                    let (top, bottom) = if let Some(sprite) = sprite {
-                        let rect = get_concrete_sprite_rect(player, sprite);
-                        (rect.top, rect.bottom)
-                    } else {
-                        (0, 0)
-                    };
-                    Ok(player.alloc_datum(Datum::Int(posn.max(top).min(bottom))))
-                })
+                let sprite_num = Self::checked_sync_datum(runtime, &args[0])?.int_value()? as i16;
+                let posn = Self::checked_sync_datum(runtime, &args[1])?.int_value()?;
+                let (top, bottom) = runtime.player.movie.score.get_sprite(sprite_num)
+                    .map(|sprite| { let rect = get_concrete_sprite_rect(runtime.player, sprite); (rect.top, rect.bottom) })
+                    .unwrap_or((0, 0));
+                Ok(runtime.player.alloc_datum(Datum::Int(posn.max(top).min(bottom))))
             }
             // `stop` / `play` / `rewind` / `pause` are overloaded Lingo
             // built-ins. Historically the web port stubbed them all to
@@ -1248,7 +1143,8 @@ impl BuiltInHandlerManager {
                         reserve_player_mut(|player| {
                             player.movie.score.get_sprite_mut(sn as i16).flash_asserted_frame = None;
                         });
-                        ruffle_play(sn);
+                        let owner_key = reserve_player_ref(|player| owner_key_string(&player.owner));
+                        ruffle_play_owned(&owner_key, sn);
                     }
                 }
                 Ok(DatumRef::Void)
@@ -1287,24 +1183,24 @@ impl BuiltInHandlerManager {
             // collectionsMaster.initCollections), where it is a no-op in
             // Director as well since nothing paused the playhead.
             Some(BuiltInSymbol::Pause | BuiltInSymbol::Continue) => Ok(DatumRef::Void),
-            Some(BuiltInSymbol::Cursor) => TypeHandlers::cursor(args),
-            Some(BuiltInSymbol::ExternalParamCount) => MovieHandlers::external_param_count(args),
-            Some(BuiltInSymbol::ExternalParamName) => MovieHandlers::external_param_name(args),
-            Some(BuiltInSymbol::ExternalParamValue) => MovieHandlers::external_param_value(args),
-            Some(BuiltInSymbol::GetNetText) => NetHandlers::get_net_text(args),
-            Some(BuiltInSymbol::Timeout) => TypeHandlers::timeout(args),
-            Some(BuiltInSymbol::Rect) => TypeHandlers::rect(args),
-            Some(BuiltInSymbol::GetStreamStatus) => NetHandlers::get_stream_status(args),
-            Some(BuiltInSymbol::NetError) => NetHandlers::net_error(args),
-            Some(BuiltInSymbol::NetStatus) => NetHandlers::net_status(args),
-            Some(BuiltInSymbol::NetTextResult) => NetHandlers::net_text_result(args),
-            Some(BuiltInSymbol::PostNetText) => NetHandlers::post_net_text(args),
-            Some(BuiltInSymbol::Rgb) => TypeHandlers::rgb(args),
-            Some(BuiltInSymbol::List) => TypeHandlers::list(args),
-            Some(BuiltInSymbol::Image) => TypeHandlers::image(args),
-            Some(BuiltInSymbol::Filter) => TypeHandlers::filter(args),
-            Some(BuiltInSymbol::NewMatrix) => TypeHandlers::new_matrix(args),
-            Some(BuiltInSymbol::ConstraintDesc) => TypeHandlers::constraint_desc(args),
+            Some(BuiltInSymbol::Cursor) => TypeHandlers::cursor(runtime, args),
+            Some(BuiltInSymbol::ExternalParamCount) => MovieHandlers::external_param_count(runtime, args),
+            Some(BuiltInSymbol::ExternalParamName) => MovieHandlers::external_param_name(runtime, args),
+            Some(BuiltInSymbol::ExternalParamValue) => MovieHandlers::external_param_value(runtime, args),
+            Some(BuiltInSymbol::GetNetText) => NetHandlers::get_net_text(runtime.player, runtime.symbols, args),
+            Some(BuiltInSymbol::Timeout) => TypeHandlers::timeout(runtime, args),
+            Some(BuiltInSymbol::Rect) => TypeHandlers::rect(runtime, args),
+            Some(BuiltInSymbol::GetStreamStatus) => NetHandlers::get_stream_status(runtime.player, runtime.symbols, args),
+            Some(BuiltInSymbol::NetError) => NetHandlers::net_error(runtime.player, runtime.symbols, args),
+            Some(BuiltInSymbol::NetStatus) => NetHandlers::net_status(runtime.player, runtime.symbols, args),
+            Some(BuiltInSymbol::NetTextResult) => NetHandlers::net_text_result(runtime.player, runtime.symbols, args),
+            Some(BuiltInSymbol::PostNetText) => NetHandlers::post_net_text(runtime.player, runtime.symbols, args),
+            Some(BuiltInSymbol::Rgb) => TypeHandlers::rgb(runtime, args),
+            Some(BuiltInSymbol::List) => TypeHandlers::list(runtime, args),
+            Some(BuiltInSymbol::Image) => TypeHandlers::image(runtime, args),
+            Some(BuiltInSymbol::Filter) => TypeHandlers::filter(runtime, args),
+            Some(BuiltInSymbol::NewMatrix) => TypeHandlers::new_matrix(runtime, args),
+            Some(BuiltInSymbol::ConstraintDesc) => TypeHandlers::constraint_desc(runtime, args),
             // Director allows both the method form `bitmap.getPixel(x, y)` and
             // the global form `getPixel(bitmap, x, y)` (chapter 15). Same for
             // `setPixel`. Both end up at the BitmapDatumHandlers entry — the
@@ -1317,7 +1213,7 @@ impl BuiltInHandlerManager {
                     ));
                 }
                 let rest: Vec<DatumRef> = args.iter().skip(1).cloned().collect();
-                BitmapDatumHandlers::get_pixel(&args[0], &rest)
+                BitmapDatumHandlers::get_pixel(runtime.player, runtime.symbols, &args[0], &rest)
             }
             Some(BuiltInSymbol::SetPixel) => {
                 if args.is_empty() {
@@ -1326,33 +1222,34 @@ impl BuiltInHandlerManager {
                     ));
                 }
                 let rest: Vec<DatumRef> = args.iter().skip(1).cloned().collect();
-                BitmapDatumHandlers::set_pixel(&args[0], &rest)
+                BitmapDatumHandlers::set_pixel(runtime.player, runtime.symbols, &args[0], &rest)
             }
-            Some(BuiltInSymbol::Chars) => StringHandlers::chars(args),
-            Some(BuiltInSymbol::PaletteIndex) => TypeHandlers::palette_index(args),
-            Some(BuiltInSymbol::Abs) => TypeHandlers::abs(args),
-            Some(BuiltInSymbol::Xtra) => TypeHandlers::xtra(args),
-            Some(BuiltInSymbol::StopEvent) => MovieHandlers::stop_event(args),
-            Some(BuiltInSymbol::GetPref) => MovieHandlers::get_pref(args),
-            Some(BuiltInSymbol::SetPref) => MovieHandlers::set_pref(args),
-            Some(BuiltInSymbol::UrlEncode) => StringHandlers::url_encode(args),
-            Some(BuiltInSymbol::GoToNetPage) => MovieHandlers::go_to_net_page(args),
-            Some(BuiltInSymbol::GoToNetMovie) => MovieHandlers::go_to_net_movie(args),
-            Some(BuiltInSymbol::Pass) => MovieHandlers::pass(args),
-            Some(BuiltInSymbol::Union) => TypeHandlers::union(args),
+            Some(BuiltInSymbol::Chars) => StringHandlers::chars(runtime, args),
+            Some(BuiltInSymbol::PaletteIndex) => TypeHandlers::palette_index(runtime, args),
+            Some(BuiltInSymbol::Abs) => TypeHandlers::abs(runtime, args),
+            Some(BuiltInSymbol::Xtra) => TypeHandlers::xtra(runtime, args),
+            Some(BuiltInSymbol::StopEvent) => MovieHandlers::stop_event(runtime, args),
+            Some(BuiltInSymbol::GetPref) => MovieHandlers::get_pref(runtime, args),
+            Some(BuiltInSymbol::SetPref) => MovieHandlers::set_pref(runtime, args),
+            Some(BuiltInSymbol::UrlEncode) => StringHandlers::url_encode(runtime, args),
+            Some(BuiltInSymbol::GoToNetPage) => MovieHandlers::go_to_net_page(runtime, args),
+            Some(BuiltInSymbol::GoToNetMovie) => MovieHandlers::go_to_net_movie(runtime, args),
+            Some(BuiltInSymbol::Pass) => MovieHandlers::pass(runtime, args),
+            Some(BuiltInSymbol::Union) => TypeHandlers::union(runtime, args),
             // inflate(rect, w, h) — the top-level form of rect.inflate(w, h).
             Some(BuiltInSymbol::Inflate) if !args.is_empty() => {
-                RectDatumHandlers::inflate(&args[0], &args[1..].to_vec())
+                runtime.with_player_and_symbols(|player, symbols| {
+                    RectDatumHandlers::inflate(player, symbols, &args[0], &args[1..])
+                })
             }
-            Some(BuiltInSymbol::BitXor) => TypeHandlers::bit_xor(args),
-            Some(BuiltInSymbol::Power) => TypeHandlers::power(args),
-            Some(BuiltInSymbol::Add) => TypeHandlers::add(args),
+            Some(BuiltInSymbol::Inflate) => TypeHandlers::inflate(runtime, args),
+            Some(BuiltInSymbol::BitXor) => TypeHandlers::bit_xor(runtime, args),
+            Some(BuiltInSymbol::Power) => TypeHandlers::power(runtime, args),
+            Some(BuiltInSymbol::Add) => TypeHandlers::add(runtime, args),
             Some(BuiltInSymbol::Abort) => Err(ScriptError::new_code(ScriptErrorCode::Abort, "abort".to_string())),
             Some(BuiltInSymbol::MouseDown) => {
-                reserve_player_mut(|player| {
-                    player.input_polled = true;
-                    Ok(player.alloc_datum(datum_bool(player.movie.mouse_down)))
-                })
+                runtime.player.input_polled = true;
+                Ok(runtime.player.alloc_datum(datum_bool(runtime.player.movie.mouse_down)))
             }
             Some(BuiltInSymbol::RightMouseDown) => {
                 // Right button IS tracked (right_mouse_down/right_mouse_up JS exports set
@@ -1360,43 +1257,43 @@ impl BuiltInHandlerManager {
                 // The function form was stubbed to FALSE, so polling movies (Rasterwerks
                 // C_Input.ReadMouse → KEY_ALTFIRE) never saw right-click → the sniper scope
                 // never engaged. Mirror the `mousedown` function above.
-                reserve_player_mut(|player| {
-                    Ok(player.alloc_datum(datum_bool(player.movie.right_mouse_down)))
-                })
+                Ok(runtime.player.alloc_datum(datum_bool(runtime.player.movie.right_mouse_down)))
             }
             Some(BuiltInSymbol::GetRendererServices) => {
                 // Return a prop list with renderer info stubs
-                reserve_player_mut(|player| {
-                    let make_sym = |p: &mut DirPlayer, s: &str| p.alloc_datum(Datum::Symbol(Symbol::from_str(s)));
+                let player = &mut *runtime.player;
+                let symbols = &mut *runtime.symbols;
+                {
+                    let make_sym = |p: &mut DirPlayer, symbols: &mut SymbolTable, s: &str| p.alloc_datum(Datum::Symbol(symbols.intern(s)));
                     let make_str = |p: &mut DirPlayer, s: &str| p.alloc_datum(Datum::String(s.to_string()));
                     let make_int = |p: &mut DirPlayer, n: i32| p.alloc_datum(Datum::Int(n));
 
                     // rendererDeviceList
-                    let rdl_key = make_sym(player, "rendererDeviceList");
+                    let rdl_key = make_sym(player, symbols, "rendererDeviceList");
                     let device = make_str(player, "WebGL2");
                     let rdl_val = player.alloc_datum(Datum::List(DatumType::List, VecDeque::from(vec![device]), false));
 
                     // renderer
-                    let rend_key = make_sym(player, "renderer");
+                    let rend_key = make_sym(player, symbols, "renderer");
                     let rend_val = make_str(player, "#openGL");
 
                     // Hardware info as nested proplist
-                    let vendor_k = make_sym(player, "vendor");
+                    let vendor_k = make_sym(player, symbols, "vendor");
                     let vendor_v = make_str(player, "WebGL");
-                    let model_k = make_sym(player, "model");
+                    let model_k = make_sym(player, symbols, "model");
                     let model_v = make_str(player, "WebGL2 Renderer");
-                    let version_k = make_sym(player, "version");
+                    let version_k = make_sym(player, symbols, "version");
                     let version_v = make_str(player, "2.0");
-                    let max_tex_k = make_sym(player, "maxTextureSize");
+                    let max_tex_k = make_sym(player, symbols, "maxTextureSize");
                     let max_tex_v = make_int(player, 4096);
-                    let tex_fmt_k = make_sym(player, "supportedTextureRenderFormats");
+                    let tex_fmt_k = make_sym(player, symbols, "supportedTextureRenderFormats");
                     let fmt = make_str(player, "rgba8880");
                     let tex_fmt_v = player.alloc_datum(Datum::List(DatumType::List, VecDeque::from(vec![fmt]), false));
-                    let tex_units_k = make_sym(player, "textureUnits");
+                    let tex_units_k = make_sym(player, symbols, "textureUnits");
                     let tex_units_v = make_int(player, 8);
-                    let depth_k = make_sym(player, "depthBufferRange");
+                    let depth_k = make_sym(player, symbols, "depthBufferRange");
                     let depth_v = make_int(player, 24);
-                    let color_k = make_sym(player, "colorBufferRange");
+                    let color_k = make_sym(player, symbols, "colorBufferRange");
                     let color_v = make_int(player, 32);
 
                     let hw_info = player.alloc_datum(Datum::PropList(VecDeque::from(vec![
@@ -1404,13 +1301,13 @@ impl BuiltInHandlerManager {
                         (max_tex_k, max_tex_v), (tex_fmt_k, tex_fmt_v), (tex_units_k, tex_units_v),
                         (depth_k, depth_v), (color_k, color_v),
                     ]), false));
-                    let hw_key = make_sym(player, "hardwareInfo");
+                    let hw_key = make_sym(player, symbols, "hardwareInfo");
 
                     let result = player.alloc_datum(Datum::PropList(VecDeque::from(vec![
                         (rdl_key, rdl_val), (rend_key, rend_val), (hw_key, hw_info),
                     ]), false));
                     Ok(result)
-                })
+                }
             }
             Some(BuiltInSymbol::GetVariable) => {
                 // Flash (SWF) member interop — getVariable(sprite, path [, asObjectFlag]).
@@ -1430,25 +1327,23 @@ impl BuiltInHandlerManager {
                 // sprite even though the member wasn't resolvable at capture time.
                 if args.len() >= 2 {
                     let sn_opt: Option<i16> = reserve_player_ref(|player| {
-                        Ok(match player.get_datum(&args[0]) {
+                        Ok::<Option<i16>, ScriptError>(match player.get_datum(&args[0]) {
                             Datum::SpriteRef(n) => Some(*n),
                             Datum::Int(n) => Some(*n as i16),
                             _ => None,
                         })
                     })?;
-                    let path = reserve_player_ref(|player| {
-                        player.get_datum(&args[1]).string_value()
-                    })?;
+                    let path = Self::checked_sync_datum(runtime, &args[1])?.string_value(runtime.symbols)?;
                     let return_as_object: bool = if args.len() >= 3 {
                         reserve_player_ref(|player| {
-                            Ok(player.get_datum(&args[2]).int_value().unwrap_or(1) == 0)
+                            Ok::<bool, ScriptError>(player.get_datum(&args[2]).int_value().unwrap_or(1) == 0)
                         })?
                     } else {
                         false
                     };
                     if let Some(sn) = sn_opt {
                         let (cl, cm): (i32, i32) = reserve_player_ref(|player| {
-                            Ok(player
+                            Ok::<(i32, i32), ScriptError>(player
                                 .movie
                                 .score
                                 .get_sprite(sn)
@@ -1472,7 +1367,7 @@ impl BuiltInHandlerManager {
                         // already pulls the entry from this set.
                         let member_ready = (cl == 0 && cm == 0)
                             || reserve_player_ref(|player| {
-                                Ok(player.flash_sprite_loaded.contains(&(sn, cl, cm)))
+                                Ok::<bool, ScriptError>(player.flash_sprite_loaded.contains(&(sn, cl, cm)))
                             })?;
                         if !return_as_object && !member_ready {
                             return Ok(DatumRef::Void);
@@ -1531,12 +1426,8 @@ impl BuiltInHandlerManager {
                 // Flash (SWF) member interop — setVariable(sprite, path, value)
                 if args.len() >= 3 {
                     let member_ref = Self::resolve_flash_member(&args[0])?;
-                    let path = reserve_player_ref(|player| {
-                        player.get_datum(&args[1]).string_value()
-                    })?;
-                    let value = reserve_player_ref(|player| {
-                        player.get_datum(&args[2]).string_value()
-                    })?;
+                    let path = Self::checked_sync_datum(runtime, &args[1])?.string_value(runtime.symbols)?;
+                    let value = Self::checked_sync_datum(runtime, &args[2])?.string_value(runtime.symbols)?;
                     if let Some((sn, _cl, _cm)) = member_ref {
                         if let Err(e) = ruffle_set_variable(sn, &path, &value) {
                             warn!("setVariable error: {:?}", e);
@@ -1549,9 +1440,7 @@ impl BuiltInHandlerManager {
                 // Flash (SWF) member interop — goToFrame(sprite, frame_or_label)
                 if args.len() >= 2 {
                     let member_ref = Self::resolve_flash_member(&args[0])?;
-                    let frame_or_label = reserve_player_ref(|player| {
-                        player.get_datum(&args[1]).string_value()
-                    })?;
+                    let frame_or_label = Self::checked_sync_datum(runtime, &args[1])?.string_value(runtime.symbols)?;
                     if let Some((sn, _cl, _cm)) = member_ref {
                         ruffle_goto_frame(sn, &frame_or_label);
                     }
@@ -1573,9 +1462,7 @@ impl BuiltInHandlerManager {
             Some(BuiltInSymbol::GetFlashProperty) => {
                 if args.len() >= 3 {
                     let member_ref = Self::resolve_flash_member(&args[0])?;
-                    let target = reserve_player_ref(|player| {
-                        player.get_datum(&args[1]).string_value()
-                    })?;
+                    let target = Self::checked_sync_datum(runtime, &args[1])?.string_value(runtime.symbols)?;
                     let prop_num = reserve_player_ref(|player| {
                         player.get_datum(&args[2]).int_value()
                     })?;
@@ -1597,15 +1484,11 @@ impl BuiltInHandlerManager {
             Some(BuiltInSymbol::SetFlashProperty) => {
                 if args.len() >= 4 {
                     let member_ref = Self::resolve_flash_member(&args[0])?;
-                    let target = reserve_player_ref(|player| {
-                        player.get_datum(&args[1]).string_value()
-                    })?;
+                    let target = Self::checked_sync_datum(runtime, &args[1])?.string_value(runtime.symbols)?;
                     let prop_num = reserve_player_ref(|player| {
                         player.get_datum(&args[2]).int_value()
                     })?;
-                    let value = reserve_player_ref(|player| {
-                        player.get_datum(&args[3]).string_value()
-                    })?;
+                    let value = Self::checked_sync_datum(runtime, &args[3])?.string_value(runtime.symbols)?;
                     if let Some((sn, _cl, _cm)) = member_ref {
                         ruffle_set_flash_property(sn, &target, prop_num, &value);
                     }
@@ -1636,9 +1519,7 @@ impl BuiltInHandlerManager {
                             1 => "normal",
                             _ => "background",
                         };
-                        return reserve_player_mut(|player| {
-                            Ok(player.alloc_datum(Datum::Symbol(Symbol::from_str(&symbol.to_string()))))
-                        });
+                        return Ok(runtime.player.alloc_datum(Datum::Symbol(runtime.symbols.intern(symbol))));
                     }
                 }
                 Ok(DatumRef::Void)
@@ -1646,122 +1527,65 @@ impl BuiltInHandlerManager {
             Some(BuiltInSymbol::TellTarget) => {
                 if args.len() >= 2 {
                     // tellTarget is complex; for now just log it
-                    let target = reserve_player_ref(|player| {
-                        player.get_datum(&args[0]).string_value()
-                    })?;
+                    let target = Self::checked_sync_datum(runtime, &args[0])?.string_value(runtime.symbols)?;
                     debug!("tellTarget: target={}", target);
                 }
                 Ok(DatumRef::Void)
             }
-            Some(BuiltInSymbol::GetaProp) => TypeHandlers::get_a_prop(args),
+            Some(BuiltInSymbol::GetaProp) => TypeHandlers::get_a_prop(runtime, args),
             Some(BuiltInSymbol::Inside) => {
-                let point = &args[0];
-                let rect = &args[1..].to_vec();
-                PointDatumHandlers::inside(point, rect)
-            }
-            Some(BuiltInSymbol::AddProp) => {
-                let list = &args[0];
-                let args = &args[1..].to_vec();
-                PropListDatumHandlers::add_prop(list, args)
-            }
-            Some(BuiltInSymbol::DeleteProp) => {
-                let list = &args[0];
-                let args = &args[1..].to_vec();
-                PropListDatumHandlers::delete_prop(list, args)
-            }
-            Some(BuiltInSymbol::Append) => {
-                let list = &args[0];
-                let args = &args[1..].to_vec();
-                ListDatumHandlers::append(list, args)
-            }
-            Some(BuiltInSymbol::DeleteAt) => reserve_player_mut(|player| {
-                let list = &args[0];
-                let args = &args[1..].to_vec();
-                match player.get_datum(list) {
-                    Datum::List(..) => ListDatumHandlers::delete_at(list, args),
-                    Datum::PropList(..) => PropListDatumHandlers::delete_at(list, args),
-                    _ => Err(ScriptError::new("Cannot delete at non list".to_string())),
+                if args.len() < 2 {
+                    return Err(ScriptError::new("inside requires a point and rectangle".to_string()));
                 }
-            }),
-            Some(BuiltInSymbol::DeleteOne) => {
-                let list = &args[0];
-                let args = &args[1..].to_vec();
-                ListDatumHandlers::delete_one(list, &args)
+                runtime.with_player_and_symbols(|player, symbols| {
+                    PointDatumHandlers::inside(player, symbols, &args[0], &args[1..])
+                })
             }
-            Some(BuiltInSymbol::DeleteAll) => {
-                let list = &args[0];
-                ListDatumHandlers::delete_all(list, &vec![])
-            }
-            Some(BuiltInSymbol::GetOne) => reserve_player_mut(|player| {
-                let list = &args[0];
-                let args = &args[1..].to_vec();
-                match player.get_datum(list) {
-                    Datum::List(..) => ListDatumHandlers::get_one(list, args),
-                    Datum::PropList(..) => PropListDatumHandlers::get_one(list, args),
-                    _ => Err(ScriptError::new("Cannot get one at non list".to_string())),
-                }
-            }),
-            Some(BuiltInSymbol::FindPos) => reserve_player_mut(|player| {
-                let list = &args[0];
-                let args = &args[1..].to_vec();
-                match player.get_datum(list) {
-                    Datum::List(..) => ListDatumHandlers::find_pos(list, &args),
-                    Datum::PropList(..) => PropListDatumHandlers::find_pos(list, &args),
-                    _ => Err(ScriptError::new("Cannot findPos on non-list".to_string())),
-                }
-            }),
-            Some(BuiltInSymbol::FindPosNear) => reserve_player_mut(|player| {
-                let list = &args[0];
-                let args = &args[1..].to_vec();
-                match player.get_datum(list) {
-                    Datum::List(..) => ListDatumHandlers::find_pos_near(list, &args),
-                    Datum::PropList(..) => PropListDatumHandlers::find_pos_near(list, &args),
-                    _ => Err(ScriptError::new("Cannot findPosNear on non-list".to_string())),
-                }
-            }),
+            Some(BuiltInSymbol::AddProp) => Self::try_collection_call(runtime, name, args, false, true)?.ok_or_else(|| ScriptError::new("Cannot addProp on non-prop list".to_string())),
+            Some(BuiltInSymbol::DeleteProp) => Self::try_collection_call(runtime, name, args, false, true)?.ok_or_else(|| ScriptError::new("Cannot deleteProp on non-prop list".to_string())),
+            Some(BuiltInSymbol::Append) => Self::try_collection_call(runtime, name, args, true, false)?.ok_or_else(|| ScriptError::new("Cannot append to non-list".to_string())),
+            Some(BuiltInSymbol::DeleteAt) => Self::try_collection_call(runtime, name, args, true, true)?.ok_or_else(|| ScriptError::new("Cannot delete at non list".to_string())),
+            Some(BuiltInSymbol::DeleteOne) => Self::try_collection_call(runtime, name, args, true, false)?.ok_or_else(|| ScriptError::new("Cannot delete one from non-list".to_string())),
+            Some(BuiltInSymbol::DeleteAll) => Self::try_collection_call(runtime, name, args, true, false)?.ok_or_else(|| ScriptError::new("Cannot delete all from non-list".to_string())),
+            Some(BuiltInSymbol::GetOne) => Self::try_collection_call(runtime, name, args, true, true)?.ok_or_else(|| ScriptError::new("Cannot get one at non list".to_string())),
+            Some(BuiltInSymbol::FindPos) => Self::try_collection_call(runtime, name, args, true, true)?.ok_or_else(|| ScriptError::new("Cannot findPos on non-list".to_string())),
+            Some(BuiltInSymbol::FindPosNear) => Self::try_collection_call(runtime, name, args, true, true)?.ok_or_else(|| ScriptError::new("Cannot findPosNear on non-list".to_string())),
             Some(BuiltInSymbol::SetProp) => {
                 let datum = &args[0];
-                let datum_type = reserve_player_ref(|player| player.get_datum(datum).type_enum());
+                let datum_type = Self::checked_sync_datum(runtime, datum)?.type_enum();
                 let args = &args[1..].to_vec();
                 match datum_type {
-                    DatumType::PropList => PropListDatumHandlers::set_opt_prop(datum, args),
-                    DatumType::ScriptInstanceRef => ScriptInstanceDatumHandlers::set_prop(datum, args),
+                    DatumType::PropList => runtime.with_player_and_symbols(|player, symbols| {
+                        PropListDatumHandlers::set_opt_prop(player, symbols, datum, args)
+                    }),
+                    DatumType::ScriptInstanceRef => ScriptInstanceDatumHandlers::set_prop(runtime.player, runtime.symbols, datum, args),
                     // `member(x).char[a..b] = v` compiles to
                     // setProp(member, #char, a, b, v) â€” a chunk write into the
                     // member's text, keeping everything outside the range.
-                    DatumType::CastMemberRef => Self::set_member_chunk(datum, args),
+                    DatumType::CastMemberRef => Self::set_member_chunk(runtime, datum, args),
                     _ => Err(ScriptError::new(
                         "Cannot setProp on non-prop list or child object".to_string(),
                     )),
                 }
             }
-            Some(BuiltInSymbol::GetPos) => reserve_player_mut(|player| {
-                let list = &args[0];
-                let args = &args[1..].to_vec();
-                match player.get_datum(list) {
-                    Datum::List(..) => ListDatumHandlers::find_pos(list, &args),
-                    Datum::PropList(..) => PropListDatumHandlers::get_pos(list, &args),
-                    _ => Err(ScriptError::new("Cannot getPos of non-list".to_string())),
-                }
-            }),
+            // The global getPos has Director's loose Symbol/String membership
+            // behavior and is kept in the explicit helper above.
             Some(BuiltInSymbol::SetaProp) => {
                 let datum = &args[0];
-                let datum_type = reserve_player_ref(|player| player.get_datum(datum).type_enum());
+                let datum_type = Self::checked_sync_datum(runtime, datum)?.type_enum();
                 let args = &args[1..].to_vec();
                 match datum_type {
-                    DatumType::PropList => PropListDatumHandlers::set_opt_prop(datum, args),
-                    DatumType::ScriptInstanceRef => ScriptInstanceDatumHandlers::set_a_prop(datum, args),
+                    DatumType::PropList => runtime.with_player_and_symbols(|player, symbols| {
+                        PropListDatumHandlers::set_opt_prop(player, symbols, datum, args)
+                    }),
+                    DatumType::ScriptInstanceRef => ScriptInstanceDatumHandlers::set_a_prop(runtime.player, runtime.symbols, datum, args),
                     _ => Err(ScriptError::new(
                         "Cannot setaProp on non-prop list or child object".to_string(),
                     )),
                 }
             }
-            Some(BuiltInSymbol::AddAt) => {
-                let list = &args[0];
-                let args = &args[1..].to_vec();
-                ListDatumHandlers::add_at(list, args)
-            }
-            Some(BuiltInSymbol::GetNodes) => Self::get_nodes(args),
+            Some(BuiltInSymbol::AddAt) => Self::try_collection_call(runtime, name, args, true, false)?.ok_or_else(|| ScriptError::new("Cannot addAt to non-list".to_string())),
+            Some(BuiltInSymbol::GetNodes) => Self::get_nodes(runtime, args),
             // `move(member, dest)` is the command form of the Member method
             // `member.move(dest)` — Agent Free Ride's Miniclip wrapper calls it
             // that way (`move(hsController, member(1, 2))`). Delegate with
@@ -1770,17 +1594,19 @@ impl BuiltInHandlerManager {
                 let receiver = &args[0];
                 let rest = args[1..].to_vec();
                 crate::player::handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers::call(
-                    receiver,
+                    runtime, receiver,
                     Symbol::builtin(BuiltInSymbol::Move),
                     &rest,
                 )
             }
             Some(BuiltInSymbol::Duplicate) => {
                 let item = &args[0];
-                let args = &args[1..].to_vec();
+                let duplicate_args = args[1..].to_vec();
+                if let Some(result) = Self::try_collection_call(runtime, name, args, true, true)? {
+                    return Ok(result);
+                }
+                Self::checked_sync_datum(runtime, item)?;
                 reserve_player_mut(|player| match player.get_datum(item) {
-                    Datum::List(..) => ListDatumHandlers::duplicate(item, args),
-                    Datum::PropList(..) => PropListDatumHandlers::duplicate(item, args),
                     Datum::Point(vals, flags) => {
                         Ok(player.alloc_datum(Datum::Point(*vals, *flags)))
                     }
@@ -1812,72 +1638,55 @@ impl BuiltInHandlerManager {
                     _ => Err(ScriptError::new(format!("duplicate() not implemented for type {}", player.get_datum(item).type_str()))),
                 })
             }
-            Some(BuiltInSymbol::GetProp) => {
-                let list = &args[0];
-                let args = &args[1..].to_vec();
-                PropListDatumHandlers::get_prop(list, args)
-            }
-            Some(BuiltInSymbol::Min) => TypeHandlers::min(args),
-            Some(BuiltInSymbol::Max) => TypeHandlers::max(args),
-            Some(BuiltInSymbol::Sort) => TypeHandlers::sort(args),
-            Some(BuiltInSymbol::Intersect) => TypeHandlers::intersect(args),
-            Some(BuiltInSymbol::Inflate) => TypeHandlers::inflate(args),
-            Some(BuiltInSymbol::MapFn) => TypeHandlers::map(args),
-            Some(BuiltInSymbol::PointToChar) => TypeHandlers::point_to_char(args),
-            Some(BuiltInSymbol::ScrollByLine) => TypeHandlers::scroll_by_line(args),
-            Some(BuiltInSymbol::ScrollByPage) => TypeHandlers::scroll_by_page(args),
-            Some(BuiltInSymbol::Rollover) => MovieHandlers::rollover(args),
+            Some(BuiltInSymbol::GetProp) => Self::try_collection_call(runtime, name, args, false, true)?.ok_or_else(|| ScriptError::new("Cannot getProp on non-prop list".to_string())),
+            Some(BuiltInSymbol::Min) => TypeHandlers::min(runtime, args),
+            Some(BuiltInSymbol::Max) => TypeHandlers::max(runtime, args),
+            Some(BuiltInSymbol::Sort) => TypeHandlers::sort(runtime, args),
+            Some(BuiltInSymbol::Intersect) => TypeHandlers::intersect(runtime, args),
+            Some(BuiltInSymbol::MapFn) => TypeHandlers::map(runtime, args),
+            Some(BuiltInSymbol::PointToChar) => TypeHandlers::point_to_char(runtime, args),
+            Some(BuiltInSymbol::ScrollByLine) => TypeHandlers::scroll_by_line(runtime, args),
+            Some(BuiltInSymbol::ScrollByPage) => TypeHandlers::scroll_by_page(runtime, args),
+            Some(BuiltInSymbol::Rollover) => MovieHandlers::rollover(runtime, args),
             // Legacy function form of the read-only mouse position properties
             // (`mouseH()` / `mouseV()` — same value as `the mouseH` / `the mouseV`),
             // in movie/stage pixels. Used by older movies for hit-region tests.
-            Some(BuiltInSymbol::MouseH) => reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Int(player.mouse_loc.0)))),
-            Some(BuiltInSymbol::MouseV) => reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Int(player.mouse_loc.1)))),
-            Some(BuiltInSymbol::GetPropAt) => TypeHandlers::get_prop_at(args),
+            Some(BuiltInSymbol::MouseH) => Ok(runtime.player.alloc_datum(Datum::Int(runtime.player.mouse_loc.0))),
+            Some(BuiltInSymbol::MouseV) => Ok(runtime.player.alloc_datum(Datum::Int(runtime.player.mouse_loc.1))),
+            Some(BuiltInSymbol::GetPropAt) => TypeHandlers::get_prop_at(runtime, args),
             Some(BuiltInSymbol::PuppetSound) => MovieHandlers::puppet_sound(args),
-            Some(BuiltInSymbol::Pi) => TypeHandlers::pi(args),
-            Some(BuiltInSymbol::Sin) => TypeHandlers::sin(args),
-            Some(BuiltInSymbol::Cos) => TypeHandlers::cos(args),
-            Some(BuiltInSymbol::Sqrt) => TypeHandlers::sqrt(args),
-            Some(BuiltInSymbol::Tan) => TypeHandlers::tan(args),
-            Some(BuiltInSymbol::Atan) => TypeHandlers::atan(args),
-            Some(BuiltInSymbol::Sound) => TypeHandlers::sound(args),
-            Some(BuiltInSymbol::Vector) => TypeHandlers::vector(args),
-            Some(BuiltInSymbol::Transform) => TypeHandlers::transform3d(args),
-            Some(BuiltInSymbol::Color) => TypeHandlers::color(args),
-            Some(BuiltInSymbol::Date) => TypeHandlers::date(args),
+            Some(BuiltInSymbol::Pi) => TypeHandlers::pi(runtime, args),
+            Some(BuiltInSymbol::Sin) => TypeHandlers::sin(runtime, args),
+            Some(BuiltInSymbol::Cos) => TypeHandlers::cos(runtime, args),
+            Some(BuiltInSymbol::Sqrt) => TypeHandlers::sqrt(runtime, args),
+            Some(BuiltInSymbol::Tan) => TypeHandlers::tan(runtime, args),
+            Some(BuiltInSymbol::Atan) => TypeHandlers::atan(runtime, args),
+            Some(BuiltInSymbol::Sound) => TypeHandlers::sound(runtime, args),
+            Some(BuiltInSymbol::Vector) => TypeHandlers::vector(runtime, args),
+            Some(BuiltInSymbol::Transform) => TypeHandlers::transform3d(runtime, args),
+            Some(BuiltInSymbol::Color) => TypeHandlers::color(runtime, args),
+            Some(BuiltInSymbol::Date) => TypeHandlers::date(runtime, args),
             // `_system.time()` — Director 11.5 Scripting Dictionary, "time() (System)":
             // "returns the current time in the system clock as a string. The format of
             // the time string depends on the computer's time settings." No parameters.
             // `_system` resolves to the movie datum here (get_set.rs), so the call lands
             // in this built-in dispatcher; without it AreaZero's `[M] Init Game` raised
             // "No handler time for datum <_movie>" on its startup log line.
-            Some(BuiltInSymbol::Time) => TypeHandlers::time(args),
-            Some(BuiltInSymbol::KeyPressed) => Self::key_pressed(args),
+            Some(BuiltInSymbol::Time) => TypeHandlers::time(runtime, args),
+            Some(BuiltInSymbol::KeyPressed) => Self::key_pressed(runtime, args),
             // Legacy function-call forms of the modifier-key state properties (Director
             // 11.5 Scripting Dictionary: Key properties `the shiftDown` / `controlDown` /
             // `optionDown` / `commandDown`, read-only). Movies call e.g. `shiftDown()`.
-            Some(BuiltInSymbol::ShiftDown) => reserve_player_mut(|player| {
-                Ok(player.alloc_datum(datum_bool(player.keyboard_manager.is_shift_down())))
-            }),
-            Some(BuiltInSymbol::ControlDown) => reserve_player_mut(|player| {
-                Ok(player.alloc_datum(datum_bool(player.keyboard_manager.is_control_down())))
-            }),
-            Some(BuiltInSymbol::OptionDown | BuiltInSymbol::AltDown) => reserve_player_mut(|player| {
-                Ok(player.alloc_datum(datum_bool(player.keyboard_manager.is_alt_down())))
-            }),
-            Some(BuiltInSymbol::CommandDown) => reserve_player_mut(|player| {
-                Ok(player.alloc_datum(datum_bool(player.keyboard_manager.is_command_down())))
-            }),
-            Some(BuiltInSymbol::ShowGlobals) => Self::show_globals(),
-            Some(BuiltInSymbol::TellStreamStatus) => Self::tell_stream_status(args),
-            Some(BuiltInSymbol::Frame) => {
-                reserve_player_mut(|player| {
-                    Ok(player.alloc_datum(Datum::Int(player.movie.current_frame as i32)))
-                })
-            }
-            Some(BuiltInSymbol::Label) => Self::label(args),
-            Some(BuiltInSymbol::Alert) => Self::alert(args),
-            Some(BuiltInSymbol::Objectp) => Self::object_p(args),
+            Some(BuiltInSymbol::ShiftDown) => Ok(runtime.player.alloc_datum(datum_bool(runtime.player.keyboard_manager.is_shift_down()))),
+            Some(BuiltInSymbol::ControlDown) => Ok(runtime.player.alloc_datum(datum_bool(runtime.player.keyboard_manager.is_control_down()))),
+            Some(BuiltInSymbol::OptionDown | BuiltInSymbol::AltDown) => Ok(runtime.player.alloc_datum(datum_bool(runtime.player.keyboard_manager.is_alt_down()))),
+            Some(BuiltInSymbol::CommandDown) => Ok(runtime.player.alloc_datum(datum_bool(runtime.player.keyboard_manager.is_command_down()))),
+            Some(BuiltInSymbol::ShowGlobals) => Self::show_globals(runtime),
+            Some(BuiltInSymbol::TellStreamStatus) => Self::tell_stream_status(runtime, args),
+            Some(BuiltInSymbol::Frame) => Ok(runtime.player.alloc_datum(Datum::Int(runtime.player.movie.current_frame as i32))),
+            Some(BuiltInSymbol::Label) => Self::label(runtime, args),
+            Some(BuiltInSymbol::Alert) => Self::alert(runtime, args),
+            Some(BuiltInSymbol::Objectp) => Self::object_p(runtime, args),
             Some(BuiltInSymbol::SoundBusy) => TypeHandlers::sound_busy(args),
             // `stopSound` (Director 11.5 Scripting Dictionary p.872) —
             // legacy command that stops the sound currently playing on
@@ -1896,19 +1705,19 @@ impl BuiltInHandlerManager {
             }
             Some(BuiltInSymbol::Delay) => MovieHandlers::delay(args),
             Some(BuiltInSymbol::Halt) => MovieHandlers::halt(args),
-            Some(BuiltInSymbol::StartTimer) => Self::start_timer(args),
-            Some(BuiltInSymbol::ExternalEvent) => Self::external_event(args),
-            Some(BuiltInSymbol::DontPassEvent) => Self::dont_pass_event(args),
-            Some(BuiltInSymbol::FrameReady) => Self::frame_ready(args),
-            Some(BuiltInSymbol::Marker) => Self::marker(args),
+            Some(BuiltInSymbol::StartTimer) => Self::start_timer(runtime, args),
+            Some(BuiltInSymbol::ExternalEvent) => Self::external_event(runtime, args),
+            Some(BuiltInSymbol::DontPassEvent) => Self::dont_pass_event(runtime, args),
+            Some(BuiltInSymbol::FrameReady) => Self::frame_ready(runtime, args),
+            Some(BuiltInSymbol::Marker) => Self::marker(runtime, args),
             Some(BuiltInSymbol::Play) => {
                 // play member("name") - play a sound on channel 1
                 if args.is_empty() {
                     return Ok(DatumRef::Void);
                 }
-                reserve_player_mut(|player| {
+                runtime.with_player_and_symbols(|player, symbols| {
                     let channel_datum = player.alloc_datum(Datum::SoundChannel(1));
-                    SoundChannelDatumHandlers::call(player, &channel_datum, Symbol::builtin(BuiltInSymbol::Play), args)
+                    SoundChannelDatumHandlers::call(player, symbols, &channel_datum, Symbol::builtin(BuiltInSymbol::Play), args)
                 })
             }
             Some(BuiltInSymbol::SpriteBox) => {
@@ -2503,60 +2312,105 @@ impl BuiltInHandlerManager {
                 // own handler (implemented in cast_member/text.rs & field.rs).
                 let rest = args[1..].to_vec();
                 crate::player::handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers::call(
-                    &args[0], name, &rest,
+                    runtime, &args[0], name, &rest,
                 )
             }
             _ => {
+                let handler_name = runtime
+                    .symbols
+                    .display(&name)
+                    .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
+                    .to_owned();
                 // Check if first arg is an xtra instance - if so, forward to the xtra instance handler
-                if !args.is_empty() {
-                    if let Some(res) = reserve_player_ref(|player| {
-                        if let Ok((xtra_name, instance_id)) = player.get_datum(&args[0]).to_xtra_instance() {
-                            let remaining_args = args[1..].to_vec();
-                            return Some(call_xtra_instance_handler(&xtra_name, *instance_id, &name.to_string(), &remaining_args));
+                if let Some(receiver_ref) = args.first() {
+                    let receiver = match Self::checked_sync_datum(runtime, receiver_ref)? {
+                        Datum::XtraInstance(name, id) => Some((name.clone(), *id)),
+                        _ => None,
+                    };
+                    if let Some((xtra_name, instance_id)) = receiver {
+                        let remaining_args = args[1..].to_vec();
+                        // RuntimeSession::dispatch_global_inner converts registered
+                        // external Multiuser/Curl instances into owned pending
+                        // requests before this synchronous fallback is reached.
+                        // The fallback therefore remains owner-bound for builtin
+                        // instance handlers without reintroducing global managers.
+                        if matches!(xtra_name.to_ascii_lowercase().as_str(), "multiuser" | "curl" | "fileio" | "xmlparser") {
+                            return crate::player::xtra::manager::call_instance_handler_explicit(
+                                runtime.player,
+                                runtime.symbols,
+                                &xtra_name,
+                                receiver_ref,
+                                &handler_name,
+                                &remaining_args,
+                            );
                         }
-                        None
-                    }) {
-                        return res;
+                        return call_xtra_instance_handler(
+                            runtime.player,
+                            &xtra_name,
+                            instance_id,
+                            &handler_name,
+                            &remaining_args,
+                            runtime.symbols,
+                        );
                     }
                 }
                 // Static-only Xtras (OpenURL, SysMenu, BudAPI, Curl statics).
+                if let Some(res) = crate::player::xtra::manager::try_call_xtra_static_handler_explicit(
+                    runtime.player,
+                    runtime.symbols,
+                    &handler_name,
+                    args,
+                ) {
+                    return res;
+                }
                 if let Some(res) =
-                    crate::player::xtra::manager::try_call_xtra_static_handler(name.into(), args)
+                    crate::player::xtra::manager::try_call_xtra_static_handler_with_symbols(
+                        runtime.player,
+                        &handler_name,
+                        args,
+                        runtime.symbols,
+                    )
                 {
                     return res;
                 }
-                let formatted_args = reserve_player_ref(|player| {
+                // Ordinary unknown-handler diagnostics consume arguments only
+                // while formatting the final error. Xtra routes above may
+                // intentionally ignore malformed or foreign trailing args.
+                let checked_args = args
+                    .iter()
+                    .map(|arg| Self::checked_sync_datum(runtime, arg).map(Clone::clone))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let formatted_args = runtime.with_player_and_symbols(|player, symbols| {
                     let mut s = String::new();
-                    for arg in args {
+                    for arg in &checked_args {
                         if !s.is_empty() { s.push_str(", "); }
-                        s.push_str(&format_concrete_datum(&player.get_datum(arg), player));
+                        s.push_str(&format_concrete_datum(arg, symbols, player)?);
                     }
-                    Ok(s)
+                    Ok::<String, ScriptError>(s)
                 })?;
-                let msg = format!("No built-in handler: {}({})", name, formatted_args);
+                let msg = format!("No built-in handler: {}({})", handler_name, formatted_args);
                 warn!("{msg}");
                 return Err(ScriptError::new(msg));
             }
         }
     }
 
-    fn alert(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let message = player.get_datum(&args[0]).string_value()?;
-            trace_output(player, &format!("Alert: {}", message));
-            Ok(DatumRef::Void)
-        })
+    fn alert(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let message = Self::checked_sync_datum(runtime, &args[0])?.string_value(runtime.symbols)?;
+        trace_output(runtime.player, &format!("Alert: {}", message));
+        Ok(DatumRef::Void)
     }
 
-    fn label(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let label_name = player.get_datum(&args[0]).string_value()?;
+    fn label(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+            let label_name = Self::checked_sync_datum(runtime, &args[0])
+                ?.string_value(runtime.symbols)?;
 
             debug!("Searching for label: {}", label_name);
 
             let label_name_lower = label_name.to_lowercase();
 
-            let label = player
+            let label = runtime
+                .player
                 .movie
                 .score
                 .frame_labels
@@ -2573,25 +2427,35 @@ impl BuiltInHandlerManager {
                 warn!("Label not found");
             }
 
-            Ok(player.alloc_datum(Datum::Int(
+            Ok(runtime.player.alloc_datum(Datum::Int(
                 label.map_or(0, |label| label.frame_num as i32),
             )))
+    }
+
+    fn show_globals(runtime: &mut ExecutionContext<'_>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
+            trace_output(player, "--- Global Variables ---");
+            let rendered = player
+                .globals
+                .iter()
+                .map(|(name, value)| {
+                    let value = format_datum(value, symbols, player)?;
+                    let name = symbols
+                        .display(name)
+                        .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+                    Ok::<_, ScriptError>(format!("{} = {}", name, value))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            for line in rendered {
+                trace_output(player, &line);
+            }
+            Ok(DatumRef::Void)
         })
     }
 
-    fn show_globals() -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            trace_output(player, "--- Global Variables ---");
-            for (name, value) in &player.globals {
-                let value = format_datum(value, player);
-                trace_output(player, &format!("{} = {}", name, value));
-            }
-        });
-        Ok(DatumRef::Void)
-    }
-
-    pub fn key_pressed(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn key_pressed(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        Self::checked_sync_datum(runtime, &args[0])?;
+        runtime.with_player_and_symbols(|player, symbols| {
             // Mark this iteration as input-polling so the bytecode busy-wait
             // yield only kicks in for `repeat while keyPressed(...)` spins.
             player.input_polled = true;
@@ -2635,7 +2499,7 @@ impl BuiltInHandlerManager {
                 return Ok(player.alloc_datum(datum_bool(is_pressed)));
             }
 
-            let key_code = if let Ok(key_str) = arg_datum.string_value() {
+            let key_code = if let Ok(key_str) = arg_datum.string_value(symbols) {
                 // Named key constants. Director's SPACE/RETURN/TAB/... are
                 // character constants, but movies pass them to keyPressed in a
                 // form that reaches us as the symbolic name (e.g. spectral-
@@ -2745,21 +2609,21 @@ impl BuiltInHandlerManager {
         })
     }
 
-    pub fn get_nodes(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn get_nodes(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         if args.len() < 2 {
             return Err(ScriptError::new(
                 "getNodes requires 2 arguments: xml_node, node_name".to_string(),
             ));
         }
 
-        reserve_player_mut(|player| {
-            let xml_node = player.get_datum(&args[0]);
-            let node_name = player.get_datum(&args[1]).string_value()?;
-
+        let xml_node = Self::checked_sync_datum(runtime, &args[0])?.clone();
+        let node_name = Self::checked_sync_datum(runtime, &args[1])?
+            .string_value(runtime.symbols)?;
+        runtime.with_player_and_symbols(|player, symbols| {
             debug!("🔧 getNodes called for node type: {}", node_name);
 
             // Get the XML node ID
-            let xml_id = match xml_node {
+            let xml_id = match &xml_node {
                 Datum::XmlRef(id) => *id,
                 _ => {
                     return Err(ScriptError::new(
@@ -2779,15 +2643,17 @@ impl BuiltInHandlerManager {
         })
     }
 
-    fn tell_stream_status(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    fn tell_stream_status(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         if args.len() < 1 {
             return Err(ScriptError::new(
                 "tellStreamStatus requires 1 argument".to_string(),
             ));
         }
 
-        reserve_player_mut(|player| {
-            let enable = player.get_datum(&args[0]).bool_value().unwrap_or(false);
+        let enable = Self::checked_sync_datum(runtime, &args[0])?
+            .bool_value()
+            .unwrap_or(false);
+        runtime.with_player_and_symbols(|player, _symbols| {
             player.enable_stream_status_handler = enable;
             if enable {
                 // Clear reported state so all tasks get fresh callbacks
@@ -2797,26 +2663,21 @@ impl BuiltInHandlerManager {
         })
     }
     
-    fn void_p(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            if args.is_empty() {
-                return Ok(player.alloc_datum(Datum::Int(1)));
-            }
-            
-            let datum = player.get_datum(&args[0]);
-            let is_void = matches!(datum, Datum::Void | Datum::Null);
-            
-            Ok(player.alloc_datum(Datum::Int(if is_void { 1 } else { 0 })))
-        })
+    fn void_p(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        if args.is_empty() {
+            return Ok(runtime.player.alloc_datum(Datum::Int(1)));
+        }
+        let datum = Self::checked_sync_datum(runtime, &args[0])?;
+        let is_void = matches!(datum, Datum::Void | Datum::Null);
+        Ok(runtime.player.alloc_datum(Datum::Int(if is_void { 1 } else { 0 })))
     }
     
-    fn object_p(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    fn object_p(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
             if args.is_empty() {
-                return Ok(player.alloc_datum(Datum::Int(0)));
+                return Ok(runtime.player.alloc_datum(Datum::Int(0)));
             }
             
-            let datum = player.get_datum(&args[0]);
+            let datum = Self::checked_sync_datum(runtime, &args[0])?;
             
             // Director considers these as objects (not primitives)
             let is_object = matches!(
@@ -2845,32 +2706,26 @@ impl BuiltInHandlerManager {
                 | Datum::TimeoutRef(_)
             );
             
-            Ok(player.alloc_datum(Datum::Int(if is_object { 1 } else { 0 })))
-        })
+            Ok(runtime.player.alloc_datum(Datum::Int(if is_object { 1 } else { 0 })))
     }
 
-    fn start_timer(_args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    fn start_timer(runtime: &mut ExecutionContext<'_>, _args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player(|player| {
             // Reset the start_time to current time
             player.start_time = chrono::Local::now();
             Ok(DatumRef::Void)
         })
     }
 
-    pub fn external_event(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_ref(|player| {
-            let event_string = player.get_datum(&args[0]).string_value()?;
-            
-            debug!("🔔 externalEvent: {}", event_string);
-            
-            crate::js_api::JsApi::dispatch_external_event(&event_string);
-            
-            Ok(DatumRef::Void)
-        })
+    pub fn external_event(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let event_string = Self::checked_sync_datum(runtime, &args[0])?.string_value(runtime.symbols)?;
+        debug!("🔔 externalEvent: {}", event_string);
+        crate::js_api::JsApi::dispatch_external_event(&event_string);
+        Ok(DatumRef::Void)
     }
 
-    fn dont_pass_event(_args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    fn dont_pass_event(runtime: &mut ExecutionContext<'_>, _args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player(|player| {
             let scope_ref = player.current_scope_ref();
             if let Some(scope) = player.scopes.get_mut(scope_ref) {
                 scope.passed = false;  // Set passed to false to stop propagation
@@ -2879,22 +2734,25 @@ impl BuiltInHandlerManager {
         })
     }
 
-    fn frame_ready(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            // Get start and end frame numbers
-            let (start_frame, end_frame) = if args.is_empty() {
-                // No arguments - check current frame only
-                let current = player.movie.current_frame;
-                (current, current)
+    fn frame_ready(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        // Resolve each consumed argument immediately before converting it so
+        // an ordinary conversion error on an earlier argument does not
+        // consume a later reference as a side effect.
+        let (start_frame, end_frame) = if args.is_empty() {
+            let current = runtime.player.movie.current_frame;
+            (current, current)
+        } else {
+            let start = Self::checked_sync_datum(runtime, &args[0])?
+                .int_value()? as u32;
+            let end = if args.len() > 1 {
+                Self::checked_sync_datum(runtime, &args[1])?
+                    .int_value()? as u32
             } else {
-                let start = player.get_datum(&args[0]).int_value()? as u32;
-                let end = if args.len() > 1 {
-                    player.get_datum(&args[1]).int_value()? as u32
-                } else {
-                    start
-                };
-                (start, end)
+                start
             };
+            (start, end)
+        };
+        runtime.with_player(|player| {
 
             debug!("frameReady checking frames {} to {}", start_frame, end_frame);
 
@@ -2956,20 +2814,19 @@ impl BuiltInHandlerManager {
         })
     }
 
-    fn marker(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    fn marker(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
             if args.is_empty() {
                 return Err(ScriptError::new("marker requires 1 argument".to_string()));
             }
 
-            let arg = player.get_datum(&args[0]);
+            let arg = Self::checked_sync_datum(runtime, &args[0])?.clone();
+            let player = &mut *runtime.player;
             
             match arg {
                 // marker(n) returns the frame number of the nth marker relative to current frame.
                 // marker(0) = current marker (nearest at or before current frame)
                 // marker(1) = next marker, marker(-1) = previous marker, etc.
                 Datum::Int(offset) => {
-                    let offset = *offset;
                     let current_frame = player.movie.current_frame as i32;
                     let labels = &player.movie.score.frame_labels;
 
@@ -3004,7 +2861,10 @@ impl BuiltInHandlerManager {
                     )))
                 }
                 Datum::Symbol(symbol) => {
-                    let marker_name = symbol.as_str();
+                    let marker_name = runtime
+                        .symbols
+                        .display(&symbol)
+                        .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
                     let marker_name_lower = marker_name.to_lowercase();
                     let marker = player
                         .movie
@@ -3022,13 +2882,16 @@ impl BuiltInHandlerManager {
                     arg.type_str()
                 ))),
             }
-        })
     }
     /// `setProp(member, #char|#word|#item|#line, first, last, value)` â€” the
     /// compiled form of `member(x).char[a..b] = value`. Replaces exactly that
     /// range of the member's text and leaves the rest alone. `last` is
     /// optional: `member(x).char[a] = v` compiles with four arguments.
-    pub fn set_member_chunk(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn set_member_chunk(
+        runtime: &mut ExecutionContext<'_>,
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
         use crate::director::lingo::datum::{StringChunkExpr, StringChunkType};
         use crate::player::handlers::datum_handlers::string_chunk::StringChunkUtils;
         use crate::player::handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers;
@@ -3038,43 +2901,57 @@ impl BuiltInHandlerManager {
                 args.len()
             )));
         }
-        let (member_ref, chunk_type, first, last, replacement) = reserve_player_ref(|player| {
-            let member_ref = match player.get_datum(datum) {
-                Datum::CastMember(r) => r.to_owned(),
-                other => {
-                    return Err(ScriptError::new(format!(
-                        "setProp: expected a cast member, got {}", other.type_str()
-                    )))
-                }
-            };
-            let kind = match player.get_datum(&args[0]) {
-                Datum::Symbol(sym) => sym.clone(),
-                other => {
-                    return Err(ScriptError::new(format!(
-                        "setProp: expected a chunk symbol, got {}", other.type_str()
-                    )))
-                }
-            };
-            let chunk_type = StringChunkType::from(kind);
-            let first = player.get_datum(&args[1]).int_value()?;
-            let (last, value_ref) = if args.len() >= 4 {
-                (player.get_datum(&args[2]).int_value()?, &args[3])
-            } else {
-                (first, &args[2])
-            };
-            let replacement = player.get_datum(value_ref).string_value()?;
-            Ok((member_ref, chunk_type, first, last, replacement))
-        })?;
-        let current = reserve_player_mut(|player| {
-            CastMemberRefHandlers::get_prop(player, &member_ref, Symbol::from_str("text"))
-                .ok()
-                .and_then(|d| d.string_value().ok())
-                .unwrap_or_default()
-        });
-        let item_delimiter = reserve_player_ref(|player| player.movie.item_delimiter);
+        let datum_value = Self::checked_sync_datum(runtime, datum)?.clone();
+        let member_ref = match &datum_value {
+            Datum::CastMember(member_ref) => member_ref.to_owned(),
+            other => {
+                return Err(ScriptError::new(format!(
+                    "setProp: expected a cast member, got {}", other.type_str()
+                )))
+            }
+        };
+        let kind = match Self::checked_sync_datum(runtime, &args[0])? {
+            Datum::Symbol(sym) => sym.clone(),
+            other => {
+                return Err(ScriptError::new(format!(
+                    "setProp: expected a chunk symbol, got {}", other.type_str()
+                )))
+            }
+        };
+        let chunk_type = StringChunkType::from_symbol(&kind, runtime.symbols)?;
+        let first = Self::checked_sync_datum(runtime, &args[1])?.int_value()?;
+        let (last, value_ref) = if args.len() >= 4 {
+            let last = Self::checked_sync_datum(runtime, &args[2])?.int_value()?;
+            let value = Self::checked_sync_datum(runtime, &args[3])?
+                .string_value(runtime.symbols)?;
+            (last, value)
+        } else {
+            let value = Self::checked_sync_datum(runtime, &args[2])?
+                .string_value(runtime.symbols)?;
+            (first, value)
+        };
+        let replacement = value_ref;
+        let current_result = CastMemberRefHandlers::get_prop(
+            runtime.player,
+            runtime.symbols,
+            &member_ref,
+            Symbol::builtin(BuiltInSymbol::Text),
+        ).and_then(|d| d.string_value(runtime.symbols));
+        let current = match current_result {
+            Ok(text) => text,
+            Err(error) if error.code == ScriptErrorCode::InvalidReference => return Err(error),
+            Err(_) => String::new(),
+        };
+        let item_delimiter = runtime.player.movie.item_delimiter;
         let chunk_expr = StringChunkExpr { chunk_type, start: first, end: last, item_delimiter };
         let new_text = StringChunkUtils::string_by_putting_into_chunk(&current, &chunk_expr, &replacement)?;
-        CastMemberRefHandlers::set_prop(&member_ref, Symbol::from_str("text"), Datum::String(new_text))?;
+        CastMemberRefHandlers::set_prop(
+            runtime.player,
+            runtime.symbols,
+            &member_ref,
+            Symbol::builtin(BuiltInSymbol::Text),
+            Datum::String(new_text),
+        )?;
         Ok(DatumRef::Void)
     }
 
@@ -3207,34 +3084,4 @@ fn wraps_in_line_up_to(
         if consumed_chars > target_char_offset { break; }
     }
     wraps
-}
-
-fn get_datum_script_instance_ids(
-    value_ref: &DatumRef,
-    player: &mut DirPlayer,
-) -> Result<Vec<ScriptInstanceRef>, ScriptError> {
-    let value = player.get_datum(value_ref);
-    let mut instance_refs = vec![];
-    match value {
-        Datum::ScriptInstanceRef(instance_id) => {
-            instance_refs.push(instance_id.clone());
-        }
-        Datum::SpriteRef(sprite_id) => {
-            let fallback = player
-                .movie
-                .score
-                .get_sprite(*sprite_id)
-                .map(|sprite| sprite.script_instance_list.clone())
-                .unwrap_or_default();
-            instance_refs.extend(player.get_sprite_script_instance_ids(*sprite_id, fallback.as_slice()));
-        }
-        Datum::Int(_) => {}
-        _ => {
-            return Err(ScriptError::new(format!(
-                "Cannot get script instance ids from datum of type: {}",
-                value.type_str()
-            )));
-        }
-    }
-    Ok(instance_refs)
 }

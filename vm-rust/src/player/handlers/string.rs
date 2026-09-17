@@ -2,20 +2,25 @@ use log::debug;
 
 use crate::{
     director::lingo::datum::Datum,
-    player::{datum_formatting::format_concrete_datum, reserve_player_mut, DatumRef, ScriptError},
+    player::{
+        datum_formatting::format_concrete_datum,
+        compare::validate_direct_symbol_fields,
+        session::ExecutionContext,
+        DatumRef, ScriptError,
+    },
 };
 
 pub struct StringHandlers {}
 
 impl StringHandlers {
-    pub fn space(_: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| Ok(player.alloc_datum(Datum::String(" ".to_string()))))
+    pub fn space(runtime: &mut ExecutionContext<'_>, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        Ok(runtime.player.alloc_datum(Datum::String(" ".to_string())))
     }
 
-    pub fn offset(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let str_to_find = player.get_datum(&args[0]).string_value()?;
-            let find_in = player.get_datum(&args[1]).string_value()?;
+    pub fn offset(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
+            let str_to_find = checked_datum(player, symbols, &args[0])?.string_value(symbols)?;
+            let find_in = checked_datum(player, symbols, &args[1])?.string_value(symbols)?;
 
             // Lingo edge cases
             if str_to_find.is_empty() {
@@ -43,13 +48,13 @@ impl StringHandlers {
         })
     }
 
-    pub fn length(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let obj = player.get_datum(&args[0]);
+    pub fn length(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
+            let obj = checked_datum(player, symbols, &args[0])?;
             match obj {
                 Datum::String(s) => Ok(player.alloc_datum(Datum::Int(s.chars().count() as i32))),
                 Datum::StringChunk(..) => {
-                    let s = obj.string_value()?;
+                    let s = obj.string_value(symbols)?;
                     Ok(player.alloc_datum(Datum::Int(s.chars().count() as i32)))
                 }
                 // Director coerces VOID to EMPTY in string contexts, so
@@ -65,35 +70,33 @@ impl StringHandlers {
         })
     }
 
-    pub fn string(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let obj = player.get_datum(&args[0]);
+    pub fn string(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
+            let obj = checked_datum(player, symbols, &args[0])?;
             let result_obj = if obj.is_string() {
-                Datum::String(obj.string_value()?.to_string())
+                Datum::String(obj.string_value(symbols)?)
             } else if obj.is_void() {
                 Datum::String("".to_string())
             } else if let Datum::Symbol(s) = obj {
                 // In Director, string(#symbol) returns "symbol" without the # prefix
-                Datum::String(s.to_string())
+                Datum::String(symbols.display(s).map_err(|_| ScriptError::new("foreign symbol".to_owned()))?.to_owned())
             } else {
-                Datum::String(format_concrete_datum(obj, player))
+                Datum::String(format_concrete_datum(obj, symbols, player)?)
             };
             Ok(player.alloc_datum(result_obj))
         })
     }
 
-    pub fn chars(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let string = player
-                .get_datum(&args[0])
-                .string_value()
+    pub fn chars(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
+            let string = checked_datum(player, symbols, &args[0])?
+                .string_value(symbols)
                 .unwrap_or_default();
-            let start = (player
-                .get_datum(&args[1])
+            let start = (checked_datum(player, symbols, &args[1])?
                 .int_value()
                 .unwrap_or(1)
                 .max(1) - 1) as usize;
-            let mut end = player.get_datum(&args[2]).int_value().unwrap_or(0) as usize;
+            let mut end = checked_datum(player, symbols, &args[2])?.int_value().unwrap_or(0) as usize;
 
             let len = string.chars().count();
             end = end.min(len); // clamp to string length
@@ -108,9 +111,9 @@ impl StringHandlers {
         })
     }
 
-    pub fn char_to_num(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let str_value = player.get_datum(&args[0]).string_value()?;
+    pub fn char_to_num(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
+            let str_value = checked_datum(player, symbols, &args[0])?.string_value(symbols)?;
             let mut chars = str_value.chars();
 
             let byte_val = if let Some(c) = chars.next() {
@@ -123,9 +126,9 @@ impl StringHandlers {
         })
     }
 
-    pub fn num_to_char(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let num = player.get_datum(&args[0]).int_value()?;
+    pub fn num_to_char(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
+            let num = checked_datum(player, symbols, &args[0])?.int_value()?;
             let byte_val = (num & 0xFF) as u8 as char;
 
             // Build a single-byte string directly from raw bytes (Latin-1 1:1)
@@ -135,21 +138,21 @@ impl StringHandlers {
         })
     }
 
-    pub fn url_encode(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn url_encode(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
             // urlEncode([#empty: sSessionID]) - takes a prop list and converts to URL parameters
-            let prop_list_datum = player.get_datum(&args[0]);
+            let prop_list_datum = checked_datum(player, symbols, &args[0])?;
 
             let result = match prop_list_datum {
                 Datum::PropList(prop_list, ..) => {
                     // Convert prop list to URL parameters: [#empty: "value"] -> "empty=encoded_value"
                     let mut url_params = String::new();
                     for (key_ref, value_ref) in prop_list {
-                        let key = player.get_datum(key_ref);
-                        let value = player.get_datum(value_ref);
+                        let key = checked_datum(player, symbols, key_ref)?;
+                        let value = checked_datum(player, symbols, value_ref)?;
 
                         let key_str = match key {
-                            Datum::Symbol(s) => s.as_str(),
+                            Datum::Symbol(s) => symbols.display(s).map_err(|_| ScriptError::new("foreign symbol".to_owned()))?,
                             Datum::String(s) => s.as_str(),
                             _ => continue,
                         };
@@ -158,7 +161,7 @@ impl StringHandlers {
                             Datum::String(s) => s.clone(),
                             Datum::Int(n) => n.to_string(),
                             Datum::Float(f) => f.to_string(),
-                            Datum::Symbol(s) => s.to_string(),
+                            Datum::Symbol(s) => symbols.display(s).map_err(|_| ScriptError::new("foreign symbol".to_owned()))?.to_owned(),
                             Datum::Void => String::new(),
                             _ => continue,
                         };
@@ -214,4 +217,23 @@ impl StringHandlers {
             Ok(player.alloc_datum(Datum::String(result)))
         })
     }
+}
+
+fn checked_datum<'a>(
+    player: &'a crate::player::DirPlayer,
+    symbols: &crate::player::symbols::symbol_table::SymbolTable,
+    datum_ref: &DatumRef,
+) -> Result<&'a Datum, ScriptError> {
+    let datum = match datum_ref {
+        DatumRef::Void => &Datum::Void,
+        _ => player
+            .allocator
+            .try_get_datum(datum_ref)
+            .ok_or_else(|| ScriptError::new_code(
+                crate::player::ScriptErrorCode::InvalidReference,
+                format!("invalid datum reference {datum_ref}"),
+            ))?,
+    };
+    validate_direct_symbol_fields(datum, symbols)?;
+    Ok(datum)
 }

@@ -1,5 +1,5 @@
 ﻿use vm_rust::player::eval::{parse_lingo_expr_ast_runtime, LingoExpr, Rule};
-use vm_rust::player::symbols::symbol::Symbol;
+use vm_rust::player::symbols::{builtin::BuiltInSymbol, symbol::Symbol};
 
 #[test]
 fn test_global_handler_no_args() {
@@ -562,7 +562,7 @@ fn test_put_into_char() {
         LingoExpr::PutInto(
             Box::new(LingoExpr::StringLiteral("X".to_string())),
             Box::new(LingoExpr::ChunkExpr(
-                Symbol::from_str("char"),
+                Symbol::builtin(BuiltInSymbol::Char),
                 Box::new(LingoExpr::IntLiteral(1)),
                 None,
                 Box::new(LingoExpr::Identifier("myStr".to_string()))
@@ -582,7 +582,7 @@ fn test_put_into_word() {
         LingoExpr::PutInto(
             Box::new(LingoExpr::StringLiteral("goodbye".to_string())),
             Box::new(LingoExpr::ChunkExpr(
-                Symbol::from_str("word"),
+                Symbol::builtin(BuiltInSymbol::Word),
                 Box::new(LingoExpr::IntLiteral(1)),
                 None,
                 Box::new(LingoExpr::Identifier("myStr".to_string()))
@@ -602,7 +602,7 @@ fn test_put_into_line() {
         LingoExpr::PutInto(
             Box::new(LingoExpr::StringLiteral("newline".to_string())),
             Box::new(LingoExpr::ChunkExpr(
-                Symbol::from_str("line"),
+                Symbol::builtin(BuiltInSymbol::Line),
                 Box::new(LingoExpr::IntLiteral(1)),
                 None,
                 Box::new(LingoExpr::Identifier("myText".to_string()))
@@ -622,7 +622,7 @@ fn test_put_into_item() {
         LingoExpr::PutInto(
             Box::new(LingoExpr::StringLiteral("X".to_string())),
             Box::new(LingoExpr::ChunkExpr(
-                Symbol::from_str("item"),
+                Symbol::builtin(BuiltInSymbol::Item),
                 Box::new(LingoExpr::IntLiteral(2)),
                 None,
                 Box::new(LingoExpr::Identifier("myList".to_string()))
@@ -642,7 +642,7 @@ fn test_put_before_char() {
         LingoExpr::PutBefore(
             Box::new(LingoExpr::StringLiteral("X".to_string())),
             Box::new(LingoExpr::ChunkExpr(
-                Symbol::from_str("char"),
+                Symbol::builtin(BuiltInSymbol::Char),
                 Box::new(LingoExpr::IntLiteral(1)),
                 None,
                 Box::new(LingoExpr::Identifier("myStr".to_string()))
@@ -662,7 +662,7 @@ fn test_put_after_char() {
         LingoExpr::PutAfter(
             Box::new(LingoExpr::StringLiteral("X".to_string())),
             Box::new(LingoExpr::ChunkExpr(
-                Symbol::from_str("char"),
+                Symbol::builtin(BuiltInSymbol::Char),
                 Box::new(LingoExpr::IntLiteral(5)),
                 None,
                 Box::new(LingoExpr::Identifier("myStr".to_string()))
@@ -682,7 +682,7 @@ fn test_put_before_word() {
         LingoExpr::PutBefore(
             Box::new(LingoExpr::StringLiteral("beautiful ".to_string())),
             Box::new(LingoExpr::ChunkExpr(
-                Symbol::from_str("word"),
+                Symbol::builtin(BuiltInSymbol::Word),
                 Box::new(LingoExpr::IntLiteral(2)),
                 None,
                 Box::new(LingoExpr::Identifier("myStr".to_string()))
@@ -702,7 +702,7 @@ fn test_put_after_word() {
         LingoExpr::PutAfter(
             Box::new(LingoExpr::StringLiteral("!".to_string())),
             Box::new(LingoExpr::ChunkExpr(
-                Symbol::from_str("word"),
+                Symbol::builtin(BuiltInSymbol::Word),
                 Box::new(LingoExpr::IntLiteral(2)),
                 None,
                 Box::new(LingoExpr::Identifier("myStr".to_string()))

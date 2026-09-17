@@ -1,36 +1,6 @@
 import { useMeasure } from "@uidotdev/usehooks";
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  set_stage_size,
-  player_create_canvas,
-  mouse_move,
-  mouse_move_delta,
-  mouse_down,
-  mouse_up,
-  right_mouse_down,
-  right_mouse_up,
-  key_down,
-  key_up,
-  wants_pointer_lock,
-  player_set_picking_mode,
-  player_get_sprite_at,
-  player_set_debug_selected_channel,
-  is_sprite_editable_field,
-  field_set_caret_at,
-  field_drag_extend_to,
-  field_select_word_at,
-  field_select_line_at,
-  is_field_focused,
-  get_focused_field_selected_text,
-  delete_focused_field_selection,
-  field_select_all,
-  paste_text_into_focused_field,
-  set_clipboard_mirror,
-  ime_composition_start,
-  ime_composition_update,
-  ime_composition_end,
-  set_renderer_backend,
-} from "vm-rust";
+import { useVMHandle } from "../../components/VMProvider";
 import { useAppDispatch } from "../../store/hooks";
 import { channelSelected } from "../../store/uiSlice";
 
@@ -189,6 +159,7 @@ function PanIcon() {
 }
 
 export default function Stage({ showControls, enableGestures }: { showControls?: boolean; enableGestures?: boolean }) {
+  const browserHandle = useVMHandle();
   const [outerMeasureRef, { width: outerWidth, height: outerHeight }] = useMeasure();
   const [stageMeasureRef, { width: stageWidth, height: stageHeight }] = useMeasure();
   const isStageCanvasCreated = useRef(false);
@@ -283,19 +254,21 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
 
   useEffect(() => {
     if (outerWidth && outerHeight && !isStageCanvasCreated.current) {
+      const stageContainer = stageEl.current;
+      if (!stageContainer) return;
       isStageCanvasCreated.current = true;
-      player_create_canvas();
+      browserHandle.create_canvas(stageContainer);
       const savedBackend = window.localStorage.getItem("dirplayer_renderer_backend");
       if (savedBackend) {
-        try { set_renderer_backend(savedBackend); } catch { /* ignore */ }
+        try { browserHandle.set_renderer_backend(savedBackend); } catch { /* ignore */ }
       }
     }
-  }, [outerWidth, outerHeight]);
+  }, [browserHandle, outerWidth, outerHeight]);
 
   useEffect(() => {
     if (!outerWidth || !outerHeight) return;
-    set_stage_size(outerWidth, outerHeight);
-  }, [outerWidth, outerHeight]);
+    browserHandle.set_stage_size(outerWidth, outerHeight);
+  }, [browserHandle, outerWidth, outerHeight]);
 
   // Before the user pans/zooms, keep the stage auto-centered on every resize.
   // After they interact, switch to delta-preserve mode so the viewport center
@@ -360,12 +333,12 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
       // on someone else's lock is what breaks mouse-look when a second
       // DirPlayer shares the page. See `lockedElRef`.
       if (ownsPointerLock()) {
-        if (!wants_pointer_lock()) {
+        if (!browserHandle.wants_pointer_lock()) {
           document.exitPointerLock();
           lockedElRef.current = null;
           return;
         }
-        mouse_move_delta(e.movementX, e.movementY);
+        browserHandle.mouse_move_delta(e.movementX, e.movementY);
       }
     };
     // Handle keyboard during pointer lock (focus may be on canvas, not the div)
@@ -374,13 +347,13 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
         // Don't prevent ESC — browser needs it to exit pointer lock
         if (e.key !== "Escape") e.preventDefault();
         if (!e.repeat) {
-          key_down(e.key, e.keyCode);
+          browserHandle.key_down(e.key, e.keyCode);
         }
       }
     };
     const handleKeyUp = (e: KeyboardEvent) => {
       if (ownsPointerLock()) {
-        key_up(e.key, e.keyCode);
+        browserHandle.key_up(e.key, e.keyCode);
       }
     };
     document.addEventListener("mousemove", handleLockedMouseMove);
@@ -391,11 +364,11 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
       document.removeEventListener("keydown", handleKeyDown);
       document.removeEventListener("keyup", handleKeyUp);
     };
-  }, []);
+  }, [browserHandle]);
 
   useEffect(() => {
-    player_set_picking_mode(pickingMode);
-  }, [pickingMode]);
+    browserHandle.set_picking_mode(pickingMode);
+  }, [browserHandle, pickingMode]);
 
   // OS-clipboard bridge for editable Field/Text members. Listeners only act
   // when an editable member holds focus so they don't steal copy/paste from
@@ -412,28 +385,28 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
     };
 
     const onCopy = (e: ClipboardEvent) => {
-      if (!is_field_focused() || isNativeEditable(e)) return;
-      const text = get_focused_field_selected_text();
+      if (!browserHandle.is_field_focused() || isNativeEditable(e)) return;
+      const text = browserHandle.get_focused_field_selected_text();
       if (!text) return;
       e.preventDefault();
       e.clipboardData?.setData("text/plain", text);
-      set_clipboard_mirror(text);
+      browserHandle.set_clipboard_mirror(text);
     };
     const onCut = (e: ClipboardEvent) => {
-      if (!is_field_focused() || isNativeEditable(e)) return;
-      const text = get_focused_field_selected_text();
+      if (!browserHandle.is_field_focused() || isNativeEditable(e)) return;
+      const text = browserHandle.get_focused_field_selected_text();
       if (!text) return;
       e.preventDefault();
       e.clipboardData?.setData("text/plain", text);
-      set_clipboard_mirror(text);
-      delete_focused_field_selection();
+      browserHandle.set_clipboard_mirror(text);
+      browserHandle.delete_focused_field_selection();
     };
     const onPaste = (e: ClipboardEvent) => {
-      if (!is_field_focused() || isNativeEditable(e)) return;
+      if (!browserHandle.is_field_focused() || isNativeEditable(e)) return;
       const text = e.clipboardData?.getData("text/plain") ?? "";
       if (!text) return;
       e.preventDefault();
-      paste_text_into_focused_field(text);
+      browserHandle.paste_text_into_focused_field(text);
     };
     document.addEventListener("copy", onCopy);
     document.addEventListener("cut", onCut);
@@ -443,7 +416,7 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
       document.removeEventListener("cut", onCut);
       document.removeEventListener("paste", onPaste);
     };
-  }, []);
+  }, [browserHandle]);
 
   function pointerOuterPos(e: React.PointerEvent): Pt {
     const rect = outerRef.current?.getBoundingClientRect();
@@ -497,12 +470,12 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
   function dispatchVMMouse(name: "move" | "down" | "up", canvasX: number, canvasY: number, e: React.PointerEvent) {
     if (pickingMode) {
       if (name === "move") {
-        mouse_move(canvasX, canvasY);
+        browserHandle.mouse_move(canvasX, canvasY);
       }
       if (name === "down") {
-        const channel = player_get_sprite_at(canvasX, canvasY);
+        const channel = browserHandle.get_sprite_at(canvasX, canvasY);
         if (channel > 0) {
-          player_set_debug_selected_channel(channel);
+          browserHandle.set_debug_selected_channel(channel);
           dispatch(channelSelected(channel));
         }
       }
@@ -516,21 +489,21 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
     switch (name) {
       case "move":
         if (!ownsPointerLock()) {
-          mouse_move(canvasX, canvasY);
+          browserHandle.mouse_move(canvasX, canvasY);
         }
         if (textDragRef.current) {
-          field_drag_extend_to(textDragRef.current.spriteId, canvasX, canvasY);
+          browserHandle.field_drag_extend_to(textDragRef.current.spriteId, canvasX, canvasY);
         }
         break;
       case "down": {
         if (isRight) {
-          right_mouse_down(canvasX, canvasY);
+          browserHandle.right_mouse_down(canvasX, canvasY);
           e.preventDefault();
           break;
         }
-        const spriteId = player_get_sprite_at(canvasX, canvasY);
-        const isEditable = spriteId > 0 && is_sprite_editable_field(spriteId);
-        mouse_down(canvasX, canvasY);
+        const spriteId = browserHandle.get_sprite_at(canvasX, canvasY);
+        const isEditable = spriteId > 0 && browserHandle.is_sprite_editable_field(spriteId);
+        browserHandle.mouse_down(canvasX, canvasY);
         if (isEditable) {
           e.preventDefault();
           hiddenInputRef.current?.focus();
@@ -544,13 +517,13 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
           const count = sameSpot ? prev.count + 1 : 1;
           lastClickRef.current = { spriteId, t: now, x: canvasX, y: canvasY, count };
           if (count >= 3) {
-            field_select_line_at(spriteId, canvasX, canvasY);
+            browserHandle.field_select_line_at(spriteId, canvasX, canvasY);
             textDragRef.current = null; // don't drag-extend after triple click
           } else if (count === 2) {
-            field_select_word_at(spriteId, canvasX, canvasY);
+            browserHandle.field_select_word_at(spriteId, canvasX, canvasY);
             textDragRef.current = null;
           } else {
-            field_set_caret_at(spriteId, canvasX, canvasY, e.shiftKey);
+            browserHandle.field_set_caret_at(spriteId, canvasX, canvasY, e.shiftKey);
             textDragRef.current = { spriteId };
           }
         } else {
@@ -561,7 +534,7 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
             outerRef.current?.focus();
           }
         }
-        if (wants_pointer_lock() && !ownsPointerLock()) {
+        if (browserHandle.wants_pointer_lock() && !ownsPointerLock()) {
           const canvas = stageEl.current?.querySelector("canvas");
           if (canvas) {
             lockedElRef.current = canvas;
@@ -572,10 +545,10 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
       }
       case "up":
         if (isRight) {
-          right_mouse_up(canvasX, canvasY);
+          browserHandle.right_mouse_up(canvasX, canvasY);
           break;
         }
-        mouse_up(canvasX, canvasY);
+        browserHandle.mouse_up(canvasX, canvasY);
         textDragRef.current = null;
         break;
     }
@@ -601,7 +574,7 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
       // progress, send mouse_up so the VM doesn't see a stuck button.
       if (singleTouchActiveRef.current) {
         const c = outerToCanvas(p);
-        mouse_up(c.x, c.y);
+        browserHandle.mouse_up(c.x, c.y);
         singleTouchActiveRef.current = false;
       }
       singlePanRef.current = null;
@@ -694,8 +667,8 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
     if (textDragRef.current) {
       if (!textCursor) setTextCursor(true);
     } else if (isInsideCanvas(c)) {
-      const spriteId = player_get_sprite_at(c.x, c.y);
-      const editable = spriteId > 0 && is_sprite_editable_field(spriteId);
+      const spriteId = browserHandle.get_sprite_at(c.x, c.y);
+      const editable = spriteId > 0 && browserHandle.is_sprite_editable_field(spriteId);
       if (editable !== textCursor) setTextCursor(editable);
     } else if (textCursor) {
       setTextCursor(false);
@@ -736,8 +709,8 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
       // over — without this the I-beam stays on after the user releases
       // outside an editable sprite.
       if (isInsideCanvas(c)) {
-        const spriteId = player_get_sprite_at(c.x, c.y);
-        const editable = spriteId > 0 && is_sprite_editable_field(spriteId);
+        const spriteId = browserHandle.get_sprite_at(c.x, c.y);
+        const editable = spriteId > 0 && browserHandle.is_sprite_editable_field(spriteId);
         if (editable !== textCursor) setTextCursor(editable);
       } else if (textCursor) {
         setTextCursor(false);
@@ -789,11 +762,11 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
         // movies rely on that — e.g. Tetris soft-drops one row per repeated
         // keyDown while the down arrow is held. Movies that instead poll
         // `the keyPressed` in a loop are unaffected (they don't read keyDown).
-        key_down(e.key, e.keyCode);
+        browserHandle.key_down(e.key, e.keyCode);
       }}
       onKeyUp={e => {
         if (document.activeElement === hiddenInputRef.current) return;
-        key_up(e.key, e.keyCode);
+        browserHandle.key_up(e.key, e.keyCode);
       }}
     >
       <div
@@ -870,7 +843,7 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
           // letting repeats through here is safe.
           if ((e.metaKey || e.ctrlKey) && (e.key === 'a' || e.key === 'A')) {
             e.preventDefault();
-            field_select_all();
+            browserHandle.field_select_all();
             return;
           }
           // Forward modifier key presses to keep the keyboard manager in sync.
@@ -883,7 +856,7 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
           // a Ctrl shortcut.
           if (e.key === 'Shift' || e.key === 'Control' || e.key === 'Meta'
               || e.key === 'Alt' || e.key === 'AltGraph') {
-            key_down(e.key, e.keyCode);
+            browserHandle.key_down(e.key, e.keyCode);
             return;
           }
           const special = ['Enter', 'Backspace', 'Tab', 'ArrowUp', 'ArrowDown',
@@ -891,22 +864,22 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
                            'Home', 'End'];
           if (special.includes(e.key)) {
             e.preventDefault();
-            key_down(e.key, e.keyCode);
+            browserHandle.key_down(e.key, e.keyCode);
           }
           // Regular characters flow through to onInput below
         }}
         onKeyUp={e => {
-          key_up(e.key, e.keyCode);
+          browserHandle.key_up(e.key, e.keyCode);
         }}
         onCompositionStart={() => {
           isComposingRef.current = true;
-          ime_composition_start();
+          browserHandle.ime_composition_start();
         }}
         onCompositionUpdate={e => {
-          ime_composition_update(e.data ?? "");
+          browserHandle.ime_composition_update(e.data ?? "");
         }}
         onCompositionEnd={e => {
-          ime_composition_end(e.data ?? "");
+          browserHandle.ime_composition_end(e.data ?? "");
           isComposingRef.current = false;
           // Clear so the trailing onInput (which fires with the committed text)
           // doesn't re-dispatch as plain key_downs.
@@ -925,15 +898,15 @@ export default function Stage({ showControls, enableGestures }: { showControls?:
             // (e.g. 'a' → 65 not 97) so the keyboard_map maps correctly.
             const chars = value.split('');
             for (let i = 0; i < chars.length; i++) {
-              key_down(chars[i], chars[i].toUpperCase().charCodeAt(0));
+              browserHandle.key_down(chars[i], chars[i].toUpperCase().charCodeAt(0));
             }
             input.value = '';
             // Defer key_up so the async keyDown command handler can read
             // keyboard state (the key, the keyCode) before it's cleared.
-            // key_down() sets state immediately but the handler runs async.
+            // browserHandle.key_down() sets state immediately but the handler runs async.
             setTimeout(() => {
               for (let i = 0; i < chars.length; i++) {
-                key_up(chars[i], chars[i].toUpperCase().charCodeAt(0));
+                browserHandle.key_up(chars[i], chars[i].toUpperCase().charCodeAt(0));
               }
             }, 100);
           }

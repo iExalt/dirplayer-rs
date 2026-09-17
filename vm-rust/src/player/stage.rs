@@ -1,4 +1,4 @@
-use crate::{director::lingo::datum::Datum, player::{bitmap::bitmap::PaletteRef, symbols::{builtin::BuiltInSymbol, symbol::Symbol}}, rendering::{render_stage_to_bitmap, with_renderer_mut}, rendering_gpu::Renderer};
+use crate::{director::lingo::datum::Datum, player::{allocator::ScriptInstanceAllocatorTrait, bitmap::bitmap::PaletteRef, symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable}, ScriptErrorCode}, rendering::{render_stage_to_bitmap, with_renderer_mut}, rendering_gpu::Renderer};
 
 use super::{
     bitmap::bitmap::{get_system_default_palette, Bitmap},
@@ -194,7 +194,14 @@ pub fn canvas_to_movie_coords(player: &DirPlayer, x: f64, y: f64) -> (f64, f64) 
     }
 }
 
-pub fn get_stage_prop(player: &mut DirPlayer, prop: Symbol) -> Result<Datum, ScriptError> {
+pub fn get_stage_prop(
+    player: &mut DirPlayer,
+    symbols: &mut SymbolTable,
+    prop: Symbol,
+) -> Result<Datum, ScriptError> {
+    symbols
+        .lower(&prop)
+        .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
     match prop.into_builtin() {
         // A window's `movie` property is the Movie playing in it (Director 11.5
         // Scripting Dictionary, Window object). The Stage is a window — see
@@ -242,24 +249,27 @@ pub fn get_stage_prop(player: &mut DirPlayer, prop: Symbol) -> Result<Datum, Scr
             let mut snapshot = None;
             with_renderer_mut(|renderer_opt| {
                 if let Some(renderer) = renderer_opt {
-                    snapshot = Some(renderer.capture_stage_bitmap(player));
+                    snapshot = Some(renderer.capture_stage_bitmap(player, symbols));
                 }
             });
-            let mut snapshot = snapshot.unwrap_or_else(|| {
-                let layout = stage_layout(player);
-                let w = layout.stage_rect[2] - layout.stage_rect[0];
-                let h = layout.stage_rect[3] - layout.stage_rect[1];
-                let mut bitmap = Bitmap::new(
-                    w as u16,
-                    h as u16,
-                    32,
-                    32,
-                    0,
-                    PaletteRef::BuiltIn(get_system_default_palette()),
-                );
-                render_stage_to_bitmap(player, &mut bitmap, None);
-                bitmap
-            });
+            let mut snapshot = match snapshot {
+                Some(snapshot) => snapshot?,
+                None => {
+                    let layout = stage_layout(player);
+                    let w = layout.stage_rect[2] - layout.stage_rect[0];
+                    let h = layout.stage_rect[3] - layout.stage_rect[1];
+                    let mut bitmap = Bitmap::new(
+                        w as u16,
+                        h as u16,
+                        32,
+                        32,
+                        0,
+                        PaletteRef::BuiltIn(get_system_default_palette()),
+                    );
+                    render_stage_to_bitmap(player, &mut bitmap, None);
+                    bitmap
+                }
+            };
             // The stage framebuffer is OPAQUE — Director's `(the stage).image`
             // has no alpha channel. `capture_stage_bitmap` flags its result
             // use_alpha=true, but if the persistent stage image keeps that
@@ -289,23 +299,30 @@ pub fn get_stage_prop(player: &mut DirPlayer, prop: Symbol) -> Result<Datum, Scr
             }
         }
         Some(BuiltInSymbol::Name) => Ok(Datum::String("stage".to_string())),
-        _ => return Err(ScriptError::new(format!("Invalid stage property {}", prop))),
+        _ => return Err(ScriptError::new(format!(
+            "Invalid stage property {}",
+            symbols.display(&prop).unwrap_or("<foreign symbol>")
+        ))),
     }
 }
 
 pub fn set_stage_prop(
     player: &mut DirPlayer,
+    symbols: &SymbolTable,
     prop: Symbol,
     value: &DatumRef,
 ) -> Result<(), ScriptError> {
+    symbols
+        .lower(&prop)
+        .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
     match prop.into_builtin() {
         Some(BuiltInSymbol::Title) => {
-            let value = player.get_datum(value).clone();
-            player.title = value.string_value()?;
+            let value = checked_stage_datum(player, symbols, value)?.clone();
+            player.title = value.string_value(symbols)?;
             Ok(())
         }
         Some(BuiltInSymbol::BgColor) => {
-            let value = player.get_datum(value).clone();
+            let value = checked_stage_datum(player, symbols, value)?.clone();
             match value {
                 Datum::ColorRef(color_ref) => {
                     player.bg_color = color_ref;
@@ -322,7 +339,7 @@ pub fn set_stage_prop(
             Ok(())
         }
         Some(BuiltInSymbol::DrawRect | BuiltInSymbol::Rect) => {
-            let value = player.get_datum(value).clone();
+            let value = checked_stage_datum(player, symbols, value)?.clone();
             match value {
                 Datum::Rect(r, _) => {
                     let w = (r[2] - r[0]).max(1.0) as u32;
@@ -344,15 +361,52 @@ pub fn set_stage_prop(
         _ => {
             return Err(ScriptError::new(format!(
                 "Cannot set stage property {}",
-                prop
+                symbols.display(&prop).unwrap_or("<foreign symbol>")
             )))
         }
     }
 }
 
+fn checked_stage_datum<'a>(
+    player: &'a DirPlayer,
+    symbols: &SymbolTable,
+    datum_ref: &DatumRef,
+) -> Result<&'a Datum, ScriptError> {
+    let datum = match datum_ref {
+        DatumRef::Void => &Datum::Void,
+        _ => player
+            .allocator
+            .try_get_datum(datum_ref)
+            .ok_or_else(|| ScriptError::new_code(
+                ScriptErrorCode::InvalidReference,
+                format!("invalid datum reference {datum_ref}"),
+            ))?,
+    };
+    crate::player::compare::validate_direct_symbol_fields(datum, symbols)?;
+    if let Datum::ScriptInstanceRef(instance_ref) = datum {
+        player
+            .allocator
+            .get_script_instance_opt(instance_ref)
+            .ok_or_else(|| ScriptError::new_code(
+                ScriptErrorCode::InvalidReference,
+                "foreign or stale ScriptInstanceRef".to_owned(),
+            ))?;
+    }
+    Ok(datum)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{compute_stage_layout, StretchStyle};
+    use super::{compute_stage_layout, get_stage_prop, set_stage_prop, StretchStyle};
+    use async_std::channel;
+    use crate::player::{
+        DirPlayer, ScriptErrorCode,
+        allocator::ScriptInstanceAllocatorTrait,
+        cast_lib::CastMemberRef,
+        script::ScriptInstance,
+    };
+    use crate::player::ownership::OwnerToken;
+    use crate::player::symbols::symbol_table::SymbolTable;
 
     #[test]
     fn stretch_meet_letterboxes_inside_stage() {
@@ -388,5 +442,49 @@ mod tests {
         assert_eq!(layout.canvas_height, 480);
         assert_eq!(layout.stage_rect, [0.0, 0.0, 640.0, 480.0]);
         assert_eq!(layout.draw_rect, [0.0, 0.0, 640.0, 480.0]);
+    }
+
+    #[test]
+    fn foreign_stage_property_symbol_is_rejected_before_dispatch() {
+        let (tx, _rx) = channel::unbounded();
+        let mut player = DirPlayer::new_with_owner(tx, OwnerToken::transitional());
+        let mut symbols = SymbolTable::new();
+        let mut foreign_symbols = SymbolTable::new();
+        let foreign_prop = foreign_symbols.intern("foreignStageProperty");
+
+        let error = match get_stage_prop(&mut player, &mut symbols, foreign_prop) {
+            Err(error) => error,
+            Ok(_) => panic!("foreign stage symbol must be rejected"),
+        };
+        assert_eq!(error.code, ScriptErrorCode::InvalidReference);
+    }
+
+    #[test]
+    fn source_rect_write_ignores_foreign_value() {
+        let (tx, _rx) = channel::unbounded();
+        let mut player = DirPlayer::new_with_owner(tx, OwnerToken::transitional());
+        let symbols = SymbolTable::new();
+        let mut foreign_player = DirPlayer::new_with_owner(
+            channel::unbounded().0,
+            OwnerToken::transitional(),
+        );
+        let foreign_instance = foreign_player.allocator.alloc_script_instance(ScriptInstance {
+            instance_id: 1,
+            script: CastMemberRef { cast_lib: 1, cast_member: 1 },
+            ancestor: None,
+            properties: Default::default(),
+            begin_sprite_called: false,
+        });
+        let foreign_value = foreign_player.alloc_datum(
+            crate::director::lingo::datum::Datum::ScriptInstanceRef(foreign_instance),
+        );
+
+        set_stage_prop(
+            &mut player,
+            &symbols,
+            crate::player::symbols::symbol::Symbol::builtin(crate::player::symbols::builtin::BuiltInSymbol::SourceRect),
+            &foreign_value,
+        )
+        .expect("SourceRect writes are ignored before value inspection");
     }
 }

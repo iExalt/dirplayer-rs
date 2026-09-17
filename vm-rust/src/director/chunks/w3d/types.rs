@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use crate::player::symbols::symbol::Symbol;
+use crate::player::symbols::symbol_table::SymbolTable;
 
 use super::skeleton::{build_node_world_matrices, export_basis_transform};
 
@@ -511,13 +512,13 @@ pub struct W3dScene {
 
 impl W3dScene {
     /// Export the scene to OBJ format with default mtl name.
-    pub fn export_obj(&self) -> String {
-        self.export_obj_with_mtl("scene.mtl")
+    pub fn export_obj(&self, symbols: &SymbolTable) -> Result<String, String> {
+        self.export_obj_with_mtl("scene.mtl", symbols)
     }
 
     /// Export the scene to OBJ format, matching the C# W3DParser assembled output.
     /// Ported from CLODMeshDecoder.WriteAssembledPart + ExportMesh.
-    pub fn export_obj_with_mtl(&self, mtl_filename: &str) -> String {
+    pub fn export_obj_with_mtl(&self, mtl_filename: &str, symbols: &SymbolTable) -> Result<String, String> {
         let mut obj = String::new();
         let basis_transform = export_basis_transform();
         let num_parts = self.clod_meshes.len() + self.raw_meshes.len();
@@ -531,9 +532,13 @@ impl W3dScene {
 
         // Export each CLOD resource as a part (like C# WriteAssembledPart)
         for (resource_name, meshes) in &self.clod_meshes {
-            let safe_name = resource_name.as_str().replace(' ', "_");
-            let world_transform = self.find_transform_for_resource(*resource_name);
-            let mat_name = self.resolve_material_for_resource(*resource_name);
+            let safe_name = symbols
+                .display(resource_name)
+                .map(str::to_owned)
+                .map_err(|_| "W3D exporter encountered a symbol owned by another session".to_owned())?
+                .replace(' ', "_");
+            let world_transform = self.find_transform_for_resource(resource_name.clone());
+            let mat_name = self.resolve_material_for_resource(resource_name.clone(), symbols)?;
 
             // Collect all positions from all sub-meshes of this resource
             // Collect all positions, build per-mesh face groups
@@ -619,11 +624,21 @@ impl W3dScene {
                 obj.push_str(&format!("\no mesh_{}\ng mesh_{}\n", mesh_idx, mesh_idx));
 
                 // Per-mesh material from shader bindings
-                let mesh_mat = self.resolve_material_for_mesh(*resource_name, mesh_idx);
+                let mesh_mat = self.resolve_material_for_mesh(resource_name.clone(), mesh_idx);
                 if let Some(ref mat) = mesh_mat {
-                    obj.push_str(&format!("usemtl {}\n", mat.as_str().replace(' ', "_")));
+                    let material_name = symbols
+                        .display(mat)
+                        .map(str::to_owned)
+                        .map_err(|_| "W3D exporter encountered a symbol owned by another session".to_owned())?
+                        .replace(' ', "_");
+                    obj.push_str(&format!("usemtl {}\n", material_name));
                 } else if let Some(ref mat) = mat_name {
-                    obj.push_str(&format!("usemtl {}\n", mat.as_str().replace(' ', "_")));
+                    let material_name = symbols
+                        .display(mat)
+                        .map(str::to_owned)
+                        .map_err(|_| "W3D exporter encountered a symbol owned by another session".to_owned())?
+                        .replace(' ', "_");
+                    obj.push_str(&format!("usemtl {}\n", material_name));
                 }
 
                 for face in faces {
@@ -653,7 +668,11 @@ impl W3dScene {
 
         // Export raw meshes
         for mesh in &self.raw_meshes {
-            let safe_name = mesh.name.as_str().replace(' ', "_");
+            let safe_name = symbols
+                .display(&mesh.name)
+                .map(str::to_owned)
+                .map_err(|_| "W3D exporter encountered a symbol owned by another session".to_owned())?
+                .replace(' ', "_");
 
             // Vertex data first (with optional vertex colors)
             let has_raw_vcolors = mesh.vertex_colors.len() == mesh.positions.len();
@@ -682,9 +701,14 @@ impl W3dScene {
             obj.push_str(&format!("\no {}\ng {}\n", safe_name, safe_name));
 
             // Try to resolve material for raw mesh by name
-            let raw_mat = self.resolve_raw_mesh_material(mesh.name);
+            let raw_mat = self.resolve_raw_mesh_material(mesh.name.clone(), symbols)?;
             if let Some(ref mat) = raw_mat {
-                obj.push_str(&format!("usemtl {}\n", mat.as_str().replace(' ', "_")));
+                let material_name = symbols
+                    .display(mat)
+                    .map(str::to_owned)
+                    .map_err(|_| "W3D exporter encountered a symbol owned by another session".to_owned())?
+                    .replace(' ', "_");
+                obj.push_str(&format!("usemtl {}\n", material_name));
             }
 
             let has_normals = !mesh.normals.is_empty();
@@ -715,16 +739,20 @@ impl W3dScene {
             if has_tc { total_texcoords += mesh.tex_coords.len() as u32; }
         }
 
-        obj
+        Ok(obj)
     }
 
     /// Export MTL file matching C# W3DParser format.
-    pub fn export_mtl(&self, mtl_name: &str) -> String {
+    pub fn export_mtl(&self, mtl_name: &str, symbols: &SymbolTable) -> Result<String, String> {
         let mut mtl = String::new();
         mtl.push_str("# W3D materials\n");
 
         for mat in &self.materials {
-            let safe_name = mat.name.as_str().replace(' ', "_");
+            let safe_name = symbols
+                .display(&mat.name)
+                .map(str::to_owned)
+                .map_err(|_| "W3D exporter encountered a symbol owned by another session".to_owned())?
+                .replace(' ', "_");
             mtl.push_str(&format!("newmtl {}\n", safe_name));
             mtl.push_str(&format!("Ka {:.4} {:.4} {:.4}\n", mat.ambient[0], mat.ambient[1], mat.ambient[2]));
             mtl.push_str(&format!("Kd {:.4} {:.4} {:.4}\n", mat.diffuse[0], mat.diffuse[1], mat.diffuse[2]));
@@ -740,10 +768,20 @@ impl W3dScene {
             if let Some(shader) = self.shaders.iter().find(|s| s.material_name == mat.name) {
                 for layer in &shader.texture_layers {
                     if layer.name.is_empty() { continue; }
-                    let ext = self.get_texture_extension(layer.name);
+                    let ext = self.get_texture_extension(layer.name.clone());
                     match layer.tex_mode {
-                        0 | 5 => mtl.push_str(&format!("map_Kd {}.{}\n", layer.name, ext)),
-                        6 => mtl.push_str(&format!("map_Ks {}.{}\n", layer.name, ext)),
+                        0 | 5 => {
+                            let texture_name = symbols
+                                .display(&layer.name)
+                                .map_err(|_| "W3D exporter encountered a symbol owned by another session".to_owned())?;
+                            mtl.push_str(&format!("map_Kd {}.{}\n", texture_name, ext));
+                        }
+                        6 => {
+                            let texture_name = symbols
+                                .display(&layer.name)
+                                .map_err(|_| "W3D exporter encountered a symbol owned by another session".to_owned())?;
+                            mtl.push_str(&format!("map_Ks {}.{}\n", texture_name, ext));
+                        }
                         _ => {}
                     }
                 }
@@ -751,19 +789,23 @@ impl W3dScene {
             mtl.push('\n');
         }
 
-        mtl
+        Ok(mtl)
     }
 
     /// Export all texture images as a list of (filename, raw_bytes) pairs.
     /// The raw bytes are in their original format (JPEG/PNG) or raw RGBA.
     /// Raw RGBA textures (4-byte header: width_le16, height_le16, then RGBA pixels)
     /// are converted to a simple TGA format for broader tool compatibility.
-    pub fn export_textures(&self) -> Vec<(String, Vec<u8>)> {
+    pub fn export_textures(&self, symbols: &SymbolTable) -> Result<Vec<(String, Vec<u8>)>, String> {
         let mut result = Vec::new();
         for (name, data) in &self.texture_images {
             if data.is_empty() { continue; }
-            let ext = self.get_texture_extension(*name);
-            let filename = format!("{}.{}", name, ext);
+            let display_name = symbols
+                .display(name)
+                .map(str::to_owned)
+                .map_err(|_| "W3D exporter encountered a symbol owned by another session".to_owned())?;
+            let ext = self.get_texture_extension(name.clone());
+            let filename = format!("{}.{}", display_name, ext);
 
             if ext == "jpg" || ext == "png" {
                 // Already in a standard format — pass through
@@ -777,12 +819,12 @@ impl W3dScene {
                 if pixel_data.len() >= expected {
                     // Convert to uncompressed TGA (type 2) for universal compatibility
                     let tga = encode_tga_rgba(w, h, &pixel_data[..expected]);
-                    let tga_filename = format!("{}.tga", name);
+                    let tga_filename = format!("{}.tga", display_name);
                     result.push((tga_filename, tga));
                 }
             }
         }
-        result
+        Ok(result)
     }
 
     fn get_texture_extension(&self, tex_name: Symbol) -> &str {
@@ -794,7 +836,7 @@ impl W3dScene {
     }
 
     /// Resolve material name for a model resource via shader bindings and model nodes.
-    pub fn resolve_material_for_resource(&self, resource_name: Symbol) -> Option<Symbol> {
+    pub fn resolve_material_for_resource(&self, resource_name: Symbol, symbols: &SymbolTable) -> Result<Option<Symbol>, String> {
         // Try model node shader → material chain
         for node in &self.nodes {
             if node.node_type != W3dNodeType::Model { continue; }
@@ -803,7 +845,7 @@ impl W3dScene {
             if !node.shader_name.is_empty() {
                 if let Some(shader) = self.shaders.iter().find(|s| s.name == node.shader_name) {
                     if !shader.material_name.is_empty() {
-                        return Some(shader.material_name.clone());
+                        return Ok(Some(shader.material_name.clone()));
                     }
                 }
             }
@@ -814,35 +856,41 @@ impl W3dScene {
                 // Try binding name as shader name
                 if let Some(shader) = self.shaders.iter().find(|s| s.name == binding.name) {
                     if !shader.material_name.is_empty() {
-                        return Some(shader.material_name.clone());
+                        return Ok(Some(shader.material_name.clone()));
                     }
                 }
                 // Try binding name as direct material name
                 if self.materials.iter().any(|m| m.name == binding.name) {
-                    return Some(binding.name.clone());
+                    return Ok(Some(binding.name.clone()));
                 }
                 // Try mesh binding names
                 for mesh_binding in &binding.mesh_bindings {
                     if mesh_binding.is_empty() { continue; }
                     if let Some(shader) = self.shaders.iter().find(|s| s.name == *mesh_binding) {
                         if !shader.material_name.is_empty() {
-                            return Some(shader.material_name.clone());
+                            return Ok(Some(shader.material_name.clone()));
                         }
                     }
                     if self.materials.iter().any(|m| m.name == *mesh_binding) {
-                        return Some(mesh_binding.clone());
+                        return Ok(Some(mesh_binding.clone()));
                     }
                 }
             }
         }
         // Fallback: if there's only one non-default material, use it
-        let non_default: Vec<_> = self.materials.iter()
-            .filter(|m| !m.name.as_lower_str().contains("default"))
-            .collect();
-        if non_default.len() == 1 {
-            return Some(non_default[0].name.clone());
+        let mut non_default = Vec::new();
+        for material in &self.materials {
+            let lower = symbols
+                .lower(&material.name)
+                .map_err(|_| "W3D exporter encountered a symbol owned by another session".to_owned())?;
+            if !lower.contains("default") {
+                non_default.push(material);
+            }
         }
-        None
+        if non_default.len() == 1 {
+            return Ok(Some(non_default[0].name.clone()));
+        }
+        Ok(None)
     }
 
     /// Resolve material for a specific sub-mesh within a resource (via shader bindings).
@@ -875,7 +923,7 @@ impl W3dScene {
     }
 
     /// Resolve material for a raw mesh by matching its name to model nodes and shader bindings.
-    fn resolve_raw_mesh_material(&self, mesh_name: Symbol) -> Option<Symbol> {
+    fn resolve_raw_mesh_material(&self, mesh_name: Symbol, symbols: &SymbolTable) -> Result<Option<Symbol>, String> {
         // Try to find a model node that references this mesh
         for node in &self.nodes {
             if node.node_type != W3dNodeType::Model { continue; }
@@ -884,13 +932,13 @@ impl W3dScene {
             if !node.shader_name.is_empty() {
                 if let Some(shader) = self.shaders.iter().find(|s| s.name == node.shader_name) {
                     if !shader.material_name.is_empty() {
-                        return Some(shader.material_name.clone());
+                        return Ok(Some(shader.material_name.clone()));
                     }
                 }
             }
         }
         // Try matching mesh name as a resource name in shader bindings
-        self.resolve_material_for_resource(mesh_name)
+        self.resolve_material_for_resource(mesh_name, symbols)
     }
 
     /// Find world transform for a model resource from the scene graph (public).

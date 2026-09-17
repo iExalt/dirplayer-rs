@@ -2,9 +2,9 @@ import classNames from "classnames";
 import { ICastMemberIdentifier, ILingoLine, ILingoSpan, IScriptMemberSnapshot, LingoTokenType, MemberSnapshot } from "../../vm";
 import styles from "./styles.module.css";
 import { useAppDispatch, useAppSelector } from "../../store/hooks";
+import { useVMHandle } from "../VMProvider";
 import { selectBreakpoints } from "../../store/vmSlice";
 import { selectScriptViewMode, scriptViewModeChanged, TScriptViewMode } from "../../store/uiSlice";
-import { toggle_breakpoint } from "vm-rust";
 import { useState } from "react";
 import { ICastMemberRef } from "dirplayer-js-api";
 
@@ -144,6 +144,7 @@ export default function ScriptMemberPreview({
   backgroundScopes,
   theme = 'light',
 }: IScriptMemberPreviewProps) {
+  const handle = useVMHandle();
   const dispatch = useAppDispatch();
   const breakpoints = useAppSelector((state) => selectBreakpoints(state.vm));
   const viewMode = useAppSelector((state) => selectScriptViewMode(state.ui));
@@ -248,7 +249,7 @@ export default function ScriptMemberPreview({
                       }
                       isInBackground={backgroundScopes.some(([name, idx, scriptMemRef]) => name === handler.name && idx === i && memberId.castNumber === scriptMemRef[0] && memberId.memberNumber === scriptMemRef[1])}
                       onBreakpointClick={() =>
-                        toggle_breakpoint(snapshot.name, handler.name, i)
+                        void handle.toggle_breakpoint(snapshot.name, handler.name, i)
                       }
                     />
                   ))}
@@ -290,10 +291,10 @@ export default function ScriptMemberPreview({
                         onBreakpointClick={() => {
                           if (hasBreakpoint && breakpointBytecodeIndex !== undefined) {
                             // Toggle existing breakpoint (removes it)
-                            toggle_breakpoint(snapshot.name, handler.name, breakpointBytecodeIndex);
+                            void handle.toggle_breakpoint(snapshot.name, handler.name, breakpointBytecodeIndex);
                           } else if (canSetBreakpoint) {
                             // Add new breakpoint at first instruction
-                            toggle_breakpoint(snapshot.name, handler.name, primaryBytecodeIndex);
+                            void handle.toggle_breakpoint(snapshot.name, handler.name, primaryBytecodeIndex);
                           }
                         }}
                       />

@@ -1,0 +1,12 @@
+--- a/vm-rust/src/player/js_lingo/mod.rs
++++ b/vm-rust/src/player/js_lingo/mod.rs
+@@ -25,8 +25,7 @@
+ pub mod variable_length;
+ pub mod xdr;
+ 
+-#[cfg(test)]
+-mod test_fixtures;
++pub(crate) mod test_fixtures;
+ #[cfg(test)]
+ mod tests;
+ #[cfg(test)]

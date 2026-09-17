@@ -4,13 +4,13 @@ import { ICastMemberIdentifier } from "../vm";
 import { useEffect, useRef } from "react";
 import { TMemberSubscription, memberSubscribed, memberUnsubscribed, selectMemberSnapshotById } from "./vmSlice";
 import { uniqueId } from "lodash";
-import { subscribe_to_member, unsubscribe_from_member } from "vm-rust";
 import { ICastMemberRef } from "dirplayer-js-api";
+import type { BrowserPlayerHandle } from "vm-rust";
 
 export const useAppSelector: TypedUseSelectorHook<RootState> = useSelector
 export const useAppDispatch: () => AppDispatch = useDispatch
 
-export const useMemberSnapshot = (memberRef: ICastMemberIdentifier) => {
+export const useMemberSnapshot = (memberRef: ICastMemberIdentifier, handle: BrowserPlayerHandle) => {
   const dispatch = useAppDispatch();
   useEffect(() => {
     const token: TMemberSubscription = {
@@ -28,19 +28,19 @@ export const useMemberSnapshot = (memberRef: ICastMemberIdentifier) => {
   return useAppSelector(state => selectMemberSnapshotById(state.vm, memberRef))
 }
 
-export const useMemberSubscriptions = () => {
+export const useMemberSubscriptions = (handle: BrowserPlayerHandle) => {
   const subscriptions = useAppSelector(state => state.vm.subscribedMemberTokens)
   const subscribedIds = useRef<ICastMemberRef[]>([])
   useEffect(() => {
     const newSubs = subscriptions.filter(sub => !subscribedIds.current.some(id => id[0] === sub.memberRef.castNumber && id[1] === sub.memberRef.memberNumber))
     const oldSubs = subscribedIds.current.filter(id => !subscriptions.some(sub => sub.memberRef.castNumber === id[0] && sub.memberRef.memberNumber === id[1]))
     newSubs.forEach(sub => {
-      subscribe_to_member(sub.memberRef.castNumber, sub.memberRef.memberNumber)
+      void handle.subscribe_to_member(sub.memberRef.castNumber, sub.memberRef.memberNumber)
       subscribedIds.current.push([sub.memberRef.castNumber, sub.memberRef.memberNumber])
     })
     oldSubs.forEach(sub => {
-      unsubscribe_from_member(sub[0], sub[1])
+      void handle.unsubscribe_from_member(sub[0], sub[1])
       subscribedIds.current = subscribedIds.current.filter(id => id !== sub)
     })
-  }, [subscriptions])
+  }, [handle, subscriptions])
 }

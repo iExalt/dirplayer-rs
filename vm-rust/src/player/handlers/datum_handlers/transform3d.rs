@@ -1,27 +1,130 @@
 //! Lingo Transform object handler.
 //! A Transform is a mutable 4x4 row-major matrix used for 3D position/rotation/scale.
 
-use std::collections::HashSet;
-use std::cell::RefCell;
 use log::debug;
 
-thread_local! {
-    /// Track which Transform3d datum IDs were mutated in-place (dirty).
-    /// sync_persistent_transforms only writes dirty datums to node_transforms.
-    pub static DIRTY_TRANSFORM_IDS: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
+pub(super) fn validate_transform_ref(
+    player: &crate::player::DirPlayer,
+    datum_ref: &crate::player::DatumRef,
+) -> Result<(), crate::player::ScriptError> {
+    let Some(owner) = datum_ref.owner() else {
+        return Err(crate::player::ScriptError::new_code(
+            crate::player::ScriptErrorCode::InvalidReference,
+            "invalid Transform3d datum reference".to_owned(),
+        ));
+    };
+    if !owner.same_identity(&player.owner)
+        || !owner.is_arena_live()
+        || player.allocator.try_get_datum(datum_ref).is_none()
+    {
+        return Err(crate::player::ScriptError::new_code(
+            crate::player::ScriptErrorCode::InvalidReference,
+            "foreign or stale Transform3d datum reference".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
-pub fn mark_transform_dirty(datum_ref: &crate::player::DatumRef) {
-    DIRTY_TRANSFORM_IDS.with(|d| d.borrow_mut().insert(datum_ref.unwrap()));
+pub fn mark_transform_dirty(
+    player: &mut crate::player::DirPlayer,
+    datum_ref: &crate::player::DatumRef,
+) -> Result<(), crate::player::ScriptError> {
+    validate_transform_ref(player, datum_ref)?;
+    player.w3d_dirty_transform_ids.insert(datum_ref.unwrap());
+    Ok(())
 }
 
-pub fn take_dirty_ids() -> HashSet<usize> {
-    DIRTY_TRANSFORM_IDS.with(|d| std::mem::take(&mut *d.borrow_mut()))
+fn checked_datum<'a>(
+    player: &'a DirPlayer,
+    datum_ref: &DatumRef,
+) -> Result<&'a Datum, ScriptError> {
+    match datum_ref {
+        DatumRef::Void => Ok(&Datum::Void),
+        _ => player
+            .allocator
+            .try_get_datum(datum_ref)
+            .ok_or_else(|| ScriptError::new_code(
+                crate::player::ScriptErrorCode::InvalidReference,
+                format!("invalid datum reference {datum_ref}"),
+            )),
+    }
+}
+
+fn checked_arg<'a>(
+    player: &'a DirPlayer,
+    args: &[DatumRef],
+    index: usize,
+) -> Result<&'a Datum, ScriptError> {
+    args.get(index)
+        .ok_or_else(|| ScriptError::new_code(
+            crate::player::ScriptErrorCode::InvalidReference,
+            format!("missing Transform3d argument {index}"),
+        ))
+        .and_then(|datum_ref| checked_datum(player, datum_ref))
+}
+
+fn mark_after_prepare<T>(
+    player: &mut DirPlayer,
+    datum: &DatumRef,
+    prepared: Result<T, ScriptError>,
+) -> Result<T, ScriptError> {
+    if let Err(error) = &prepared {
+        if error.code == crate::player::ScriptErrorCode::InvalidReference {
+            return Err(error.clone());
+        }
+    }
+    mark_transform_dirty(player, datum)?;
+    prepared
+}
+
+fn prepare_axis_angle(
+    player: &DirPlayer,
+    value: &Datum,
+) -> Result<Option<([f64; 3], f64)>, ScriptError> {
+    let Datum::List(_, items, _) = value else {
+        return Ok(None);
+    };
+    if items.len() < 2 {
+        return Ok(None);
+    }
+    let axis = match checked_datum(player, &items[0])? {
+        Datum::Vector(axis) => *axis,
+        _ => return Err(ScriptError::new("axisAngle: expected vector for axis".into())),
+    };
+    let angle = checked_datum(player, &items[1])?.to_float()?;
+    Ok(Some((axis, angle)))
+}
+
+enum RotatePreparation {
+    Pivot([f64; 3], [f64; 3], f64),
+    Euler(f64, f64, f64),
+}
+
+fn prepare_rotate(
+    player: &DirPlayer,
+    args: &[DatumRef],
+) -> Result<RotatePreparation, ScriptError> {
+    if args.len() >= 3 {
+        if matches!(checked_arg(player, args, 0)?, Datum::Vector(_)) {
+            let pivot = match checked_arg(player, args, 0)? {
+                Datum::Vector(vector) => *vector,
+                _ => unreachable!(),
+            };
+            let axis = match checked_arg(player, args, 1)? {
+                Datum::Vector(axis) => *axis,
+                _ => [0.0, 0.0, 1.0],
+            };
+            let angle = checked_arg(player, args, 2)?.to_float()?;
+            return Ok(RotatePreparation::Pivot(pivot, axis, angle));
+        }
+    }
+    let (x, y, z) = Transform3dDatumHandlers::read_xyz(player, args)?;
+    Ok(RotatePreparation::Euler(x, y, z))
 }
 
 use crate::{
     director::lingo::datum::Datum,
-    player::{DatumRef, DirPlayer, ScriptError, reserve_player_mut, symbols::{builtin::BuiltInSymbol, symbol::Symbol}},
+    player::{DatumRef, DirPlayer, ScriptError, session::ExecutionContext, symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable}},
 };
 
 const IDENTITY: [f64; 16] = [
@@ -34,11 +137,21 @@ const IDENTITY: [f64; 16] = [
 pub struct Transform3dDatumHandlers;
 
 impl Transform3dDatumHandlers {
-    pub fn get_prop(player: &mut DirPlayer, datum: &DatumRef, prop: Symbol) -> Result<Datum, ScriptError> {
-        let m = match player.get_datum(datum) {
+    pub fn get_prop(player: &mut DirPlayer, symbols: &SymbolTable, datum: &DatumRef, prop: Symbol) -> Result<Datum, ScriptError> {
+        let datum = match datum {
+            DatumRef::Void => &Datum::Void,
+            _ => player
+                .allocator
+                .try_get_datum(datum)
+                .ok_or_else(|| ScriptError::new(format!("invalid datum reference {datum}")))?,
+        };
+        let m = match datum {
             Datum::Transform3d(m) => **m,
             _ => return Err(ScriptError::new("Expected Transform3d".into())),
         };
+        let prop_name = symbols
+            .display(&prop)
+            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
 
         match prop.into_builtin() {
             Some(BuiltInSymbol::Position) => Ok(Datum::Vector([m[12], m[13], m[14]])),
@@ -72,19 +185,35 @@ impl Transform3dDatumHandlers {
                     false,
                 ))
             }
-            _ => Err(ScriptError::new(format!("Unknown transform property '{prop}'"))),
+            _ => Err(ScriptError::new(format!("Unknown transform property '{prop_name}'"))),
         }
     }
 
-    pub fn set_prop(player: &mut DirPlayer, datum: &DatumRef, prop: Symbol, value: &DatumRef) -> Result<(), ScriptError> {
-        mark_transform_dirty(datum);
-        let val = player.get_datum(value).clone();
+    pub fn set_prop(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        prop: Symbol,
+        value: &DatumRef,
+    ) -> Result<(), ScriptError> {
+        validate_transform_ref(player, datum)?;
+        let prop_name = symbols
+            .display(&prop)
+            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+        let val = checked_datum(player, value)?.clone();
+        let prop_kind = prop.into_builtin();
+        let prepared_axis_angle = if matches!(prop_kind, Some(BuiltInSymbol::AxisAngle)) {
+            prepare_axis_angle(player, &val)
+        } else {
+            Ok(None)
+        };
+        let prepared_axis_angle = mark_after_prepare(player, datum, prepared_axis_angle)?;
         let m = match player.get_datum_mut(datum) {
             Datum::Transform3d(m) => m,
             _ => return Err(ScriptError::new("Expected Transform3d".into())),
         };
 
-        match prop.into_builtin() {
+        match prop_kind {
             Some(BuiltInSymbol::Position) => {
                 if let Datum::Vector(v) = val {
                     // Guard: only set finite values
@@ -152,17 +281,9 @@ impl Transform3dDatumHandlers {
             }
             Some(BuiltInSymbol::AxisAngle) => {
                 // axisAngle = [vector(axis), angle_degrees]
-                // Extract values before getting mutable borrow on transform
-                let (axis, angle_deg) = if let Datum::List(_, items, _) = &val {
-                    if items.len() >= 2 {
-                        let axis = match player.get_datum(&items[0]) {
-                            Datum::Vector(v) => *v,
-                            _ => return Err(ScriptError::new("axisAngle: expected vector for axis".into())),
-                        };
-                        let angle_deg = player.get_datum(&items[1]).to_float()?;
-                        (Some(axis), angle_deg)
-                    } else { (None, 0.0) }
-                } else { (None, 0.0) };
+                let (axis, angle_deg) = prepared_axis_angle
+                    .map(|(axis, angle)| (Some(axis), angle))
+                    .unwrap_or((None, 0.0));
 
                 if let Some(axis) = axis {
                     let m = match player.get_datum_mut(datum) {
@@ -184,131 +305,121 @@ impl Transform3dDatumHandlers {
                 }
                 Ok(())
             }
-            _ => Err(ScriptError::new(format!("Cannot set transform property '{}'", prop))),
+            _ => Err(ScriptError::new(format!("Cannot set transform property '{prop_name}'"))),
         }
     }
 
-    pub fn call(datum: &DatumRef, handler_name: Symbol, args: &[DatumRef]) -> Result<DatumRef, ScriptError> {
-        match handler_name.as_lower_str() {
-            "identity" => Self::identity(datum),
-            "translate" => Self::translate(datum, args, true),    // Director translate = pre-multiply (moves in local space)
-            "pretranslate" => Self::translate(datum, args, false),
-            "rotate" => Self::rotate(datum, args, true),     // Director rotate = pre-multiply (R*M, transforms position)
-            "prerotate" => Self::rotate(datum, args, false), // Director preRotate = post-multiply (M*R, doesn't transform position)
-            "scale" => Self::scale(datum, args, true),
-            "prescale" => Self::scale(datum, args, false),
-            "inverse" => Self::inverse(datum),
-            "invert" => Self::invert(datum),
-            "duplicate" => Self::duplicate(datum),
-            "multiply" => Self::multiply(datum, args),
-            "interpolate" => Self::interpolate(datum, args),
-            "interpolateto" => Self::interpolate_to(datum, args),
-            "getat" => Self::get_at(datum, args),
-            "setat" => Self::set_at(datum, args),
-            "getprop" | "getpropref" => {
-                // transform.rotation[3] → getProp(#rotation, 3)
-                reserve_player_mut(|player| {
-                    let prop_name = player.get_datum(&args[0]).symbol_value()?;
-                    let prop_datum = Self::get_prop(player, datum, prop_name)?;
-                    if args.len() > 1 {
-                        let index = player.get_datum(&args[1]).int_value()?;
-                        let prop_ref = player.alloc_datum(prop_datum);
-                        let prop_val = player.get_datum(&prop_ref).clone();
-                        match prop_val {
-                            Datum::Vector(v) => {
-                                let idx = (index as usize).saturating_sub(1);
-                                if idx < 3 {
-                                    Ok(player.alloc_datum(Datum::Float(v[idx])))
-                                } else {
-                                    Ok(player.alloc_datum(Datum::Float(0.0)))
-                                }
-                            }
-                            Datum::List(_, items, _) => {
-                                let idx = (index as usize).saturating_sub(1);
-                                if idx < items.len() {
-                                    Ok(items[idx].clone())
-                                } else {
-                                    Ok(DatumRef::Void)
-                                }
-                            }
-                            other => Ok(player.alloc_datum(other)),
+    pub fn call(
+        runtime: &mut ExecutionContext<'_>,
+        datum: DatumRef,
+        handler_name: Symbol,
+        args: &[DatumRef],
+    ) -> Result<DatumRef, ScriptError> {
+        let player = &mut runtime.player;
+        let symbols = &mut *runtime.symbols;
+        checked_datum(player, &datum)?;
+        let handler_name_display = symbols
+            .display(&handler_name)
+            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+        let is_invert = handler_name_display.eq_ignore_ascii_case("invert");
+        if is_invert {
+            return Self::invert(player, &datum);
+        }
+        match handler_name.into_builtin() {
+            Some(BuiltInSymbol::Identity) => Self::identity(player, &datum),
+            Some(BuiltInSymbol::Translate) => Self::translate(player, &datum, args, true),
+            Some(BuiltInSymbol::PreTranslate) => Self::translate(player, &datum, args, false),
+            Some(BuiltInSymbol::Rotate) => Self::rotate(player, &datum, args, true),
+            Some(BuiltInSymbol::PreRotate) => Self::rotate(player, &datum, args, false),
+            Some(BuiltInSymbol::Scale) => Self::scale(player, &datum, args, true),
+            Some(BuiltInSymbol::PreScale) => Self::scale(player, &datum, args, false),
+            Some(BuiltInSymbol::Inverse) => Self::inverse(player, &datum),
+            Some(BuiltInSymbol::Duplicate) => Self::duplicate(player, &datum),
+            Some(BuiltInSymbol::Multiply) => Self::multiply(player, &datum, args),
+            Some(BuiltInSymbol::Interpolate) => Self::interpolate(player, &datum, args),
+            Some(BuiltInSymbol::InterpolateTo) => Self::interpolate_to(player, &datum, args),
+            Some(BuiltInSymbol::GetAt) => Self::get_at(player, &datum, args),
+            Some(BuiltInSymbol::SetAt) => Self::set_at(player, &datum, args),
+            Some(BuiltInSymbol::GetProp | BuiltInSymbol::GetPropRef) => {
+                // transform.rotation[3] -> getProp(#rotation, 3)
+                let prop_name = checked_arg(player, args, 0)?.symbol_value(symbols)?;
+                let prop_datum = Self::get_prop(player, symbols, &datum, prop_name)?;
+                if args.len() > 1 {
+                    let index = checked_arg(player, args, 1)?.int_value()?;
+                    let prop_ref = player.alloc_datum(prop_datum);
+                    let prop_val = player.get_datum(&prop_ref).clone();
+                    match prop_val {
+                        Datum::Vector(v) => {
+                            let idx = (index as usize).saturating_sub(1);
+                            if idx < 3 { Ok(player.alloc_datum(Datum::Float(v[idx]))) }
+                            else { Ok(player.alloc_datum(Datum::Float(0.0))) }
                         }
-                    } else {
-                        Ok(player.alloc_datum(prop_datum))
+                        Datum::List(_, items, _) => {
+                            let idx = (index as usize).saturating_sub(1);
+                            if idx < items.len() { Ok(items[idx].clone()) }
+                            else { Ok(DatumRef::Void) }
+                        }
+                        other => Ok(player.alloc_datum(other)),
                     }
-                })
+                } else {
+                    Ok(player.alloc_datum(prop_datum))
+                }
             }
-            "count" => {
-                // transform.rotation.count → 3
-                reserve_player_mut(|player| {
-                    let prop_name = player.get_datum(&args[0]).symbol_value()?;
-                    let prop_datum = Self::get_prop(player, datum, prop_name)?;
-                    let count = match &prop_datum {
-                        Datum::Vector(_) => 3,
-                        Datum::List(_, items, _) => items.len() as i32,
-                        _ => 1,
-                    };
-                    Ok(player.alloc_datum(Datum::Int(count)))
-                })
+            Some(BuiltInSymbol::Count) => {
+                let prop_name = checked_arg(player, args, 0)?.symbol_value(symbols)?;
+                let prop_datum = Self::get_prop(player, symbols, &datum, prop_name)?;
+                let count = match &prop_datum {
+                    Datum::Vector(_) => 3,
+                    Datum::List(_, items, _) => items.len() as i32,
+                    _ => 1,
+                };
+                Ok(player.alloc_datum(Datum::Int(count)))
             }
-            _ => Err(ScriptError::new(format!("No handler '{}' for transform", handler_name))),
+            _ => Err(ScriptError::new(format!("No handler '{}' for transform", handler_name_display))),
         }
     }
 
-    fn identity(datum: &DatumRef) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            mark_transform_dirty(datum);
-            *player.get_datum_mut(datum) = Datum::transform3d(IDENTITY);
-            Ok(DatumRef::Void)
-        })
+    fn identity(player: &mut DirPlayer, datum: &DatumRef) -> Result<DatumRef, ScriptError> {
+        mark_transform_dirty(player, datum)?;
+        *player.get_datum_mut(datum) = Datum::transform3d(IDENTITY);
+        Ok(DatumRef::Void)
     }
 
-    fn translate(datum: &DatumRef, args: &[DatumRef], pre: bool) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            mark_transform_dirty(datum);
-            let (dx, dy, dz) = Self::read_xyz(player, args)?;
+    fn translate(player: &mut DirPlayer, datum: &DatumRef, args: &[DatumRef], pre: bool) -> Result<DatumRef, ScriptError> {
+            let xyz = Self::read_xyz(player, args);
+            let (dx, dy, dz) = mark_after_prepare(player, datum, xyz)?;
             let m = match player.get_datum(datum) {
                 Datum::Transform3d(m) => **m,
                 _ => return Err(ScriptError::new("Expected Transform3d".into())),
             };
-
+    
             let t = [
                 1.0, 0.0, 0.0, 0.0,
                 0.0, 1.0, 0.0, 0.0,
                 0.0, 0.0, 1.0, 0.0,
                 dx,  dy,  dz,  1.0,
             ];
-
+    
             let result = if pre { mat4_mul(&t, &m) } else { mat4_mul(&m, &t) };
             *player.get_datum_mut(datum) = Datum::transform3d(result);
             Ok(DatumRef::Void)
-        })
     }
-
-    fn rotate(datum: &DatumRef, args: &[DatumRef], pre: bool) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            mark_transform_dirty(datum);
-            let m = match player.get_datum(datum) {
+    
+    fn rotate(player: &mut DirPlayer, datum: &DatumRef, args: &[DatumRef], pre: bool) -> Result<DatumRef, ScriptError> {
+        let prepared = checked_datum(player, datum).and_then(|receiver| {
+            let m = match receiver {
                 Datum::Transform3d(m) => **m,
                 _ => return Err(ScriptError::new("Expected Transform3d".into())),
             };
-
+            prepare_rotate(player, args).map(|args| (m, args))
+        });
+        let (m, prepared) = mark_after_prepare(player, datum, prepared)?;
+    
             // Two forms:
             // 1. rotate(rx, ry, rz) or rotate(vector) — Euler angles
             // 2. rotate(point, axis, angle) — rotate around point by angle about axis
-            let is_pivot_form = args.len() >= 3
-                && matches!(player.get_datum(&args[0]), Datum::Vector(_));
-
-            let result = if is_pivot_form {
-                let pivot = match player.get_datum(&args[0]) {
-                    Datum::Vector(v) => *v,
-                    _ => [0.0; 3],
-                };
-                let axis = match player.get_datum(&args[1]) {
-                    Datum::Vector(v) => *v,
-                    _ => [0.0, 0.0, 1.0],
-                };
-                let angle_deg = player.get_datum(&args[2]).to_float()?;
+            let result = match prepared {
+                RotatePreparation::Pivot(pivot, axis, angle_deg) => {
                 let r = axis_angle_to_matrix(&axis, angle_deg);
                 // P = T(pivot) * R * T(-pivot) — the rotation about `pivot`.
                 // rotate(pivot,...)    : world-frame pivot → P * M
@@ -323,55 +434,50 @@ impl Transform3dDatumHandlers {
                 let t_pos = translation_matrix(pivot[0], pivot[1], pivot[2]);
                 let p = mat4_mul(&t_pos, &mat4_mul(&r, &t_neg));
                 if pre { mat4_mul(&p, &m) } else { mat4_mul(&m, &p) }
-            } else {
-                let (rx, ry, rz) = Self::read_xyz(player, args)?;
+                }
+                RotatePreparation::Euler(rx, ry, rz) => {
                 let r = euler_to_matrix(rx, ry, rz);
                 if pre { mat4_mul(&r, &m) } else { mat4_mul(&m, &r) }
+                }
             };
-
+    
             *player.get_datum_mut(datum) = Datum::transform3d(result);
             Ok(DatumRef::Void)
-        })
     }
-
-    fn scale(datum: &DatumRef, args: &[DatumRef], pre: bool) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            mark_transform_dirty(datum);
-            let (sx, sy, sz) = Self::read_xyz(player, args)?;
+    
+    fn scale(player: &mut DirPlayer, datum: &DatumRef, args: &[DatumRef], pre: bool) -> Result<DatumRef, ScriptError> {
+            let xyz = Self::read_xyz(player, args);
+            let (sx, sy, sz) = mark_after_prepare(player, datum, xyz)?;
             let m = match player.get_datum(datum) {
                 Datum::Transform3d(m) => **m,
                 _ => return Err(ScriptError::new("Expected Transform3d".into())),
             };
-
+    
             let s = [
                 sx,  0.0, 0.0, 0.0,
                 0.0, sy,  0.0, 0.0,
                 0.0, 0.0, sz,  0.0,
                 0.0, 0.0, 0.0, 1.0,
             ];
-
+    
             let result = if pre { mat4_mul(&s, &m) } else { mat4_mul(&m, &s) };
             *player.get_datum_mut(datum) = Datum::transform3d(result);
             Ok(DatumRef::Void)
-        })
     }
-
-    fn inverse(datum: &DatumRef) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    
+    fn inverse(player: &mut DirPlayer, datum: &DatumRef) -> Result<DatumRef, ScriptError> {
             let m = match player.get_datum(datum) {
                 Datum::Transform3d(m) => **m,
                 _ => return Err(ScriptError::new("Expected Transform3d".into())),
             };
             let inv = mat4_invert_affine(&m);
             Ok(player.alloc_datum(Datum::transform3d(inv)))
-        })
     }
-
+    
     /// invert() inverts the transform IN PLACE (mutates the original), unlike
     /// inverse() which returns a copy (Director Scripting Dictionary).
-    fn invert(datum: &DatumRef) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            mark_transform_dirty(datum);
+    fn invert(player: &mut DirPlayer, datum: &DatumRef) -> Result<DatumRef, ScriptError> {
+            mark_transform_dirty(player, datum)?;
             let m = match player.get_datum(datum) {
                 Datum::Transform3d(m) => **m,
                 _ => return Err(ScriptError::new("Expected Transform3d".into())),
@@ -379,90 +485,71 @@ impl Transform3dDatumHandlers {
             let inv = mat4_invert_affine(&m);
             *player.get_datum_mut(datum) = Datum::Transform3d(Box::new(inv));
             Ok(DatumRef::Void)
-        })
     }
-
-    fn duplicate(datum: &DatumRef) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    
+    fn duplicate(player: &mut DirPlayer, datum: &DatumRef) -> Result<DatumRef, ScriptError> {
             let m = match player.get_datum(datum) {
                 Datum::Transform3d(m) => **m,
                 _ => return Err(ScriptError::new("Expected Transform3d".into())),
             };
             Ok(player.alloc_datum(Datum::transform3d(m)))
-        })
     }
-
-    fn multiply(datum: &DatumRef, args: &[DatumRef]) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    
+    fn multiply(player: &mut DirPlayer, datum: &DatumRef, args: &[DatumRef]) -> Result<DatumRef, ScriptError> {
             let m = match player.get_datum(datum) {
                 Datum::Transform3d(m) => **m,
                 _ => return Err(ScriptError::new("Expected Transform3d".into())),
             };
-            let other = match player.get_datum(&args[0]) {
+            let other = match checked_arg(player, args, 0)? {
                 Datum::Transform3d(m) => **m,
                 _ => return Err(ScriptError::new("Expected Transform3d argument".into())),
             };
             let result = mat4_mul(&m, &other);
             Ok(player.alloc_datum(Datum::transform3d(result)))
-        })
     }
-
-    fn interpolate(datum: &DatumRef, args: &[DatumRef]) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    
+    fn interpolate(player: &mut DirPlayer, datum: &DatumRef, args: &[DatumRef]) -> Result<DatumRef, ScriptError> {
             let m = match player.get_datum(datum) {
                 Datum::Transform3d(m) => **m,
                 _ => return Err(ScriptError::new("Expected Transform3d".into())),
             };
-            let target = match player.get_datum(&args[0]) {
-                Datum::Transform3d(m) => **m,
-                _ => return Err(ScriptError::new("Expected Transform3d argument".into())),
-            };
-            let t = player.get_datum(&args[1]).float_value()? / 100.0; // percent → 0-1
+            let (target, t) = Self::prepare_interpolate(player, args)?;
             // Lerp position/scale, SLERP rotation (Director 11.5 interpolate():
             // "position and rotation"). Element-wise matrix lerp shears rotation.
             let result = interpolate_transform(&m, &target, t);
             Ok(player.alloc_datum(Datum::Transform3d(Box::new(result))))
-        })
     }
-
-    fn interpolate_to(datum: &DatumRef, args: &[DatumRef]) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            mark_transform_dirty(datum);
-            let m = match player.get_datum(datum) {
+    
+    fn interpolate_to(player: &mut DirPlayer, datum: &DatumRef, args: &[DatumRef]) -> Result<DatumRef, ScriptError> {
+        let prepared = checked_datum(player, datum).and_then(|receiver| {
+            let m = match receiver {
                 Datum::Transform3d(m) => **m,
                 _ => return Err(ScriptError::new("Expected Transform3d".into())),
             };
-            let target = match player.get_datum(&args[0]) {
-                Datum::Transform3d(m) => **m,
-                _ => return Err(ScriptError::new("Expected Transform3d argument".into())),
-            };
-            let t = player.get_datum(&args[1]).float_value()? / 100.0;
+            Self::prepare_interpolate(player, args).map(|args| (m, args))
+        });
+        let (m, (target, t)) = mark_after_prepare(player, datum, prepared)?;
             // interpolateTo modifies transform1 in place (Director 11.5).
             let result = interpolate_transform(&m, &target, t);
             *player.get_datum_mut(datum) = Datum::Transform3d(Box::new(result));
             Ok(DatumRef::Void)
-        })
     }
-
-    fn get_at(datum: &DatumRef, args: &[DatumRef]) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    
+    fn get_at(player: &mut DirPlayer, datum: &DatumRef, args: &[DatumRef]) -> Result<DatumRef, ScriptError> {
             let m = match player.get_datum(datum) {
                 Datum::Transform3d(m) => **m,
                 _ => return Err(ScriptError::new("Expected Transform3d".into())),
             };
-            let index = (player.get_datum(&args[0]).int_value()? - 1) as usize;
+            let index = (checked_arg(player, args, 0)?.int_value()? - 1) as usize;
             if index >= 16 {
                 return Err(ScriptError::new("Transform index out of range".into()));
             }
             Ok(player.alloc_datum(Datum::Float(m[index])))
-        })
     }
-
-    fn set_at(datum: &DatumRef, args: &[DatumRef]) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            mark_transform_dirty(datum);
-            let index = (player.get_datum(&args[0]).int_value()? - 1) as usize;
-            let value = player.get_datum(&args[1]).float_value()?;
+    
+    fn set_at(player: &mut DirPlayer, datum: &DatumRef, args: &[DatumRef]) -> Result<DatumRef, ScriptError> {
+            let prepared = Self::prepare_set_at(player, args);
+            let (index, value) = mark_after_prepare(player, datum, prepared)?;
             if index >= 16 {
                 return Err(ScriptError::new("Transform index out of range".into()));
             }
@@ -470,27 +557,47 @@ impl Transform3dDatumHandlers {
                 m[index] = value;
             }
             Ok(DatumRef::Void)
-        })
     }
 
     /// Read (x, y, z) from args - either 3 separate floats or a single vector
     fn read_xyz(player: &DirPlayer, args: &[DatumRef]) -> Result<(f64, f64, f64), ScriptError> {
         if args.len() >= 3 {
-            let x = player.get_datum(&args[0]).float_value()?;
-            let y = player.get_datum(&args[1]).float_value()?;
-            let z = player.get_datum(&args[2]).float_value()?;
+            let x = checked_arg(player, args, 0)?.float_value()?;
+            let y = checked_arg(player, args, 1)?.float_value()?;
+            let z = checked_arg(player, args, 2)?.float_value()?;
             Ok((x, y, z))
         } else if args.len() >= 1 {
-            match player.get_datum(&args[0]) {
+            match checked_arg(player, args, 0)? {
                 Datum::Vector(v) => Ok((v[0], v[1], v[2])),
                 _ => {
-                    let x = player.get_datum(&args[0]).float_value()?;
+                    let x = checked_arg(player, args, 0)?.float_value()?;
                     Ok((x, 0.0, 0.0))
                 }
             }
         } else {
             Ok((0.0, 0.0, 0.0))
         }
+    }
+
+    fn prepare_interpolate(
+        player: &DirPlayer,
+        args: &[DatumRef],
+    ) -> Result<([f64; 16], f64), ScriptError> {
+        let target = match checked_arg(player, args, 0)? {
+            Datum::Transform3d(matrix) => **matrix,
+            _ => return Err(ScriptError::new("Expected Transform3d argument".into())),
+        };
+        let percent = checked_arg(player, args, 1)?.float_value()?;
+        Ok((target, percent / 100.0))
+    }
+
+    fn prepare_set_at(
+        player: &DirPlayer,
+        args: &[DatumRef],
+    ) -> Result<(usize, f64), ScriptError> {
+        let index = (checked_arg(player, args, 0)?.int_value()? - 1) as usize;
+        let value = checked_arg(player, args, 1)?.float_value()?;
+        Ok((index, value))
     }
 }
 

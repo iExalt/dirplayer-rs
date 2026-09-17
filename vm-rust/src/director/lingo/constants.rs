@@ -9,6 +9,7 @@ pub fn opcode_names() -> &'static HashMap<OpCode, Box<str>> {
     MAP.get_or_init(|| {
         HashMap::from([
             // single-byte
+            (OpCode::Invalid, "invalid".into()),
             (OpCode::Ret, "ret".into()),
             (OpCode::RetFactory, "retfactory".into()),
             (OpCode::Mul, "mul".into()),
@@ -224,7 +225,13 @@ pub fn sprite_prop_names() -> &'static HashMap<u16, BuiltInSymbol> {
 
 #[inline]
 pub fn get_opcode_name(opcode: OpCode) -> &'static str {
-    opcode_names().get(&opcode).unwrap().as_ref()
+    // Keep diagnostics total when a newly added enum variant has not yet
+    // received a display entry. Unsupported bytecode still reports its
+    // original error; formatting it must not introduce a secondary panic.
+    opcode_names()
+        .get(&opcode)
+        .map(|name| name.as_ref())
+        .unwrap_or("unknown")
 }
 
 #[inline]

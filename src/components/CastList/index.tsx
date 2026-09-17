@@ -1,8 +1,8 @@
 import { useState, useMemo, useEffect } from "react"
 import { ICastMemberIdentifier, castMemberIdentifier, CastSnapshot, CastMemberRecord } from "../../vm"
+import { useVMHandle } from "../VMProvider"
 import classNames from "classnames"
 import styles from './styles.module.css'
-import { subscribe_to_cast_member_list, unsubscribe_from_cast_member_list } from 'vm-rust'
 import _ from "lodash"
 
 function getMemberTypeIcon(memberType?: string, scriptType?: string): string | null {
@@ -60,6 +60,7 @@ interface ICastListItemProps {
 }
 
 function CastListItem({ number, name, members, selectedMemberId, onSelectMember, forceExpanded, filterText }: ICastListItemProps) {
+  const handle = useVMHandle();
   const [isExpanded, setExpanded] = useState(false);
   const castNumber = number;
   const showExpanded = forceExpanded || isExpanded;
@@ -69,9 +70,9 @@ function CastListItem({ number, name, members, selectedMemberId, onSelectMember,
   // ran to tens of thousands of snapshots, re-sent on every member added.
   useEffect(() => {
     if (!showExpanded) return;
-    subscribe_to_cast_member_list(castNumber);
-    return () => unsubscribe_from_cast_member_list(castNumber);
-  }, [showExpanded, castNumber]);
+    void handle.subscribe_to_cast_member_list(castNumber);
+    return () => { void handle.unsubscribe_from_cast_member_list(castNumber); };
+  }, [handle, showExpanded, castNumber]);
 
   const filteredMembers = useMemo(() => {
     if (!filterText) return Object.entries(members);

@@ -10,7 +10,11 @@ pub mod webgl2;
 use wasm_bindgen::JsCast;
 use web_sys::HtmlCanvasElement;
 
-use crate::player::{bitmap::bitmap::Bitmap, DirPlayer};
+use crate::player::{
+    bitmap::bitmap::Bitmap,
+    symbols::symbol_table::SymbolTable,
+    DirPlayer, ScriptError,
+};
 
 /// Renderer backend selection
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,11 +34,19 @@ impl Default for RendererBackend {
 /// Common trait for all rendering backends
 pub trait Renderer {
     /// Draw the main stage frame
-    fn draw_frame(&mut self, player: &mut DirPlayer);
+    fn draw_frame(
+        &mut self,
+        player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
+    ) -> Result<(), ScriptError>;
 
     /// Capture the current visible stage output as a bitmap using this
     /// backend's own rendering path.
-    fn capture_stage_bitmap(&mut self, player: &mut DirPlayer) -> Bitmap;
+    fn capture_stage_bitmap(
+        &mut self,
+        player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
+    ) -> Result<Bitmap, ScriptError>;
 
     /// Reset per-movie state (texture caches, rendered-text cache, any
     /// scene-level GPU data). Call between tests so sprites from a previous
@@ -71,10 +83,15 @@ pub trait Renderer {
     /// Render a single sprite in isolation on a transparent background
     /// and return the canvas data URL. The sprite is rendered at its
     /// normal stage position but nothing else is drawn.
-    fn draw_sprite_isolated(&mut self, player: &mut DirPlayer, channel_num: i16) {
+    fn draw_sprite_isolated(
+        &mut self,
+        player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
+        channel_num: i16,
+    ) -> Result<(), ScriptError> {
         // Default: just draw the full frame (callers crop).
         // Backends can override for a true isolated render.
-        self.draw_frame(player);
+        self.draw_frame(player, symbols)
     }
 }
 
@@ -141,17 +158,25 @@ impl DynamicRenderer {
 }
 
 impl Renderer for DynamicRenderer {
-    fn draw_frame(&mut self, player: &mut DirPlayer) {
+    fn draw_frame(
+        &mut self,
+        player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
+    ) -> Result<(), ScriptError> {
         match self {
-            DynamicRenderer::Canvas2D(r) => r.draw_frame(player),
-            DynamicRenderer::WebGL2(r) => r.draw_frame(player),
+            DynamicRenderer::Canvas2D(r) => r.draw_frame(player, symbols),
+            DynamicRenderer::WebGL2(r) => r.draw_frame(player, symbols),
         }
     }
 
-    fn capture_stage_bitmap(&mut self, player: &mut DirPlayer) -> Bitmap {
+    fn capture_stage_bitmap(
+        &mut self,
+        player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
+    ) -> Result<Bitmap, ScriptError> {
         match self {
-            DynamicRenderer::Canvas2D(r) => r.capture_stage_bitmap(player),
-            DynamicRenderer::WebGL2(r) => r.capture_stage_bitmap(player),
+            DynamicRenderer::Canvas2D(r) => r.capture_stage_bitmap(player, symbols),
+            DynamicRenderer::WebGL2(r) => r.capture_stage_bitmap(player, symbols),
         }
     }
 
@@ -225,10 +250,15 @@ impl Renderer for DynamicRenderer {
         }
     }
 
-    fn draw_sprite_isolated(&mut self, player: &mut DirPlayer, channel_num: i16) {
+    fn draw_sprite_isolated(
+        &mut self,
+        player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
+        channel_num: i16,
+    ) -> Result<(), ScriptError> {
         match self {
-            DynamicRenderer::Canvas2D(r) => r.draw_sprite_isolated(player, channel_num),
-            DynamicRenderer::WebGL2(r) => r.draw_sprite_isolated(player, channel_num),
+            DynamicRenderer::Canvas2D(r) => r.draw_sprite_isolated(player, symbols, channel_num),
+            DynamicRenderer::WebGL2(r) => r.draw_sprite_isolated(player, symbols, channel_num),
         }
     }
 }

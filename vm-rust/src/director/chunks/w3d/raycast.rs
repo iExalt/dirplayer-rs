@@ -2,7 +2,7 @@
 
 use log::debug;
 
-use crate::player::symbols::{builtin::BuiltInSymbol, symbol::Symbol};
+use crate::player::symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable};
 
 use super::types::*;
 
@@ -175,8 +175,9 @@ pub fn raycast_scene(
     ray: &Ray,
     scene: &W3dScene,
     max_dist: f32,
-) -> Option<RayHit> {
-    raycast_scene_multi(ray, scene, max_dist, 1, None, None, None).into_iter().next()
+    symbols: &SymbolTable,
+) -> Result<Option<RayHit>, String> {
+    Ok(raycast_scene_multi(ray, scene, max_dist, 1, None, None, None, symbols)?.into_iter().next())
 }
 
 /// Test ray against all meshes in a scene, returning up to max_hits sorted by distance.
@@ -190,7 +191,28 @@ pub fn raycast_scene_multi(
     node_transforms: Option<&std::collections::HashMap<Symbol, [f32; 16]>>,
     excluded_nodes: Option<&std::collections::HashSet<Symbol>>,
     included_nodes: Option<&std::collections::HashSet<Symbol>>,
-) -> Vec<RayHit> {
+    symbols: &SymbolTable,
+) -> Result<Vec<RayHit>, String> {
+    for node in &scene.nodes {
+        for name in [&node.name, &node.parent_name, &node.resource_name, &node.model_resource_name] {
+            symbols.display(name)
+                .map_err(|_| "W3D raycast encountered a symbol owned by another session".to_owned())?;
+        }
+    }
+    for name in scene.clod_meshes.keys().chain(scene.model_resources.keys()) {
+        symbols.display(name)
+            .map_err(|_| "W3D raycast encountered a symbol owned by another session".to_owned())?;
+    }
+    for mesh in &scene.raw_meshes {
+        symbols.display(&mesh.name)
+            .map_err(|_| "W3D raycast encountered a symbol owned by another session".to_owned())?;
+    }
+    for set in [excluded_nodes, included_nodes].into_iter().flatten() {
+        for name in set {
+            symbols.display(name)
+                .map_err(|_| "W3D raycast encountered a symbol owned by another session".to_owned())?;
+        }
+    }
     let mut all_hits: Vec<RayHit> = Vec::new();
 
     // Name -> node index, built once per call. The world transform of each model
@@ -206,7 +228,7 @@ pub fn raycast_scene_multi(
         .nodes
         .iter()
         .enumerate()
-        .map(|(i, n)| (n.name, i))
+        .map(|(i, n)| (n.name.clone(), i))
         .collect();
 
     // For each model node, find its mesh data and test
@@ -391,7 +413,7 @@ pub fn raycast_scene_multi(
                     }
                 }
                 let tc = mesh.tex_coords.first().map(|v| v.as_slice());
-                if let Some(mut hit) = raycast_mesh(&local_ray, &mesh.positions, &mesh.normals, &mesh.faces, tc, node.name, (mi + 1) as u32, max_dist, cull_flip) {
+                if let Some(mut hit) = raycast_mesh(&local_ray, &mesh.positions, &mesh.normals, &mesh.faces, tc, node.name.clone(), (mi + 1) as u32, max_dist, cull_flip, symbols)? {
                     // Transform hit position and vertices back to world space
                     hit.position = transform_point_4x4(&world_transform, hit.position[0], hit.position[1], hit.position[2]);
                     hit.normal = transform_dir_4x4(&world_transform, hit.normal[0], hit.normal[1], hit.normal[2]);
@@ -413,7 +435,7 @@ pub fn raycast_scene_multi(
         for (mi, mesh) in scene.raw_meshes.iter().enumerate() {
             if mesh.name == *resource {
                 let tc = if !mesh.tex_coords.is_empty() { Some(mesh.tex_coords.as_slice()) } else { None };
-                if let Some(mut hit) = raycast_mesh(&local_ray, &mesh.positions, &mesh.normals, &mesh.faces, tc, node.name, (mi + 1) as u32, max_dist, cull_flip) {
+                if let Some(mut hit) = raycast_mesh(&local_ray, &mesh.positions, &mesh.normals, &mesh.faces, tc, node.name.clone(), (mi + 1) as u32, max_dist, cull_flip, symbols)? {
                     hit.position = transform_point_4x4(&world_transform, hit.position[0], hit.position[1], hit.position[2]);
                     hit.normal = transform_dir_4x4(&world_transform, hit.normal[0], hit.normal[1], hit.normal[2]);
                     for v in &mut hit.vertices {
@@ -434,7 +456,7 @@ pub fn raycast_scene_multi(
     // Sort by distance, take max_hits
     all_hits.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(std::cmp::Ordering::Equal));
     all_hits.truncate(max_hits);
-    all_hits
+    Ok(all_hits)
 }
 
 /// Transform a direction vector (no translation) by a 4x4 matrix
@@ -459,7 +481,11 @@ fn raycast_mesh(
     // True when the node's world transform is a mirror (negative determinant),
     // which reverses the effective winding — see raycast_scene_multi.
     cull_flip: bool,
-) -> Option<RayHit> {
+    symbols: &SymbolTable,
+) -> Result<Option<RayHit>, String> {
+    let model_name = symbols
+        .display(&model_name)
+        .map_err(|_| "W3D raycast encountered a symbol owned by another session".to_owned())?;
     // BVH disabled temporarily - use brute force for all meshes to match C# reference
     // TODO: debug BVH to find why it misses floor faces
     // if faces.len() > 32 {
@@ -509,7 +535,7 @@ fn raycast_mesh(
                     ];
                     let uv = interpolate_uv(tex_coords, i0, i1, i2, u, v);
                     closest = Some(RayHit {
-                        model_name: model_name.to_string(),
+                        model_name: model_name.to_owned(),
                         distance: t,
                         position: pos,
                         normal,
@@ -522,7 +548,7 @@ fn raycast_mesh(
             }
         }
     }
-    closest
+    Ok(closest)
 }
 
 /// Möller–Trumbore ray-triangle intersection.

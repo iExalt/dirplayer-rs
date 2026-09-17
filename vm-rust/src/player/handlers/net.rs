@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use crate::{
     director::lingo::datum::{datum_bool, Datum},
-    player::{net_task::NetTaskState, reserve_player_mut, DatumRef, ScriptError},
+    player::{net_task::NetTaskState, symbols::symbol_table::SymbolTable, DatumRef, DirPlayer, ScriptError},
 };
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 
@@ -14,203 +14,193 @@ impl NetHandlers {
     /// 4242 ("Download stopped by netAbort") so `netDone(id)` returns TRUE and
     /// `netError(id)` reports it — the movie stops polling. An unknown id/URL is a
     /// no-op. Returns VOID.
-    pub fn net_abort(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let (id_opt, url_opt) = if let Some(dr) = args.first() {
-                let d = player.get_datum(dr);
-                (d.int_value().ok().map(|v| v as u32), d.string_value().ok())
-            } else {
-                (None, None)
-            };
-            let task_id = id_opt.or_else(|| {
-                url_opt.and_then(|u| player.net_manager.find_task_by_url(&u))
-            });
-            if let Some(id) = task_id {
-                if let Some(mut shared) = player.net_manager.shared_state.try_lock() {
-                    // "If the data transmission is complete, this command has no
-                    // effect." — only terminate a task that is still in progress.
-                    let in_progress =
-                        shared.task_states.get(&id).map_or(false, |s| s.result.is_none());
-                    if in_progress {
-                        shared.update_task_state(
-                            id,
-                            NetTaskState { result: Some(Err(4242)), bytes_loaded: 0, bytes_total: 0 },
-                        );
-                    }
+    pub fn net_abort(player: &mut DirPlayer, symbols: &SymbolTable, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let (id_opt, url_opt) = if let Some(dr) = args.first() {
+            let d = player.get_datum(dr);
+            (d.int_value().ok().map(|v| v as u32), d.string_value(symbols).ok())
+        } else {
+            (None, None)
+        };
+        let task_id = id_opt.or_else(|| {
+            url_opt.and_then(|u| player.net_manager.find_task_by_url(&u))
+        });
+        if let Some(id) = task_id {
+            if let Some(mut shared) = player.net_manager.shared_state.try_lock() {
+                // "If the data transmission is complete, this command has no
+                // effect." — only terminate a task that is still in progress.
+                let in_progress =
+                    shared.task_states.get(&id).map_or(false, |s| s.result.is_none());
+                if in_progress {
+                    shared.update_task_state(
+                        id,
+                        NetTaskState { result: Some(Err(4242)), bytes_loaded: 0, bytes_total: 0 },
+                    );
                 }
             }
-            Ok(DatumRef::Void)
-        })
+        }
+        Ok(DatumRef::Void)
     }
 
-    pub fn net_done(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let task_id = if let Some(task_id_ref) = &args.get(0) {
-                let task_id_datum = player.get_datum(task_id_ref);
-                Some(task_id_datum.int_value()? as u32)
-            } else {
-                None
-            };
-            // Director 11.5: netDone returns TRUE (the default) when the
-            // operation is finished OR was terminated by a browser error, and
-            // FALSE only while genuinely in progress. An unknown / never-started
-            // id (e.g. mixmaster's Billboard polls netDone(-1) when there is no
-            // billboard URL) is therefore "done", not "in progress" — returning
-            // FALSE there made the movie spin on the download state.
-            let is_done = match player.net_manager.get_task_state(task_id) {
-                Some(state) => state.is_done(),
-                None => true,
-            };
-            Ok(player.alloc_datum(datum_bool(is_done)))
-        })
+    pub fn net_done(player: &mut DirPlayer, symbols: &SymbolTable, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let task_id = if let Some(task_id_ref) = &args.get(0) {
+            let task_id_datum = player.get_datum(task_id_ref);
+            Some(task_id_datum.int_value()? as u32)
+        } else {
+            None
+        };
+        // Director 11.5: netDone returns TRUE (the default) when the
+        // operation is finished OR was terminated by a browser error, and
+        // FALSE only while genuinely in progress. An unknown / never-started
+        // id (e.g. mixmaster's Billboard polls netDone(-1) when there is no
+        // billboard URL) is therefore "done", not "in progress" — returning
+        // FALSE there made the movie spin on the download state.
+        let is_done = match player.net_manager.get_task_state(task_id) {
+            Some(state) => state.is_done(),
+            None => true,
+        };
+        Ok(player.alloc_datum(datum_bool(is_done)))
     }
 
-    pub fn preload_net_thing(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let url = player.get_datum(&args[0]).string_value()?;
-            let task_id = player.net_manager.preload_net_thing(url);
-            Ok(player.alloc_datum(Datum::Int(task_id as i32)))
-        })
+    pub fn preload_net_thing(player: &mut DirPlayer, symbols: &SymbolTable, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let url = player.get_datum(&args[0]).string_value(symbols)?;
+        let task_id = player.net_manager.preload_net_thing(url);
+        Ok(player.alloc_datum(Datum::Int(task_id as i32)))
     }
 
-    pub fn get_net_text(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let url = player.get_datum(&args[0]).string_value()?;
+    pub fn get_net_text(player: &mut DirPlayer, symbols: &SymbolTable, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let url = player.get_datum(&args[0]).string_value(symbols)?;
 
-            // TODO should the task be tagged as a text task?
-            // URL decoding is handled by preload_net_thing
-            let task_id = player.net_manager.preload_net_thing(url.clone());
-            Ok(player.alloc_datum(Datum::Int(task_id as i32)))
-        })
+        // TODO should the task be tagged as a text task?
+        // URL decoding is handled by preload_net_thing
+        let task_id = player.net_manager.preload_net_thing(url.clone());
+        Ok(player.alloc_datum(Datum::Int(task_id as i32)))
     }
 
-    pub fn get_stream_status(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            // Support: no args (last task), int task ID, or URL string.
-            // Resolve to Option<task_id> first so the datum borrow is released
-            // before we (mutably) alloc the result — and so an unknown URL can
-            // return a status instead of raising (Director's getStreamStatus
-            // never throws on a bad URL).
-            let mut req_url: Option<String> = None;
-            let resolved: Option<u32> = if args.is_empty() {
-                Some(
-                    player
-                        .net_manager
-                        .get_last_task_id()
-                        .ok_or_else(|| ScriptError::new("No network tasks exist".to_string()))?,
-                )
-            } else {
-                let arg = player.get_datum(&args[0]);
-                match arg {
-                    Datum::Int(id) => Some(*id as u32),
-                    Datum::String(url) => {
-                        req_url = Some(url.clone());
-                        player.net_manager.find_task_by_url(url)
-                    }
-                    _ => {
-                        return Err(ScriptError::new(
-                            "getStreamStatus requires an integer task ID or URL string".to_string(),
-                        ))
-                    }
+    pub fn get_stream_status(player: &mut DirPlayer, symbols: &SymbolTable, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        // Support: no args (last task), int task ID, or URL string.
+        // Resolve to Option<task_id> first so the datum borrow is released
+        // before we (mutably) alloc the result — and so an unknown URL can
+        // return a status instead of raising (Director's getStreamStatus
+        // never throws on a bad URL).
+        let mut req_url: Option<String> = None;
+        let resolved: Option<u32> = if args.is_empty() {
+            Some(
+                player
+                    .net_manager
+                    .get_last_task_id()
+                    .ok_or_else(|| ScriptError::new("No network tasks exist".to_string()))?,
+            )
+        } else {
+            let arg = player.get_datum(&args[0]);
+            match arg {
+                Datum::Int(id) => Some(*id as u32),
+                Datum::String(url) => {
+                    req_url = Some(url.clone());
+                    player.net_manager.find_task_by_url(url)
                 }
-            };
-            let task_id = match resolved {
-                Some(id) => id,
-                None => {
-                    // Unknown URL. A `#movie`'s linked file is loaded into a
-                    // nested DirPlayer (its net task consumed), so a status poll
-                    // of its URL has no task here — report Complete so load-status
-                    // pollers proceed rather than the debugger pausing on an error.
-                    let url = req_url.unwrap_or_default();
-                    let result_map = Datum::PropList(
-                        VecDeque::from(vec![
-                            (
-                                player.alloc_datum(Datum::String("URL".to_owned())),
-                                player.alloc_datum(Datum::String(url)),
-                            ),
-                            (
-                                player.alloc_datum(Datum::String("state".to_owned())),
-                                player.alloc_datum(Datum::String("Complete".to_owned())),
-                            ),
-                            (
-                                player.alloc_datum(Datum::String("bytesSoFar".to_owned())),
-                                player.alloc_datum(Datum::Int(0)),
-                            ),
-                            (
-                                player.alloc_datum(Datum::String("bytesTotal".to_owned())),
-                                player.alloc_datum(Datum::Int(0)),
-                            ),
-                            (
-                                player.alloc_datum(Datum::String("error".to_owned())),
-                                player.alloc_datum(Datum::String("OK".to_owned())),
-                            ),
-                        ]),
-                        false,
-                    );
-                    return Ok(player.alloc_datum(result_map));
+                _ => {
+                    return Err(ScriptError::new(
+                        "getStreamStatus requires an integer task ID or URL string".to_string(),
+                    ))
                 }
-            };
+            }
+        };
+        let task_id = match resolved {
+            Some(id) => id,
+            None => {
+                // Unknown URL. A `#movie`'s linked file is loaded into a
+                // nested DirPlayer (its net task consumed), so a status poll
+                // of its URL has no task here — report Complete so load-status
+                // pollers proceed rather than the debugger pausing on an error.
+                let url = req_url.unwrap_or_default();
+                let result_map = Datum::PropList(
+                    VecDeque::from(vec![
+                        (
+                            player.alloc_datum(Datum::String("URL".to_owned())),
+                            player.alloc_datum(Datum::String(url)),
+                        ),
+                        (
+                            player.alloc_datum(Datum::String("state".to_owned())),
+                            player.alloc_datum(Datum::String("Complete".to_owned())),
+                        ),
+                        (
+                            player.alloc_datum(Datum::String("bytesSoFar".to_owned())),
+                            player.alloc_datum(Datum::Int(0)),
+                        ),
+                        (
+                            player.alloc_datum(Datum::String("bytesTotal".to_owned())),
+                            player.alloc_datum(Datum::Int(0)),
+                        ),
+                        (
+                            player.alloc_datum(Datum::String("error".to_owned())),
+                            player.alloc_datum(Datum::String("OK".to_owned())),
+                        ),
+                    ]),
+                    false,
+                );
+                return Ok(player.alloc_datum(result_map));
+            }
+        };
 
-            let task = player.net_manager.get_task(task_id)
-                .ok_or_else(|| ScriptError::new(format!("Network task {} not found", task_id)))?;
-            let url = task.url.to_owned();
+        let task = player.net_manager.get_task(task_id)
+            .ok_or_else(|| ScriptError::new(format!("Network task {} not found", task_id)))?;
+        let url = task.url.to_owned();
 
-            let task_state = player.net_manager.get_task_state(Some(task_id))
-                .ok_or_else(|| ScriptError::new(format!("Network task state {} not found", task_id)))?;
+        let task_state = player.net_manager.get_task_state(Some(task_id))
+            .ok_or_else(|| ScriptError::new(format!("Network task state {} not found", task_id)))?;
 
-            let (state, error, bytes_so_far, bytes_total) = match &task_state.result {
-                Some(Ok(bytes)) => {
-                    let len = bytes.len() as i32;
-                    ("Complete", "OK", len, len)
+        let (state, error, bytes_so_far, bytes_total) = match &task_state.result {
+            Some(Ok(bytes)) => {
+                let len = bytes.len() as i32;
+                ("Complete", "OK", len, len)
+            }
+            Some(Err(_code)) => {
+                ("Error", "Error", 0i32, 0i32)
+            }
+            None => {
+                if task_state.bytes_loaded > 0 {
+                    // If the server (or a CORS proxy) didn't advertise a
+                    // total, `bytes_total` is 0. Report the bytes loaded so
+                    // far as the total so callers that divide by it don't hit
+                    // a divide-by-zero and pin progress at 0% forever — DGS's
+                    // showGameLoadStats computes
+                    // `percentloaded = bytesloaded / bytestotal * 100`.
+                    // Accurate mid-load % still needs Content-Length (which
+                    // the proxy now preserves); this is the graceful floor.
+                    let total = task_state.bytes_total.max(task_state.bytes_loaded);
+                    ("InProgress", "", task_state.bytes_loaded as i32, total as i32)
+                } else {
+                    ("Connecting", "", 0i32, 0i32)
                 }
-                Some(Err(_code)) => {
-                    ("Error", "Error", 0i32, 0i32)
-                }
-                None => {
-                    if task_state.bytes_loaded > 0 {
-                        // If the server (or a CORS proxy) didn't advertise a
-                        // total, `bytes_total` is 0. Report the bytes loaded so
-                        // far as the total so callers that divide by it don't hit
-                        // a divide-by-zero and pin progress at 0% forever — DGS's
-                        // showGameLoadStats computes
-                        // `percentloaded = bytesloaded / bytestotal * 100`.
-                        // Accurate mid-load % still needs Content-Length (which
-                        // the proxy now preserves); this is the graceful floor.
-                        let total = task_state.bytes_total.max(task_state.bytes_loaded);
-                        ("InProgress", "", task_state.bytes_loaded as i32, total as i32)
-                    } else {
-                        ("Connecting", "", 0i32, 0i32)
-                    }
-                }
-            };
+            }
+        };
 
-            let result_map = Datum::PropList(
-                VecDeque::from(vec![
-                    (
-                        player.alloc_datum(Datum::String("URL".to_owned())),
-                        player.alloc_datum(Datum::String(url)),
-                    ),
-                    (
-                        player.alloc_datum(Datum::String("state".to_owned())),
-                        player.alloc_datum(Datum::String(state.to_owned())),
-                    ),
-                    (
-                        player.alloc_datum(Datum::String("bytesSoFar".to_owned())),
-                        player.alloc_datum(Datum::Int(bytes_so_far)),
-                    ),
-                    (
-                        player.alloc_datum(Datum::String("bytesTotal".to_owned())),
-                        player.alloc_datum(Datum::Int(bytes_total)),
-                    ),
-                    (
-                        player.alloc_datum(Datum::String("error".to_owned())),
-                        player.alloc_datum(Datum::String(error.to_owned())),
-                    ),
-                ]),
-                false,
-            );
-            Ok(player.alloc_datum(result_map))
-        })
+        let result_map = Datum::PropList(
+            VecDeque::from(vec![
+                (
+                    player.alloc_datum(Datum::String("URL".to_owned())),
+                    player.alloc_datum(Datum::String(url)),
+                ),
+                (
+                    player.alloc_datum(Datum::String("state".to_owned())),
+                    player.alloc_datum(Datum::String(state.to_owned())),
+                ),
+                (
+                    player.alloc_datum(Datum::String("bytesSoFar".to_owned())),
+                    player.alloc_datum(Datum::Int(bytes_so_far)),
+                ),
+                (
+                    player.alloc_datum(Datum::String("bytesTotal".to_owned())),
+                    player.alloc_datum(Datum::Int(bytes_total)),
+                ),
+                (
+                    player.alloc_datum(Datum::String("error".to_owned())),
+                    player.alloc_datum(Datum::String(error.to_owned())),
+                ),
+            ]),
+            false,
+        );
+        Ok(player.alloc_datum(result_map))
     }
 
     /// `netStatus msgString` — Director 11.5 Scripting Dictionary: a Command
@@ -220,167 +210,159 @@ impl NetHandlers {
     /// return and treat it as a no-op (logged at debug for diagnostics — movies
     /// like SpongeBob "JellyFishin'" call it once per download-progress tick to
     /// surface "Download N% Complete").
-    pub fn net_status(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            if let Some(msg_ref) = args.get(0) {
-                if let Ok(msg) = player.get_datum(msg_ref).string_value() {
-                    log::debug!("netStatus: {}", msg);
+    pub fn net_status(player: &mut DirPlayer, symbols: &SymbolTable, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        if let Some(msg_ref) = args.get(0) {
+            if let Ok(msg) = player.get_datum(msg_ref).string_value(symbols) {
+                log::debug!("netStatus: {}", msg);
+            }
+        }
+        Ok(DatumRef::Void)
+    }
+
+    pub fn net_error(player: &mut DirPlayer, symbols: &SymbolTable, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let task_id = args
+            .get(0)
+            .and_then(|datum_ref| player.get_datum(datum_ref).int_value().ok()).map(|id| id as u32);
+        // Director 11.5: netError returns an empty string when no background
+        // loading operation has started for this id (or it is still in
+        // progress), "OK" on success, else an error code. An unknown id must
+        // NOT raise — mixmaster's Billboard calls netError(-1) with no
+        // billboard URL, and raising aborts the exitFrame handler, leaving
+        // the stage's black bgColor stuck (blank screen).
+        let error = match player.net_manager.get_task_state(task_id) {
+            None => Datum::String("".to_owned()),
+            Some(task_state) => {
+                let is_ok = task_state.is_done()
+                    && task_state.result.as_ref().is_some_and(|r| r.is_ok());
+                if is_ok {
+                    Datum::String("OK".to_owned())
+                } else if let Some(Err(error)) = task_state.result.as_ref() {
+                    Datum::Int(*error)
+                } else {
+                    // Still IN PROGRESS. Director 11.5 Scripting Dictionary,
+                    // `netError()`: "If no background loading operation has
+                    // started, or if the operation is in progress, this
+                    // function returns an empty string." We returned Int(0),
+                    // which movies read as a real (unrecognised) status the
+                    // moment they start polling.
+                    //
+                    // AreaZero's `[PS] Preload Engine.stepFrame` polls
+                    //   if (netDone(id) = 1) and (netError(id) = "OK") then ...
+                    //   else if netError(id) <> EMPTY then <classify + abort>
+                    // so the very first poll — before the fetch finishes —
+                    // saw 0 <> EMPTY, fell through every documented code to
+                    // `otherwise`, and reported "Engine was not downloaded and
+                    // linked. Error was: Error unknown." for a download that
+                    // then completed fine. EMPTY keeps the movie polling.
+                    Datum::String("".to_owned())
                 }
             }
-            Ok(DatumRef::Void)
-        })
+        };
+        Ok(player.alloc_datum(error))
     }
 
-    pub fn net_error(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let task_id = args
-                .get(0)
-                .and_then(|datum_ref| player.get_datum(datum_ref).int_value().ok()).map(|id| id as u32);
-            // Director 11.5: netError returns an empty string when no background
-            // loading operation has started for this id (or it is still in
-            // progress), "OK" on success, else an error code. An unknown id must
-            // NOT raise — mixmaster's Billboard calls netError(-1) with no
-            // billboard URL, and raising aborts the exitFrame handler, leaving
-            // the stage's black bgColor stuck (blank screen).
-            let error = match player.net_manager.get_task_state(task_id) {
-                None => Datum::String("".to_owned()),
-                Some(task_state) => {
-                    let is_ok = task_state.is_done()
-                        && task_state.result.as_ref().is_some_and(|r| r.is_ok());
-                    if is_ok {
-                        Datum::String("OK".to_owned())
-                    } else if let Some(Err(error)) = task_state.result.as_ref() {
-                        Datum::Int(*error)
-                    } else {
-                        // Still IN PROGRESS. Director 11.5 Scripting Dictionary,
-                        // `netError()`: "If no background loading operation has
-                        // started, or if the operation is in progress, this
-                        // function returns an empty string." We returned Int(0),
-                        // which movies read as a real (unrecognised) status the
-                        // moment they start polling.
-                        //
-                        // AreaZero's `[PS] Preload Engine.stepFrame` polls
-                        //   if (netDone(id) = 1) and (netError(id) = "OK") then ...
-                        //   else if netError(id) <> EMPTY then <classify + abort>
-                        // so the very first poll — before the fetch finishes —
-                        // saw 0 <> EMPTY, fell through every documented code to
-                        // `otherwise`, and reported "Engine was not downloaded and
-                        // linked. Error was: Error unknown." for a download that
-                        // then completed fine. EMPTY keeps the movie polling.
-                        Datum::String("".to_owned())
-                    }
-                }
-            };
-            Ok(player.alloc_datum(error))
-        })
-    }
-
-    pub fn net_text_result(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let task_id = args
-                .get(0)
-                .and_then(|datum_ref| player.get_datum(datum_ref).int_value().ok()).map(|id| id as u32);
-            // netTextResult returns the downloaded text, or an empty string if
-            // the operation failed, is in progress, or the id is unknown (Director
-            // does not raise on a bad id).
-            let text = match player.net_manager.get_task_state(task_id) {
-                Some(task_state)
-                    if task_state.is_done()
-                        && task_state.result.as_ref().is_some_and(|r| r.is_ok()) =>
-                {
-                    let bytes = task_state.result.as_ref().unwrap().as_ref().unwrap();
-                    // UTF-8 strict first (modern editors), Win-1252 fallback
-                    // (legacy Director-authored external_texts_*.txt etc.).
-                    // Strips a UTF-8 BOM if present. See io::encoding for why
-                    // strict-then-fallback is unambiguous in practice.
-                    Datum::String(crate::io::encoding::decode_text_auto(bytes))
-                }
-                _ => Datum::String("".to_owned()),
-            };
-            Ok(player.alloc_datum(text))
-        })
-    }
-
-    pub fn post_net_text(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            if args.is_empty() {
-                return Err(ScriptError::new(
-                    "postNetText requires at least 1 argument (url)".to_string(),
-                ));
+    pub fn net_text_result(player: &mut DirPlayer, symbols: &SymbolTable, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let task_id = args
+            .get(0)
+            .and_then(|datum_ref| player.get_datum(datum_ref).int_value().ok()).map(|id| id as u32);
+        // netTextResult returns the downloaded text, or an empty string if
+        // the operation failed, is in progress, or the id is unknown (Director
+        // does not raise on a bad id).
+        let text = match player.net_manager.get_task_state(task_id) {
+            Some(task_state)
+                if task_state.is_done()
+                    && task_state.result.as_ref().is_some_and(|r| r.is_ok()) =>
+            {
+                let bytes = task_state.result.as_ref().unwrap().as_ref().unwrap();
+                // UTF-8 strict first (modern editors), Win-1252 fallback
+                // (legacy Director-authored external_texts_*.txt etc.).
+                // Strips a UTF-8 BOM if present. See io::encoding for why
+                // strict-then-fallback is unambiguous in practice.
+                Datum::String(crate::io::encoding::decode_text_auto(bytes))
             }
+            _ => Datum::String("".to_owned()),
+        };
+        Ok(player.alloc_datum(text))
+    }
 
-            let mut url = player.get_datum(&args[0]).string_value()?;
+    pub fn post_net_text(player: &mut DirPlayer, symbols: &SymbolTable, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        if args.is_empty() {
+            return Err(ScriptError::new(
+                "postNetText requires at least 1 argument (url)".to_string(),
+            ));
+        }
 
-            // If a fake movie path override is active, rewrite URLs that use
-            // the fake base path back to the real base path so network requests
-            // reach the actual server (e.g. postNetText(the moviePath & "security.asp", ...))
-            if let Some(ref override_path) = player.movie_path_override {
-                if !override_path.is_empty() {
-                    let fake_base = if let Ok(parsed) = url::Url::parse(override_path) {
-                        crate::utils::get_base_url(&parsed).to_string()
-                    } else if let Some(pos) = override_path.rfind('/') {
-                        override_path[..=pos].to_string()
-                    } else {
-                        String::new()
-                    };
-                    if !fake_base.is_empty() && url.starts_with(&fake_base) {
-                        if let Some(ref real_base) = player.net_manager.base_path {
-                            let relative = &url[fake_base.len()..];
-                            url = format!("{}{}", real_base.as_str(), relative);
-                        }
+        let mut url = player.get_datum(&args[0]).string_value(symbols)?;
+
+        // If a fake movie path override is active, rewrite URLs that use
+        // the fake base path back to the real base path so network requests
+        // reach the actual server (e.g. postNetText(the moviePath & "security.asp", ...))
+        if let Some(ref override_path) = player.movie_path_override {
+            if !override_path.is_empty() {
+                let fake_base = if let Ok(parsed) = url::Url::parse(override_path) {
+                    crate::utils::get_base_url(&parsed).to_string()
+                } else if let Some(pos) = override_path.rfind('/') {
+                    override_path[..=pos].to_string()
+                } else {
+                    String::new()
+                };
+                if !fake_base.is_empty() && url.starts_with(&fake_base) {
+                    if let Some(ref real_base) = player.net_manager.base_path {
+                        let relative = &url[fake_base.len()..];
+                        url = format!("{}{}", real_base.as_str(), relative);
                     }
                 }
             }
+        }
 
-            // Get the post data (can be a property list or string)
-            let post_data = if args.len() > 1 {
-                let data_datum = player.get_datum(&args[1]);
-                match data_datum {
-                    Datum::PropList(prop_list, _) => {
-                        // Convert property list to form data
-                        let mut form_parts = vec![];
-                        for (key_ref, value_ref) in prop_list {
-                            let key = player.get_datum(key_ref).string_value()?;
-                            let value = player.get_datum(value_ref).string_value()?;
-                            // URL encode the key and value using percent_encoding
-                            let encoded_key =
-                                utf8_percent_encode(&key, NON_ALPHANUMERIC).to_string();
-                            let encoded_value =
-                                utf8_percent_encode(&value, NON_ALPHANUMERIC).to_string();
-                            form_parts.push(format!("{}={}", encoded_key, encoded_value));
-                        }
-                        form_parts.join("&")
+        // Get the post data (can be a property list or string)
+        let post_data = if args.len() > 1 {
+            let data_datum = player.get_datum(&args[1]);
+            match data_datum {
+                Datum::PropList(prop_list, _) => {
+                    // Convert property list to form data
+                    let mut form_parts = vec![];
+                    for (key_ref, value_ref) in prop_list {
+                        let key = player.get_datum(key_ref).string_value(symbols)?;
+                        let value = player.get_datum(value_ref).string_value(symbols)?;
+                        // URL encode the key and value using percent_encoding
+                        let encoded_key =
+                            utf8_percent_encode(&key, NON_ALPHANUMERIC).to_string();
+                        let encoded_value =
+                            utf8_percent_encode(&value, NON_ALPHANUMERIC).to_string();
+                        form_parts.push(format!("{}={}", encoded_key, encoded_value));
                     }
-                    Datum::String(s) => s.clone(),
-                    _ => {
-                        return Err(ScriptError::new(format!(
-                            "postNetText second argument must be a property list or string, got {}",
-                            data_datum.type_str()
-                        )))
-                    }
+                    form_parts.join("&")
                 }
-            } else {
-                String::new()
-            };
+                Datum::String(s) => s.clone(),
+                _ => {
+                    return Err(ScriptError::new(format!(
+                        "postNetText second argument must be a property list or string, got {}",
+                        data_datum.type_str()
+                    )))
+                }
+            }
+        } else {
+            String::new()
+        };
 
-            // Optional server OS string (3rd argument)
-            let _server_os = if args.len() > 2 {
-                Some(player.get_datum(&args[2]).string_value()?)
-            } else {
-                None
-            };
+        // Optional server OS string (3rd argument)
+        let _server_os = if args.len() > 2 {
+            Some(player.get_datum(&args[2]).string_value(symbols)?)
+        } else {
+            None
+        };
 
-            // Optional server charset string (4th argument)
-            let _server_charset = if args.len() > 3 {
-                Some(player.get_datum(&args[3]).string_value()?)
-            } else {
-                None
-            };
+        // Optional server charset string (4th argument)
+        let _server_charset = if args.len() > 3 {
+            Some(player.get_datum(&args[3]).string_value(symbols)?)
+        } else {
+            None
+        };
 
-            // Create the network task
-            let task_id = player.net_manager.post_net_text(url, post_data);
+        // Create the network task
+        let task_id = player.net_manager.post_net_text(url, post_data);
 
-            Ok(player.alloc_datum(Datum::Int(task_id as i32)))
-        })
+        Ok(player.alloc_datum(Datum::Int(task_id as i32)))
     }
 }

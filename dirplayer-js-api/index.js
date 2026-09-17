@@ -1,6 +1,36 @@
 let vmCallbacks = undefined;
-export function registerVmCallbacks(callbacks) {
+const vmCallbacksByOwner = new Map();
+
+// Owner-qualified Flash calls use the same capability-scoped callback table as
+// the rest of the VM bridge.  These stable page functions deliberately do not
+// close over a particular player: registration and disposal update the
+// owner-keyed entry, so a later owner cannot replace or resurrect an earlier
+// runtime and non-LIFO teardown leaves no stale closure behind.
+const routeFlashPlayOwned = (ownerKey, spriteNum) =>
+  vmCallbacksByOwner.get(ownerKey)?.onFlashPlayOwned?.(spriteNum);
+const routeFlashLocalConnectionSendOwned = (ownerKey, name, method, argsJson) =>
+  vmCallbacksByOwner.get(ownerKey)?.onFlashLocalConnectionSendOwned?.(name, method, argsJson) ?? false;
+if (typeof globalThis.window !== 'undefined') {
+  const win = globalThis.window;
+  if (typeof win.dirplayer_rufflePlayOwned !== 'function') {
+    win.dirplayer_rufflePlayOwned = routeFlashPlayOwned;
+  }
+  if (typeof win.dirplayer_localConnectionSendOwned !== 'function') {
+    win.dirplayer_localConnectionSendOwned = routeFlashLocalConnectionSendOwned;
+  }
+}
+
+export function registerVmCallbacks(callbacks, ownerKey) {
   vmCallbacks = callbacks;
+  if (ownerKey) vmCallbacksByOwner.set(ownerKey, callbacks);
+  // Registration is capability-scoped: a provider may dispose its callbacks
+  // without clearing a newer provider's registration.
+  return () => {
+    if (vmCallbacks === callbacks) vmCallbacks = undefined;
+    if (ownerKey && vmCallbacksByOwner.get(ownerKey) === callbacks) {
+      vmCallbacksByOwner.delete(ownerKey);
+    }
+  };
 }
 
 // Resolvers for in-flight whenMovieLoaded() calls. We resolve them
@@ -52,8 +82,10 @@ export function onCastMemberChanged(...args) {
   vmCallbacks.onCastMemberChanged(...args)
 }
 
-export function onScoreChanged(snapshot) {
-  vmCallbacks.onScoreChanged(snapshot)
+export function onScoreChanged(snapshot, ownerKey) {
+  const callbacks = ownerKey ? vmCallbacksByOwner.get(ownerKey) : vmCallbacks;
+  if (ownerKey && !callbacks) return;
+  callbacks?.onScoreChanged?.(snapshot);
 }
 
 export function onFrameChanged(frame) {
@@ -108,18 +140,24 @@ export function onScriptInstanceSnapshot(instanceId, snapshot) {
   vmCallbacks.onScriptInstanceSnapshot(instanceId, snapshot)
 }
 
-export function onChannelChanged(channel, value) {
-  vmCallbacks.onChannelChanged(channel, value)
+export function onChannelChanged(channel, value, ownerKey) {
+  const callbacks = ownerKey ? vmCallbacksByOwner.get(ownerKey) : vmCallbacks;
+  if (ownerKey && !callbacks) return;
+  callbacks?.onChannelChanged?.(channel, value);
 }
 
-export function onChannelDisplayNameChanged(channel, displayName) {
-  vmCallbacks.onChannelDisplayNameChanged(channel, displayName)
+export function onChannelDisplayNameChanged(channel, displayName, ownerKey) {
+  const callbacks = ownerKey ? vmCallbacksByOwner.get(ownerKey) : vmCallbacks;
+  if (ownerKey && !callbacks) return;
+  callbacks?.onChannelDisplayNameChanged?.(channel, displayName);
 }
 
 // Bulk form, used when a panel first subscribes: one message for every named
 // channel instead of one per channel.
-export function onChannelDisplayNamesChanged(names) {
-  vmCallbacks.onChannelDisplayNamesChanged(names)
+export function onChannelDisplayNamesChanged(names, ownerKey) {
+  const callbacks = ownerKey ? vmCallbacksByOwner.get(ownerKey) : vmCallbacks;
+  if (ownerKey && !callbacks) return;
+  callbacks?.onChannelDisplayNamesChanged?.(names);
 }
 
 export function onExternalEvent(event) {
@@ -130,25 +168,31 @@ export function onExternalEvent(event) {
   }
 }
 
-export function onFlashMemberLoaded(spriteNum, castLib, castMember, swfData, width, height, pausedAtStart, assertedFrame) {
-  if (vmCallbacks?.onFlashMemberLoaded) {
-    vmCallbacks.onFlashMemberLoaded(spriteNum, castLib, castMember, swfData, width, height, pausedAtStart, assertedFrame);
+export function onFlashMemberLoaded(spriteNum, castLib, castMember, swfData, width, height, pausedAtStart, assertedFrame, ownerKey) {
+  const callbacks = ownerKey ? vmCallbacksByOwner.get(ownerKey) : vmCallbacks;
+  if (ownerKey && !callbacks) return;
+  if (callbacks?.onFlashMemberLoaded) {
+    callbacks.onFlashMemberLoaded(spriteNum, castLib, castMember, swfData, width, height, pausedAtStart, assertedFrame, ownerKey);
   } else {
     console.log('Flash member loaded:', 'sprite#' + spriteNum, castLib, castMember, width, height, swfData.length, 'bytes', 'pausedAtStart=' + pausedAtStart, 'assertedFrame=' + assertedFrame);
   }
 }
 
-export function onFlashMemberUnloaded(spriteNum) {
-  if (vmCallbacks?.onFlashMemberUnloaded) {
-    vmCallbacks.onFlashMemberUnloaded(spriteNum);
+export function onFlashMemberUnloaded(spriteNum, ownerKey) {
+  const callbacks = ownerKey ? vmCallbacksByOwner.get(ownerKey) : vmCallbacks;
+  if (ownerKey && !callbacks) return;
+  if (callbacks?.onFlashMemberUnloaded) {
+    callbacks.onFlashMemberUnloaded(spriteNum, ownerKey);
   } else {
     console.log('Flash member unloaded: sprite#' + spriteNum);
   }
 }
 
-export function onFlashResetAll() {
-  if (vmCallbacks?.onFlashResetAll) {
-    vmCallbacks.onFlashResetAll();
+export function onFlashResetAll(ownerKey) {
+  const callbacks = ownerKey ? vmCallbacksByOwner.get(ownerKey) : vmCallbacks;
+  if (ownerKey && !callbacks) return;
+  if (callbacks?.onFlashResetAll) {
+    callbacks.onFlashResetAll(ownerKey);
   }
 }
 
@@ -177,7 +221,9 @@ export function onStageSizeChanged(width, height, center) {
 // bytes between plugin memory and vm-rust calls; it does not decode
 // the wire format.
 
-const _plugins = new Map(); // lowercaseName -> { exports, memory }
+// Plugins are capabilities of one exact BrowserPlayerHandle generation.
+const _plugins = new Map(); // `${ownerKey}\0${lowercaseName}` -> plugin slot
+const _externalXtraHostsByOwner = new Map(); // owner key -> BrowserPlayerHandle
 let _vmModule = null;       // lazy-loaded `vm-rust` module reference
 let _xtraMovieBase = null;  // base URL used for movie-relative xtra resolution
 let _xtraHostBase = null;   // base URL for "~/foo.wasm" — points at where the host JS lives
@@ -192,6 +238,14 @@ function _normalizeXtraKey(name) {
   let s = name.toLowerCase();
   s = s.replace(/\.(?:x32|x16|xtr|wasm)$/i, '');
   return s;
+}
+
+function _pluginKey(ownerKey, name) {
+  return `${ownerKey || ''}\0${_normalizeXtraKey(name)}`;
+}
+
+function _pluginFor(ownerKey, name) {
+  return _plugins.get(_pluginKey(ownerKey, name));
 }
 
 /// Derive a "by convention" URL for an xtra name. Used as the last-resort
@@ -298,12 +352,13 @@ export function getXtraRegistry() {
 /// Resolve the currently-loaded movie's XTRl declarations against the
 /// registry and load any matched plugins that aren't already loaded.
 /// Returns a summary object describing what happened.
-export async function resolveAndLoadMovieXtras() {
+export async function resolveAndLoadMovieXtras(hostHandle) {
   const vm = _getVmModule();
   if (typeof vm.movie_required_xtras !== 'function') {
     return { skipped: [], loaded: [], failed: [], missing: [] };
   }
   const required = vm.movie_required_xtras(); // Array of { filename, displayName }
+  const ownerKey = hostHandle ? hostHandle.owner_identity() : '';
   const skipped = [];
   const missing = [];
   const toLoad = [];
@@ -311,7 +366,7 @@ export async function resolveAndLoadMovieXtras() {
     const filename = entry.filename || '';
     const display = entry.displayName || '';
     const key = _normalizeXtraKey(display || filename);
-    if (_plugins.has(key) || _plugins.has(_normalizeXtraKey(filename))) {
+    if (_pluginFor(ownerKey, key) || _pluginFor(ownerKey, filename)) {
       // Already loaded under either key form.
       skipped.push(display || filename);
       continue;
@@ -338,7 +393,7 @@ export async function resolveAndLoadMovieXtras() {
     toLoad.push({ name: display || filename, url });
   }
   const loadResults = await Promise.allSettled(
-    toLoad.map((t) => loadExternalXtra(t.url).then((name) => ({ t, name })))
+    toLoad.map((t) => loadExternalXtra(t.url, hostHandle).then((name) => ({ t, name })))
   );
   const loaded = [];
   const failed = [];
@@ -513,10 +568,47 @@ const _pendingLoads = [];
 /// loaded xtra names (same order as input). Hosts call this at boot
 /// with whichever URLs they want available (dev=localStorage list,
 /// polyfill=init-script, extension=chrome.storage, Electron=app config).
-export function loadExternalXtras(urls) {
+export function loadExternalXtras(urls, hostHandle) {
   if (!urls || urls.length === 0) return Promise.resolve([]);
   // Each loadExternalXtra() already pushes itself to _pendingLoads.
-  return Promise.all(urls.map((u) => loadExternalXtra(u)));
+  return Promise.all(urls.map((u) => loadExternalXtra(u, hostHandle)));
+}
+
+/** Register the owner-bound host used by on-demand Xtra loads. */
+export function registerExternalXtraHost(handle) {
+  let ownerKey = handle.owner_identity();
+  _externalXtraHostsByOwner.set(ownerKey, handle);
+  const registration = (() => {
+    if (_externalXtraHostsByOwner.get(ownerKey) === handle) {
+      _externalXtraHostsByOwner.delete(ownerKey);
+    }
+  });
+  registration.rebindOwner = () => {
+    if (_externalXtraHostsByOwner.get(ownerKey) === handle) {
+      _externalXtraHostsByOwner.delete(ownerKey);
+    }
+    ownerKey = handle.owner_identity();
+    _externalXtraHostsByOwner.set(ownerKey, handle);
+  };
+  return registration;
+}
+
+function _disposeExternalXtraOwner(ownerKey) {
+  if (!ownerKey) return;
+  if (_externalXtraHostsByOwner.get(ownerKey)) {
+    _externalXtraHostsByOwner.delete(ownerKey);
+  }
+  const prefix = `${ownerKey}\0`;
+  for (const key of _plugins.keys()) {
+    if (key.startsWith(prefix)) _plugins.delete(key);
+  }
+  for (const key of _onDemandInFlight) {
+    if (key.startsWith(prefix)) _onDemandInFlight.delete(key);
+  }
+}
+
+export function disposeExternalXtraHost(ownerKey) {
+  _disposeExternalXtraOwner(ownerKey);
 }
 
 /// Resolves once every loadExternalXtra/s call initiated so far has
@@ -534,14 +626,15 @@ export async function getExternalXtrasReady() {
 /// resolves with the xtra name (so the host can confirm which plugin
 /// loaded). The promise is also tracked by `getExternalXtrasReady`
 /// regardless of whether you await it directly.
-export function loadExternalXtra(url) {
-  const p = _loadExternalXtraInner(url);
+export function loadExternalXtra(url, hostHandle) {
+  const p = _loadExternalXtraInner(url, hostHandle);
   _pendingLoads.push(p);
   return p;
 }
 
-async function _loadExternalXtraInner(url) {
+async function _loadExternalXtraInner(url, hostHandle) {
   const resolved = _resolveXtraUrl(url);
+  const ownerKey = hostHandle ? hostHandle.owner_identity() : '';
   const wasmBytes = await fetch(resolved).then((r) => {
     if (!r.ok) throw new Error(`loadExternalXtra: HTTP ${r.status} for ${resolved}`);
     return r.arrayBuffer();
@@ -556,7 +649,14 @@ async function _loadExternalXtraInner(url) {
       dx_host_call: (opId, argsPtr, argsLen) => {
         if (!pluginSlot.exports) return 0n;
         const argsBytes = _readPluginBytes(pluginSlot, argsPtr, argsLen);
-        const result = _getVmModule().external_xtra_host_dispatch(opId, argsBytes);
+        if (hostHandle && hostHandle.owner_identity() !== ownerKey) {
+          throw new Error('loadExternalXtra: owner retired during plugin host call');
+        }
+        if (!hostHandle || typeof hostHandle.external_xtra_host_dispatch !== 'function') {
+          throw new Error('loadExternalXtra: owner-bound host handle is required');
+        }
+        const dispatch = hostHandle.external_xtra_host_dispatch.bind(hostHandle);
+        const result = dispatch(opId, argsBytes);
         // result is Uint8Array (possibly empty for void sentinel).
         if (!result || result.length === 0) return 0n;
         const ptr = _writePluginBytes(pluginSlot, result);
@@ -566,6 +666,9 @@ async function _loadExternalXtraInner(url) {
   };
 
   const { instance } = await WebAssembly.instantiate(wasmBytes, imports);
+  if (hostHandle && hostHandle.owner_identity() !== ownerKey) {
+    throw new Error('loadExternalXtra: owner retired during plugin instantiation');
+  }
   pluginSlot.exports = instance.exports;
 
   // Read the xtra name out of the plugin.
@@ -574,18 +677,23 @@ async function _loadExternalXtraInner(url) {
   const name = new TextDecoder().decode(nameBytes);
   if (!name) throw new Error(`loadExternalXtra(${url}): plugin returned empty xtra name`);
 
-  _plugins.set(name.toLowerCase(), pluginSlot);
+  pluginSlot.ownerKey = ownerKey;
+  _plugins.set(_pluginKey(ownerKey, name), pluginSlot);
 
-  // Tell vm-rust about the new xtra so manager.rs can route to it.
-  _getVmModule().register_external_xtra(name);
+  // Register with this exact owner. A plugin loaded by one provider must
+  // never become visible to another provider's player.
+  if (!hostHandle || typeof hostHandle.register_external_xtra !== 'function') {
+    throw new Error(`loadExternalXtra(${url}): owner-bound registration is unavailable`);
+  }
+  hostHandle.register_external_xtra(name);
 
   return name;
 }
 
 // ─── Bridge functions called by vm-rust extern declarations ──────────
 
-export function dispatchExternalXtraStaticHandler(xtraName, handler, args) {
-  const plugin = _plugins.get(xtraName.toLowerCase());
+export function dispatchExternalXtraStaticHandler(xtraName, handler, args, ownerKey) {
+  const plugin = _pluginFor(ownerKey, xtraName);
   if (!plugin) return undefined;
 
   const handlerBytes = new TextEncoder().encode(handler);
@@ -600,8 +708,8 @@ export function dispatchExternalXtraStaticHandler(xtraName, handler, args) {
   return result;
 }
 
-export function dispatchExternalXtraInstanceHandler(xtraName, instanceId, handler, args) {
-  const plugin = _plugins.get(xtraName.toLowerCase());
+export function dispatchExternalXtraInstanceHandler(xtraName, instanceId, handler, args, ownerKey) {
+  const plugin = _pluginFor(ownerKey, xtraName);
   if (!plugin) return undefined;
 
   const handlerBytes = new TextEncoder().encode(handler);
@@ -616,8 +724,8 @@ export function dispatchExternalXtraInstanceHandler(xtraName, instanceId, handle
   return result;
 }
 
-export function createExternalXtraInstance(xtraName, args) {
-  const plugin = _plugins.get(xtraName.toLowerCase());
+export function createExternalXtraInstance(xtraName, args, ownerKey) {
+  const plugin = _pluginFor(ownerKey, xtraName);
   if (!plugin) return undefined;
 
   const argsPtr = _writePluginBytes(plugin, args);
@@ -627,14 +735,14 @@ export function createExternalXtraInstance(xtraName, args) {
   return result;
 }
 
-export function destroyExternalXtraInstance(xtraName, instanceId) {
-  const plugin = _plugins.get(xtraName.toLowerCase());
+export function destroyExternalXtraInstance(xtraName, instanceId, ownerKey) {
+  const plugin = _pluginFor(ownerKey, xtraName);
   if (!plugin) return;
   plugin.exports.__xtra_destroy_instance(instanceId);
 }
 
-export function externalXtraHasStaticHandler(xtraName, handler) {
-  const plugin = _plugins.get(xtraName.toLowerCase());
+export function externalXtraHasStaticHandler(xtraName, handler, ownerKey) {
+  const plugin = _pluginFor(ownerKey, xtraName);
   if (!plugin) return 0;
   const handlerBytes = new TextEncoder().encode(handler);
   const handlerPtr = _writePluginBytes(plugin, handlerBytes);
@@ -645,10 +753,11 @@ export function externalXtraHasStaticHandler(xtraName, handler) {
 
 // ── On-demand load callback (called by vm-rust on unknown xtra) ───────
 //
-// vm-rust fires `onRequestXtraLoad(name)` from `request_xtra_load` when
+// vm-rust fires `onRequestXtraLoad(name, ownerKey, capability)` from
+// `request_xtra_load` when
 // Lingo executes `new(xtra "name")` for a name that isn't registered.
 // We resolve the name through the registry, load the .wasm if matched,
-// then call `complete_external_xtra_load(name, success)` back into
+// then call `complete_external_xtra_load(name, capability, success)` back into
 // vm-rust so the parked bytecode handler can resume.
 //
 // One name → at most one in-flight load. Repeat triggers (e.g. multiple
@@ -658,20 +767,26 @@ export function externalXtraHasStaticHandler(xtraName, handler) {
 // while a load is in flight.
 const _onDemandInFlight = new Set();
 
-export function onRequestXtraLoad(name) {
-  const key = (name || '').toLowerCase();
-  if (!key) {
-    _completeOnDemandLoad(name, false);
+export function onRequestXtraLoad(name, ownerKey, capability) {
+  const hostHandle = ownerKey ? _externalXtraHostsByOwner.get(ownerKey) : undefined;
+  if (ownerKey && !hostHandle) {
+    _completeOnDemandLoad(name, ownerKey, capability, false);
     return;
   }
-  if (_plugins.has(key)) {
+  const key = (name || '').toLowerCase();
+  const ownerLoadKey = `${ownerKey || ''}\0${key}`;
+  if (!key) {
+    _completeOnDemandLoad(name, ownerKey, capability, false);
+    return;
+  }
+  if (_pluginFor(ownerKey, key)) {
     // Already loaded — signal success immediately. (Shouldn't normally
     // happen, but vm-rust's request_xtra_load fast-paths registered
     // names; this is the defence-in-depth catch.)
-    _completeOnDemandLoad(name, true);
+    _completeOnDemandLoad(name, ownerKey, capability, true);
     return;
   }
-  if (_onDemandInFlight.has(key)) {
+  if (_onDemandInFlight.has(ownerLoadKey)) {
     // Another caller already started this load. The completion handler
     // there will signal all waiters when it finishes.
     return;
@@ -684,26 +799,32 @@ export function onRequestXtraLoad(name) {
     _conventionUrl(name);
   if (!url) {
     console.warn(`[dirplayer] onRequestXtraLoad: no registry entry or convention URL for '${name}'`);
-    _completeOnDemandLoad(name, false);
+    _completeOnDemandLoad(name, ownerKey, capability, false);
     return;
   }
-  _onDemandInFlight.add(key);
-  loadExternalXtra(url)
+  _onDemandInFlight.add(ownerLoadKey);
+  loadExternalXtra(url, hostHandle)
     .then((loadedName) => {
-      _onDemandInFlight.delete(key);
+      _onDemandInFlight.delete(ownerLoadKey);
       console.log(`[dirplayer] on-demand loaded '${loadedName}' from ${url}`);
-      _completeOnDemandLoad(name, true);
+      _completeOnDemandLoad(name, ownerKey, capability, true);
     })
     .catch((err) => {
-      _onDemandInFlight.delete(key);
+      _onDemandInFlight.delete(ownerLoadKey);
       console.error(`[dirplayer] on-demand load failed for '${name}' (${url}):`, err);
-      _completeOnDemandLoad(name, false);
+      _completeOnDemandLoad(name, ownerKey, capability, false);
     });
 }
 
-function _completeOnDemandLoad(name, success) {
+function _completeOnDemandLoad(name, ownerKey, capability, success) {
   try {
-    _getVmModule().complete_external_xtra_load(name, success);
+    const hostHandle = ownerKey ? _externalXtraHostsByOwner.get(ownerKey) : undefined;
+    if (!hostHandle || typeof hostHandle.complete_external_xtra_load !== 'function') {
+      // The owner may have been retired while the fetch was in flight; its
+      // player canceled the waiter, so there is no valid completion target.
+      return;
+    }
+    hostHandle.complete_external_xtra_load(name, capability, success);
   } catch (e) {
     console.error('[dirplayer] complete_external_xtra_load threw:', e);
   }

@@ -21,6 +21,8 @@
   // method/property request, and pruned via `destroyPlayer`.
   /** @type {Map<string, any>} */
   const players = new Map();
+  /** @type {Map<string, string>} */
+  const playerOwnerKeys = new Map();
   let nextId = 1;
 
   // Pre-seed the dirplayer_RufflePlayer config so the Ruffle bundle
@@ -68,15 +70,62 @@
 
   // dirplayer LocalConnection.send bridge (main world → isolated). The Ruffle
   // fork runs HERE (main world) and calls window.dirplayer_localConnectionSend
-  // when a SWF does LocalConnection.send; dirplayer's WASM export that dispatches
+  // when a SWF does LocalConnection.send; the current legacy producer is
+  // ruffle/core/src/avm1/globals/local_connection.rs and has no owner key.
+  // dirplayer's WASM export that dispatches
   // the Lingo setCallback handler lives in the ISOLATED world. Re-fire it there
   // as a DOM event (shared document, wombat-safe). Fire-and-forget — the fork
   // ignores the return. dirplayer_-namespaced so it never collides with stock.
+  function uniqueLegacyOwnerKey() {
+    let ownerKey;
+    for (const candidate of playerOwnerKeys.values()) {
+      if (typeof candidate !== 'string' || !candidate) continue;
+      if (ownerKey && ownerKey !== candidate) return undefined;
+      ownerKey = candidate;
+    }
+    return ownerKey;
+  }
+
+  function ownerIsActive(ownerKey) {
+    for (const candidate of playerOwnerKeys.values()) {
+      if (candidate === ownerKey) return true;
+    }
+    return false;
+  }
+
+  function dispatchLocalConnection(ownerKey, name, method, argsJson) {
+    if (typeof ownerKey !== 'string' || !ownerIsActive(ownerKey)) {
+      if (typeof console !== 'undefined' && console.warn) {
+        console.warn('[dirplayer] LocalConnection.send rejected for an inactive owner');
+      }
+      return false;
+    }
+    window.dispatchEvent(new CustomEvent('dirplayer-lc-send', {
+      detail: { ownerKey: ownerKey, name: name, method: method, argsJson: argsJson },
+    }));
+    return false;
+  }
+
+  // Owner-qualified producer used by the patched AVM1 wasm import. This is a
+  // stable host function; it does not capture an owner or replace another
+  // player's callback.
+  window.dirplayer_localConnectionSendOwned = function (ownerKey, name, method, argsJson) {
+    try {
+      return dispatchLocalConnection(ownerKey, name, method, argsJson);
+    } catch (e) { /* ignore */ }
+    return false;
+  };
+
   window.dirplayer_localConnectionSend = function (name, method, argsJson) {
     try {
-      window.dispatchEvent(new CustomEvent('dirplayer-lc-send', {
-        detail: { name: name, method: method, argsJson: argsJson },
-      }));
+      const ownerKey = uniqueLegacyOwnerKey();
+      if (!ownerKey) {
+        if (playerOwnerKeys.size > 0 && typeof console !== 'undefined' && console.warn) {
+          console.warn('[dirplayer] LocalConnection.send requires an owner-qualified producer when multiple players are active');
+        }
+        return false;
+      }
+      return dispatchLocalConnection(ownerKey, name, method, argsJson);
     } catch (e) { /* ignore */ }
     return false;
   };
@@ -98,6 +147,7 @@
     window.dispatchEvent(new CustomEvent(EVT_EVENT, {
       detail: {
         playerId: playerId,
+        ownerKey: playerOwnerKeys.get(playerId),
         eventName: eventName,
         detail: detail,
       },
@@ -206,8 +256,15 @@
           if (typeof window.dirplayer_RufflePlayer?.newest !== 'function') {
             throw new Error('Ruffle bundle has not finished loading');
           }
+          if (typeof m.ownerKey !== 'string' || !m.ownerKey) {
+            throw new Error('createPlayer requires an owner key');
+          }
           const ruffle = window.dirplayer_RufflePlayer.newest();
           const player = ruffle.createPlayer();
+          if (typeof player.dirplayer_set_owner_key !== 'function') {
+            throw new Error('dirplayer Ruffle player does not support owner binding');
+          }
+          player.dirplayer_set_owner_key(m.ownerKey);
           const id = String(nextId++);
           // Stamp the element so the isolated world can find it via
           // querySelector. Append to a temporary hidden parent so it's
@@ -220,6 +277,7 @@
           player.style.top = '-99999px';
           (document.body || document.documentElement).appendChild(player);
           players.set(id, player);
+          playerOwnerKeys.set(id, m.ownerKey);
           attachEventForwarders(id, player);
           respond(requestId, { playerId: id });
           break;
@@ -272,6 +330,9 @@
           // forwards the body for the actual Lingo dispatch there.
           const player = players.get(playerId);
           if (!player) throw new Error('player not registered: ' + playerId);
+          if (typeof m.ownerKey !== 'string' || playerOwnerKeys.get(playerId) !== m.ownerKey) {
+            throw new Error('callback owner does not match player owner');
+          }
           if (typeof player.dirplayer_addOpenUrlHandler === 'function') {
             player.dirplayer_addOpenUrlHandler(function (url, target) {
               if (typeof url === 'string'
@@ -296,6 +357,7 @@
           if (player) {
             try { player.remove(); } catch (e) { /* ignore */ }
             players.delete(playerId);
+            playerOwnerKeys.delete(playerId);
           }
           respond(requestId, null);
           break;

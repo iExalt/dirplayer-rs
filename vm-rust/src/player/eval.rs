@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::{collections::VecDeque, hash::{Hash, Hasher}, rc::Rc};
 use log::error;
 use pest::{
     iterators::{Pair, Pairs},
@@ -10,7 +10,7 @@ use crate::{
     director::lingo::datum::{Datum, DatumType, StringChunkExpr, StringChunkType, datum_bool},
     js_api::ascii_safe,
     player::{
-        DirPlayer, bytecode::{get_set::GetSetUtils, string::StringBytecodeHandler}, datum_operations::{add_datums, divide_datums, multiply_datums, subtract_datums}, handlers::datum_handlers::{player_call_datum_handler, prop_list::PropListUtils, string_chunk::StringChunkUtils}, player_call_global_handler, reserve_player_mut, script::{get_lctx_for_script, get_obj_prop, player_set_obj_prop, script_get_prop_opt, script_set_prop}, symbols::{builtin::BuiltInSymbol, symbol::Symbol}
+        DirPlayer, bytecode::{get_set::GetSetUtils, string::StringBytecodeHandler}, datum_operations::{add_datums, divide_datums, multiply_datums, subtract_datums}, handlers::datum_handlers::{prop_list::PropListUtils, string_chunk::StringChunkUtils}, script::{get_lctx_for_script, get_obj_prop, script_get_prop_opt, script_set_prop}, symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable}
     },
 };
 
@@ -22,6 +22,382 @@ struct LingoParser;
 
 fn tokenize_lingo(_expr: &str) -> Vec<String> {
     [].to_vec()
+}
+
+/// Opaque identity for one session-owned evaluator. The serial is only a
+/// lookup hint; accepting a completion also requires this exact capability
+/// allocation, so a fabricated numeric value cannot target a live evaluator.
+#[derive(Debug)]
+struct EvalCapability;
+
+#[derive(Clone, Debug)]
+pub(crate) struct EvalId {
+    serial: u64,
+    capability: Rc<EvalCapability>,
+}
+
+impl EvalId {
+    pub(crate) fn new(serial: u64) -> Self {
+        Self { serial, capability: Rc::new(EvalCapability) }
+    }
+}
+
+impl PartialEq for EvalId {
+    fn eq(&self, other: &Self) -> bool {
+        self.serial == other.serial && Rc::ptr_eq(&self.capability, &other.capability)
+    }
+}
+
+impl Eq for EvalId {}
+
+impl Hash for EvalId {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.serial.hash(state);
+        (Rc::as_ptr(&self.capability) as usize).hash(state);
+    }
+}
+
+/// External work requested by an evaluator turn. Requests own every VM handle
+/// and are consumed by the session/driver owner after the borrow ends.
+pub(crate) enum EvalPending {
+    Global {
+        capability: EvalAction,
+        request: crate::player::driver::InternalVmRequest,
+        reason: Option<String>,
+        prepared_child: Option<PreparedGlobal>,
+    },
+    Object {
+        capability: EvalAction,
+        request: crate::player::driver::InternalVmRequest,
+        reason: Option<String>,
+    },
+    SetProperty { capability: EvalAction, request: crate::player::driver::InternalVmRequest },
+}
+
+pub(crate) enum PreparedGlobal {
+    Child {
+        receiver: Option<crate::player::ScriptInstanceRef>,
+        handler_ref: crate::player::script::ScriptHandlerRef,
+        args: Vec<crate::player::DatumRef>,
+        use_raw_arg_list: bool,
+        completion: Option<crate::player::driver::ChildCompletion>,
+    },
+    Ancestors {
+        calls: Vec<crate::player::handlers::types::AncestorCall>,
+    },
+    Broadcast {
+        plan: crate::player::driver::BroadcastPlan,
+    },
+}
+
+#[derive(Debug)]
+struct EvalActionCapability;
+
+#[derive(Clone, Debug)]
+pub(crate) struct EvalAction {
+    serial: u64,
+    capability: Rc<EvalActionCapability>,
+}
+
+impl EvalAction {
+    fn new(serial: u64) -> Self {
+        Self { serial, capability: Rc::new(EvalActionCapability) }
+    }
+}
+
+impl PartialEq for EvalAction {
+    fn eq(&self, other: &Self) -> bool {
+        self.serial == other.serial && Rc::ptr_eq(&self.capability, &other.capability)
+    }
+}
+
+impl Eq for EvalAction {}
+
+pub(crate) enum EvalState {
+    Ready,
+    Running,
+    Waiting,
+    Completed(Result<DatumRef, ScriptError>),
+}
+
+/// Canonical owned evaluator boundary. The expression and owner capability
+/// outlive every synchronous turn; no player or symbol-table borrow is stored.
+pub(crate) struct EvalContinuation {
+    pub(crate) id: EvalId,
+    pub(crate) player_id: crate::player::session::PlayerId,
+    pub(crate) owner: crate::player::ownership::OwnerToken,
+    pub(crate) scope: Option<crate::player::ScopeToken>,
+    pub(crate) expression: LingoExpr,
+    pub(crate) state: EvalState,
+    frames: Vec<EvalFrame>,
+    values: Vec<DatumRef>,
+    command_lines: Option<Vec<String>>,
+    next_command_line: usize,
+    next_action: u64,
+    waiting_action: Option<EvalAction>,
+    waiting_discards_result: bool,
+    callback_sender: Option<async_std::channel::Sender<Result<crate::player::scope::ScopeResult, ScriptError>>>,
+}
+
+impl EvalContinuation {
+    pub(crate) fn new(
+        session: &mut crate::player::session::RuntimeSession,
+        player_id: crate::player::session::PlayerId,
+        id: EvalId,
+        expression: LingoExpr,
+    ) -> Result<Self, ScriptError> {
+        let (owner, scope) = session
+            .with_player(player_id, |context| -> Result<_, ScriptError> {
+                let scope = if context.player.scope_count > 0 {
+                    let candidate = if context.player.current_breakpoint.is_some() {
+                        context.player.eval_scope_index
+                            .unwrap_or(context.player.scope_count - 1) as usize
+                    } else {
+                        context.player.scope_count as usize - 1
+                    };
+                    if candidate >= context.player.scope_count as usize
+                        || candidate >= context.player.scopes.len()
+                    {
+                        return Err(ScriptError::new("debugger evaluator scope index is invalid".to_owned()));
+                    }
+                    let live_scope = &context.player.scopes[candidate];
+                    Some(crate::player::ScopeToken {
+                        owner: context.player.owner.clone(),
+                        slot: candidate,
+                        generation: live_scope.generation,
+                        epoch: context.player.scope_invalidation_epoch,
+                    })
+                } else { None };
+                Ok((context.player.owner.clone(), scope))
+            })
+            .ok_or_else(crate::player::cancelled_scope_error)??;
+        Ok(Self {
+            id,
+            player_id,
+            owner,
+            scope,
+            frames: vec![EvalFrame::Evaluate(expression.clone())],
+            expression,
+            values: Vec::new(),
+            state: EvalState::Ready,
+            next_action: 1,
+            waiting_action: None,
+            waiting_discards_result: false,
+            callback_sender: None,
+            command_lines: None,
+            next_command_line: 0,
+        })
+    }
+
+    pub(crate) fn accepts_owner(&self, owner: &crate::player::ownership::OwnerToken) -> bool {
+        self.owner.same_identity(owner) && self.owner.is_arena_live()
+    }
+
+    pub(crate) fn child_anchor(&self) -> (crate::player::ownership::OwnerToken, Option<crate::player::ScopeToken>) {
+        (self.owner.clone(), self.scope.clone())
+    }
+
+    pub(crate) fn waiting_for(&self, action: &EvalAction) -> bool {
+        matches!(self.state, EvalState::Waiting) && self.waiting_action.as_ref() == Some(action)
+    }
+
+    pub(crate) fn new_command(
+        session: &mut crate::player::session::RuntimeSession,
+        player_id: crate::player::session::PlayerId,
+        id: EvalId,
+        lines: Vec<String>,
+    ) -> Result<Self, ScriptError> {
+        let mut continuation = Self::new(session, player_id, id, LingoExpr::VoidLiteral)?;
+        continuation.frames.clear();
+        continuation.command_lines = Some(lines);
+        Ok(continuation)
+    }
+
+    /// Create a continuation whose root work is already an owned external
+    /// request. This is used by event/actor adapters that have no source
+    /// expression to evaluate but still need the evaluator's real owner and
+    /// capability validation for completion and reset.
+    pub(crate) fn new_request(
+        session: &mut crate::player::session::RuntimeSession,
+        player_id: crate::player::session::PlayerId,
+        id: EvalId,
+        request: crate::player::driver::InternalVmRequest,
+    ) -> Result<(Self, EvalPending), ScriptError> {
+        let mut continuation = Self::new(session, player_id, id, LingoExpr::VoidLiteral)?;
+        continuation.frames.clear();
+        continuation.state = EvalState::Waiting;
+        let capability = continuation.new_action(false);
+        let pending = match request {
+            crate::player::driver::InternalVmRequest::Global { name, args } => EvalPending::Global {
+                capability,
+                request: crate::player::driver::InternalVmRequest::Global { name, args },
+                reason: None,
+                prepared_child: None,
+            },
+            crate::player::driver::InternalVmRequest::Object { receiver, name, args } => EvalPending::Object {
+                capability,
+                request: crate::player::driver::InternalVmRequest::Object { receiver, name, args },
+                reason: None,
+            },
+            crate::player::driver::InternalVmRequest::SetProperty { receiver, name, value } => EvalPending::SetProperty {
+                capability,
+                request: crate::player::driver::InternalVmRequest::SetProperty { receiver, name, value },
+            },
+            _ => return Err(ScriptError::new("standalone evaluator request is not a global, object, or property operation".to_owned())),
+        };
+        Ok((continuation, pending))
+    }
+
+    pub(crate) fn set_callback_sender(
+        &mut self,
+        sender: async_std::channel::Sender<Result<crate::player::scope::ScopeResult, ScriptError>>,
+    ) {
+        self.callback_sender = Some(sender);
+    }
+
+    pub(crate) fn take_callback_sender(
+        &mut self,
+    ) -> Option<async_std::channel::Sender<Result<crate::player::scope::ScopeResult, ScriptError>>> {
+        self.callback_sender.take()
+    }
+
+    pub(crate) fn turn(
+        &mut self,
+        session: &mut crate::player::session::RuntimeSession,
+    ) -> EvalTurn {
+        let owner_active = session
+            .with_player(self.player_id, |context| {
+                self.accepts_owner(&context.player.owner)
+                    && self.scope.as_ref().map_or(true, |scope| scope.validate_active(context.player))
+            })
+            .unwrap_or(false);
+        if !owner_active {
+            let error = crate::player::cancelled_scope_error();
+            self.state = EvalState::Completed(Err(error.clone()));
+            return EvalTurn::Complete(Err(error));
+        }
+        if !matches!(self.state, EvalState::Ready) {
+            return EvalTurn::Complete(Err(ScriptError::new(
+                "evaluator turn is not ready".to_owned(),
+            )));
+        }
+        loop {
+            if self.frames.is_empty() {
+                // A root expression can complete an external action with no
+                // parent frame. Preserve that value before asking the lazy
+                // command source for another line; otherwise a resumed root
+                // handler incorrectly returns VOID.
+                if let Some(value) = self.values.pop() {
+                    if self.command_lines.as_ref().is_some_and(|lines| self.next_command_line < lines.len()) {
+                        self.values.clear();
+                        self.state = EvalState::Ready;
+                        continue;
+                    }
+                    self.state = EvalState::Completed(Ok(value.clone()));
+                    return EvalTurn::Complete(Ok(value));
+                }
+                match self.next_command_ast() {
+                    Ok(Some(ast)) => self.frames.push(EvalFrame::Evaluate(ast)),
+                    Ok(None) => {
+                        self.state = EvalState::Completed(Ok(DatumRef::Void));
+                        return EvalTurn::Complete(Ok(DatumRef::Void));
+                    }
+                    Err(error) => {
+                        self.state = EvalState::Completed(Err(error.clone()));
+                        return EvalTurn::Complete(Err(error));
+                    }
+                }
+            }
+            self.state = EvalState::Running;
+            match self.run_frames(session) {
+                EvalTurn::Pending { request } => {
+                    self.state = EvalState::Waiting;
+                    return EvalTurn::Pending { request };
+                }
+                EvalTurn::Complete(Err(error)) => {
+                    self.state = EvalState::Completed(Err(error.clone()));
+                    return EvalTurn::Complete(Err(error));
+                }
+                EvalTurn::Complete(Ok(value)) => {
+                    if self.command_lines.as_ref().is_some_and(|lines| self.next_command_line < lines.len()) {
+                        self.values.clear();
+                        self.state = EvalState::Ready;
+                        continue;
+                    }
+                    self.state = EvalState::Completed(Ok(value.clone()));
+                    return EvalTurn::Complete(Ok(value));
+                }
+            }
+        }
+    }
+
+
+    pub(crate) fn complete(
+        &mut self,
+        session: &mut crate::player::session::RuntimeSession,
+        action: &EvalAction,
+        owner: &crate::player::ownership::OwnerToken,
+        result: Result<DatumRef, ScriptError>,
+    ) -> bool {
+        if !self.accepts_owner(owner)
+            || !matches!(self.state, EvalState::Waiting)
+            || self.waiting_action.as_ref() != Some(action)
+        {
+            return false;
+        }
+        let current_owner = session
+            .with_player(self.player_id, |context| {
+                self.accepts_owner(&context.player.owner)
+                    && self.scope.as_ref().map_or(true, |scope| scope.validate_active(context.player))
+            })
+            .unwrap_or(false);
+        if !current_owner {
+            return false;
+        }
+        let result_valid = match &result {
+            Ok(value) => session
+                .with_player(self.player_id, |context| {
+                    crate::player::driver::checked_internal_datum(context.player, context.symbols, value)
+                        .map(|_| ())
+                })
+                .and_then(Result::ok)
+                .is_some(),
+            Err(_) => true,
+        };
+        if !result_valid {
+            return false;
+        }
+        self.waiting_action = None;
+        let value = match result {
+            Ok(value) => value,
+            Err(error) => {
+                self.state = EvalState::Completed(Err(error));
+                return true;
+            }
+        };
+        self.values.push(if self.waiting_discards_result { DatumRef::Void } else { value });
+        self.waiting_discards_result = false;
+        self.state = EvalState::Ready;
+        true
+    }
+
+    fn new_action(&mut self, discards_result: bool) -> EvalAction {
+        let serial = self.next_action;
+        self.next_action = self.next_action.wrapping_add(1).max(1);
+        let action = EvalAction::new(serial);
+        self.waiting_action = Some(action.clone());
+        self.waiting_discards_result = discards_result;
+        action
+    }
+
+    fn next_command_ast(&mut self) -> Result<Option<LingoExpr>, ScriptError> {
+        let Some(lines) = self.command_lines.as_ref() else { return Ok(None) };
+        let Some(line) = lines.get(self.next_command_line).cloned() else { return Ok(None) };
+        self.next_command_line += 1;
+        parse_lingo_expr_ast_runtime(Rule::command_eval_expr, line)
+            .map(Some)
+    }
+
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -82,36 +458,101 @@ pub enum LingoExpr {
 }
 
 /// Evaluate a static Lingo expression. This does not support function calls.
-pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError> {
+fn checked_static_datum(
+    player: &DirPlayer,
+    datum_ref: &DatumRef,
+    symbols: &SymbolTable,
+) -> Result<Datum, ScriptError> {
+    let datum = match datum_ref {
+        DatumRef::Void => Datum::Void,
+        DatumRef::Ref(_) => player
+            .allocator
+            .try_get_datum(datum_ref)
+            .cloned()
+            .ok_or_else(|| ScriptError::new_code(
+                crate::player::ScriptErrorCode::InvalidReference,
+                "Foreign or stale datum reference".to_string(),
+            ))?,
+    };
+    crate::player::compare::validate_direct_symbol_fields(&datum, symbols)?;
+    Ok(datum)
+}
+
+fn validate_static_stack_datum(
+    player: &DirPlayer,
+    value: &crate::player::scope::StackDatum,
+    symbols: &SymbolTable,
+) -> Result<(), ScriptError> {
+    match value {
+        crate::player::scope::StackDatum::Symbol(symbol) => symbols
+            .display(symbol)
+            .map(|_| ())
+            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign.into()),
+        crate::player::scope::StackDatum::Ref(datum_ref) => {
+            checked_static_datum(player, datum_ref, symbols).map(|_| ())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn eval_static_term_with_prefix(
+    first: Pair<Rule>,
+    iter: &mut std::vec::IntoIter<Pair<Rule>>,
+    player: &mut DirPlayer,
+    symbols: &mut SymbolTable,
+) -> Result<DatumRef, ScriptError> {
+    match first.as_rule() {
+        Rule::not_op => {
+            let operand = iter.next().ok_or_else(|| {
+                ScriptError::new("Expected operand after not".to_string())
+            })?;
+            let operand_ref = eval_static_term_with_prefix(operand, iter, player, symbols)?;
+            let value = checked_static_datum(player, &operand_ref, symbols)?.bool_value()?;
+            Ok(player.alloc_datum(Datum::Int(i32::from(!value))))
+        }
+        Rule::neg_op => {
+            let operand = iter.next().ok_or_else(|| {
+                ScriptError::new("Expected operand after unary minus".to_string())
+            })?;
+            let operand_ref = eval_static_term_with_prefix(operand, iter, player, symbols)?;
+            let minus_one = player.alloc_datum(Datum::Int(-1));
+            let value = crate::player::datum_operations::multiply_datums(
+                operand_ref,
+                minus_one,
+                player,
+                symbols,
+            )?;
+            Ok(player.alloc_datum(value))
+        }
+        _ => eval_lingo_pair_static(first, player, symbols),
+    }
+}
+
+pub fn eval_lingo_pair_static(
+    pair: Pair<Rule>,
+    player: &mut DirPlayer,
+    symbols: &mut SymbolTable,
+) -> Result<DatumRef, ScriptError> {
     let inner_rule = pair.as_rule();
     match pair.as_rule() {
         Rule::expr => {
             let mut inner_pairs: Vec<Pair<Rule>> = pair.into_inner().collect();
             if inner_pairs.len() == 1 {
-                return eval_lingo_pair_static(inner_pairs.remove(0));
+                return eval_lingo_pair_static(inner_pairs.remove(0), player, symbols);
             }
             // Handle binary operators (e.g. "foo" & QUOTE & "bar")
             let mut iter = inner_pairs.into_iter();
             let first = iter.next()
                 .ok_or_else(|| ScriptError::new("Expected expression content".to_string()))?;
-            // A leading unary minus binds to the FIRST term only — negating the
-            // whole expression would turn `-a + b` into `-(a + b)`. Negate via
-            // `* -1` so vectors/points/lists work (see the runtime prefix arm).
-            let mut result = if first.as_rule() == Rule::neg_op {
-                let operand = iter.next().ok_or_else(|| {
-                    ScriptError::new("Expected operand after unary minus".to_string())
-                })?;
-                let operand_ref = eval_lingo_pair_static(operand)?;
-                reserve_player_mut(|player| {
-                    let minus_one = player.alloc_datum(Datum::Int(-1));
-                    let v = crate::player::datum_operations::multiply_datums(
-                        operand_ref.clone(), minus_one, player,
-                    )?;
-                    Ok(player.alloc_datum(v))
-                })?
-            } else {
-                eval_lingo_pair_static(first)?
-            };
+            // Prefix operators bind to one term. Consume them recursively so
+            // `not not true` and a prefix on a binary RHS (`true and not x`)
+            // use the same term boundaries as the runtime Pratt evaluator.
+            let mut result = eval_static_term_with_prefix(
+                first,
+                &mut iter,
+                player,
+                symbols,
+            )?;
             while let Some(op) = iter.next() {
                 let right = iter.next()
                     .ok_or_else(|| ScriptError::new("Expected right operand".to_string()))?;
@@ -120,28 +561,33 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
                 // e.g. `number` as a variable).
                 if op.as_rule() == Rule::obj_prop {
                     let prop_name = right.as_str().trim().to_string();
-                    result = reserve_player_mut(|player| {
-                        crate::player::script::get_obj_prop(player, &result, Symbol::from_str(&prop_name))
-                    })?;
+                    let prop_symbol = symbols.intern(&prop_name);
+                    result = crate::player::script::get_obj_prop(
+                        player,
+                        symbols,
+                        &result,
+                        prop_symbol,
+                    )?;
                     continue;
                 }
-                let right_ref = eval_lingo_pair_static(right)?;
+                let right_ref = eval_static_term_with_prefix(
+                    right,
+                    &mut iter,
+                    player,
+                    symbols,
+                )?;
                 match op.as_rule() {
                     Rule::join => {
                         // String concatenation (&)
-                        result = reserve_player_mut(|player| {
-                            let left_str = player.get_datum(&result).string_value()?;
-                            let right_str = player.get_datum(&right_ref).string_value()?;
-                            Ok(player.alloc_datum(Datum::String(format!("{}{}", left_str, right_str))))
-                        })?;
+                        let left_str = checked_static_datum(player, &result, symbols)?.string_value(symbols)?;
+                        let right_str = checked_static_datum(player, &right_ref, symbols)?.string_value(symbols)?;
+                        result = player.alloc_datum(Datum::String(format!("{}{}", left_str, right_str)));
                     }
                     Rule::join_pad => {
                         // Padded concatenation (&&)
-                        result = reserve_player_mut(|player| {
-                            let left_str = player.get_datum(&result).string_value()?;
-                            let right_str = player.get_datum(&right_ref).string_value()?;
-                            Ok(player.alloc_datum(Datum::String(format!("{} {}", left_str, right_str))))
-                        })?;
+                        let left_str = checked_static_datum(player, &result, symbols)?.string_value(symbols)?;
+                        let right_str = checked_static_datum(player, &right_ref, symbols)?.string_value(symbols)?;
+                        result = player.alloc_datum(Datum::String(format!("{} {}", left_str, right_str)));
                     }
                     // Arithmetic. `.value` on a text member is how movies ship data
                     // tables, and those tables contain expressions, not just literals —
@@ -152,21 +598,27 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
                     // between the two paths.
                     Rule::add | Rule::subtract | Rule::multiply | Rule::divide => {
                         let rule = op.as_rule();
-                        result = reserve_player_mut(|player| {
-                            let v = match rule {
+                        let v = match rule {
                                 Rule::add => {
-                                    let (l, r) = (player.get_datum(&result).clone(), player.get_datum(&right_ref).clone());
-                                    crate::player::datum_operations::add_datums(l, r, player)?
+                                    let (l, r) = (checked_static_datum(player, &result, symbols)?, checked_static_datum(player, &right_ref, symbols)?);
+                                    crate::player::datum_operations::add_datums(l, r, player, symbols)?
                                 }
                                 Rule::subtract => {
-                                    let (l, r) = (player.get_datum(&result).clone(), player.get_datum(&right_ref).clone());
-                                    crate::player::datum_operations::subtract_datums(l, r, player)?
+                                    let (l, r) = (checked_static_datum(player, &result, symbols)?, checked_static_datum(player, &right_ref, symbols)?);
+                                    crate::player::datum_operations::subtract_datums(l, r, player, symbols)?
                                 }
-                                Rule::multiply => crate::player::datum_operations::multiply_datums(result.clone(), right_ref.clone(), player)?,
-                                _ => crate::player::datum_operations::divide_datums(result.clone(), right_ref.clone(), player)?,
+                                Rule::multiply => {
+                                    checked_static_datum(player, &result, symbols)?;
+                                    checked_static_datum(player, &right_ref, symbols)?;
+                                    crate::player::datum_operations::multiply_datums(result.clone(), right_ref.clone(), player, symbols)?
+                                }
+                                _ => {
+                                    checked_static_datum(player, &result, symbols)?;
+                                    checked_static_datum(player, &right_ref, symbols)?;
+                                    crate::player::datum_operations::divide_datums(result.clone(), right_ref.clone(), player, symbols)?
+                                }
                             };
-                            Ok(player.alloc_datum(v))
-                        })?;
+                        result = player.alloc_datum(v);
                     }
                     _ => {
                         return Err(ScriptError::new(format!(
@@ -180,78 +632,78 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
         Rule::term_arg => {
             let inner = pair.into_inner().next()
                 .ok_or_else(|| ScriptError::new("Expected term_arg content".to_string()))?;
-            eval_lingo_pair_static(inner)
+            eval_lingo_pair_static(inner, player, symbols)
         },
         Rule::list => {
             let inner = pair.into_inner().next()
                 .ok_or_else(|| ScriptError::new("Expected list content".to_string()))?;
-            eval_lingo_pair_static(inner)
+            eval_lingo_pair_static(inner, player, symbols)
         },
         Rule::multi_list => {
             let mut result_vec = VecDeque::new();
             for inner_pair in pair.into_inner() {
-                let result = eval_lingo_pair_static(inner_pair)?;
+                let result = eval_lingo_pair_static(inner_pair, player, symbols)?;
                 result_vec.push_back(result);
             }
-            reserve_player_mut(|player| {
+            {
                 Ok(player.alloc_datum(Datum::List(DatumType::List, result_vec, false)))
-            })
+            }
         }
         Rule::string => {
             let str_val = pair.into_inner().next()
                 .ok_or_else(|| ScriptError::new("Expected string content".to_string()))?
                 .as_str();
-            reserve_player_mut(|player| Ok(player.alloc_datum(Datum::String(str_val.to_owned()))))
+            Ok(player.alloc_datum(Datum::String(str_val.to_owned())))
         }
         Rule::prop_list => {
             let inner = pair.into_inner().next()
                 .ok_or_else(|| ScriptError::new("Expected prop list content".to_string()))?;
-            eval_lingo_pair_static(inner)
+            eval_lingo_pair_static(inner, player, symbols)
         },
         Rule::multi_prop_list => {
             let mut result_vec = VecDeque::new();
             for inner_pair in pair.into_inner() {
                 let mut pair_inner = inner_pair.into_inner();
                 let key = eval_lingo_pair_static(pair_inner.next()
-                    .ok_or_else(|| ScriptError::new("Expected prop list key".to_string()))?)?;
+                    .ok_or_else(|| ScriptError::new("Expected prop list key".to_string()))?, player, symbols)?;
                 let value = eval_lingo_pair_static(pair_inner.next()
-                    .ok_or_else(|| ScriptError::new("Expected prop list value".to_string()))?)?;
+                    .ok_or_else(|| ScriptError::new("Expected prop list value".to_string()))?, player, symbols)?;
 
                 result_vec.push_back((key, value));
             }
-            reserve_player_mut(|player| Ok(player.alloc_datum(Datum::PropList(result_vec, false))))
+            Ok(player.alloc_datum(Datum::PropList(result_vec, false)))
         }
         Rule::empty_prop_list => {
-            reserve_player_mut(|player| Ok(player.alloc_datum(Datum::PropList(VecDeque::new(), false))))
+            Ok(player.alloc_datum(Datum::PropList(VecDeque::new(), false)))
         }
-        Rule::number_int => reserve_player_mut(|player| {
+        Rule::number_int => {
             let val = pair.as_str().parse::<i32>()
                 .map_err(|e| ScriptError::new(format!("Invalid integer: {}", e)))?;
             Ok(player.alloc_datum(Datum::Int(val)))
-        }),
-        Rule::number_float => reserve_player_mut(|player| {
+        },
+        Rule::number_float => {
             let val = pair.as_str().parse::<f64>()
                 .map_err(|e| ScriptError::new(format!("Invalid float: {}", e)))?;
             Ok(player.alloc_datum(Datum::Float(val)))
-        }),
+        },
         Rule::rect => {
             let mut inner = pair.into_inner();
-            let x_ref = eval_lingo_pair_static(inner.next().ok_or_else(|| ScriptError::new("Expected rect x".to_string()))?)?;
-            let y_ref = eval_lingo_pair_static(inner.next().ok_or_else(|| ScriptError::new("Expected rect y".to_string()))?)?;
-            let w_ref = eval_lingo_pair_static(inner.next().ok_or_else(|| ScriptError::new("Expected rect w".to_string()))?)?;
-            let h_ref = eval_lingo_pair_static(inner.next().ok_or_else(|| ScriptError::new("Expected rect h".to_string()))?)?;
-            reserve_player_mut(|player| {
-                let x_datum = player.get_datum(&x_ref);
-                let y_datum = player.get_datum(&y_ref);
-                let w_datum = player.get_datum(&w_ref);
-                let h_datum = player.get_datum(&h_ref);
-                let rect = Datum::build_rect(x_datum, y_datum, w_datum, h_datum)?;
+            let x_ref = eval_lingo_pair_static(inner.next().ok_or_else(|| ScriptError::new("Expected rect x".to_string()))?, player, symbols)?;
+            let y_ref = eval_lingo_pair_static(inner.next().ok_or_else(|| ScriptError::new("Expected rect y".to_string()))?, player, symbols)?;
+            let w_ref = eval_lingo_pair_static(inner.next().ok_or_else(|| ScriptError::new("Expected rect w".to_string()))?, player, symbols)?;
+            let h_ref = eval_lingo_pair_static(inner.next().ok_or_else(|| ScriptError::new("Expected rect h".to_string()))?, player, symbols)?;
+            {
+                let x_datum = checked_static_datum(player, &x_ref, symbols)?;
+                let y_datum = checked_static_datum(player, &y_ref, symbols)?;
+                let w_datum = checked_static_datum(player, &w_ref, symbols)?;
+                let h_datum = checked_static_datum(player, &h_ref, symbols)?;
+                let rect = Datum::build_rect(&x_datum, &y_datum, &w_datum, &h_datum)?;
                 Ok(player.alloc_datum(rect))
-            })
+            }
         }
         Rule::rgb_num_color => {
             let mut inner = pair.into_inner();
-            reserve_player_mut(|player| {
+            {
                 // Trim each component: Director accepts whitespace inside the
                 // parens, e.g. `rgb( 255, 255, 255 )` (spectral-wizard's
                 // customHyperlink behavior params are authored this way). Parse
@@ -272,7 +724,7 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
                 let g = comp("green")?;
                 let b = comp("blue")?;
                 Ok(player.alloc_datum(Datum::ColorRef(ColorRef::Rgb(r, g, b))))
-            })
+            }
         }
         Rule::rgb_str_color => {
             let mut inner = pair.into_inner();
@@ -281,52 +733,52 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
                 .into_inner().next()
                 .ok_or_else(|| ScriptError::new("Expected rgb string content".to_string()))?;
             let str_val = str_inner.as_str();
-            reserve_player_mut(|player| {
+            {
                 Ok(player.alloc_datum(Datum::ColorRef(ColorRef::from_hex(str_val))))
-            })
+            }
         }
         Rule::rgb_color => {
             let mut inner = pair.into_inner();
             if let Some(inner_pair) = inner.next() {
                 // recursively call the static evaluator
-                eval_lingo_pair_static(inner_pair)
+                eval_lingo_pair_static(inner_pair, player, symbols)
             } else {
                 // fallback to default static behavior
-                reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Void)))
+                Ok(player.alloc_datum(Datum::Void))
             }
         }
         Rule::symbol => {
             let str_val = pair.into_inner().next()
                 .ok_or_else(|| ScriptError::new("Expected symbol name".to_string()))?
                 .as_str();
-            reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Symbol(Symbol::from_str(str_val)))))
+            Ok(player.alloc_datum(Datum::Symbol(symbols.intern(str_val))))
         }
-        Rule::bool_true => reserve_player_mut(|player| Ok(player.alloc_datum(datum_bool(true)))),
-        Rule::bool_false => reserve_player_mut(|player| Ok(player.alloc_datum(datum_bool(false)))),
+        Rule::bool_true => Ok(player.alloc_datum(datum_bool(true))),
+        Rule::bool_false => Ok(player.alloc_datum(datum_bool(false))),
         Rule::void => Ok(DatumRef::Void),
         Rule::string_empty => {
-            reserve_player_mut(|player| Ok(player.alloc_datum(Datum::String("".to_owned()))))
+            Ok(player.alloc_datum(Datum::String("".to_owned())))
         }
         Rule::return_const => {
-            reserve_player_mut(|player| Ok(player.alloc_datum(Datum::String("\r\n".to_owned()))))
+            Ok(player.alloc_datum(Datum::String("\r\n".to_owned())))
         }
-        Rule::nohash_symbol => reserve_player_mut(|player| {
-            Ok(player.alloc_datum(Datum::Symbol(Symbol::from_str(pair.as_str()))))
-        }),
+        Rule::nohash_symbol => {
+            Ok(player.alloc_datum(Datum::Symbol(symbols.intern(pair.as_str()))))
+        },
         Rule::point => {
             let mut inner = pair.into_inner();
-            let x_ref = eval_lingo_pair_static(inner.next().ok_or_else(|| ScriptError::new("Expected point x".to_string()))?)?;
-            let y_ref = eval_lingo_pair_static(inner.next().ok_or_else(|| ScriptError::new("Expected point y".to_string()))?)?;
-            reserve_player_mut(|player| {
-                let x_datum = player.get_datum(&x_ref);
-                let y_datum = player.get_datum(&y_ref);
-                let point = Datum::build_point(x_datum, y_datum)?;
+            let x_ref = eval_lingo_pair_static(inner.next().ok_or_else(|| ScriptError::new("Expected point x".to_string()))?, player, symbols)?;
+            let y_ref = eval_lingo_pair_static(inner.next().ok_or_else(|| ScriptError::new("Expected point y".to_string()))?, player, symbols)?;
+            {
+                let x_datum = checked_static_datum(player, &x_ref, symbols)?;
+                let y_datum = checked_static_datum(player, &y_ref, symbols)?;
+                let point = Datum::build_point(&x_datum, &y_datum)?;
                 Ok(player.alloc_datum(point))
-            })
+            }
         }
-        Rule::empty_list => reserve_player_mut(|player| {
+        Rule::empty_list => {
             Ok(player.alloc_datum(Datum::List(DatumType::List, VecDeque::new(), false)))
-        }),
+        },
         Rule::the_prop => {
             // For multi-word properties like "the long time", we need to get the full text
             // and extract the property name
@@ -337,10 +789,11 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
                 // Shouldn't happen with correct grammar, but handle it
                 full_text
             };
-            reserve_player_mut(|player| {
-                let prop_value = player.get_movie_prop(Symbol::from_str(prop_name))?;
+            {
+                let prop_symbol = symbols.intern(prop_name);
+                let prop_value = player.get_movie_prop(symbols, prop_symbol)?;
                 Ok(prop_value)
-            })
+            }
         }
         // `sprite(N)` — dkbarrel's score tables address the stage directly, e.g.
         // `[cmd_Zset, sprite(guispr).locz-1, DKSPR, …]`, so a data table read with
@@ -349,11 +802,11 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
         Rule::sprite_ref => {
             let inner = pair.into_inner().next()
                 .ok_or_else(|| ScriptError::new("Expected sprite number".to_string()))?;
-            let num_ref = eval_lingo_pair_static(inner)?;
-            reserve_player_mut(|player| {
-                let n = player.get_datum(&num_ref).int_value()?;
+            let num_ref = eval_lingo_pair_static(inner, player, symbols)?;
+            {
+                let n = checked_static_datum(player, &num_ref, symbols)?.int_value()?;
                 Ok(player.alloc_datum(Datum::SpriteRef(n as i16)))
-            })
+            }
         }
         Rule::member_ref => {
             let mut inner = pair.into_inner();
@@ -361,24 +814,28 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
             // First expression is the member name or number
             let member_expr = inner.next()
                 .ok_or_else(|| ScriptError::new("Expected member identifier".to_string()))?;
-            let member_id_ref = eval_lingo_pair_static(member_expr)?;
+            let member_id_ref = eval_lingo_pair_static(member_expr, player, symbols)?;
 
             // Optional: "of castLib X"
             let cast_lib_ref = if let Some(castlib_expr) = inner.next() {
-                Some(eval_lingo_pair_static(castlib_expr)?)
+                Some(eval_lingo_pair_static(castlib_expr, player, symbols)?)
             } else {
                 None
             };
 
-            reserve_player_mut(|player| {
-                let member_id_datum = player.get_datum(&member_id_ref).clone();
+            {
+                let member_id_datum = checked_static_datum(player, &member_id_ref, symbols)?;
 
                 // Get cast lib datum if specified
-                let cast_lib_datum = cast_lib_ref.as_ref().map(|r| player.get_datum(r).clone());
+                let cast_lib_datum = cast_lib_ref
+                    .as_ref()
+                    .map(|r| checked_static_datum(player, r, symbols))
+                    .transpose()?;
 
                 // Use find_member_ref_by_identifiers for proper member lookup
                 // This handles both string names and numeric member IDs
                 let member_result = player.movie.cast_manager.find_member_ref_by_identifiers(
+                    symbols,
                     &member_id_datum,
                     cast_lib_datum.as_ref(),
                     &player.allocator,
@@ -415,20 +872,20 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
                 };
 
                 Ok(player.alloc_datum(Datum::CastMember(member_ref)))
-            })
+            }
         }
         Rule::castlib_ref => {
             let mut inner = pair.into_inner();
             
             let castlib_expr = inner.next()
                 .ok_or_else(|| ScriptError::new("Expected castLib identifier".to_string()))?;
-            let castlib_ref = eval_lingo_pair_static(castlib_expr)?;
+            let castlib_ref = eval_lingo_pair_static(castlib_expr, player, symbols)?;
             
-            reserve_player_mut(|player| {
-                let castlib_num = player.get_datum(&castlib_ref).int_value()
-                    .or_else(|_| {
+            {
+                let castlib_num = checked_static_datum(player, &castlib_ref, symbols)?.int_value()
+                    .or_else(|_| -> Result<i32, ScriptError> {
                         // If it's not an int, try to get it as a string (named castLib)
-                        let name = player.get_datum(&castlib_ref).string_value()?;
+                        let name = checked_static_datum(player, &castlib_ref, symbols)?.string_value(symbols)?;
                         // Convert castLib name to number
                         let cast = player
                             .movie
@@ -440,18 +897,18 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
                 
                 // Return a CastLib reference datum
                 Ok(player.alloc_datum(Datum::CastLib(castlib_num as u32)))
-            })
+            }
         }
         Rule::lang_ident => {
             // Handle well-known Lingo constants in static context
             let name = pair.as_str();
             match name {
-                "QUOTE" => reserve_player_mut(|player| {
+                "QUOTE" => {
                     Ok(player.alloc_datum(Datum::String("\"".to_owned())))
-                }),
-                "TAB" => reserve_player_mut(|player| {
+                },
+                "TAB" => {
                     Ok(player.alloc_datum(Datum::String("\t".to_owned())))
-                }),
+                },
                 // Otherwise it's a variable reference. Director's `value()`
                 // evaluates the string as Lingo, so identifiers resolve against
                 // the accessible context — NabiscoWorld Mini Mini-Golf stores
@@ -486,31 +943,41 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
                 // get_eval_top_level_prop already implements the whole chain (locals,
                 // then `me`, then globals, then top-level props), so defer to it and
                 // keep VOID for a name that resolves nowhere.
-                _ => reserve_player_mut(|player| {
+                _ => {
                     // Locals first (the chain above), then a CASE-INSENSITIVE global
                     // scan. Lingo identifiers are case-insensitive, but the globals map
                     // is keyed by the casing first seen — dkbarrel's tables reference
                     // `cmd_jamfrm` while the global was created as `cmd_JamFrm`, and an
                     // exact-match lookup returned VOID for it.
-                    if let Some(r) = get_eval_top_level_prop(player, name).ok() {
-                        if !matches!(player.get_datum(&r), Datum::Void) {
+                    let primary = match get_eval_top_level_prop_classified(player, symbols, name)? {
+                        EvalLookupResult::Found(value) => Some(value),
+                        EvalLookupResult::OrdinaryError(_) => None,
+                    };
+                    if let Some(r) = primary {
+                        if !matches!(checked_static_datum(player, &r, symbols)?, Datum::Void) {
                             return Ok(r);
                         }
                     }
-                    let ci = player
-                        .globals
-                        .iter()
-                        .find(|(k, _)| k.eq_ignore_ascii_case(name))
-                        .map(|(_, v)| v.clone());
-                    Ok(ci.unwrap_or(DatumRef::Void))
-                }),
+                    for (key, value) in &player.globals {
+                        let matches = symbols
+                            .lower(key)
+                            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
+                            .eq_ignore_ascii_case(name);
+                        if !matches {
+                            continue;
+                        }
+                        checked_static_datum(player, &value, symbols)?;
+                        return Ok(value.clone());
+                    }
+                    Ok(DatumRef::Void)
+                },
             }
         }
         Rule::config_key | Rule::config_ident_part => {
             // Config keys treated as strings in static context
-            reserve_player_mut(|player| {
+            {
                 Ok(player.alloc_datum(Datum::String(pair.as_str().to_owned())))
-            })
+            }
         }
         Rule::handler_call => {
             // Support common constructors in static context (e.g. vector(0, 0, -1))
@@ -524,27 +991,27 @@ pub fn eval_lingo_pair_static(pair: Pair<Rule>) -> Result<DatumRef, ScriptError>
                     // Each arg_pair contains an expr; recursively evaluate
                     let mut arg_inner = arg_pair.into_inner();
                     if let Some(expr_pair) = arg_inner.next() {
-                        arg_refs.push(eval_lingo_pair_static(expr_pair)?);
+                        arg_refs.push(eval_lingo_pair_static(expr_pair, player, symbols)?);
                     }
                 }
             }
             match handler_name.as_str() {
                 "vector" => {
-                    reserve_player_mut(|player| {
-                        let x = if arg_refs.len() > 0 { player.get_datum(&arg_refs[0]).to_float().unwrap_or(0.0) } else { 0.0 };
-                        let y = if arg_refs.len() > 1 { player.get_datum(&arg_refs[1]).to_float().unwrap_or(0.0) } else { 0.0 };
-                        let z = if arg_refs.len() > 2 { player.get_datum(&arg_refs[2]).to_float().unwrap_or(0.0) } else { 0.0 };
-                        Ok(player.alloc_datum(Datum::Vector([x, y, z])))
-                    })
+                    {
+                        let x = if arg_refs.len() > 0 { checked_static_datum(player, &arg_refs[0], symbols)?.to_float().unwrap_or(0.0) } else { 0.0 };
+                        let y = if arg_refs.len() > 1 { checked_static_datum(player, &arg_refs[1], symbols)?.to_float().unwrap_or(0.0) } else { 0.0 };
+                        let z = if arg_refs.len() > 2 { checked_static_datum(player, &arg_refs[2], symbols)?.to_float().unwrap_or(0.0) } else { 0.0 };
+                        Ok::<DatumRef, ScriptError>(player.alloc_datum(Datum::Vector([x, y, z])))
+                    }
                 }
                 "rect" => {
-                    reserve_player_mut(|player| {
-                        let l = if arg_refs.len() > 0 { player.get_datum(&arg_refs[0]).to_float().unwrap_or(0.0) } else { 0.0 };
-                        let t = if arg_refs.len() > 1 { player.get_datum(&arg_refs[1]).to_float().unwrap_or(0.0) } else { 0.0 };
-                        let r = if arg_refs.len() > 2 { player.get_datum(&arg_refs[2]).to_float().unwrap_or(0.0) } else { 0.0 };
-                        let b = if arg_refs.len() > 3 { player.get_datum(&arg_refs[3]).to_float().unwrap_or(0.0) } else { 0.0 };
-                        Ok(player.alloc_datum(Datum::Rect([l, t, r, b], 0)))
-                    })
+                    {
+                        let l = if arg_refs.len() > 0 { checked_static_datum(player, &arg_refs[0], symbols)?.to_float().unwrap_or(0.0) } else { 0.0 };
+                        let t = if arg_refs.len() > 1 { checked_static_datum(player, &arg_refs[1], symbols)?.to_float().unwrap_or(0.0) } else { 0.0 };
+                        let r = if arg_refs.len() > 2 { checked_static_datum(player, &arg_refs[2], symbols)?.to_float().unwrap_or(0.0) } else { 0.0 };
+                        let b = if arg_refs.len() > 3 { checked_static_datum(player, &arg_refs[3], symbols)?.to_float().unwrap_or(0.0) } else { 0.0 };
+                        Ok::<DatumRef, ScriptError>(player.alloc_datum(Datum::Rect([l, t, r, b], 0)))
+                    }
                 }
                 _ => Err(ScriptError::new(format!(
                     "Unsupported handler '{}' in static expression", handler_name
@@ -579,33 +1046,73 @@ fn parse_number_value(pair: Pair<Rule>) -> Result<f64, ScriptError> {
 /// declared instance property (not `ancestor`/`script`/`ilk` or global names).
 fn current_do_receiver_with_prop(
     player: &DirPlayer,
+    symbols: &mut SymbolTable,
     ident_name: &str,
-) -> Option<crate::player::script_ref::ScriptInstanceRef> {
+) -> Result<Option<crate::player::script_ref::ScriptInstanceRef>, ScriptError> {
     use crate::player::allocator::ScriptInstanceAllocatorTrait;
-    use crate::player::ci_string::CiStr;
-
     if player.scope_count == 0 || (player.scope_count as usize) > player.scopes.len() {
-        return None;
+        return Ok(None);
     }
     let raw = if player.current_breakpoint.is_some() {
         player.eval_scope_index.unwrap_or(player.scope_count - 1)
     } else {
         player.scope_count - 1
     };
-    let scope = player.scopes.get(raw as usize)?;
-    let receiver = scope.receiver.clone()?;
-    let inst = player.allocator.get_script_instance(&receiver);
-    if inst.properties.contains_key(&Symbol::from_str(ident_name)) {
-        Some(receiver)
+    let Some(scope) = player.scopes.get(raw as usize) else {
+        return Ok(None);
+    };
+    let Some(receiver) = scope.receiver.clone() else {
+        return Ok(None);
+    };
+    let Some(inst) = player.allocator.get_script_instance_opt(&receiver) else {
+        return Err(ScriptError::new_code(
+            crate::player::ScriptErrorCode::InvalidReference,
+            "Foreign or stale receiver reference".to_string(),
+        ));
+    };
+    let prop_name = symbols.intern(ident_name);
+    if inst.properties.contains_key(&prop_name) {
+        Ok(Some(receiver))
     } else {
-        None
+        Ok(None)
     }
 }
 
+enum EvalLookupResult {
+    Found(DatumRef),
+    OrdinaryError(ScriptError),
+}
+
+/// Preserve ordinary lookup failures for the static evaluator's legacy VOID
+/// fallback while keeping owner violations fatal. Existing async callers use
+/// the flattened compatibility boundary below.
 fn get_eval_top_level_prop(
     player: &mut DirPlayer,
+    symbols: &mut SymbolTable,
     prop_name: &str,
 ) -> Result<DatumRef, ScriptError> {
+    match get_eval_top_level_prop_classified(player, symbols, prop_name)? {
+        EvalLookupResult::Found(value) => Ok(value),
+        EvalLookupResult::OrdinaryError(_) => {
+            // Classic Director resolves unknown identifiers to VOID. Keep the
+            // debugger's useful diagnostic while hiding the internal
+            // GetSetUtils top-level lookup error from normal evaluation.
+            if player.current_breakpoint.is_some() {
+                Err(ScriptError::new(format!("Undefined variable: {}", prop_name)))
+            } else {
+                Ok(DatumRef::Void)
+            }
+        }
+    }
+}
+
+fn get_eval_top_level_prop_classified(
+    player: &mut DirPlayer,
+    symbols: &mut SymbolTable,
+    prop_name: &str,
+) -> Result<EvalLookupResult, ScriptError> {
+    use crate::player::allocator::ScriptInstanceAllocatorTrait;
+
     if prop_name.starts_with("the ") {
         let actual_prop = &prop_name[4..];
         // `the paramCount` reads from the current handler's scope, not the
@@ -615,13 +1122,19 @@ fn get_eval_top_level_prop(
             if player.scope_count > 0 && (player.scope_count as usize) <= player.scopes.len() {
                 let scope_idx = (player.scope_count - 1) as usize;
                 if let Some(scope) = player.scopes.get(scope_idx) {
-                    return Ok(player.alloc_datum(Datum::Int(scope.args.len() as i32)));
+                    return Ok(EvalLookupResult::Found(
+                        player.alloc_datum(Datum::Int(scope.args.len() as i32)),
+                    ));
                 }
             }
-            return Ok(player.alloc_datum(Datum::Int(0)));
+            return Ok(EvalLookupResult::Found(
+                player.alloc_datum(Datum::Int(0)),
+            ));
         }
-        let result = player.get_movie_prop(Symbol::from_str(actual_prop))?;
-        return Ok(result);
+        let prop_symbol = symbols.intern(actual_prop);
+        let result = player.get_movie_prop(symbols, prop_symbol)?;
+        checked_static_datum(player, &result, symbols)?;
+        return Ok(EvalLookupResult::Found(result));
     }
 
     // Resolve against the current scope (locals, args, receiver properties)
@@ -639,11 +1152,9 @@ fn get_eval_top_level_prop(
         if scope_idx >= player.scopes.len() {
             // Fall through to globals.
         } else {
-            let scope = &player.scopes[scope_idx];
-
             // Check locals by reverse-looking up the name_id from the name table
             {
-                let script_ref_for_locals = scope.script_ref.clone();
+                let script_ref_for_locals = player.scopes[scope_idx].script_ref.clone();
                 if let Some(script_rc) = player.movie.cast_manager.get_script_by_ref(&script_ref_for_locals) {
                     if let Some(lctx) = get_lctx_for_script(player, &script_rc) {
                         if let Some(name_id) = lctx.names.iter().position(|n| n.eq_ignore_ascii_case(prop_name)) {
@@ -671,10 +1182,15 @@ fn get_eval_top_level_prop(
                                     h.local_name_ids.iter().position(|&nid| nid as usize == name_id)
                                 });
                             if let Some(slot) = slot {
-                                let scope = &player.scopes[scope_idx];
-                                if scope.local_is_assigned(slot) {
+                                let local = &player.scopes[scope_idx];
+                                if local.local_is_assigned(slot) {
                                     crate::player::interp_stats::record_eval_local_hit();
-                                    return Ok(scope.local(slot).into_ref());
+                                    let value = local.local(slot).clone();
+                                    validate_static_stack_datum(player, &value, symbols)?;
+                                    return Ok(EvalLookupResult::Found(value.into_ref_with(
+                                        &mut player.allocator,
+                                        &mut player.bitmap_manager,
+                                    )));
                                 }
                             }
                         }
@@ -682,10 +1198,23 @@ fn get_eval_top_level_prop(
                 }
             }
 
+            let scope = &player.scopes[scope_idx];
+
             // Check "me" (the receiver)
             if prop_name == "me" {
                 if let Some(receiver) = scope.receiver.clone() {
-                    return Ok(player.alloc_datum(Datum::ScriptInstanceRef(receiver)));
+                    player
+                        .allocator
+                        .get_script_instance_opt(&receiver)
+                        .ok_or_else(|| {
+                            ScriptError::new_code(
+                                crate::player::ScriptErrorCode::InvalidReference,
+                                "Foreign or stale receiver reference".to_string(),
+                            )
+                        })?;
+                    return Ok(EvalLookupResult::Found(
+                        player.alloc_datum(Datum::ScriptInstanceRef(receiver)),
+                    ));
                 }
             }
 
@@ -697,9 +1226,15 @@ fn get_eval_top_level_prop(
                 // Find the handler whose name_id matches this scope's handler_name_id
                 let handler_name = script.handlers.iter()
                     .find(|(_, h)| h.name_id == handler_name_id)
-                    .map(|(name, _)| name.as_str().to_owned());
+                    .map(|(name, _)| {
+                        symbols
+                            .display(name)
+                            .map(str::to_owned)
+                            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)
+                    })
+                    .transpose()?;
                 if let Some(handler_name) = handler_name {
-                    if let Some(handler_def) = script.get_own_handler(Symbol::from_str(&handler_name)) {
+                    if let Some(handler_def) = script.get_own_handler(symbols.intern(&handler_name)) {
                         let handler_def = handler_def.clone();
                         // Check handler arguments by name
                         if let Some(lctx) = get_lctx_for_script(player, &script) {
@@ -707,7 +1242,8 @@ fn get_eval_top_level_prop(
                                 if let Some(name) = lctx.names.get(name_id as usize) {
                                     if name.eq_ignore_ascii_case(prop_name) {
                                         if let Some(arg_ref) = player.scopes[scope_idx].args.get(i) {
-                                            return Ok(arg_ref.clone());
+                                            checked_static_datum(player, arg_ref, symbols)?;
+                                            return Ok(EvalLookupResult::Found(arg_ref.clone()));
                                         }
                                     }
                                 }
@@ -720,30 +1256,32 @@ fn get_eval_top_level_prop(
             // Check properties on the receiver (me) object
             let receiver = player.scopes[scope_idx].receiver.clone();
             if let Some(receiver_ref) = receiver {
-                let prop_name_symbol = Symbol::from_str(prop_name);
-                if let Some(result) = script_get_prop_opt(player, &receiver_ref, prop_name_symbol) {
-                    return Ok(result);
+                let prop_name_symbol = symbols.intern(prop_name);
+                if let Some(result) = script_get_prop_opt(
+                    player,
+                    symbols,
+                    &receiver_ref,
+                    prop_name_symbol,
+                )? {
+                    checked_static_datum(player, &result, symbols)?;
+                    return Ok(EvalLookupResult::Found(result));
                 }
             }
         }
     }
 
-    if let Some(global_ref) = player.globals.get(&Symbol::from_str(prop_name)) {
-        Ok(global_ref.clone())
+    let prop_symbol = symbols.intern(prop_name);
+    let global_ref = player.globals.get(&prop_symbol).cloned();
+    if let Some(global_ref) = global_ref {
+        checked_static_datum(player, &global_ref, symbols)?;
+        Ok(EvalLookupResult::Found(global_ref))
     } else {
-        match GetSetUtils::get_top_level_prop(player, Symbol::from_str(prop_name)) {
-            Ok(result) => Ok(player.alloc_datum(result)),
-            Err(_) => {
-                // Classic Director resolves unknown identifiers to VOID, so
-                // patterns like `do("foo(" & #none & ")")` reach the handler as
-                // `foo(VOID)`. Preserve the diagnostic error only when the user
-                // is poking around in the debugger.
-                if player.current_breakpoint.is_some() {
-                    Err(ScriptError::new(format!("Undefined variable: {}", prop_name)))
-                } else {
-                    Ok(DatumRef::Void)
-                }
+        match GetSetUtils::get_top_level_prop(player, symbols, prop_symbol) {
+            Ok(result) => {
+                crate::player::compare::validate_direct_symbol_fields(&result, symbols)?;
+                Ok(EvalLookupResult::Found(player.alloc_datum(result)))
             }
+            Err(error) => Ok(EvalLookupResult::OrdinaryError(error)),
         }
     }
 }
@@ -1398,7 +1936,13 @@ pub fn parse_lingo_rule_runtime(
         Rule::chunk_expr => {
             let mut inner = pair.into_inner();
             let chunk_type_pair = inner.next().ok_or_else(|| ScriptError::new("Expected chunk type".to_string()))?;
-            let chunk_type = Symbol::from_str(chunk_type_pair.as_str());
+            let chunk_type = match chunk_type_pair.as_str().to_ascii_lowercase().as_str() {
+                "item" => Symbol::builtin(BuiltInSymbol::Item),
+                "word" => Symbol::builtin(BuiltInSymbol::Word),
+                "char" => Symbol::builtin(BuiltInSymbol::Char),
+                "line" => Symbol::builtin(BuiltInSymbol::Line),
+                _ => return Err(ScriptError::new("Invalid string chunk type".to_string())),
+            };
             let index_pair = inner.next().ok_or_else(|| ScriptError::new("Expected index expression".to_string()))?;
             let index_expr = parse_lingo_expr_runtime(index_pair.into_inner(), pratt)?;
             // Check for optional range: "to <expr>"
@@ -1500,63 +2044,11 @@ pub fn parse_lingo_rule_runtime(
 }
 
 /// Evaluate common chunk expression components: chunk_type, start index, end index, value string.
-async fn eval_chunk_components(
-    value_ref: &DatumRef,
-    target: &LingoExpr,
-) -> Result<(StringChunkType, i32, i32, String, LingoExpr), ScriptError> {
-    let (chunk_type_str, index_expr, range_end_expr, source_expr) = match target {
-        LingoExpr::ChunkExpr(chunk_type, index, range_end, source) => (chunk_type, index, range_end, source),
-        _ => return Err(ScriptError::new("Expected chunk expression".to_string())),
-    };
-
-    let index_ref = Box::pin(eval_lingo_expr_ast_runtime(index_expr)).await?;
-    let index = reserve_player_mut(|player| player.get_datum(&index_ref).int_value())?;
-
-    let end_index = if let Some(range_end) = range_end_expr {
-        let end_ref = Box::pin(eval_lingo_expr_ast_runtime(range_end)).await?;
-        reserve_player_mut(|player| player.get_datum(&end_ref).int_value())?
-    } else {
-        index
-    };
-
-    let chunk_type = StringChunkType::from(*chunk_type_str);
-
-    let value_str = reserve_player_mut(|player| {
-        use crate::player::datum_formatting::datum_to_string_for_concat;
-        let value_datum = player.get_datum(value_ref);
-        Ok(datum_to_string_for_concat(value_datum, player))
-    })?;
-
-    Ok((chunk_type, index, end_index, value_str, *source_expr.clone()))
-}
-
-/// Read the current string from a chunk source expression.
-async fn read_chunk_source(source_expr: &LingoExpr) -> Result<String, ScriptError> {
-    match source_expr {
-        LingoExpr::Identifier(name) => {
-            reserve_player_mut(|player| {
-                let current_ref = player.globals.get(&Symbol::from_str(name))
-                    .cloned()
-                    .unwrap_or_else(|| player.alloc_datum(Datum::String(String::new())));
-                player.get_datum(&current_ref).string_value()
-            })
-        },
-        _ => {
-            // General expression: evaluate it to get a string
-            let source_ref = Box::pin(eval_lingo_expr_ast_runtime(source_expr)).await?;
-            reserve_player_mut(|player| {
-                player.get_datum(&source_ref).string_value()
-            })
-        }
-    }
-}
-
-/// Write the modified string back to the chunk source.
-fn write_chunk_source(player: &mut DirPlayer, source_expr: &LingoExpr, new_string: String) {
+fn write_chunk_source(player: &mut DirPlayer, symbols: &mut SymbolTable, source_expr: &LingoExpr, new_string: String) {
     match source_expr {
         LingoExpr::Identifier(name) => {
             let new_ref = player.alloc_datum(Datum::String(new_string));
-            player.globals.insert(Symbol::from_str(name), new_ref);
+            player.globals.insert(symbols.intern(name), new_ref);
         },
         LingoExpr::HandlerCall(handler_name, args) if handler_name.eq_ignore_ascii_case("field") => {
             // field(name_or_num) or field(name_or_num, castLib_num)
@@ -1571,7 +2063,7 @@ fn write_chunk_source(player: &mut DirPlayer, source_expr: &LingoExpr, new_strin
             });
             if let Some(member_id) = member_name_or_num {
                 let member_ref = player.movie.cast_manager
-                    .find_member_ref_by_identifiers(&member_id, cast_id.as_ref(), &player.allocator);
+                    .find_member_ref_by_identifiers(symbols, &member_id, cast_id.as_ref(), &player.allocator);
                 if let Ok(Some(member_ref)) = member_ref {
                     if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         use crate::player::cast_member::CastMemberType;
@@ -1590,1004 +2082,1158 @@ fn write_chunk_source(player: &mut DirPlayer, source_expr: &LingoExpr, new_strin
     }
 }
 
-async fn handle_put_into_chunk(
-    value_ref: DatumRef,
-    target: &LingoExpr,
-) -> Result<DatumRef, ScriptError> {
-    let (chunk_type, index, end_index, value_str, source_expr) = eval_chunk_components(&value_ref, target).await?;
-    let current_str = read_chunk_source(&source_expr).await?;
 
-    reserve_player_mut(|player| {
-        let chunk_expr = StringChunkExpr {
-            chunk_type,
-            start: index,
-            end: end_index,
-            item_delimiter: player.movie.item_delimiter,
-        };
-        let new_string = StringChunkUtils::string_by_putting_into_chunk(&current_str, &chunk_expr, &value_str)?;
-        write_chunk_source(player, &source_expr, new_string);
-        Ok(DatumRef::Void)
-    })
+
+/// One synchronous evaluator turn. Pending requests own all arguments and are
+/// returned to the session before any host work can begin.
+pub(crate) enum EvalTurn {
+    Complete(Result<DatumRef, ScriptError>),
+    Pending { request: EvalPending },
 }
 
-async fn handle_put_before_chunk(
-    value_ref: DatumRef,
-    target: &LingoExpr,
-) -> Result<DatumRef, ScriptError> {
-    let (chunk_type, index, end_index, value_str, source_expr) = eval_chunk_components(&value_ref, target).await?;
-    let current_str = read_chunk_source(&source_expr).await?;
-
-    reserve_player_mut(|player| {
-        let chunk_expr = StringChunkExpr {
-            chunk_type,
-            start: index,
-            end: end_index,
-            item_delimiter: player.movie.item_delimiter,
-        };
-        let new_string = StringChunkUtils::string_by_putting_before_chunk(&current_str, &chunk_expr, &value_str)?;
-        write_chunk_source(player, &source_expr, new_string);
-        Ok(DatumRef::Void)
-    })
+/// Parse and register an owned runtime expression. Callers drive the returned
+/// continuation through `eval_lingo_expr_turn`; no player or symbol-table
+/// borrow crosses a pending request.
+pub(crate) fn start_eval_lingo_expr(
+    session: &mut crate::player::session::RuntimeSession,
+    player_id: crate::player::session::PlayerId,
+    expr: String,
+) -> Result<EvalId, ScriptError> {
+    let ast = parse_lingo_expr_ast_runtime(Rule::eval_expr, expr)?;
+    session.start_eval(player_id, ast)
 }
 
-async fn handle_put_after_chunk(
-    value_ref: DatumRef,
-    target: &LingoExpr,
-) -> Result<DatumRef, ScriptError> {
-    let (chunk_type, index, end_index, value_str, source_expr) = eval_chunk_components(&value_ref, target).await?;
-    let current_str = read_chunk_source(&source_expr).await?;
-
-    reserve_player_mut(|player| {
-        let chunk_expr = StringChunkExpr {
-            chunk_type,
-            start: index,
-            end: end_index,
-            item_delimiter: player.movie.item_delimiter,
-        };
-        let new_string = StringChunkUtils::string_by_putting_after_chunk(&current_str, &chunk_expr, &value_str)?;
-        write_chunk_source(player, &source_expr, new_string);
-        Ok(DatumRef::Void)
-    })
+pub(crate) fn start_eval_lingo_command(
+    session: &mut crate::player::session::RuntimeSession,
+    player_id: crate::player::session::PlayerId,
+    expr: String,
+) -> Result<EvalId, ScriptError> {
+    let lines: Vec<String> = expr
+        .split(|c| c == '\r' || c == '\n')
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with("--"))
+        .map(str::to_owned)
+        .collect();
+    if lines.len() <= 1 {
+        let ast = parse_lingo_expr_ast_runtime(Rule::command_eval_expr, expr)?;
+        return session.start_eval(player_id, ast);
+    }
+    session.start_command_eval(player_id, lines)
 }
 
-pub async fn eval_lingo_expr_ast_runtime(expr: &LingoExpr) -> Result<DatumRef, ScriptError> {
-    match expr {
-        LingoExpr::SymbolLiteral(s) => {
-            reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Symbol(Symbol::from_str(s)))))
-        }
-        LingoExpr::StringLiteral(s) => {
-            reserve_player_mut(|player| Ok(player.alloc_datum(Datum::String(s.to_string()))))
-        }
-        LingoExpr::ListLiteral(items) => {
-            let mut datum_items = VecDeque::new();
-            for item in items {
-                let datum = Box::pin(eval_lingo_expr_ast_runtime(item)).await?;
-                datum_items.push_back(datum);
-            }
-            reserve_player_mut(|player| {
-                Ok(player.alloc_datum(Datum::List(DatumType::List, datum_items, false)))
-            })
-        }
-        LingoExpr::VoidLiteral => Ok(DatumRef::Void),
-        LingoExpr::BoolLiteral(b) => {
-            reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Int(if *b { 1 } else { 0 }))))
-        }
-        LingoExpr::IntLiteral(i) => {
-            reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Int(*i))))
-        }
-        LingoExpr::FloatLiteral(f) => {
-            reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Float(*f))))
-        }
-        LingoExpr::PropListLiteral(pairs) => {
-            let mut datum_pairs = VecDeque::new();
-            for (key_expr, value_expr) in pairs {
-                let key_datum = Box::pin(eval_lingo_expr_ast_runtime(key_expr)).await?;
-                let value_datum = Box::pin(eval_lingo_expr_ast_runtime(value_expr)).await?;
-                datum_pairs.push_back((key_datum, value_datum));
-            }
-            reserve_player_mut(|player| Ok(player.alloc_datum(Datum::PropList(datum_pairs, false))))
-        }
-        LingoExpr::HandlerCall(handler_name, args) => {
-            let mut datum_args = vec![];
-            for arg in args {
-                let datum = Box::pin(eval_lingo_expr_ast_runtime(arg)).await?;
-                datum_args.push(datum);
-            }
-            // When a breakpoint is active and there's a receiver, try calling the handler on the receiver first
-            let receiver_call = reserve_player_mut(|player| {
-                if player.current_breakpoint.is_some() && player.scope_count > 0 {
-                    let scope_idx = player.eval_scope_index
-                        .unwrap_or(player.scope_count - 1) as usize;
-                    let scope = &player.scopes[scope_idx];
-                    if let Some(receiver_ref) = scope.receiver.clone() {
-                        let script_ref = scope.script_ref.clone();
-                        if let Some(script) = player.movie.cast_manager.get_script_by_ref(&script_ref) {
-                            if script.get_own_handler(Symbol::from_str(handler_name)).is_some() {
-                                let me_ref = player.alloc_datum(Datum::ScriptInstanceRef(receiver_ref));
-                                return Some(me_ref);
-                            }
-                        }
-                    }
-                }
-                None
+pub(crate) fn eval_lingo_expr_turn(
+    session: &mut crate::player::session::RuntimeSession,
+    id: EvalId,
+) -> EvalTurn {
+    session.turn_eval(id)
+}
+
+pub(crate) fn complete_eval_lingo_expr(
+    session: &mut crate::player::session::RuntimeSession,
+    id: EvalId,
+    action: &EvalAction,
+    owner: &crate::player::ownership::OwnerToken,
+    result: Result<DatumRef, ScriptError>,
+) -> EvalTurn {
+    session.resume_eval(id, action, owner, result)
+}
+
+/// Queue one already-classified owner-bound VM request and await its actual
+/// completion. The request is retained in the session before this future
+/// yields; the owner pump executes it outside the borrow and routes the exact
+/// result back through `submit_pending_eval_completion`.
+pub(crate) async fn invoke_request_owned(
+    session: crate::player::session::RuntimeSessionHandle,
+    player_id: crate::player::session::PlayerId,
+    owner: crate::player::ownership::OwnerToken,
+    request: crate::player::driver::InternalVmRequest,
+) -> Result<DatumRef, ScriptError> {
+    let owner_valid = session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            owner.same_identity(&context.player.owner) && owner.is_arena_live()
+        })
+        .unwrap_or(false);
+    if !owner_valid {
+        return Err(crate::player::cancelled_scope_error());
+    }
+    let (_id, _action, receiver) = session
+        .borrow_mut()
+        .start_eval_request(player_id, request)?;
+    receiver
+        .recv()
+        .await
+        .map_err(|_| crate::player::cancelled_scope_error())
+        .and_then(|result| result)
+}
+
+/// Invoke a nested script handler while retaining the caller's real driver.
+/// The subordinate evaluator owns the child capability; this wrapper only
+/// schedules a pending child action and awaits the callback channel outside
+/// every `RuntimeSession` borrow.  The returned `ScopeResult` preserves the
+/// handler's `pass` outcome for event propagation.
+pub(crate) async fn invoke_script_callback_owned(
+    session: crate::player::session::RuntimeSessionHandle,
+    player_id: crate::player::session::PlayerId,
+    owner: crate::player::ownership::OwnerToken,
+    receiver: Option<crate::player::ScriptInstanceRef>,
+    handler_ref: crate::player::script::ScriptHandlerRef,
+    args: Vec<DatumRef>,
+    use_raw_arg_list: bool,
+) -> Result<crate::player::scope::ScopeResult, ScriptError> {
+    let (id, turn, callback) = session.borrow_mut().start_owned_script_callback(
+        player_id,
+        owner.clone(),
+        receiver,
+        handler_ref,
+        args,
+        use_raw_arg_list,
+    )?;
+    let mut cancellation = CallbackCancellation {
+        session: session.clone(),
+        player_id,
+        owner: owner.clone(),
+        id: id.clone(),
+        armed: true,
+    };
+    match turn {
+        crate::player::session::EvalRequestTurn::Child(
+            crate::player::driver::DriverTurn::Waiting,
+        ) => {
+            session.borrow_mut().retain_pending_command(crate::player::driver::PendingCommand {
+                player_id,
+                owner,
+                action: None,
+                started: false,
+                ticket: None,
+                completer: None,
+                event_sender: None,
+                score_continuation: None,
+                child_completion: None,
+                eval_child: Some(id),
+                eval_sender: None,
             });
-            if let Some(me_ref) = receiver_call {
-                player_call_datum_handler(&me_ref, Symbol::from_str(handler_name), &datum_args).await
-            } else {
-                player_call_global_handler(Symbol::from_str(handler_name), &datum_args).await
-            }
         }
-        LingoExpr::ObjProp(obj_expr, prop_name) => {
-            let obj_datum = Box::pin(eval_lingo_expr_ast_runtime(obj_expr.as_ref())).await?;
-            reserve_player_mut(|player| get_obj_prop(player, &obj_datum, Symbol::from_str(prop_name)))
+        crate::player::session::EvalRequestTurn::Child(
+            crate::player::driver::DriverTurn::Pending(action),
+        ) => {
+            session.borrow_mut().retain_pending_command(crate::player::driver::PendingCommand {
+                player_id,
+                owner,
+                ticket: Some(action.ticket().clone()),
+                action: Some(action),
+                started: false,
+                completer: None,
+                event_sender: None,
+                score_continuation: None,
+                child_completion: None,
+                eval_child: Some(id),
+                eval_sender: None,
+            });
         }
-        LingoExpr::ListAccess(list_expr, index_expr) => {
-            // Lingo `s.line[N]` / `s.item[N]` / `s.word[N]` is a chunk
-            // expression — must dispatch through the chunk handler that knows
-            // about the itemDelimiter and how to slice by line/word/item.
-            // Without this, the AST evaluator first looks `.line` up as a
-            // built-in property on the string and errors out with
-            // "Invalid string built-in property line".
-            if let LingoExpr::ObjProp(obj_expr, prop_name) = list_expr.as_ref() {
-                let prop_lower = prop_name.to_ascii_lowercase();
-                if prop_lower == "line" || prop_lower == "item" || prop_lower == "word"
-                    || prop_lower == "char"
-                {
-                    let obj_ref = Box::pin(eval_lingo_expr_ast_runtime(obj_expr.as_ref())).await?;
-                    let index_ref = Box::pin(eval_lingo_expr_ast_runtime(index_expr.as_ref())).await?;
-                    let chunk_datum = reserve_player_mut(|player| {
-                        use crate::director::lingo::datum::{
-                            StringChunkExpr, StringChunkSource, StringChunkType,
-                        };
-                        let index = player.get_datum(&index_ref).int_value()?;
-                        let source_datum = player.get_datum(&obj_ref).clone();
-                        match source_datum {
-                            // `string.line[N]` etc. — build a StringChunk
-                            // whose source is the originating string datum.
-                            Datum::String(_) => {
-                                let d = crate::player::handlers::datum_handlers::string::StringDatumUtils::get_prop_ref(
-                                    player, &obj_ref, Symbol::from_str(&prop_lower), index, index,
-                                )?;
-                                Ok(Some(d))
-                            }
-                            // `member.line[N]` — build a StringChunk whose
-                            // source is the underlying member, so downstream
-                            // `.fontStyle` / `.font` / `.color` can walk back
-                            // to STXT formatting_runs. Without this the AST
-                            // path returned a plain String (via the field
-                            // `.line` getter returning a List<String>) and
-                            // every per-chunk style read errored with
-                            // "Invalid string built-in property fontStyle".
-                            Datum::CastMember(member_ref) => {
-                                let member = player.movie.cast_manager
-                                    .find_member_by_ref(&member_ref);
-                                let text = match member {
-                                    Some(m) => match &m.member_type {
-                                        crate::player::cast_member::CastMemberType::Field(f) => f.text.clone(),
-                                        crate::player::cast_member::CastMemberType::Text(t) => t.text.clone(),
-                                        _ => return Ok(None),
-                                    },
-                                    None => return Ok(None),
-                                };
-                                let chunk_expr = StringChunkExpr {
-                                    chunk_type: StringChunkType::from(Symbol::from_str(&prop_lower)),
-                                    start: index,
-                                    end: index,
-                                    item_delimiter: player.movie.item_delimiter,
-                                };
-                                let resolved =
-                                    StringChunkUtils::resolve_chunk_expr_string(&text, &chunk_expr)?;
-                                Ok(Some(Datum::StringChunk(
-                                    StringChunkSource::Member(member_ref),
-                                    chunk_expr,
-                                    resolved,
-                                )))
-                            }
-                            // Nested chunk: chain via Datum source so the
-                            // walk back to the member preserves both ranges.
-                            Datum::StringChunk(..) => {
-                                let parent_str = player.get_datum(&obj_ref).string_value()?;
-                                let chunk_expr = StringChunkExpr {
-                                    chunk_type: StringChunkType::from(Symbol::from_str(&prop_lower)),
-                                    start: index,
-                                    end: index,
-                                    item_delimiter: player.movie.item_delimiter,
-                                };
-                                let resolved =
-                                    StringChunkUtils::resolve_chunk_expr_string(&parent_str, &chunk_expr)?;
-                                Ok(Some(Datum::StringChunk(
-                                    StringChunkSource::Datum(obj_ref.clone()),
-                                    chunk_expr,
-                                    resolved,
-                                )))
-                            }
-                            _ => Ok(None),
-                        }
-                    })?;
-                    if let Some(d) = chunk_datum {
-                        return reserve_player_mut(|player| Ok(player.alloc_datum(d)));
-                    }
-                }
-            }
-
-            let list_ref = Box::pin(eval_lingo_expr_ast_runtime(list_expr.as_ref())).await?;
-            let index_ref = Box::pin(eval_lingo_expr_ast_runtime(index_expr.as_ref())).await?;
-
-            reserve_player_mut(|player| {
-                let list_datum = player.get_datum(&list_ref);
-                let index_datum = player.get_datum(&index_ref);
-
-                // Access list/proplist/point/rect element
-                match list_datum {
-                    Datum::List(_, items, _) => {
-                        let index_num = index_datum.int_value()?;
-                        if index_num < 1 || index_num as usize > items.len() {
-                            Err(ScriptError::new(format!(
-                                "List index {} out of bounds (list has {} items)",
-                                index_num,
-                                items.len()
-                            )))
-                        } else {
-                            // Lingo uses 1-based indexing, so subtract 1
-                            Ok(items[(index_num - 1) as usize].clone())
-                        }
-                    }
-                    // PropList: int index = Nth value, symbol/string = key lookup
-                    Datum::PropList(pairs, pairs_sorted) => {
-                        PropListUtils::get_at(pairs, &index_ref, &player.allocator, *pairs_sorted)
-                    }
-                    // Point indexed by number: 1=x, 2=y
-                    Datum::Point(vals, flags) => {
-                        let index_num = index_datum.int_value()?;
-                        if index_num < 1 || index_num > 2 {
-                            Err(ScriptError::new(format!(
-                                "Point index {} out of bounds (must be 1 or 2)", index_num
-                            )))
-                        } else {
-                            let i = (index_num - 1) as usize;
-                            let component = Datum::inline_component_to_datum(vals[i], Datum::inline_is_float(*flags, i));
-                            Ok(player.alloc_datum(component))
-                        }
-                    }
-                    // Rect indexed by number: 1-4
-                    Datum::Rect(vals, flags) => {
-                        let index_num = index_datum.int_value()?;
-                        if index_num < 1 || index_num > 4 {
-                            Err(ScriptError::new(format!(
-                                "Rect index {} out of bounds (must be 1-4)", index_num
-                            )))
-                        } else {
-                            let i = (index_num - 1) as usize;
-                            let component = Datum::inline_component_to_datum(vals[i], Datum::inline_is_float(*flags, i));
-                            Ok(player.alloc_datum(component))
-                        }
-                    }
-                    // String indexed by number: return nth character
-                    Datum::String(s) => {
-                        let index_num = index_datum.int_value()?;
-                        if index_num < 1 || index_num as usize > s.chars().count() {
-                            Ok(player.alloc_datum(Datum::String(String::new())))
-                        } else {
-                            let ch = s.chars().nth((index_num - 1) as usize)
-                                .map(|c| c.to_string())
-                                .unwrap_or_default();
-                            Ok(player.alloc_datum(Datum::String(ch)))
-                        }
-                    }
-                    // `sprite(N)[#foo]` — the bracket form of `sprite(N).foo`,
-                    // which Director resolves against the sprite's behaviour
-                    // properties. The bytecode paths already do this (see
-                    // TypeUtils::get_sub_prop and the getPropRef handler); the
-                    // message window needs it too so these expressions can be
-                    // inspected, e.g. Merlin's Revenge's `p.spr[#pIam]`.
-                    Datum::SpriteRef(sprite_number) => {
-                        let sprite_number = *sprite_number;
-                        let prop_name = match index_datum {
-                            // Symbol and String now hold different types, so
-                            // the old or-pattern can no longer bind one name.
-                            Datum::Symbol(name) => name.to_string(),
-                            Datum::String(name) => name.clone(),
-                            other => {
-                                return Err(ScriptError::new(format!(
-                                    "Cannot index sprite {} with {}",
-                                    sprite_number,
-                                    other.type_str()
-                                )))
-                            }
-                        };
-                        let result = crate::player::score::sprite_get_prop(
-                            player,
-                            sprite_number,
-                            Symbol::from_str(&*&prop_name),
-                        )?;
-                        Ok(player
-                            .last_sprite_prop_ref
-                            .take()
-                            .unwrap_or_else(|| player.alloc_datum(result)))
-                    }
-                    _ => Err(ScriptError::new(format!(
-                        "Cannot index non-list type: {:?}",
-                        list_datum.type_enum()
-                    ))),
-                }
-            })
+        crate::player::session::EvalRequestTurn::Evaluator(
+            EvalTurn::Complete(_),
+        ) => {}
+        crate::player::session::EvalRequestTurn::Child(
+            crate::player::driver::DriverTurn::Complete(_),
+        )
+        | crate::player::session::EvalRequestTurn::Child(
+            crate::player::driver::DriverTurn::Error(_),
+        ) => {}
+        crate::player::session::EvalRequestTurn::Evaluator(EvalTurn::Pending { .. })
+        | crate::player::session::EvalRequestTurn::MovieAsync(_) => {
+            return Err(ScriptError::new(
+                "nested script callback yielded an unsupported evaluator request".to_owned(),
+            ));
         }
-        LingoExpr::ThePropOf(obj_expr, prop_name) => {
-            // Special case: "the number of castMembers of X" should request
-            // "number of castMembers" as a compound property from X
-            if prop_name == "number" || prop_name == "count" {
-                if let LingoExpr::ObjProp(inner_obj, inner_prop) = obj_expr.as_ref() {
-                    // We have "the number of <property> of <object>"
-                    // Convert to compound property: "number of <property>"
-                    let compound_prop = format!("{} of {}", prop_name, inner_prop);
-                    let inner_datum = Box::pin(eval_lingo_expr_ast_runtime(inner_obj.as_ref())).await?;
-                    return reserve_player_mut(|player| get_obj_prop(player, &inner_datum, Symbol::from_str(&compound_prop)));
-                }
-            }
-            
-            // For other cases, evaluate obj_expr and get the property
-            let obj_datum = Box::pin(eval_lingo_expr_ast_runtime(obj_expr.as_ref())).await?;
-            reserve_player_mut(|player| get_obj_prop(player, &obj_datum, Symbol::from_str(prop_name)))
+        crate::player::session::EvalRequestTurn::ExternalXtra(_) => {
+            return Err(ScriptError::new(
+                "external Xtra cannot originate from a prepared child evaluator".to_owned(),
+            ));
         }
-        LingoExpr::ColorLiteral(color_ref) => {
-            reserve_player_mut(|player| Ok(player.alloc_datum(Datum::ColorRef(color_ref.clone()))))
+        crate::player::session::EvalRequestTurn::ExternalXtraLoad(_) => {
+            return Err(ScriptError::new(
+                "external Xtra load cannot originate from a prepared child evaluator".to_owned(),
+            ));
         }
-        LingoExpr::RectLiteral(values) => {
-            if values.len() != 1 {
-                return Err(ScriptError::new("RectLiteral must have 1 tuple of 4 elements".to_string()));
-            }
-            let (x_expr, y_expr, w_expr, h_expr) = &values[0];
-
-            // Evaluate each component expression
-            let x_ref = Box::pin(eval_lingo_expr_ast_runtime(x_expr)).await?;
-            let y_ref = Box::pin(eval_lingo_expr_ast_runtime(y_expr)).await?;
-            let w_ref = Box::pin(eval_lingo_expr_ast_runtime(w_expr)).await?;
-            let h_ref = Box::pin(eval_lingo_expr_ast_runtime(h_expr)).await?;
-
-            // Create the Rect datum with inline components
-            reserve_player_mut(|player| {
-                let x_d = player.get_datum(&x_ref);
-                let y_d = player.get_datum(&y_ref);
-                let w_d = player.get_datum(&w_ref);
-                let h_d = player.get_datum(&h_ref);
-                let rect = Datum::build_rect(x_d, y_d, w_d, h_d)?;
-                Ok(player.alloc_datum(rect))
-            })
+        crate::player::session::EvalRequestTurn::XtraPending(_) => {
+            return Err(ScriptError::new(
+                "owner-bound Multiuser/Curl operation cannot originate from a prepared child evaluator".to_owned(),
+            ));
         }
-        LingoExpr::PointLiteral(values) => {
-            if values.len() != 1 {
-                return Err(ScriptError::new("PointLiteral must have 1 tuple of 2 elements".to_string()));
-            }
-            let (x_expr, y_expr) = &values[0];
+    }
+    let result = callback
+        .recv()
+        .await
+        .map_err(|_| crate::player::cancelled_scope_error())?;
+    cancellation.armed = false;
+    result
+}
 
-            // Evaluate each component expression
-            let x_ref = Box::pin(eval_lingo_expr_ast_runtime(x_expr)).await?;
-            let y_ref = Box::pin(eval_lingo_expr_ast_runtime(y_expr)).await?;
+struct CallbackCancellation {
+    session: crate::player::session::RuntimeSessionHandle,
+    player_id: crate::player::session::PlayerId,
+    owner: crate::player::ownership::OwnerToken,
+    id: EvalId,
+    armed: bool,
+}
 
-            // Create the Point datum with inline components
-            reserve_player_mut(|player| {
-                let x_d = player.get_datum(&x_ref);
-                let y_d = player.get_datum(&y_ref);
-                let point = Datum::build_point(x_d, y_d)?;
-                Ok(player.alloc_datum(point))
-            })
-        }
-        LingoExpr::MemberRef(member_expr, cast_lib_expr) => {
-            // Evaluate member name or number
-            let member_id_ref = Box::pin(eval_lingo_expr_ast_runtime(member_expr.as_ref())).await?;
-
-            // Evaluate cast lib (or None if not specified)
-            let cast_lib_ref = if let Some(expr) = cast_lib_expr {
-                Some(Box::pin(eval_lingo_expr_ast_runtime(expr.as_ref())).await?)
-            } else {
-                None
-            };
-
-            reserve_player_mut(|player| {
-                let member_id_datum = player.get_datum(&member_id_ref).clone();
-
-                // Get cast lib datum if specified
-                let cast_lib_datum = cast_lib_ref.as_ref().map(|r| player.get_datum(r).clone());
-
-                // Use find_member_ref_by_identifiers for proper member lookup
-                // This handles both string names and numeric member IDs
-                let member_result = player.movie.cast_manager.find_member_ref_by_identifiers(
-                    &member_id_datum,
-                    cast_lib_datum.as_ref(),
-                    &player.allocator,
-                )?;
-
-                let member_ref = match member_result {
-                    Some(r) => r,
-                    None => {
-                        // If cast_lib was specified, create a ref with member 0
-                        // Otherwise return invalid ref
-                        if let Some(cast_datum) = cast_lib_datum {
-                            let cast_lib_num = match &cast_datum {
-                                Datum::Int(num) => *num,
-                                Datum::CastLib(num) => *num as i32,
-                                Datum::String(name) => {
-                                    player.movie.cast_manager.get_cast_by_name(name)
-                                        .map(|c| c.number as i32)
-                                        .unwrap_or(0)
-                                }
-                                _ => return Err(ScriptError::new(format!(
-                                    "Expected int, string, or castLib, got {:?}",
-                                    cast_datum.type_enum()
-                                ))),
-                            };
-                            // Try to get member number for explicit reference
-                            let member_num = member_id_datum.int_value().unwrap_or(0);
-                            super::cast_lib::CastMemberRef {
-                                cast_lib: cast_lib_num,
-                                cast_member: member_num,
-                            }
-                        } else {
-                            super::cast_lib::INVALID_CAST_MEMBER_REF
-                        }
-                    }
-                };
-
-                Ok(player.alloc_datum(Datum::CastMember(member_ref)))
-            })
-        }
-        LingoExpr::Identifier(ident_name) => {
-            reserve_player_mut(|player| get_eval_top_level_prop(player, ident_name))
-        }
-        LingoExpr::ObjHandlerCall(obj_expr, handler_name, args) => {
-            let obj_datum = Box::pin(eval_lingo_expr_ast_runtime(obj_expr.as_ref())).await?;
-            let mut datum_args = vec![];
-            for arg in args {
-                let datum = Box::pin(eval_lingo_expr_ast_runtime(arg)).await?;
-                datum_args.push(datum);
-            }
-            player_call_datum_handler(&obj_datum, Symbol::from_str(handler_name), &datum_args).await
-        }
-        LingoExpr::Assignment(left_expr, right_expr) => {
-            let right_datum = Box::pin(eval_lingo_expr_ast_runtime(right_expr.as_ref())).await?;
-
-            match left_expr.as_ref() {
-                LingoExpr::Identifier(ident_name) => reserve_player_mut(|player| {
-                    if ident_name.starts_with("the ") {
-                        let prop_name = &ident_name[4..];
-                        let right_datum_value = player.get_datum(&right_datum).clone();
-                        player.set_movie_prop(Symbol::from_str(prop_name), right_datum_value)?;
-                        Ok(right_datum)
-                    } else {
-                        // Director scoping for `do`/eval: a bare-identifier
-                        // assignment targets the current handler's receiver
-                        // PROPERTY when one is declared, and only otherwise a
-                        // global — mirroring the identifier READ path above.
-                        // Behaviors store per-instance tables this way, e.g. Dora
-                        // Soccer loads its animation clips with
-                        // `do("stb = [1,103,115,1]")` in beginSprite; writing a
-                        // global left the behavior's `stb` property VOID, so its
-                        // `aframe = stb[2]` was 0 and she stayed frozen at frame 0.
-                        if let Some(receiver) = current_do_receiver_with_prop(player, ident_name) {
-                            script_set_prop(player, &receiver, Symbol::from_str(ident_name), &right_datum, true)?;
-                            return Ok(right_datum);
-                        }
-                        player.globals.insert(Symbol::from_str(ident_name), right_datum.clone());
-                        Ok(right_datum)
-                    }
-                }),
-                LingoExpr::ObjProp(obj_expr, prop_name) => {
-                    let obj_datum =
-                        Box::pin(eval_lingo_expr_ast_runtime(obj_expr.as_ref())).await?;
-                    player_set_obj_prop(&obj_datum, Symbol::from_str(prop_name), &right_datum).await?;
-                    Ok(DatumRef::Void)
-                }
-                LingoExpr::ThePropOf(obj_expr, prop_name) => {
-                    let obj_datum =
-                        Box::pin(eval_lingo_expr_ast_runtime(obj_expr.as_ref())).await?;
-                    player_set_obj_prop(&obj_datum, Symbol::from_str(prop_name), &right_datum).await?;
-                    Ok(DatumRef::Void)
-                }
-                // Handle bracket-indexed assignment: list[index] = value
-                LingoExpr::ListAccess(list_expr, index_expr) => {
-                    // Lingo `obj.prop[i] = val` — generic List mutation only updates
-                    // the list datum, which for some object types (Shockwave3dObjectRef
-                    // shader properties) is just a runtime view of underlying scene
-                    // state. Dispatch to obj.setAt(prop, i, val) so the setter can
-                    // sync the assignment back into scene.shaders[].texture_layers[]
-                    // (and similar). Without this the Lingo write is invisible to the
-                    // renderer.
-                    if let LingoExpr::ObjProp(obj_expr, prop_name) = list_expr.as_ref() {
-                        let obj_ref = Box::pin(eval_lingo_expr_ast_runtime(obj_expr.as_ref())).await?;
-                        let needs_writeback = reserve_player_mut(|player| {
-                            Ok(matches!(
-                                player.get_datum(&obj_ref),
-                                Datum::Shockwave3dObjectRef(_)
-                            ))
-                        })?;
-                        if needs_writeback {
-                            let index_ref = Box::pin(eval_lingo_expr_ast_runtime(index_expr.as_ref())).await?;
-                            let prop_ref = reserve_player_mut(|player| {
-                                Ok(player.alloc_datum(Datum::Symbol(Symbol::from_str(prop_name))))
-                            })?;
-                            player_call_datum_handler(
-                                &obj_ref,
-                                Symbol::builtin(BuiltInSymbol::SetAt),
-                                &vec![prop_ref, index_ref, right_datum.clone()],
-                            ).await?;
-                            return Ok(right_datum);
-                        }
-                    }
-
-                    let list_ref = Box::pin(eval_lingo_expr_ast_runtime(list_expr.as_ref())).await?;
-                    let index_ref = Box::pin(eval_lingo_expr_ast_runtime(index_expr.as_ref())).await?;
-                    reserve_player_mut(|player| {
-                        let list_datum = player.get_datum(&list_ref);
-                        let index_datum = player.get_datum(&index_ref);
-                        match list_datum {
-                            Datum::List(_, items, _) => {
-                                let index_num = index_datum.int_value()?;
-                                let adjusted = if index_num >= 1 { (index_num - 1) as usize } else { 0 };
-                                if adjusted >= items.len() {
-                                    return Err(ScriptError::new(format!(
-                                        "List index {} out of bounds (list has {} items)",
-                                        index_num, items.len()
-                                    )));
-                                }
-                                let (_, list_vec, _) = player.get_datum_mut(&list_ref).to_list_mut()?;
-                                list_vec[adjusted] = right_datum.clone();
-                                Ok(right_datum)
-                            }
-                            Datum::PropList(..) => {
-                                PropListUtils::set_at(player, &list_ref, &index_ref, &right_datum)?;
-                                Ok(right_datum)
-                            }
-                            Datum::Point(..) => {
-                                let index_num = index_datum.int_value()?;
-                                let adjusted = if index_num >= 1 { (index_num - 1) as usize } else { 0 };
-                                if adjusted >= 2 {
-                                    return Err(ScriptError::new(format!(
-                                        "Point index {} out of bounds", index_num
-                                    )));
-                                }
-                                let right_val = player.get_datum(&right_datum);
-                                let (val, is_float) = Datum::datum_to_inline_component(right_val)?;
-                                let (point_vals, point_flags) = player.get_datum_mut(&list_ref).to_point_inline_mut()?;
-                                point_vals[adjusted] = val;
-                                Datum::inline_set_float(point_flags, adjusted, is_float);
-                                Ok(right_datum)
-                            }
-                            Datum::Rect(..) => {
-                                let index_num = index_datum.int_value()?;
-                                let adjusted = if index_num >= 1 { (index_num - 1) as usize } else { 0 };
-                                if adjusted >= 4 {
-                                    return Err(ScriptError::new(format!(
-                                        "Rect index {} out of bounds", index_num
-                                    )));
-                                }
-                                let right_val = player.get_datum(&right_datum);
-                                let (val, is_float) = Datum::datum_to_inline_component(right_val)?;
-                                let (rect_vals, rect_flags) = player.get_datum_mut(&list_ref).to_rect_inline_mut()?;
-                                rect_vals[adjusted] = val;
-                                Datum::inline_set_float(rect_flags, adjusted, is_float);
-                                Ok(right_datum)
-                            }
-                            _ => Err(ScriptError::new(format!(
-                                "Cannot assign to index of type: {}",
-                                list_datum.type_str()
-                            ))),
-                        }
-                    })
-                }
-                _ => Err(ScriptError::new(
-                    "Invalid assignment left-hand side".to_string(),
-                )),
-            }
-        }
-        LingoExpr::Add(lhs, rhs) => {
-            let left = Box::pin(eval_lingo_expr_ast_runtime(lhs.as_ref())).await?;
-            let right = Box::pin(eval_lingo_expr_ast_runtime(rhs.as_ref())).await?;
-            reserve_player_mut(|player| {
-                let left = player.get_datum(&left).clone();
-                let right = player.get_datum(&right).clone();
-                let result = add_datums(left, right, player)?;
-                Ok(player.alloc_datum(result))
-            })
-        }
-        LingoExpr::Subtract(lhs, rhs) => {
-            let left = Box::pin(eval_lingo_expr_ast_runtime(lhs.as_ref())).await?;
-            let right = Box::pin(eval_lingo_expr_ast_runtime(rhs.as_ref())).await?;
-            reserve_player_mut(|player| {
-                let left = player.get_datum(&left).clone();
-                let right = player.get_datum(&right).clone();
-                let result = subtract_datums(left, right, player)?;
-                Ok(player.alloc_datum(result))
-            })
-        }
-        LingoExpr::Multiply(lhs, rhs) => {
-            let left = Box::pin(eval_lingo_expr_ast_runtime(lhs.as_ref())).await?;
-            let right = Box::pin(eval_lingo_expr_ast_runtime(rhs.as_ref())).await?;
-            reserve_player_mut(|player| {
-                let result = multiply_datums(left, right, player)?;
-                Ok(player.alloc_datum(result))
-            })
-        }
-        LingoExpr::Divide(lhs, rhs) => {
-            let left = Box::pin(eval_lingo_expr_ast_runtime(lhs.as_ref())).await?;
-            let right = Box::pin(eval_lingo_expr_ast_runtime(rhs.as_ref())).await?;
-            reserve_player_mut(|player| {
-                let result = divide_datums(left, right, player)?;
-                Ok(player.alloc_datum(result))
-            })
-        }
-        LingoExpr::Modulo(lhs, rhs) => {
-            let left = Box::pin(eval_lingo_expr_ast_runtime(lhs.as_ref())).await?;
-            let right = Box::pin(eval_lingo_expr_ast_runtime(rhs.as_ref())).await?;
-            reserve_player_mut(|player| {
-                let result = crate::player::bytecode::arithmetics::ArithmeticsBytecodeHandler
-                    ::modulo_datums(&left, &right, player)?;
-                Ok(player.alloc_datum(result))
-            })
-        }
-        LingoExpr::Join(lhs, rhs) => {
-            let left = Box::pin(eval_lingo_expr_ast_runtime(lhs.as_ref())).await?;
-            let right = Box::pin(eval_lingo_expr_ast_runtime(rhs.as_ref())).await?;
-            reserve_player_mut(|player| {
-                let result = StringBytecodeHandler::concat_datums(left, right, player, false)?;
-                Ok(result)
-            })
-        }
-        LingoExpr::JoinPad(lhs, rhs) => {
-            let left = Box::pin(eval_lingo_expr_ast_runtime(lhs.as_ref())).await?;
-            let right = Box::pin(eval_lingo_expr_ast_runtime(rhs.as_ref())).await?;
-            reserve_player_mut(|player| {
-                let result = StringBytecodeHandler::concat_datums(left, right, player, true)?;
-                Ok(result)
-            })
-        }
-        LingoExpr::PutDisplay(value_expr) => {
-            let value = Box::pin(eval_lingo_expr_ast_runtime(value_expr)).await?;
-            reserve_player_mut(|player| {
-                use crate::player::handlers::manager::BuiltInHandlerManager;
-                BuiltInHandlerManager::put(&vec![value])?;
-                Ok(DatumRef::Void)
-            })
-        }
-        LingoExpr::PutInto(expr, target) => {
-            // Evaluate the expression
-            let value = Box::pin(eval_lingo_expr_ast_runtime(expr)).await?;
-            
-            // Get target variable name
-            let target_name = match target.as_ref() {
-                LingoExpr::Identifier(name) => name.clone(),
-                LingoExpr::ChunkExpr(..) => {
-                    // Handle chunk assignment - use existing PutChunk logic
-                    return handle_put_into_chunk(value, target).await;
-                },
-                _ => return Err(ScriptError::new("Invalid put into target".to_string())),
-            };
-            
-            // Set the global variable
-            reserve_player_mut(|player| {
-                player.globals.insert(Symbol::from_str(&target_name), value.clone());
-                Ok(DatumRef::Void)
-            })
-        },
-        LingoExpr::PutBefore(expr, target) => {
-            // Evaluate the expression
-            let value = Box::pin(eval_lingo_expr_ast_runtime(expr)).await?;
-            
-            let target_name = match target.as_ref() {
-                LingoExpr::Identifier(name) => name.clone(),
-                LingoExpr::ChunkExpr(..) => {
-                    // Handle chunk before - use existing logic
-                    return handle_put_before_chunk(value, target).await;
-                },
-                _ => return Err(ScriptError::new("Invalid put before target".to_string())),
-            };
-            
-            // Get current value, concatenate value before it, set back
-            reserve_player_mut(|player| {
-                let current = player.globals.get(&Symbol::from_str(&target_name))
-                    .cloned()
-                    .unwrap_or_else(|| player.alloc_datum(Datum::String(String::new())));
-                
-                let value_datum = player.get_datum(&value);
-                let current_datum = player.get_datum(&current);
-                
-                // Use datum_to_string_for_concat for proper conversion
-                use crate::player::datum_formatting::datum_to_string_for_concat;
-                let value_str = datum_to_string_for_concat(value_datum, player);
-                let current_str = datum_to_string_for_concat(current_datum, player);
-                
-                let result = Datum::String(format!("{}{}", value_str, current_str));
-                let result_ref = player.alloc_datum(result);
-                
-                player.globals.insert(Symbol::from_str(&target_name), result_ref);
-                Ok(DatumRef::Void)
-            })
-        },
-        LingoExpr::PutAfter(expr, target) => {
-            // Evaluate the expression
-            let value = Box::pin(eval_lingo_expr_ast_runtime(expr)).await?;
-            
-            let target_name = match target.as_ref() {
-                LingoExpr::Identifier(name) => name.clone(),
-                LingoExpr::ChunkExpr(..) => {
-                    // Handle chunk after - use existing logic
-                    return handle_put_after_chunk(value, target).await;
-                },
-                _ => return Err(ScriptError::new("Invalid put after target".to_string())),
-            };
-            
-            // Get current value, concatenate value after it, set back
-            reserve_player_mut(|player| {
-                let current = player.globals.get(&Symbol::from_str(&target_name))
-                    .cloned()
-                    .unwrap_or_else(|| player.alloc_datum(Datum::String(String::new())));
-                
-                let value_datum = player.get_datum(&value);
-                let current_datum = player.get_datum(&current);
-                
-                use crate::player::datum_formatting::datum_to_string_for_concat;
-                let current_str = datum_to_string_for_concat(current_datum, player);
-                let value_str = datum_to_string_for_concat(value_datum, player);
-                
-                let result = Datum::String(format!("{}{}", current_str, value_str));
-                let result_ref = player.alloc_datum(result);
-                
-                player.globals.insert(Symbol::from_str(&target_name), result_ref);
-                Ok(DatumRef::Void)
-            })
-        },
-        LingoExpr::DeleteChunk(chunk_target) => {
-            // "delete char 1 of s" - delete a chunk from a variable
-            let (chunk_type_str, index_expr, range_end_expr, source_expr) = match chunk_target.as_ref() {
-                LingoExpr::ChunkExpr(chunk_type, index, range_end, source) => (chunk_type, index, range_end, source),
-                _ => return Err(ScriptError::new("Expected chunk expression after delete".to_string())),
-            };
-
-            let index_ref = Box::pin(eval_lingo_expr_ast_runtime(index_expr)).await?;
-            let index = reserve_player_mut(|player| {
-                player.get_datum(&index_ref).int_value()
-            })?;
-
-            let end_index = if let Some(range_end) = range_end_expr {
-                let end_ref = Box::pin(eval_lingo_expr_ast_runtime(range_end)).await?;
-                reserve_player_mut(|player| player.get_datum(&end_ref).int_value())?
-            } else {
-                0
-            };
-
-            let chunk_type = StringChunkType::from(*chunk_type_str);
-            let current_str = read_chunk_source(source_expr).await?;
-
-            reserve_player_mut(|player| {
-                let chunk_expr = StringChunkExpr {
-                    chunk_type,
-                    start: index,
-                    end: end_index,
-                    item_delimiter: player.movie.item_delimiter,
-                };
-
-                let new_string = StringChunkUtils::string_by_deleting_chunk(
-                    &current_str,
-                    &chunk_expr,
-                )?;
-
-                write_chunk_source(player, source_expr, new_string);
-                Ok(DatumRef::Void)
-            })
-        },
-        LingoExpr::And(lhs, rhs) => {
-            let left = Box::pin(eval_lingo_expr_ast_runtime(lhs)).await?;
-            let right = Box::pin(eval_lingo_expr_ast_runtime(rhs)).await?;
-            reserve_player_mut(|player| {
-                let left_val = player.get_datum(&left).int_value()?;
-                let right_val = player.get_datum(&right).int_value()?;
-                let result = if left_val != 0 && right_val != 0 { 1 } else { 0 };
-                Ok(player.alloc_datum(Datum::Int(result)))
-            })
-        }
-        LingoExpr::Or(lhs, rhs) => {
-            let left = Box::pin(eval_lingo_expr_ast_runtime(lhs)).await?;
-            let right = Box::pin(eval_lingo_expr_ast_runtime(rhs)).await?;
-            reserve_player_mut(|player| {
-                let left_val = player.get_datum(&left).int_value()?;
-                let right_val = player.get_datum(&right).int_value()?;
-                let result = if left_val != 0 || right_val != 0 { 1 } else { 0 };
-                Ok(player.alloc_datum(Datum::Int(result)))
-            })
-        }
-        LingoExpr::Not(operand) => {
-            let value = Box::pin(eval_lingo_expr_ast_runtime(operand)).await?;
-            reserve_player_mut(|player| {
-                let int_val = player.get_datum(&value).int_value()?;
-                let result = if int_val == 0 { 1 } else { 0 };
-                Ok(player.alloc_datum(Datum::Int(result)))
-            })
-        }
-        LingoExpr::ChunkExpr(chunk_type, index_expr, range_end_expr, source_expr) => {
-            // Evaluate the source expression to get a string
-            let source_ref = Box::pin(eval_lingo_expr_ast_runtime(source_expr)).await?;
-            let source_string = reserve_player_mut(|player| {
-                player.get_datum(&source_ref).string_value()
-            })?;
-
-            // Evaluate the index expression
-            let index_ref = Box::pin(eval_lingo_expr_ast_runtime(index_expr)).await?;
-            let index = reserve_player_mut(|player| {
-                player.get_datum(&index_ref).int_value()
-            })?;
-
-            // Evaluate optional range end
-            let end_index = if let Some(range_end) = range_end_expr {
-                let end_ref = Box::pin(eval_lingo_expr_ast_runtime(range_end)).await?;
-                reserve_player_mut(|player| player.get_datum(&end_ref).int_value())?
-            } else {
-                index
-            };
-
-            // Convert chunk type string to StringChunkType
-            let chunk_type_enum = StringChunkType::from(*chunk_type);
-
-            // Create chunk expression
-            let chunk_expr = reserve_player_mut(|player| {
-                Ok(StringChunkExpr {
-                    chunk_type: chunk_type_enum,
-                    start: index,
-                    end: end_index,
-                    item_delimiter: player.movie.item_delimiter,
-                })
-            })?;
-
-            // Extract the chunk. When the source is a `CastMember` or another
-            // `StringChunk`, return a chained `StringChunk` so subsequent
-            // `.fontStyle` / `.font` / `.color` reads can walk back to the
-            // member's STXT runs (parallel to the bytecode `get_chunk`
-            // handler in bytecode/string.rs). Plain `String` sources have
-            // no member to chain to, so they keep the original flatten
-            // behaviour. This is the path the interactive message-window
-            // evaluator uses; without it `put member.line[5].word[1].fontStyle`
-            // would error with "Invalid string built-in property fontStyle"
-            // because `word[1]` would have already collapsed to a String.
-            let result_string =
-                StringChunkUtils::resolve_chunk_expr_string(&source_string, &chunk_expr)?;
-
-            reserve_player_mut(|player| {
-                use crate::director::lingo::datum::StringChunkSource;
-                let source_datum = player.get_datum(&source_ref).clone();
-                let chunk_source = match source_datum {
-                    Datum::CastMember(member_ref) => {
-                        Some(StringChunkSource::Member(member_ref))
-                    }
-                    Datum::StringChunk(..) => Some(StringChunkSource::Datum(source_ref.clone())),
-                    _ => None,
-                };
-                Ok(match chunk_source {
-                    Some(src) => player.alloc_datum(Datum::StringChunk(
-                        src,
-                        chunk_expr,
-                        result_string,
-                    )),
-                    None => player.alloc_datum(Datum::String(result_string)),
-                })
-            })
-        }
-        LingoExpr::Eq(left, right) => {
-            let left = Box::pin(eval_lingo_expr_ast_runtime(left)).await?;
-            let right = Box::pin(eval_lingo_expr_ast_runtime(right)).await?;
-            reserve_player_mut(|player| {
-                let left_datum = player.get_datum(&left);
-                let right_datum = player.get_datum(&right);
-                let result = crate::player::compare::datum_equals(
-                    left_datum, 
-                    right_datum, 
-                    &player.allocator
-                )?;
-                Ok(player.alloc_datum(Datum::Int(if result { 1 } else { 0 })))
-            })
-        },
-        LingoExpr::Ne(left, right) => {
-            let left = Box::pin(eval_lingo_expr_ast_runtime(left)).await?;
-            let right = Box::pin(eval_lingo_expr_ast_runtime(right)).await?;
-            reserve_player_mut(|player| {
-                let left_datum = player.get_datum(&left);
-                let right_datum = player.get_datum(&right);
-                let result = !crate::player::compare::datum_equals(
-                    left_datum, 
-                    right_datum, 
-                    &player.allocator
-                )?;
-                Ok(player.alloc_datum(Datum::Int(if result { 1 } else { 0 })))
-            })
-        },
-        LingoExpr::Lt(left, right) => {
-            let left = Box::pin(eval_lingo_expr_ast_runtime(left)).await?;
-            let right = Box::pin(eval_lingo_expr_ast_runtime(right)).await?;
-            reserve_player_mut(|player| {
-                let left_datum = player.get_datum(&left);
-                let right_datum = player.get_datum(&right);
-                let result = crate::player::compare::datum_less_than(
-                    left_datum, 
-                    right_datum,
-                    &player.allocator
-                )?;
-                Ok(player.alloc_datum(Datum::Int(if result { 1 } else { 0 })))
-            })
-        },
-        LingoExpr::Gt(left, right) => {
-            let left = Box::pin(eval_lingo_expr_ast_runtime(left)).await?;
-            let right = Box::pin(eval_lingo_expr_ast_runtime(right)).await?;
-            reserve_player_mut(|player| {
-                let left_datum = player.get_datum(&left);
-                let right_datum = player.get_datum(&right);
-                let result = crate::player::compare::datum_greater_than(
-                    left_datum, 
-                    right_datum,
-                    &player.allocator
-                )?;
-                Ok(player.alloc_datum(Datum::Int(if result { 1 } else { 0 })))
-            })
-        },
-        LingoExpr::Le(left, right) => {
-            let left = Box::pin(eval_lingo_expr_ast_runtime(left)).await?;
-            let right = Box::pin(eval_lingo_expr_ast_runtime(right)).await?;
-            reserve_player_mut(|player| {
-                let left_datum = player.get_datum(&left);
-                let right_datum = player.get_datum(&right);
-                let is_eq = crate::player::compare::datum_equals(
-                    left_datum, 
-                    right_datum, 
-                    &player.allocator
-                )?;
-                let is_lt = crate::player::compare::datum_less_than(
-                    left_datum, 
-                    right_datum,
-                    &player.allocator
-                )?;
-                Ok(player.alloc_datum(Datum::Int(if is_eq || is_lt { 1 } else { 0 })))
-            })
-        },
-        LingoExpr::Ge(left, right) => {
-            let left = Box::pin(eval_lingo_expr_ast_runtime(left)).await?;
-            let right = Box::pin(eval_lingo_expr_ast_runtime(right)).await?;
-            reserve_player_mut(|player| {
-                let left_datum = player.get_datum(&left);
-                let right_datum = player.get_datum(&right);
-                let is_eq = crate::player::compare::datum_equals(
-                    left_datum,
-                    right_datum,
-                    &player.allocator
-                )?;
-                let is_gt = crate::player::compare::datum_greater_than(
-                    left_datum,
-                    right_datum,
-                    &player.allocator
-                )?;
-                Ok(player.alloc_datum(Datum::Int(if is_eq || is_gt { 1 } else { 0 })))
-            })
-        },
-        LingoExpr::IfThen(cond, body) => {
-            let cond_ref = Box::pin(eval_lingo_expr_ast_runtime(cond)).await?;
-            let cond_true = reserve_player_mut(|player| {
-                player.get_datum(&cond_ref).bool_value()
-            })?;
-            if cond_true {
-                Box::pin(eval_lingo_expr_ast_runtime(body)).await
-            } else {
-                Ok(DatumRef::Void)
-            }
-        }
-        LingoExpr::Pass => {
-            // `pass` in a text-eval context has no handler chain to
-            // forward to — treat as a successful no-op.
-            Ok(DatumRef::Void)
+impl Drop for CallbackCancellation {
+    fn drop(&mut self) {
+        if self.armed {
+            self.session
+                .borrow_mut()
+                .cancel_eval_callback(&self.id, self.player_id, &self.owner);
         }
     }
 }
 
-pub fn eval_lingo_expr_static(expr: String) -> Result<DatumRef, ScriptError> {
+#[derive(Clone, Copy)]
+enum EvalBinary {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Modulo,
+    Join(bool),
+    Eq,
+    Ne,
+    Lt,
+    Gt,
+    Le,
+    Ge,
+    And,
+    Or,
+}
+
+#[derive(Clone)]
+enum EvalFrame {
+    Evaluate(LingoExpr),
+    ApplyList(usize),
+    ApplyPropList(usize),
+    ApplyBinary(EvalBinary),
+    ApplyNot,
+    ApplyObjProp(String),
+    ApplySetProperty(String),
+    ApplyHandler { name: String, argc: usize },
+    ApplyObjHandler { name: String, argc: usize },
+    ApplyListAccess,
+    ApplyChunkAccess { property: String, target: LingoExpr },
+    ApplyAssignment(LingoExpr),
+    ProbeIndexedAssignment { value: DatumRef, target: LingoExpr },
+    ApplyIndexedAssignment { value: DatumRef, property: Option<String> },
+    ApplySetAtResult(DatumRef),
+    ApplyPut { kind: u8, target: LingoExpr },
+    ApplyPutChunk { kind: u8, target: LingoExpr, value: DatumRef },
+    FormatPutValue(DatumRef),
+    ReadChunkSource(LingoExpr),
+    ReadChunkSourceDone,
+    ConvertIndex,
+    ConvertEnd,
+    ApplyChunkSource,
+    ApplyChunk { chunk_type: Symbol, has_end: bool },
+    ApplyDeleteChunk { chunk_type: Symbol, has_end: bool, source: LingoExpr },
+    ApplyRect,
+    ApplyPoint,
+    ApplyMember { has_cast: bool },
+    ApplyIf { body: LingoExpr },
+}
+
+macro_rules! eval_turn_try {
+    ($value:expr) => {
+        match $value {
+            Ok(value) => value,
+            Err(error) => return Some(EvalTurn::Complete(Err(error))),
+        }
+    };
+}
+
+impl EvalContinuation {
+    fn pop_value(&mut self) -> Result<DatumRef, ScriptError> {
+        self.values
+            .pop()
+            .ok_or_else(|| ScriptError::new("evaluator operand stack underflow".to_owned()))
+    }
+
+    fn pop_values(&mut self, count: usize) -> Result<Vec<DatumRef>, ScriptError> {
+        if self.values.len() < count {
+            return Err(ScriptError::new("evaluator argument stack underflow".to_owned()));
+        }
+        let start = self.values.len() - count;
+        // Child frames are pushed in reverse order, so the operand stack
+        // already contains this suffix in source evaluation order.
+        Ok(self.values.split_off(start))
+    }
+
+    fn intern(
+        session: &mut crate::player::session::RuntimeSession,
+        player_id: crate::player::session::PlayerId,
+        name: &str,
+    ) -> Result<Symbol, ScriptError> {
+        session
+            .with_player(player_id, |context| Ok::<_, ScriptError>(context.symbols.intern(name)))
+            .ok_or_else(crate::player::cancelled_scope_error)?
+    }
+
+    fn validate_ref(
+        session: &mut crate::player::session::RuntimeSession,
+        player_id: crate::player::session::PlayerId,
+        value: &DatumRef,
+    ) -> Result<DatumRef, ScriptError> {
+        session
+            .with_player(player_id, |context| {
+                crate::player::driver::checked_internal_datum(context.player, context.symbols, value)
+                    .map(|_| value.clone())
+            })
+            .ok_or_else(crate::player::cancelled_scope_error)?
+    }
+
+    fn evaluate_frame(
+        &mut self,
+        session: &mut crate::player::session::RuntimeSession,
+        frame: EvalFrame,
+    ) -> Option<EvalTurn> {
+        let EvalFrame::Evaluate(expr) = frame else {
+            self.frames.push(frame);
+            return None;
+        };
+        match expr {
+            LingoExpr::SymbolLiteral(name) => {
+                let result = Self::intern(session, self.player_id, &name).and_then(|symbol| {
+                    session.with_player(self.player_id, |context| {
+                        Ok::<_, ScriptError>(context.player.alloc_datum(Datum::Symbol(symbol)))
+                    }).ok_or_else(crate::player::cancelled_scope_error)?
+                });
+                self.values.push(eval_turn_try!(result));
+            }
+            LingoExpr::StringLiteral(value) => {
+                let result = session.with_player(self.player_id, |context| {
+                    Ok::<_, ScriptError>(context.player.alloc_datum(Datum::String(value)))
+                }).ok_or_else(crate::player::cancelled_scope_error).and_then(|result| result);
+                self.values.push(eval_turn_try!(result));
+            }
+            LingoExpr::VoidLiteral | LingoExpr::Pass => self.values.push(DatumRef::Void),
+            LingoExpr::BoolLiteral(value) => {
+                let result = session.with_player(self.player_id, |context| {
+                    Ok::<_, ScriptError>(context.player.alloc_datum(Datum::Int(i32::from(value))))
+                }).ok_or_else(crate::player::cancelled_scope_error).and_then(|result| result);
+                self.values.push(eval_turn_try!(result));
+            }
+            LingoExpr::IntLiteral(value) => {
+                let result = session.with_player(self.player_id, |context| {
+                    Ok::<_, ScriptError>(context.player.alloc_datum(Datum::Int(value)))
+                }).ok_or_else(crate::player::cancelled_scope_error).and_then(|result| result);
+                self.values.push(eval_turn_try!(result));
+            }
+            LingoExpr::FloatLiteral(value) => {
+                let result = session.with_player(self.player_id, |context| {
+                    Ok::<_, ScriptError>(context.player.alloc_datum(Datum::Float(value)))
+                }).ok_or_else(crate::player::cancelled_scope_error).and_then(|result| result);
+                self.values.push(eval_turn_try!(result));
+            }
+            LingoExpr::ColorLiteral(value) => {
+                let result = session.with_player(self.player_id, |context| {
+                    Ok::<_, ScriptError>(context.player.alloc_datum(Datum::ColorRef(value)))
+                }).ok_or_else(crate::player::cancelled_scope_error).and_then(|result| result);
+                self.values.push(eval_turn_try!(result));
+            }
+            LingoExpr::ListLiteral(items) => {
+                let len = items.len();
+                self.frames.push(EvalFrame::ApplyList(len));
+                for item in items.into_iter().rev() { self.frames.push(EvalFrame::Evaluate(item)); }
+            }
+            LingoExpr::PropListLiteral(pairs) => {
+                let len = pairs.len();
+                self.frames.push(EvalFrame::ApplyPropList(len));
+                for (key, value) in pairs.into_iter().rev() {
+                    self.frames.push(EvalFrame::Evaluate(value));
+                    self.frames.push(EvalFrame::Evaluate(key));
+                }
+            }
+            LingoExpr::HandlerCall(name, args) => {
+                let argc = args.len();
+                self.frames.push(EvalFrame::ApplyHandler { name, argc });
+                for arg in args.into_iter().rev() { self.frames.push(EvalFrame::Evaluate(arg)); }
+            }
+            LingoExpr::ObjProp(object, name) => {
+                self.frames.push(EvalFrame::ApplyObjProp(name));
+                self.frames.push(EvalFrame::Evaluate(*object));
+            }
+            LingoExpr::ObjHandlerCall(object, name, args) => {
+                let argc = args.len();
+                self.frames.push(EvalFrame::ApplyObjHandler { name, argc });
+                for arg in args.into_iter().rev() { self.frames.push(EvalFrame::Evaluate(arg)); }
+                self.frames.push(EvalFrame::Evaluate(*object));
+            }
+            LingoExpr::ListAccess(list, index) => {
+                if let LingoExpr::ObjProp(obj, prop_name) = *list {
+                    let prop_lower = prop_name.to_ascii_lowercase();
+                    if matches!(prop_lower.as_str(), "line" | "item" | "word" | "char") {
+                        let target = LingoExpr::ListAccess(
+                            Box::new(LingoExpr::ObjProp(obj.clone(), prop_name.clone())),
+                            index.clone(),
+                        );
+                        self.frames.push(EvalFrame::ApplyChunkAccess { property: prop_lower, target });
+                        self.frames.push(EvalFrame::Evaluate(*index));
+                        self.frames.push(EvalFrame::Evaluate(*obj));
+                    } else {
+                        self.frames.push(EvalFrame::ApplyListAccess);
+                        self.frames.push(EvalFrame::Evaluate(*index));
+                        self.frames.push(EvalFrame::Evaluate(LingoExpr::ObjProp(obj, prop_name)));
+                    }
+                } else {
+                    self.frames.push(EvalFrame::ApplyListAccess);
+                    self.frames.push(EvalFrame::Evaluate(*index));
+                    self.frames.push(EvalFrame::Evaluate(*list));
+                }
+            }
+            LingoExpr::Assignment(left, right) => {
+                self.frames.push(EvalFrame::ApplyAssignment(*left));
+                self.frames.push(EvalFrame::Evaluate(*right));
+            }
+            LingoExpr::Add(a,b) => self.push_binary(EvalBinary::Add, *a, *b),
+            LingoExpr::Subtract(a,b) => self.push_binary(EvalBinary::Subtract, *a, *b),
+            LingoExpr::Multiply(a,b) => self.push_binary(EvalBinary::Multiply, *a, *b),
+            LingoExpr::Divide(a,b) => self.push_binary(EvalBinary::Divide, *a, *b),
+            LingoExpr::Modulo(a,b) => self.push_binary(EvalBinary::Modulo, *a, *b),
+            LingoExpr::Join(a,b) => self.push_binary(EvalBinary::Join(false), *a, *b),
+            LingoExpr::JoinPad(a,b) => self.push_binary(EvalBinary::Join(true), *a, *b),
+            LingoExpr::Eq(a,b) => self.push_binary(EvalBinary::Eq, *a, *b),
+            LingoExpr::Ne(a,b) => self.push_binary(EvalBinary::Ne, *a, *b),
+            LingoExpr::Lt(a,b) => self.push_binary(EvalBinary::Lt, *a, *b),
+            LingoExpr::Gt(a,b) => self.push_binary(EvalBinary::Gt, *a, *b),
+            LingoExpr::Le(a,b) => self.push_binary(EvalBinary::Le, *a, *b),
+            LingoExpr::Ge(a,b) => self.push_binary(EvalBinary::Ge, *a, *b),
+            LingoExpr::And(a,b) => self.push_binary(EvalBinary::And, *a, *b),
+            LingoExpr::Or(a,b) => self.push_binary(EvalBinary::Or, *a, *b),
+            LingoExpr::Not(value) => { self.frames.push(EvalFrame::ApplyNot); self.frames.push(EvalFrame::Evaluate(*value)); }
+            LingoExpr::PutInto(value, target) => self.push_put(0, *value, *target),
+            LingoExpr::PutBefore(value, target) => self.push_put(1, *value, *target),
+            LingoExpr::PutAfter(value, target) => self.push_put(2, *value, *target),
+            LingoExpr::PutDisplay(value) => self.push_put(3, *value, LingoExpr::VoidLiteral),
+            LingoExpr::ChunkExpr(kind, index, end, source) => {
+                self.frames.push(EvalFrame::ApplyChunk { chunk_type: kind, has_end: end.is_some() });
+                if let Some(end) = end {
+                    self.frames.push(EvalFrame::ConvertEnd);
+                    self.frames.push(EvalFrame::Evaluate(*end));
+                }
+                self.frames.push(EvalFrame::ConvertIndex);
+                self.frames.push(EvalFrame::Evaluate(*index));
+                self.frames.push(EvalFrame::ApplyChunkSource);
+                self.frames.push(EvalFrame::Evaluate(*source));
+            }
+            LingoExpr::DeleteChunk(chunk) => if let LingoExpr::ChunkExpr(kind,index,end,source)=*chunk {
+                let source_expr = *source;
+                self.frames.push(EvalFrame::ApplyDeleteChunk { chunk_type: kind, has_end:end.is_some(), source:source_expr.clone() });
+                self.frames.push(EvalFrame::ReadChunkSource(source_expr));
+                if let Some(end)=end { self.frames.push(EvalFrame::ConvertEnd); self.frames.push(EvalFrame::Evaluate(*end)); }
+                self.frames.push(EvalFrame::ConvertIndex);
+                self.frames.push(EvalFrame::Evaluate(*index));
+            } else { return Some(EvalTurn::Complete(Err(ScriptError::new("Expected chunk expression after delete".to_owned())))); },
+            LingoExpr::ThePropOf(object,name) => {
+                let compound = name == "number" || name == "count";
+                match (*object, compound) {
+                    (LingoExpr::ObjProp(inner_object, inner_property), true) => {
+                        self.frames.push(EvalFrame::ApplyObjProp(format!("{} of {}", name, inner_property)));
+                        self.frames.push(EvalFrame::Evaluate(*inner_object));
+                    }
+                    (object, _) => {
+                        self.frames.push(EvalFrame::ApplyObjProp(name));
+                        self.frames.push(EvalFrame::Evaluate(object));
+                    }
+                }
+            }
+            LingoExpr::RectLiteral(values) => {
+                if values.len()!=1 { return Some(EvalTurn::Complete(Err(ScriptError::new("RectLiteral must have 1 tuple of 4 elements".to_owned())))); }
+                let (a,b,c,d)=values.into_iter().next().unwrap(); self.frames.push(EvalFrame::ApplyRect);
+                self.frames.extend([EvalFrame::Evaluate(d),EvalFrame::Evaluate(c),EvalFrame::Evaluate(b),EvalFrame::Evaluate(a)]);
+            }
+            LingoExpr::PointLiteral(values) => {
+                if values.len()!=1 { return Some(EvalTurn::Complete(Err(ScriptError::new("PointLiteral must have 1 tuple of 2 elements".to_owned())))); }
+                let (a,b)=values.into_iter().next().unwrap(); self.frames.push(EvalFrame::ApplyPoint);
+                self.frames.extend([EvalFrame::Evaluate(b),EvalFrame::Evaluate(a)]);
+            }
+            LingoExpr::MemberRef(member,cast) => {
+                let has_cast=cast.is_some(); self.frames.push(EvalFrame::ApplyMember{has_cast});
+                if let Some(cast)=cast { self.frames.push(EvalFrame::Evaluate(*cast)); }
+                self.frames.push(EvalFrame::Evaluate(*member));
+            }
+            LingoExpr::IfThen(cond,body) => { self.frames.push(EvalFrame::ApplyIf{body:*body}); self.frames.push(EvalFrame::Evaluate(*cond)); }
+            LingoExpr::Identifier(name) => {
+                let result=session.with_player(self.player_id, |context| get_eval_top_level_prop(context.player,context.symbols,&name)).ok_or_else(crate::player::cancelled_scope_error).and_then(|result| result);
+                let value = eval_turn_try!(result);
+                self.values.push(eval_turn_try!(Self::validate_ref(session, self.player_id, &value)));
+            }
+        }
+        None
+    }
+
+    fn push_binary(&mut self, op: EvalBinary, left: LingoExpr, right: LingoExpr) {
+        self.frames.push(EvalFrame::ApplyBinary(op));
+        self.frames.push(EvalFrame::Evaluate(right));
+        self.frames.push(EvalFrame::Evaluate(left));
+    }
+    fn push_put(&mut self, kind:u8, value:LingoExpr, target:LingoExpr) {
+        self.frames.push(EvalFrame::ApplyPut{kind,target});
+        self.frames.push(EvalFrame::Evaluate(value));
+    }
+
+    fn set_indexed_value(
+        player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
+        list: &DatumRef,
+        index: &DatumRef,
+        value: &DatumRef,
+    ) -> Result<DatumRef, ScriptError> {
+        let index_datum = player.get_datum(index).clone();
+        match player.get_datum(list) {
+            Datum::List(..) => {
+                let i = index_datum.int_value()?;
+                let i = if i >= 1 { (i - 1) as usize } else { 0 };
+                let (_, items, _) = player.get_datum_mut(list).to_list_mut()?;
+                if i >= items.len() { return Err(ScriptError::new(format!("List index {} out of bounds (list has {} items)", i + 1, items.len()))); }
+                items[i] = value.clone();
+            }
+            Datum::PropList(..) => PropListUtils::set_at(player, symbols, list, index, value)?,
+            Datum::Point(..) => {
+                let i = index_datum.int_value()?;
+                let i = if i >= 1 { (i - 1) as usize } else { 0 };
+                if i >= 2 { return Err(ScriptError::new(format!("Point index {} out of bounds", i + 1))); }
+                let (val, is_float) = Datum::datum_to_inline_component(player.get_datum(value))?;
+                let (vals, flags) = player.get_datum_mut(list).to_point_inline_mut()?;
+                vals[i] = val; Datum::inline_set_float(flags, i, is_float);
+            }
+            Datum::Rect(..) => {
+                let i = index_datum.int_value()?;
+                let i = if i >= 1 { (i - 1) as usize } else { 0 };
+                if i >= 4 { return Err(ScriptError::new(format!("Rect index {} out of bounds", i + 1))); }
+                let (val, is_float) = Datum::datum_to_inline_component(player.get_datum(value))?;
+                let (vals, flags) = player.get_datum_mut(list).to_rect_inline_mut()?;
+                vals[i] = val; Datum::inline_set_float(flags, i, is_float);
+            }
+            datum => return Err(ScriptError::new(format!("Cannot assign to index of type: {}", datum.type_str()))),
+        }
+        Ok(value.clone())
+    }
+
+    fn get_indexed_value(
+        player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
+        list: &DatumRef,
+        index: &DatumRef,
+    ) -> Result<DatumRef, ScriptError> {
+        match player.get_datum(list) {
+            Datum::List(_, items, _) => {
+                let i = player.get_datum(index).int_value()?;
+                if i < 1 || i as usize > items.len() {
+                    Err(ScriptError::new(format!("List index {} out of bounds (list has {} items)", i, items.len())))
+                } else { Ok(items[(i - 1) as usize].clone()) }
+            }
+            Datum::PropList(pairs, sorted) => PropListUtils::get_at(pairs, index, &player.allocator, symbols, *sorted),
+            Datum::Point(vals, flags) => {
+                let i = player.get_datum(index).int_value()?;
+                if !(1..=2).contains(&i) { return Err(ScriptError::new(format!("Point index {} out of bounds (must be 1 or 2)", i))); }
+                let i = (i - 1) as usize;
+                Ok(player.alloc_datum(Datum::inline_component_to_datum(vals[i], Datum::inline_is_float(*flags, i))))
+            }
+            Datum::Rect(vals, flags) => {
+                let i = player.get_datum(index).int_value()?;
+                if !(1..=4).contains(&i) { return Err(ScriptError::new(format!("Rect index {} out of bounds (must be 1-4)", i))); }
+                let i = (i - 1) as usize;
+                Ok(player.alloc_datum(Datum::inline_component_to_datum(vals[i], Datum::inline_is_float(*flags, i))))
+            }
+            Datum::String(value) => {
+                let i = player.get_datum(index).int_value()?;
+                if i < 1 || i as usize > value.chars().count() { Ok(player.alloc_datum(Datum::String(String::new()))) }
+                else { Ok(player.alloc_datum(Datum::String(value.chars().nth((i - 1) as usize).unwrap().to_string()))) }
+            }
+            Datum::SpriteRef(sprite_number) => {
+                let prop_name = match player.get_datum(index) {
+                    Datum::Symbol(name) => symbols.display(name).map_err(|_| ScriptError::new_code(crate::player::ScriptErrorCode::InvalidReference, "foreign symbol".to_owned()))?.to_owned(),
+                    Datum::String(name) => name.clone(),
+                    other => return Err(ScriptError::new(format!("Cannot index sprite {} with {}", sprite_number, other.type_str()))),
+                };
+                let prop_symbol = symbols.intern(&prop_name);
+                let result = crate::player::score::sprite_get_prop(player, symbols, *sprite_number, prop_symbol)?;
+                Ok(player.last_sprite_prop_ref.take().unwrap_or_else(|| player.alloc_datum(result)))
+            }
+            datum => Err(ScriptError::new(format!("Cannot index non-list type: {:?}", datum.type_enum()))),
+        }
+    }
+
+    fn schedule_chunk_fallback(&mut self, target: LingoExpr) {
+        if let LingoExpr::ListAccess(list, index) = target {
+            self.frames.push(EvalFrame::ApplyListAccess);
+            self.frames.push(EvalFrame::Evaluate(*index));
+            self.frames.push(EvalFrame::Evaluate(*list));
+        } else {
+            self.frames.push(EvalFrame::Evaluate(target));
+        }
+    }
+
+    fn apply_frame(&mut self, session:&mut crate::player::session::RuntimeSession, frame:EvalFrame) -> Option<EvalTurn> {
+        match frame {
+            EvalFrame::Evaluate(expr) => self.frames.push(EvalFrame::Evaluate(expr)),
+            EvalFrame::ApplyList(count) => {
+                let items=match self.pop_values(count){Ok(v)=>v,Err(e)=>return Some(EvalTurn::Complete(Err(e)))};
+                let result=session.with_player(self.player_id,|context| Ok::<_,ScriptError>(context.player.alloc_datum(Datum::List(DatumType::List,items.into_iter().collect(),false)))).ok_or_else(crate::player::cancelled_scope_error).and_then(|result| result);
+                self.values.push(eval_turn_try!(result));
+            }
+            EvalFrame::ApplyPropList(count) => {
+                let vals=match self.pop_values(count*2){Ok(v)=>v,Err(e)=>return Some(EvalTurn::Complete(Err(e)))};
+                let pairs=vals.chunks_exact(2).map(|v|(v[0].clone(),v[1].clone())).collect();
+                let result=session.with_player(self.player_id,|context| Ok::<_,ScriptError>(context.player.alloc_datum(Datum::PropList(pairs,false)))).ok_or_else(crate::player::cancelled_scope_error).and_then(|result| result);
+                self.values.push(eval_turn_try!(result));
+            }
+            EvalFrame::ApplyNot => { let v=eval_turn_try!(self.pop_value()); let result=session.with_player(self.player_id,|context| {let n=context.player.get_datum(&v).int_value()?; Ok::<_,ScriptError>(context.player.alloc_datum(Datum::Int(i32::from(n==0))))}).ok_or_else(crate::player::cancelled_scope_error).and_then(|result| result); self.values.push(eval_turn_try!(result)); }
+            EvalFrame::ApplyBinary(op) => {
+                let args=match self.pop_values(2){Ok(v)=>v,Err(e)=>return Some(EvalTurn::Complete(Err(e)))}; let l=args[0].clone();let r=args[1].clone();
+                let result=session.with_player(self.player_id,|context| {
+                    let p=context.player; let ld=p.get_datum(&l);let rd=p.get_datum(&r);
+                    let d=match op { EvalBinary::Add=>add_datums(ld.clone(),rd.clone(),p,context.symbols)?, EvalBinary::Subtract=>subtract_datums(ld.clone(),rd.clone(),p,context.symbols)?, EvalBinary::Multiply=>multiply_datums(l.clone(),r.clone(),p,context.symbols)?, EvalBinary::Divide=>divide_datums(l.clone(),r.clone(),p,context.symbols)?, EvalBinary::Modulo=>crate::player::bytecode::arithmetics::ArithmeticsBytecodeHandler::modulo_datums(&l,&r,p,context.symbols)?, EvalBinary::Join(pad)=>return StringBytecodeHandler::concat_datums(l,r,p,context.symbols,pad), EvalBinary::Eq=>Datum::Int(i32::from(crate::player::compare::datum_equals(ld,rd,&p.allocator,context.symbols)?)), EvalBinary::Ne=>Datum::Int(i32::from(!crate::player::compare::datum_equals(ld,rd,&p.allocator,context.symbols)?)), EvalBinary::Lt=>Datum::Int(i32::from(crate::player::compare::datum_less_than(ld,rd,&p.allocator,context.symbols)?)), EvalBinary::Gt=>Datum::Int(i32::from(crate::player::compare::datum_greater_than(ld,rd,&p.allocator,context.symbols)?)), EvalBinary::Le=>Datum::Int(i32::from({let e=crate::player::compare::datum_equals(ld,rd,&p.allocator,context.symbols)?;let l=crate::player::compare::datum_less_than(ld,rd,&p.allocator,context.symbols)?;e||l})), EvalBinary::Ge=>Datum::Int(i32::from({let e=crate::player::compare::datum_equals(ld,rd,&p.allocator,context.symbols)?;let g=crate::player::compare::datum_greater_than(ld,rd,&p.allocator,context.symbols)?;e||g})), EvalBinary::And=>{let left=ld.int_value()?;let right=rd.int_value()?;Datum::Int(i32::from(left!=0 && right!=0))}, EvalBinary::Or=>{let left=ld.int_value()?;let right=rd.int_value()?;Datum::Int(i32::from(left!=0 || right!=0))}}; Ok::<_,ScriptError>(p.alloc_datum(d))
+                }).ok_or_else(crate::player::cancelled_scope_error).and_then(|result| result);
+                self.values.push(eval_turn_try!(result));
+            }
+            EvalFrame::ApplyObjProp(name) => {
+                let object = eval_turn_try!(self.pop_value());
+                let result = session.with_player(self.player_id, |context| {
+                    let symbol = context.symbols.intern(&name);
+                    get_obj_prop(context.player, context.symbols, &object, symbol)
+                }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r);
+                let result = eval_turn_try!(result);
+                self.values.push(eval_turn_try!(Self::validate_ref(session, self.player_id, &result)));
+            }
+            EvalFrame::ApplyHandler{name,argc} => {
+                let args=match self.pop_values(argc){Ok(v)=>v,Err(e)=>return Some(EvalTurn::Complete(Err(e)))}; let symbol=match Self::intern(session,self.player_id,&name){Ok(s)=>s,Err(e)=>return Some(EvalTurn::Complete(Err(e)))};
+                let receiver = match session.with_player(self.player_id, |context| {
+                    if context.player.current_breakpoint.is_none() || context.player.scope_count == 0 {
+                        return Ok::<_, ScriptError>(None);
+                    }
+                    let scope_idx = context.player.eval_scope_index
+                        .unwrap_or(context.player.scope_count - 1) as usize;
+                    let Some(scope) = context.player.scopes.get(scope_idx) else { return Ok(None); };
+                    let Some(receiver_ref) = scope.receiver.clone() else { return Ok(None); };
+                    let script_ref = scope.script_ref.clone();
+                    let Some(script) = context.player.movie.cast_manager.get_script_by_ref(&script_ref) else { return Ok(None); };
+                    if script.get_own_handler(symbol.clone()).is_some() {
+                        Ok(Some(context.player.alloc_datum(Datum::ScriptInstanceRef(receiver_ref))))
+                    } else { Ok(None) }
+                }).ok_or_else(crate::player::cancelled_scope_error).and_then(|result| result) {
+                    Ok(value) => value,
+                    Err(error) => return Some(EvalTurn::Complete(Err(error))),
+                };
+                if let Some(receiver) = receiver {
+                    let capability = self.new_action(false);
+                    return Some(EvalTurn::Pending { request: EvalPending::Object {
+                        capability,
+                        request: crate::player::driver::InternalVmRequest::Object { receiver, name: symbol.clone(), args },
+                        reason: None,
+                    }});
+                }
+                match session.dispatch_global(self.player_id,&symbol,&args) {
+                    Ok(crate::player::driver::GlobalDispatch::SyncResult(result)) => {
+                        let result = eval_turn_try!(result);
+                        self.values.push(eval_turn_try!(Self::validate_ref(session, self.player_id, &result)));
+                    },
+                    Ok(crate::player::driver::GlobalDispatch::Child { receiver, handler_ref }) => {
+                        let capability = self.new_action(false);
+                        return Some(EvalTurn::Pending { request: EvalPending::Global {
+                            capability,
+                            request: crate::player::driver::InternalVmRequest::Global { name: symbol, args: args.clone() },
+                            reason: None,
+                            prepared_child: Some(crate::player::eval::PreparedGlobal::Child {
+                                receiver,
+                                handler_ref,
+                                args: args.clone(),
+                                use_raw_arg_list: true,
+                                completion: None,
+                            }),
+                        }});
+                    }
+                    Ok(crate::player::driver::GlobalDispatch::ChildPrepared { receiver, handler_ref, args: prepared_args }) => {
+                        let capability = self.new_action(false);
+                        return Some(EvalTurn::Pending { request: EvalPending::Global {
+                            capability,
+                            request: crate::player::driver::InternalVmRequest::Global { name: symbol, args: args.clone() },
+                            reason: None,
+                            prepared_child: Some(crate::player::eval::PreparedGlobal::Child {
+                                receiver,
+                                handler_ref,
+                                args: prepared_args,
+                                use_raw_arg_list: false,
+                                completion: None,
+                            }),
+                        }});
+                    }
+                    Ok(crate::player::driver::GlobalDispatch::ChildWithCompletion {
+                        receiver,
+                        handler_ref,
+                        args: prepared_args,
+                        completion,
+                    }) => {
+                        let capability = self.new_action(false);
+                        return Some(EvalTurn::Pending { request: EvalPending::Global {
+                            capability,
+                            request: crate::player::driver::InternalVmRequest::Global { name: symbol, args },
+                            reason: None,
+                            prepared_child: Some(crate::player::eval::PreparedGlobal::Child {
+                                receiver,
+                                handler_ref,
+                                args: prepared_args,
+                                use_raw_arg_list: false,
+                                completion: Some(completion),
+                            }),
+                        }});
+                    }
+                    Ok(crate::player::driver::GlobalDispatch::AncestorChildren { calls }) => {
+                        let capability = self.new_action(false);
+                        return Some(EvalTurn::Pending { request: EvalPending::Global {
+                            capability,
+                            request: crate::player::driver::InternalVmRequest::Global { name: symbol, args },
+                            reason: None,
+                            prepared_child: Some(crate::player::eval::PreparedGlobal::Ancestors { calls }),
+                        }});
+                    }
+                    Ok(crate::player::driver::GlobalDispatch::ChildSequence { plan }) => {
+                        let capability = self.new_action(false);
+                        return Some(EvalTurn::Pending { request: EvalPending::Global {
+                            capability,
+                            request: crate::player::driver::InternalVmRequest::Global { name: symbol, args },
+                            reason: None,
+                            prepared_child: Some(crate::player::eval::PreparedGlobal::Broadcast { plan }),
+                        }});
+                    }
+                    Ok(crate::player::driver::GlobalDispatch::PendingRequest { request, reason }) => {
+                        let capability = self.new_action(false);
+                        return Some(EvalTurn::Pending { request: EvalPending::Global {
+                            capability,
+                            request,
+                            reason: Some(reason),
+                            prepared_child: None,
+                        }});
+                    }
+                    Ok(crate::player::driver::GlobalDispatch::Pending { reason }) => {
+                        let capability = self.new_action(false);
+                        return Some(EvalTurn::Pending { request: EvalPending::Global {
+                            capability,
+                            request: crate::player::driver::InternalVmRequest::Global { name: symbol, args },
+                            reason: Some(reason),
+                            prepared_child: None,
+                        }});
+                    }
+                    Err(e) => return Some(EvalTurn::Complete(Err(e))),
+                }
+            }
+            EvalFrame::ApplyObjHandler{name,argc} => {
+                let args=match self.pop_values(argc){Ok(v)=>v,Err(e)=>return Some(EvalTurn::Complete(Err(e)))}; let receiver=match self.pop_value(){Ok(v)=>v,Err(e)=>return Some(EvalTurn::Complete(Err(e)))}; let symbol=match Self::intern(session,self.player_id,&name){Ok(s)=>s,Err(e)=>return Some(EvalTurn::Complete(Err(e)))};
+                let capability = self.new_action(false);
+                return Some(EvalTurn::Pending{request:EvalPending::Object{capability,request:crate::player::driver::InternalVmRequest::Object{receiver,name:symbol,args},reason:None}});
+            }
+            EvalFrame::ApplyListAccess => {
+                let index=eval_turn_try!(self.pop_value());let list=eval_turn_try!(self.pop_value());
+                eval_turn_try!(Self::validate_ref(session, self.player_id, &index));
+                eval_turn_try!(Self::validate_ref(session, self.player_id, &list));
+                let result = session.with_player(self.player_id, |context| {
+                    let p = context.player;
+                    match p.get_datum(&list) {
+                        Datum::List(_, items, _) => {
+                            let i = p.get_datum(&index).int_value()?;
+                            if i < 1 || i as usize > items.len() {
+                                Err(ScriptError::new(format!("List index {} out of bounds (list has {} items)", i, items.len())))
+                            } else {
+                                Ok(items[(i - 1) as usize].clone())
+                            }
+                        }
+                        Datum::PropList(pairs, sorted) => PropListUtils::get_at(
+                            pairs, &index, &p.allocator, context.symbols, *sorted,
+                        ),
+                        Datum::Point(vals, flags) => {
+                            let i = p.get_datum(&index).int_value()?;
+                            if !(1..=2).contains(&i) { return Err(ScriptError::new(format!("Point index {} out of bounds (must be 1 or 2)", i))); }
+                            let i = (i - 1) as usize;
+                            Ok(p.alloc_datum(Datum::inline_component_to_datum(vals[i], Datum::inline_is_float(*flags, i))))
+                        }
+                        Datum::Rect(vals, flags) => {
+                            let i = p.get_datum(&index).int_value()?;
+                            if !(1..=4).contains(&i) { return Err(ScriptError::new(format!("Rect index {} out of bounds (must be 1-4)", i))); }
+                            let i = (i - 1) as usize;
+                            Ok(p.alloc_datum(Datum::inline_component_to_datum(vals[i], Datum::inline_is_float(*flags, i))))
+                        }
+                        Datum::String(value) => {
+                            let i = p.get_datum(&index).int_value()?;
+                            if i < 1 || i as usize > value.chars().count() { Ok(p.alloc_datum(Datum::String(String::new()))) }
+                            else { Ok(p.alloc_datum(Datum::String(value.chars().nth((i - 1) as usize).unwrap().to_string()))) }
+                        }
+                        Datum::SpriteRef(sprite_number) => {
+                            let prop_name = match p.get_datum(&index) {
+                                Datum::Symbol(name) => context.symbols.display(name).map_err(|_| ScriptError::new_code(crate::player::ScriptErrorCode::InvalidReference, "foreign symbol".to_owned()))?.to_owned(),
+                                Datum::String(name) => name.clone(),
+                                other => return Err(ScriptError::new(format!("Cannot index sprite {} with {}", sprite_number, other.type_str()))),
+                            };
+                            let prop_symbol = context.symbols.intern(&prop_name);
+                            let result = crate::player::score::sprite_get_prop(p, context.symbols, *sprite_number, prop_symbol)?;
+                            Ok(p.last_sprite_prop_ref.take().unwrap_or_else(|| p.alloc_datum(result)))
+                        }
+                        _ => Err(ScriptError::new("cannot index value".to_owned())),
+                    }
+                }).ok_or_else(crate::player::cancelled_scope_error).and_then(|result| result);
+                let result = eval_turn_try!(result);
+                self.values.push(eval_turn_try!(Self::validate_ref(session, self.player_id, &result)));
+            }
+            EvalFrame::ApplyChunkAccess { property: prop_name, target } => {
+                let index = eval_turn_try!(self.pop_value());
+                let object = eval_turn_try!(self.pop_value());
+                eval_turn_try!(Self::validate_ref(session, self.player_id, &index));
+                eval_turn_try!(Self::validate_ref(session, self.player_id, &object));
+                let result = session.with_player(self.player_id, |context| {
+                    let p = context.player;
+                    let i = p.get_datum(&index).int_value()?;
+                    let prop_symbol = context.symbols.intern(&prop_name);
+                    match p.get_datum(&object).clone() {
+                        Datum::String(_) => Ok(Some(p.alloc_datum(
+                            crate::player::handlers::datum_handlers::string::StringDatumUtils::get_prop_ref(
+                                p, context.symbols, &object, prop_symbol, i, i,
+                            )?,
+                        ))),
+                        Datum::CastMember(member_ref) => {
+                            let Some(text) = p.movie.cast_manager.find_member_by_ref(&member_ref)
+                                .and_then(|member| match &member.member_type {
+                                    crate::player::cast_member::CastMemberType::Field(field) => Some(field.text.clone()),
+                                    crate::player::cast_member::CastMemberType::Text(text) => Some(text.text.clone()),
+                                    _ => None,
+                                }) else { return Ok(None) };
+                            let chunk_type = StringChunkType::from_symbol(&prop_symbol, context.symbols)?;
+                            let chunk = StringChunkExpr { chunk_type, start: i, end: i, item_delimiter: p.movie.item_delimiter };
+                            let resolved = StringChunkUtils::resolve_chunk_expr_string(&text, &chunk)?;
+                            Ok(Some(p.alloc_datum(Datum::StringChunk(
+                                crate::director::lingo::datum::StringChunkSource::Member(member_ref), chunk, resolved,
+                            ))))
+                        }
+                        Datum::StringChunk(..) => {
+                            let text = p.get_datum(&object).string_value(context.symbols)?;
+                            let chunk_type = StringChunkType::from_symbol(&prop_symbol, context.symbols)?;
+                            let chunk = StringChunkExpr { chunk_type, start: i, end: i, item_delimiter: p.movie.item_delimiter };
+                            let resolved = StringChunkUtils::resolve_chunk_expr_string(&text, &chunk)?;
+                            Ok(Some(p.alloc_datum(Datum::StringChunk(
+                                crate::director::lingo::datum::StringChunkSource::Datum(object), chunk, resolved,
+                            ))))
+                        }
+                        _ => Ok(None),
+                    }
+                }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r);
+                let result = eval_turn_try!(result);
+                if let Some(value) = result {
+                    self.values.push(eval_turn_try!(Self::validate_ref(session, self.player_id, &value)));
+                } else {
+                    self.schedule_chunk_fallback(target);
+                }
+            }
+            EvalFrame::ApplyAssignment(target) => { let value=eval_turn_try!(self.pop_value()); match target {LingoExpr::Identifier(name)=>{let result=session.with_player(self.player_id,|context|{let p=context.player;if name.starts_with("the "){let sym=context.symbols.intern(&name[4..]);p.set_movie_prop(context.symbols,sym,p.get_datum(&value).clone())?;}else if let Some(receiver)=current_do_receiver_with_prop(p,context.symbols,&name)?{let sym=context.symbols.intern(&name);script_set_prop(p,context.symbols,&receiver,sym,&value,true)?;}else{let sym=context.symbols.intern(&name);p.globals.insert(sym,value.clone());}Ok::<_,ScriptError>(value)}).ok_or_else(crate::player::cancelled_scope_error).and_then(|result| result);self.values.push(eval_turn_try!(result));},LingoExpr::ObjProp(object,name)|LingoExpr::ThePropOf(object,name)=>{self.frames.push(EvalFrame::ApplySetProperty(name));self.frames.push(EvalFrame::Evaluate(*object));self.values.push(value);},LingoExpr::ListAccess(list,index)=>{
+                            if let LingoExpr::ObjProp(object, property) = list.as_ref() {
+                                let target = LingoExpr::ListAccess(
+                                    Box::new(LingoExpr::ObjProp(object.clone(), property.clone())),
+                                    index.clone(),
+                                );
+                                self.frames.push(EvalFrame::ProbeIndexedAssignment { value, target });
+                                self.frames.push(EvalFrame::Evaluate((**object).clone()));
+                            } else {
+                                self.frames.push(EvalFrame::ApplyIndexedAssignment { value, property: None });
+                                self.frames.push(EvalFrame::Evaluate(*index));
+                                self.frames.push(EvalFrame::Evaluate(*list));
+                            }
+                        },_=>return Some(EvalTurn::Complete(Err(ScriptError::new("invalid assignment target".to_owned()))))} }
+            EvalFrame::ProbeIndexedAssignment { value, target } => {
+                let object = eval_turn_try!(self.pop_value());
+                eval_turn_try!(Self::validate_ref(session, self.player_id, &object));
+                let LingoExpr::ListAccess(list, index) = target else {
+                    return Some(EvalTurn::Complete(Err(ScriptError::new("invalid indexed assignment probe".to_owned()))));
+                };
+                let LingoExpr::ObjProp(_, property) = list.as_ref() else {
+                    return Some(EvalTurn::Complete(Err(ScriptError::new("invalid indexed assignment probe".to_owned()))));
+                };
+                let is_s3d = eval_turn_try!(session.with_player(self.player_id, |context| {
+                    Ok::<_, ScriptError>(matches!(context.player.get_datum(&object), Datum::Shockwave3dObjectRef(_)))
+                }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r));
+                if is_s3d {
+                    self.values.push(object);
+                    self.frames.push(EvalFrame::ApplyIndexedAssignment { value, property: Some(property.clone()) });
+                    self.frames.push(EvalFrame::Evaluate(*index));
+                } else {
+                    self.frames.push(EvalFrame::ApplyIndexedAssignment { value, property: None });
+                    self.frames.push(EvalFrame::Evaluate(*index));
+                    self.frames.push(EvalFrame::Evaluate(*list));
+                }
+            }
+            EvalFrame::ApplyIndexedAssignment { value, property } => {
+                let index = eval_turn_try!(self.pop_value());
+                let container = eval_turn_try!(self.pop_value());
+                eval_turn_try!(Self::validate_ref(session, self.player_id, &index));
+                eval_turn_try!(Self::validate_ref(session, self.player_id, &container));
+                eval_turn_try!(Self::validate_ref(session, self.player_id, &value));
+                if let Some(property) = property {
+                    let is_s3d = session.with_player(self.player_id, |context| {
+                        Ok::<_, ScriptError>(matches!(context.player.get_datum(&container), Datum::Shockwave3dObjectRef(_)))
+                    }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r);
+                    if eval_turn_try!(is_s3d) {
+                        let (property_ref, set_at) = match session.with_player(self.player_id, |context| {
+                            let property_ref = context.player.alloc_datum(Datum::Symbol(context.symbols.intern(&property)));
+                            Ok::<_, ScriptError>((property_ref, Symbol::builtin(BuiltInSymbol::SetAt)))
+                        }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r) {
+                            Ok(v) => v,
+                            Err(error) => return Some(EvalTurn::Complete(Err(error))),
+                        };
+                        self.frames.push(EvalFrame::ApplySetAtResult(value.clone()));
+                        let capability = self.new_action(false);
+                        return Some(EvalTurn::Pending { request: EvalPending::Object {
+                            capability,
+                            request: crate::player::driver::InternalVmRequest::Object {
+                                receiver: container,
+                                name: set_at,
+                                args: vec![property_ref, index, value.clone()],
+                            },
+                            reason: None,
+                        }});
+                    }
+                    let result = session.with_player(self.player_id, |context| {
+                        let symbol = context.symbols.intern(&property);
+                        get_obj_prop(context.player, context.symbols, &container, symbol)
+                    }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r);
+                    let list = eval_turn_try!(result);
+                    let result = session.with_player(self.player_id, |context| {
+                        Self::set_indexed_value(context.player, context.symbols, &list, &index, &value)
+                    }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r);
+                    self.values.push(eval_turn_try!(result));
+                } else {
+                    let result = session.with_player(self.player_id, |context| {
+                        Self::set_indexed_value(context.player, context.symbols, &container, &index, &value)
+                    }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r);
+                    self.values.push(eval_turn_try!(result));
+                }
+            }
+            EvalFrame::ApplySetAtResult(value) => {
+                let _ = eval_turn_try!(self.pop_value());
+                self.values.push(value);
+            }
+            EvalFrame::ApplyPut{kind,target}=>{
+                let value=eval_turn_try!(self.pop_value());
+                if kind==3 {
+                    let result = session.with_player(self.player_id, |mut context| {
+                        crate::player::handlers::manager::BuiltInHandlerManager::put(&mut context, &vec![value])
+                    }).ok_or_else(crate::player::cancelled_scope_error).and_then(|result| result);
+                    self.values.push(eval_turn_try!(result));
+                } else if let LingoExpr::ChunkExpr(chunk_type,index,end,source)=target {
+                    let source_expr=*source;
+                    let apply_target=LingoExpr::ChunkExpr(
+                        chunk_type.clone(), index.clone(), end.clone(),
+                        Box::new(source_expr.clone()),
+                    );
+                    self.frames.push(EvalFrame::ApplyPutChunk{kind,target:apply_target,value:value.clone()});
+                    self.frames.push(EvalFrame::ReadChunkSource(source_expr));
+                    self.frames.push(EvalFrame::FormatPutValue(value));
+                    if let Some(end)=end { self.frames.push(EvalFrame::ConvertEnd); self.frames.push(EvalFrame::Evaluate(*end)); }
+                    self.frames.push(EvalFrame::ConvertIndex);
+                    self.frames.push(EvalFrame::Evaluate(*index));
+                } else if let LingoExpr::Identifier(name)=target {
+                    let result=session.with_player(self.player_id,|context|{
+                        let sym=context.symbols.intern(&name);
+                        if kind == 0 {
+                            context.player.globals.insert(sym, value.clone());
+                        } else {
+                            let old=context.player.globals.get(&sym).cloned().unwrap_or_else(||context.player.alloc_datum(Datum::String(String::new())));
+                            use crate::player::datum_formatting::datum_to_string_for_concat;
+                            let text = if kind == 1 {
+                                let value_text = datum_to_string_for_concat(context.player.get_datum(&value),context.symbols,context.player)?;
+                                let old_text = datum_to_string_for_concat(context.player.get_datum(&old),context.symbols,context.player)?;
+                                format!("{}{}", value_text, old_text)
+                            } else {
+                                let old_text = datum_to_string_for_concat(context.player.get_datum(&old),context.symbols,context.player)?;
+                                let value_text = datum_to_string_for_concat(context.player.get_datum(&value),context.symbols,context.player)?;
+                                format!("{}{}", old_text, value_text)
+                            };
+                            let result_ref = context.player.alloc_datum(Datum::String(text));
+                            context.player.globals.insert(sym, result_ref);
+                        }
+                        Ok::<_,ScriptError>(DatumRef::Void)
+                    }).ok_or_else(crate::player::cancelled_scope_error).and_then(|result| result);self.values.push(eval_turn_try!(result));
+                } else { return Some(EvalTurn::Complete(Err(ScriptError::new("invalid put target".to_owned())))); }
+            }
+            EvalFrame::FormatPutValue(value) => {
+                eval_turn_try!(Self::validate_ref(session, self.player_id, &value));
+                let result = session.with_player(self.player_id, |context| {
+                    use crate::player::datum_formatting::datum_to_string_for_concat;
+                    let text = datum_to_string_for_concat(context.player.get_datum(&value), context.symbols, context.player)?;
+                    Ok::<_, ScriptError>(context.player.alloc_datum(Datum::String(text)))
+                }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r);
+                self.values.push(eval_turn_try!(result));
+            }
+            EvalFrame::ReadChunkSource(source) => {
+                match source {
+                    LingoExpr::Identifier(name) => {
+                        let result = session.with_player(self.player_id, |context| {
+                            let symbol = context.symbols.intern(&name);
+                            Ok::<_, ScriptError>(context.player.globals.get(&symbol).cloned().unwrap_or_else(|| {
+                                context.player.alloc_datum(Datum::String(String::new()))
+                            }))
+                        }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r);
+                        let value = eval_turn_try!(result);
+                        self.values.push(eval_turn_try!(Self::validate_ref(session, self.player_id, &value)));
+                    }
+                    expression => {
+                        self.frames.push(EvalFrame::ReadChunkSourceDone);
+                        self.frames.push(EvalFrame::Evaluate(expression));
+                    }
+                }
+            }
+            EvalFrame::ReadChunkSourceDone => {
+                let value = eval_turn_try!(self.pop_value());
+                self.values.push(eval_turn_try!(Self::validate_ref(session, self.player_id, &value)));
+            }
+            EvalFrame::ConvertIndex => {
+                let input = eval_turn_try!(self.pop_value());
+                eval_turn_try!(Self::validate_ref(session, self.player_id, &input));
+                let result = session.with_player(self.player_id, |context| {
+                    let index = context.player.get_datum(&input).int_value()?;
+                    Ok::<_, ScriptError>(context.player.alloc_datum(Datum::Int(index)))
+                }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r);
+                self.values.push(eval_turn_try!(result));
+            }
+            EvalFrame::ConvertEnd => {
+                let input = eval_turn_try!(self.pop_value());
+                eval_turn_try!(Self::validate_ref(session, self.player_id, &input));
+                let result = session.with_player(self.player_id, |context| {
+                    let end = context.player.get_datum(&input).int_value()?;
+                    Ok::<_, ScriptError>(context.player.alloc_datum(Datum::Int(end)))
+                }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r);
+                self.values.push(eval_turn_try!(result));
+            }
+            EvalFrame::ApplyPutChunk{kind,target,value}=>{
+                let has_end = matches!(&target, LingoExpr::ChunkExpr(_, _, Some(_), _));
+                let source_ref=eval_turn_try!(self.pop_value());
+                let formatted_value=eval_turn_try!(self.pop_value());
+                let end=if has_end { eval_turn_try!(self.pop_value()) } else { DatumRef::Void };
+                let index=eval_turn_try!(self.pop_value());
+                eval_turn_try!(Self::validate_ref(session, self.player_id, &source_ref));
+                eval_turn_try!(Self::validate_ref(session, self.player_id, &value));
+                eval_turn_try!(Self::validate_ref(session, self.player_id, &formatted_value));
+                eval_turn_try!(Self::validate_ref(session, self.player_id, &index));
+                if has_end { eval_turn_try!(Self::validate_ref(session, self.player_id, &end)); }
+                let LingoExpr::ChunkExpr(chunk_type,_,_,source_expr)=target else { unreachable!() };
+                let result=session.with_player(self.player_id,|context|{let p=context.player;let i=p.get_datum(&index).int_value()?;let e=if !matches!(end,DatumRef::Void){p.get_datum(&end).int_value()?}else{i};let text=p.get_datum(&source_ref).string_value(context.symbols)?;let value_text=p.get_datum(&formatted_value).string_value(context.symbols)?;let chunk=StringChunkExpr{chunk_type:StringChunkType::from_symbol(&chunk_type,context.symbols)?,start:i,end:e,item_delimiter:p.movie.item_delimiter};let changed=match kind{0=>StringChunkUtils::string_by_putting_into_chunk(&text,&chunk,&value_text)?,1=>StringChunkUtils::string_by_putting_before_chunk(&text,&chunk,&value_text)?,_=>StringChunkUtils::string_by_putting_after_chunk(&text,&chunk,&value_text)?};write_chunk_source(p,context.symbols,&source_expr,changed);Ok::<_,ScriptError>(DatumRef::Void)}).ok_or_else(crate::player::cancelled_scope_error).and_then(|result|result);self.values.push(eval_turn_try!(result));
+            }
+            EvalFrame::ApplyChunkSource => {
+                let source = eval_turn_try!(self.pop_value());
+                eval_turn_try!(Self::validate_ref(session, self.player_id, &source));
+                let result = session.with_player(self.player_id, |context| {
+                    let text = context.player.get_datum(&source).string_value(context.symbols)?;
+                    Ok::<_, ScriptError>((source, context.player.alloc_datum(Datum::String(text))))
+                }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r);
+                let (source, converted) = eval_turn_try!(result);
+                self.values.push(source);
+                self.values.push(converted);
+            }
+            EvalFrame::ApplyChunk{chunk_type,has_end}=>{
+                let end=if has_end{eval_turn_try!(self.pop_value())}else{DatumRef::Void};
+                let index=eval_turn_try!(self.pop_value());
+                let converted=eval_turn_try!(self.pop_value());
+                let source=eval_turn_try!(self.pop_value());
+                let result=session.with_player(self.player_id,|context|{
+                    let p=context.player;
+                    let i=p.get_datum(&index).int_value()?;
+                    let e=if has_end{p.get_datum(&end).int_value()?}else{i};
+                    let text=p.get_datum(&converted).string_value(context.symbols)?;
+                    let chunk=StringChunkExpr{chunk_type:StringChunkType::from_symbol(&chunk_type,context.symbols)?,start:i,end:e,item_delimiter:p.movie.item_delimiter};
+                    let resolved=StringChunkUtils::resolve_chunk_expr_string(&text,&chunk)?;
+                    let datum=match p.get_datum(&source){
+                        Datum::CastMember(member_ref)=>Datum::StringChunk(crate::director::lingo::datum::StringChunkSource::Member(*member_ref),chunk,resolved),
+                        Datum::StringChunk(..)=>Datum::StringChunk(crate::director::lingo::datum::StringChunkSource::Datum(source.clone()),chunk,resolved),
+                        _=>Datum::String(resolved),
+                    };
+                    Ok::<_,ScriptError>(p.alloc_datum(datum))
+                }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r);
+                let value=eval_turn_try!(result);
+                self.values.push(eval_turn_try!(Self::validate_ref(session,self.player_id,&value)));
+            }
+            EvalFrame::ApplySetProperty(name) => {
+                let receiver = match self.pop_value() { Ok(v) => v, Err(e) => return Some(EvalTurn::Complete(Err(e))) };
+                let value = match self.pop_value() { Ok(v) => v, Err(e) => return Some(EvalTurn::Complete(Err(e))) };
+                eval_turn_try!(Self::validate_ref(session, self.player_id, &receiver));
+                eval_turn_try!(Self::validate_ref(session, self.player_id, &value));
+                let symbol = match Self::intern(session, self.player_id, &name) { Ok(v) => v, Err(e) => return Some(EvalTurn::Complete(Err(e))) };
+                let capability = self.new_action(true);
+                return Some(EvalTurn::Pending { request: EvalPending::SetProperty { capability, request: crate::player::driver::InternalVmRequest::SetProperty { receiver, name: symbol, value } } });
+            }
+            EvalFrame::ApplyRect => {
+                let values=match self.pop_values(4){Ok(v)=>v,Err(e)=>return Some(EvalTurn::Complete(Err(e)))};
+                let result=session.with_player(self.player_id,|context|{let refs=[&values[0],&values[1],&values[2],&values[3]];let d=Datum::build_rect(context.player.get_datum(refs[0]),context.player.get_datum(refs[1]),context.player.get_datum(refs[2]),context.player.get_datum(refs[3]))?;Ok::<_,ScriptError>(context.player.alloc_datum(d))}).ok_or_else(crate::player::cancelled_scope_error).and_then(|result|result);self.values.push(eval_turn_try!(result));
+            }
+            EvalFrame::ApplyPoint => {
+                let values=match self.pop_values(2){Ok(v)=>v,Err(e)=>return Some(EvalTurn::Complete(Err(e)))};
+                let result=session.with_player(self.player_id,|context|{let d=Datum::build_point(context.player.get_datum(&values[0]),context.player.get_datum(&values[1]))?;Ok::<_,ScriptError>(context.player.alloc_datum(d))}).ok_or_else(crate::player::cancelled_scope_error).and_then(|result|result);self.values.push(eval_turn_try!(result));
+            }
+            EvalFrame::ApplyMember{has_cast} => {
+                let cast = if has_cast { Some(eval_turn_try!(self.pop_value())) } else { None };
+                let member = eval_turn_try!(self.pop_value());
+                let result = session.with_player(self.player_id, |context| {
+                    let p = context.player;
+                    let member_datum = p.get_datum(&member).clone();
+                    let cast_datum = cast.as_ref().map(|r| p.get_datum(r).clone());
+                    let found = p.movie.cast_manager.find_member_ref_by_identifiers(
+                        context.symbols, &member_datum, cast_datum.as_ref(), &p.allocator,
+                    )?;
+                    let member_ref = match found {
+                        Some(r) => r,
+                        None => if let Some(cast_datum) = cast_datum {
+                            let cast_lib = match cast_datum {
+                                Datum::Int(number) => number,
+                                Datum::CastLib(number) => number as i32,
+                                Datum::String(name) => p.movie.cast_manager.get_cast_by_name(&name)
+                                    .map(|c| c.number as i32).unwrap_or(0),
+                                datum => return Err(ScriptError::new(format!(
+                                    "Expected int, string, or castLib, got {:?}", datum.type_enum(),
+                                ))),
+                            };
+                            super::cast_lib::CastMemberRef {
+                                cast_lib,
+                                cast_member: member_datum.int_value().unwrap_or(0),
+                            }
+                        } else { INVALID_CAST_MEMBER_REF },
+                    };
+                    Ok::<_, ScriptError>(p.alloc_datum(Datum::CastMember(member_ref)))
+                }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r);
+                let value = eval_turn_try!(result);
+                self.values.push(eval_turn_try!(Self::validate_ref(session, self.player_id, &value)));
+            }
+            EvalFrame::ApplyDeleteChunk{chunk_type,has_end,source} => {
+                let source_ref=eval_turn_try!(self.pop_value());let end=if has_end{eval_turn_try!(self.pop_value())}else{DatumRef::Void};let index=eval_turn_try!(self.pop_value());
+                eval_turn_try!(Self::validate_ref(session, self.player_id, &source_ref));
+                eval_turn_try!(Self::validate_ref(session, self.player_id, &index));
+                if has_end { eval_turn_try!(Self::validate_ref(session, self.player_id, &end)); }
+                let result=session.with_player(self.player_id,|context|{let p=context.player;let i=p.get_datum(&index).int_value()?;let e=if has_end{p.get_datum(&end).int_value()?}else{i};let text=p.get_datum(&source_ref).string_value(context.symbols)?;let chunk=StringChunkExpr{chunk_type:StringChunkType::from_symbol(&chunk_type,context.symbols)?,start:i,end:e,item_delimiter:p.movie.item_delimiter};let new_text=StringChunkUtils::string_by_deleting_chunk(&text,&chunk)?;write_chunk_source(p,context.symbols,&source,new_text);Ok::<_,ScriptError>(DatumRef::Void)}).ok_or_else(crate::player::cancelled_scope_error).and_then(|result|result);self.values.push(eval_turn_try!(result));
+            }
+            EvalFrame::ApplyIf{body}=>{let cond=eval_turn_try!(self.pop_value());let yes=eval_turn_try!(session.with_player(self.player_id,|context|context.player.get_datum(&cond).bool_value()).ok_or_else(crate::player::cancelled_scope_error).and_then(|result| result));if yes{self.frames.push(EvalFrame::Evaluate(body));}else{self.values.push(DatumRef::Void);}}
+        }
+        None
+    }
+
+    fn run_frames(&mut self, session:&mut crate::player::session::RuntimeSession)->EvalTurn {
+        while let Some(frame)=self.frames.pop() {
+            let pending=match frame {EvalFrame::Evaluate(expr)=>self.evaluate_frame(session,EvalFrame::Evaluate(expr)),other=>self.apply_frame(session,other)};
+            if let Some(turn)=pending{return turn;}
+        }
+        EvalTurn::Complete(self.pop_value())
+    }
+}
+
+pub fn eval_lingo_expr_static(
+    expr: String,
+    player: &mut DirPlayer,
+    symbols: &mut SymbolTable,
+) -> Result<DatumRef, ScriptError> {
     let _tokens = tokenize_lingo(&expr);
     match LingoParser::parse(Rule::eval_expr, expr.as_str()) {
         Ok(parse_result) => {
             let expr_pair = &parse_result.enumerate().next().unwrap();
-            eval_lingo_pair_static(expr_pair.1.clone())
+            eval_lingo_pair_static(expr_pair.1.clone(), player, symbols)
         }
         Err(e) => {
             let error_msg = format!("eval_lingo_expr_static parse error: {}", ascii_safe(&e.to_string()));
@@ -2599,12 +3245,16 @@ pub fn eval_lingo_expr_static(expr: String) -> Result<DatumRef, ScriptError> {
 }
 
 /// Like `eval_lingo_expr_static` but does not log errors on parse failure.
-pub fn try_eval_lingo_expr_static(expr: String) -> Result<DatumRef, ScriptError> {
+pub fn try_eval_lingo_expr_static(
+    expr: String,
+    player: &mut DirPlayer,
+    symbols: &mut SymbolTable,
+) -> Result<DatumRef, ScriptError> {
     let _tokens = tokenize_lingo(&expr);
     match LingoParser::parse(Rule::eval_expr, expr.as_str()) {
         Ok(parse_result) => {
             let expr_pair = &parse_result.enumerate().next().unwrap();
-            eval_lingo_pair_static(expr_pair.1.clone())
+            eval_lingo_pair_static(expr_pair.1.clone(), player, symbols)
         }
         Err(e) => {
             Err(ScriptError::new(format!("eval_lingo_expr_static parse error: {}", ascii_safe(&e.to_string()))))
@@ -2633,11 +3283,6 @@ pub fn parse_lingo_expr_ast_runtime(rule: Rule, expr: String) -> Result<LingoExp
     }
 }
 
-pub async fn eval_lingo_expr_runtime(expr: String) -> Result<DatumRef, ScriptError> {
-    let ast = parse_lingo_expr_ast_runtime(Rule::eval_expr, expr)?;
-    eval_lingo_expr_ast_runtime(&ast).await
-}
-
 fn create_lingo_pratt_parser() -> PrattParser<Rule> {
     PrattParser::new()
         .op(Op::infix(Rule::or_op, Assoc::Left))              // Lowest: or
@@ -2661,42 +3306,21 @@ fn create_lingo_pratt_parser() -> PrattParser<Rule> {
             | Op::postfix(Rule::list_index))                  // and [index]
 }
 
-pub async fn eval_lingo_command(expr: String) -> Result<DatumRef, ScriptError> {
-    // Director's runtime text-eval contexts (keyUpScript, mouseUpScript,
-    // timeoutScript, `do "…"`) often contain MULTIPLE statements separated
-    // by CR/LF. The grammar's `command_eval_expr` is `SOI ~ command ~ EOI`
-    // — a single statement — so we split first and evaluate each line as
-    // its own command. Empty lines and `--` comments are skipped.
-    // Returns the result of the LAST executed statement (matches Director
-    // `do` semantics).
-    //
-    // For a single-line input this is a fast path: one alloc + one parse.
-    let lines: Vec<&str> = expr
-        .split(|c| c == '\r' || c == '\n')
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty() && !s.starts_with("--"))
-        .collect();
-    if lines.len() <= 1 {
-        let ast = parse_lingo_expr_ast_runtime(Rule::command_eval_expr, expr)?;
-        return eval_lingo_expr_ast_runtime(&ast).await;
-    }
-    let mut last = DatumRef::Void;
-    for line in lines {
-        let ast = parse_lingo_expr_ast_runtime(Rule::command_eval_expr, line.to_string())?;
-        last = eval_lingo_expr_ast_runtime(&ast).await?;
-    }
-    Ok(last)
-}
-
 // Helper functions for testing config parsing without requiring player instance
 /// Parse a config value to check if it's valid Lingo syntax
 /// Returns Ok if the value can be parsed, Err with parse error message if not
 pub fn test_parse_lingo_value(value_str: &str) -> Result<(), String> {
+    validate_lingo_expr_syntax(value_str)
+}
+
+/// Validate expression syntax without allocating a player, symbol table, or
+/// runtime datum. File parsers use this boundary for values that are only
+/// materialized once an owning runtime context exists.
+pub fn validate_lingo_expr_syntax(value_str: &str) -> Result<(), String> {
     LingoParser::parse(Rule::eval_expr, value_str)
         .map(|_| ())
         .map_err(|e| format!("{}", e))
 }
-
 /// Parse a config key to check if it's valid
 /// Returns Ok if the key can be parsed, Err with parse error message if not
 pub fn test_parse_config_key(key_str: &str) -> Result<(), String> {
@@ -2705,5 +3329,534 @@ pub fn test_parse_config_key(key_str: &str) -> Result<(), String> {
         .map_err(|e| format!("{}", e))
 }
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use crate::player::ownership::OwnerToken;
+    use async_std::channel;
 
+    fn test_session() -> crate::player::session::RuntimeSession {
+        let mut session = crate::player::session::RuntimeSession::new(
+            crate::player::symbols::symbol_table::SymbolOwner {
+                session: 900,
+                generation: 1,
+            },
+        );
+        let (tx, _rx) = channel::unbounded();
+        assert!(session.add_player(1, tx));
+        session
+    }
 
+    fn test_player() -> DirPlayer {
+        let (tx, _rx) = channel::unbounded();
+        DirPlayer::new_with_owner(tx, OwnerToken::transitional())
+    }
+
+    #[test]
+    fn static_eval_uses_explicit_context_for_nested_values() {
+        let mut player = test_player();
+        let mut symbols = SymbolTable::new();
+        let value = eval_lingo_expr_static(
+            "[#MiXeD, point(1, 2)]".to_string(),
+            &mut player,
+            &mut symbols,
+        )
+        .expect("nested static expression should evaluate");
+        let datum = checked_static_datum(&player, &value, &symbols)
+            .expect("result should belong to the supplied session");
+        let Datum::List(_, values, _) = datum else {
+            panic!("expected nested list result");
+        };
+        let Datum::Symbol(symbol) = checked_static_datum(&player, &values[0], &symbols)
+            .expect("nested symbol should be valid") else {
+            panic!("expected symbol literal");
+        };
+        assert_eq!(symbols.display(&symbol).unwrap(), "MiXeD");
+    }
+
+    #[test]
+    fn static_eval_rejects_symbol_from_another_session() {
+        let mut player = test_player();
+        let mut symbols = SymbolTable::new();
+        let mut foreign_symbols = SymbolTable::new();
+        let foreign = foreign_symbols.intern("foreign");
+        let value = player.alloc_datum(Datum::Symbol(foreign));
+        assert!(checked_static_datum(&player, &value, &symbols).is_err());
+    }
+
+    #[test]
+    fn parser_uses_builtin_chunk_type_without_session_context() {
+        let ast = parse_lingo_expr_ast_runtime(
+            Rule::eval_expr,
+            "item 1 of \"a,b\"".to_string(),
+        )
+        .expect("chunk expression should parse");
+        let LingoExpr::ChunkExpr(chunk_type, ..) = ast else {
+            panic!("expected chunk expression");
+        };
+        assert_eq!(chunk_type.into_builtin(), Some(BuiltInSymbol::Item));
+    }
+
+    #[test]
+    fn static_eval_evaluates_nested_arithmetic_in_explicit_context() {
+        let mut player = test_player();
+        let mut symbols = SymbolTable::new();
+        let value = eval_lingo_expr_static(
+            "[1 + 2, point(3 * 4, 5)]".to_string(),
+            &mut player,
+            &mut symbols,
+        )
+        .expect("nested arithmetic should evaluate");
+        let Datum::List(_, values, _) = checked_static_datum(&player, &value, &symbols)
+            .expect("result should belong to the supplied session") else {
+            panic!("expected nested list result");
+        };
+        assert!(matches!(
+            checked_static_datum(&player, &values[0], &symbols),
+            Ok(Datum::Int(3))
+        ));
+        assert!(matches!(
+            checked_static_datum(&player, &values[1], &symbols),
+            Ok(Datum::Point([x, y], _)) if x == 12.0 && y == 5.0
+        ));
+    }
+
+    #[test]
+    fn static_eval_rejects_foreign_symbol_in_global_value() {
+        let mut player = test_player();
+        let mut symbols = SymbolTable::new();
+        let mut foreign_symbols = SymbolTable::new();
+        let foreign = foreign_symbols.intern("foreign");
+        let global_name = symbols.intern("foreign_global");
+        let global_value = player.alloc_datum(Datum::Symbol(foreign));
+        player.globals.insert(global_name, global_value);
+
+        let result = eval_lingo_expr_static(
+            "foreign_global".to_string(),
+            &mut player,
+            &mut symbols,
+        );
+        assert!(result.is_err(), "foreign global values must fail through eval");
+    }
+
+    #[test]
+    fn static_eval_unknown_identifier_is_void() {
+        let mut player = test_player();
+        let mut symbols = SymbolTable::new();
+        let value = eval_lingo_expr_static(
+            "not_declared".to_string(),
+            &mut player,
+            &mut symbols,
+        )
+        .expect("ordinary unknown identifiers should use Director's VOID fallback");
+        assert!(matches!(
+            checked_static_datum(&player, &value, &symbols),
+            Ok(Datum::Void)
+        ));
+    }
+
+    #[test]
+    fn owned_eval_preserves_noncommutative_and_list_order() {
+        let mut session = test_session();
+        let subtract = session
+            .start_eval(
+                1,
+                LingoExpr::Subtract(
+                    Box::new(LingoExpr::IntLiteral(10)),
+                    Box::new(LingoExpr::IntLiteral(3)),
+                ),
+            )
+            .unwrap();
+        let result = match session.turn_eval(subtract) {
+            EvalTurn::Complete(Ok(value)) => session
+                .with_player(1, |context| context.player.get_datum(&value).clone())
+                .unwrap(),
+            other => panic!("unexpected subtraction turn: {:?}", std::mem::discriminant(&other)),
+        };
+        assert!(matches!(result, Datum::Int(7)));
+
+        let list = session
+            .start_eval(
+                1,
+                LingoExpr::ListLiteral(vec![
+                    LingoExpr::IntLiteral(1),
+                    LingoExpr::IntLiteral(2),
+                    LingoExpr::IntLiteral(3),
+                ]),
+            )
+            .unwrap();
+        let result = match session.turn_eval(list) {
+            EvalTurn::Complete(Ok(value)) => session
+                .with_player(1, |context| context.player.get_datum(&value).clone())
+                .unwrap(),
+            other => panic!("unexpected list turn: {:?}", std::mem::discriminant(&other)),
+        };
+        let Datum::List(_, values, _) = result else { panic!("expected list") };
+        let ints: Vec<_> = values
+            .iter()
+            .map(|value| {
+                session
+                    .with_player(1, |context| context.player.get_datum(value).int_value())
+                    .unwrap()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(ints, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn static_eval_not_true_is_false() {
+        let mut session = test_session();
+        let result = session
+            .with_player(1, |context| {
+                let value = eval_lingo_expr_static("not true".to_owned(), context.player, context.symbols)?;
+                let nested = eval_lingo_expr_static("not not true".to_owned(), context.player, context.symbols)?;
+                let parenthesized = eval_lingo_expr_static("not (not true)".to_owned(), context.player, context.symbols)?;
+                let rhs = eval_lingo_expr_static("1 + not false".to_owned(), context.player, context.symbols)?;
+                Ok::<_, ScriptError>((
+                    context.player.get_datum(&value).clone(),
+                    context.player.get_datum(&nested).clone(),
+                    context.player.get_datum(&parenthesized).clone(),
+                    context.player.get_datum(&rhs).clone(),
+                ))
+            })
+            .unwrap()
+            .unwrap();
+        assert!(matches!(result.0, Datum::Int(0)));
+        assert!(matches!(result.1, Datum::Int(1)));
+        assert!(matches!(result.2, Datum::Int(1)));
+        assert!(matches!(result.3, Datum::Int(2)));
+    }
+
+    #[test]
+    fn owned_eval_pending_keeps_args_and_resumes_parent_frames_once() {
+        let mut session = test_session();
+        let id = session
+            .start_eval(
+                1,
+                LingoExpr::Subtract(
+                    Box::new(LingoExpr::ObjHandlerCall(
+                        Box::new(LingoExpr::IntLiteral(1)),
+                        "deferred".to_owned(),
+                        vec![LingoExpr::IntLiteral(4), LingoExpr::IntLiteral(5)],
+                    )),
+                    Box::new(LingoExpr::IntLiteral(2)),
+                ),
+            )
+            .unwrap();
+        let pending = session.turn_eval(id.clone());
+        let EvalTurn::Pending {
+            request:
+                EvalPending::Object {
+                    capability,
+                        request:
+                            crate::player::driver::InternalVmRequest::Object {
+                                receiver,
+                                args,
+                                ..
+                            },
+                        ..
+                },
+        } = pending
+        else {
+            panic!("expected an owned object request")
+        };
+        assert_eq!(capability.serial, 1);
+        let values: Vec<_> = session
+            .with_player(1, |context| {
+                [receiver, args[0].clone(), args[1].clone()]
+                    .into_iter()
+                    .map(|value| context.player.get_datum(&value).int_value().unwrap())
+                    .collect()
+            })
+            .unwrap();
+        assert_eq!(values, vec![1, 4, 5]);
+
+        let owner = session.with_player(1, |context| context.player.owner.clone()).unwrap();
+        let completion = session
+            .with_player(1, |context| context.player.alloc_datum(Datum::Int(10)))
+            .unwrap();
+        let result = session.resume_eval(
+            id.clone(),
+            &capability,
+            &owner,
+            Ok(completion),
+        );
+        let EvalTurn::Complete(Ok(value)) = result else { panic!("expected resumed completion") };
+        let result = session.with_player(1, |context| context.player.get_datum(&value).clone()).unwrap();
+        assert!(matches!(result, Datum::Int(8)));
+        assert!(matches!(session.turn_eval(id), EvalTurn::Complete(Err(_))));
+    }
+
+    #[test]
+    fn owned_eval_rejects_foreign_completion_without_consuming_pending_request() {
+        let mut session = test_session();
+        let id = session
+            .start_eval(
+                1,
+                LingoExpr::ObjHandlerCall(
+                    Box::new(LingoExpr::IntLiteral(1)),
+                    "deferred".to_owned(),
+                    vec![],
+                ),
+            )
+            .unwrap();
+        let pending = session.turn_eval(id.clone());
+        let action = match pending {
+            EvalTurn::Pending { request: EvalPending::Object { capability, .. } } => capability,
+            _ => panic!("expected an owned pending action"),
+        };
+        assert!(matches!(session.turn_eval(id.clone()), EvalTurn::Complete(Err(_))));
+        let foreign = OwnerToken::transitional();
+        let foreign_value = session
+            .with_player(1, |context| context.player.alloc_datum(Datum::Int(99)))
+            .unwrap();
+        assert!(matches!(
+            session.resume_eval(id.clone(), &action, &foreign, Ok(foreign_value)),
+            EvalTurn::Complete(Err(_))
+        ));
+        let owner = session.with_player(1, |context| context.player.owner.clone()).unwrap();
+        let value = session
+            .with_player(1, |context| context.player.alloc_datum(Datum::Int(7)))
+            .unwrap();
+        assert!(matches!(session.resume_eval(id.clone(), &action, &owner, Ok(value)), EvalTurn::Complete(Ok(_))));
+        assert!(matches!(session.resume_eval(id, &action, &owner, Ok(DatumRef::Void)), EvalTurn::Complete(Err(_))));
+    }
+
+    #[test]
+    fn owned_eval_rejects_previous_action_after_next_wait_is_issued() {
+        let mut session = test_session();
+        let call = |name: &str| {
+            LingoExpr::ObjHandlerCall(
+                Box::new(LingoExpr::IntLiteral(1)), name.to_owned(), vec![],
+            )
+        };
+        let id = session
+            .start_eval(1, LingoExpr::Add(Box::new(call("first")), Box::new(call("second"))))
+            .unwrap();
+        let first = match session.turn_eval(id.clone()) {
+            EvalTurn::Pending { request: EvalPending::Object { capability, .. } } => capability,
+            _ => panic!("expected first pending action"),
+        };
+        let owner = session.with_player(1, |context| context.player.owner.clone()).unwrap();
+        let first_value = session.with_player(1, |context| context.player.alloc_datum(Datum::Int(3))).unwrap();
+        let second = match session.resume_eval(id.clone(), &first, &owner, Ok(first_value)) {
+            EvalTurn::Pending { request: EvalPending::Object { capability, .. } } => capability,
+            _ => panic!("expected second pending action"),
+        };
+        assert_ne!(first, second);
+        assert!(matches!(
+            session.resume_eval(id.clone(), &first, &owner, Ok(DatumRef::Void)),
+            EvalTurn::Complete(Err(_))
+        ));
+        let second_value = session.with_player(1, |context| context.player.alloc_datum(Datum::Int(4))).unwrap();
+        assert!(matches!(session.resume_eval(id, &second, &owner, Ok(second_value)), EvalTurn::Complete(Ok(_))));
+    }
+    #[test]
+    fn owned_eval_rejects_foreign_element_exposed_by_local_list() {
+        let mut session = test_session();
+        let mut foreign_symbols = SymbolTable::new();
+        let foreign_symbol = foreign_symbols.intern("foreign_element");
+        let list_name = session.with_player(1, |context| {
+            let foreign = context.player.alloc_datum(Datum::Symbol(foreign_symbol));
+            let list = context.player.alloc_datum(Datum::List(
+                DatumType::List,
+                vec![foreign].into_iter().collect(),
+                false,
+            ));
+            let name = context.symbols.intern("local_list");
+            context.player.globals.insert(name.clone(), list);
+            name
+        }).unwrap();
+        let name = session.with_player(1, |context| context.symbols.display(&list_name).unwrap().to_owned()).unwrap();
+        let id = session.start_eval(1, LingoExpr::ListAccess(
+            Box::new(LingoExpr::Identifier(name)),
+            Box::new(LingoExpr::IntLiteral(1)),
+        )).unwrap();
+        assert!(matches!(session.turn_eval(id), EvalTurn::Complete(Err(error)) if error.code == crate::player::ScriptErrorCode::InvalidReference));
+    }
+
+    #[test]
+    fn rejected_complete_eval_keeps_pending_ticket() {
+        let mut session = test_session();
+        let id = session.start_eval(1, LingoExpr::ObjHandlerCall(
+            Box::new(LingoExpr::IntLiteral(1)), "deferred".to_owned(), vec![],
+        )).unwrap();
+        let action = match session.turn_eval(id.clone()) {
+            EvalTurn::Pending { request: EvalPending::Object { capability, .. } } => capability,
+            _ => panic!("expected pending object request"),
+        };
+        let foreign_owner = OwnerToken::transitional();
+        assert!(!session.complete_eval(id.clone(), &action, &foreign_owner, Ok(DatumRef::Void)));
+        let owner = session.with_player(1, |context| context.player.owner.clone()).unwrap();
+        let value = session.with_player(1, |context| context.player.alloc_datum(Datum::Int(9))).unwrap();
+        assert!(session.complete_eval(id.clone(), &action, &owner, Ok(value)));
+        assert!(matches!(session.turn_eval(id), EvalTurn::Complete(Ok(_))));
+    }
+
+    #[test]
+    fn owned_eval_root_completion_returns_value() {
+        let mut session = test_session();
+        let id = session.start_eval(1, LingoExpr::ObjHandlerCall(
+            Box::new(LingoExpr::IntLiteral(1)), "deferred".to_owned(), vec![],
+        )).unwrap();
+        let action = match session.turn_eval(id.clone()) {
+            EvalTurn::Pending { request: EvalPending::Object { capability, .. } } => capability,
+            _ => panic!("expected pending root handler"),
+        };
+        let owner = session.with_player(1, |context| context.player.owner.clone()).unwrap();
+        let value = session.with_player(1, |context| context.player.alloc_datum(Datum::Int(9))).unwrap();
+        let result = session.resume_eval(id, &action, &owner, Ok(value));
+        let EvalTurn::Complete(Ok(result)) = result else { panic!("expected root result") };
+        assert!(matches!(session.with_player(1, |context| context.player.get_datum(&result).clone()).unwrap(), Datum::Int(9)));
+    }
+
+    #[test]
+    fn owned_command_last_pending_line_returns_its_completion() {
+        let mut session = test_session();
+        let id = session.start_command_eval(1, vec![
+            "sendAllSprites(#first)".to_owned(),
+            "sendAllSprites(#last)".to_owned(),
+        ]).unwrap();
+        let first = match session.turn_eval(id.clone()) {
+            EvalTurn::Pending { request: EvalPending::Global { capability, .. } } => capability,
+            _ => panic!("expected first command to suspend"),
+        };
+        let owner = session.with_player(1, |context| context.player.owner.clone()).unwrap();
+        let first_value = session.with_player(1, |context| context.player.alloc_datum(Datum::Int(4))).unwrap();
+        let second = match session.resume_eval(id.clone(), &first, &owner, Ok(first_value)) {
+            EvalTurn::Pending { request: EvalPending::Global { capability, .. } } => capability,
+            _ => panic!("expected second command to suspend"),
+        };
+        let last_value = session.with_player(1, |context| context.player.alloc_datum(Datum::Int(11))).unwrap();
+        let result = session.resume_eval(id, &second, &owner, Ok(last_value));
+        let EvalTurn::Complete(Ok(result)) = result else { panic!("expected last command result") };
+        assert!(matches!(session.with_player(1, |context| context.player.get_datum(&result).clone()).unwrap(), Datum::Int(11)));
+    }
+
+    fn datum_result(session: &mut crate::player::session::RuntimeSession, id: EvalId) -> Datum {
+        let result = match session.turn_eval(id) {
+            EvalTurn::Complete(Ok(value)) => value,
+            EvalTurn::Complete(Err(error)) => panic!("evaluation failed: {error:?}"),
+            EvalTurn::Pending { .. } => panic!("test expression unexpectedly suspended"),
+        };
+        session.with_player(1, |context| context.player.get_datum(&result).clone()).unwrap()
+    }
+
+    fn global_datum(session: &mut crate::player::session::RuntimeSession, name: &str) -> Option<Datum> {
+        session.with_player(1, |context| {
+            let symbol = context.symbols.intern(name);
+            context.player.globals.get(&symbol).map(|value| context.player.get_datum(value).clone())
+        }).unwrap()
+    }
+
+    fn item_chunk(index: i32, end: Option<i32>, source: &str) -> LingoExpr {
+        LingoExpr::ChunkExpr(
+            Symbol::builtin(BuiltInSymbol::Item),
+            Box::new(LingoExpr::IntLiteral(index)),
+            end.map(|value| Box::new(LingoExpr::IntLiteral(value))),
+            Box::new(LingoExpr::Identifier(source.to_owned())),
+        )
+    }
+
+    #[test]
+    fn owned_eval_chunk_read_preserves_ranged_output() {
+        let mut session = test_session();
+        session.with_player(1, |context| {
+            let symbol = context.symbols.intern("read_source");
+            let value = context.player.alloc_datum(Datum::String("a,b,c,d".to_owned()));
+            context.player.globals.insert(symbol, value);
+        }).unwrap();
+        let id = session.start_eval(1, item_chunk(2, Some(3), "read_source")).unwrap();
+        let result = datum_result(&mut session, id);
+        assert!(matches!(result, Datum::String(value) if value == "b,c"));
+    }
+
+    #[test]
+    fn owned_eval_chunk_delete_and_put_preserve_source_and_concat_formatting() {
+        let mut session = test_session();
+        let set_source = |session: &mut crate::player::session::RuntimeSession, value: &str| {
+            session.with_player(1, |context| {
+                let symbol = context.symbols.intern("chunk_source");
+                let value = context.player.alloc_datum(Datum::String(value.to_owned()));
+                context.player.globals.insert(symbol, value);
+            }).unwrap();
+        };
+
+        set_source(&mut session, "a,b,c,d");
+        let deleted = session.start_eval(1, LingoExpr::DeleteChunk(Box::new(item_chunk(2, Some(3), "chunk_source")))).unwrap();
+        assert!(matches!(datum_result(&mut session, deleted), Datum::Void));
+        assert!(matches!(global_datum(&mut session, "chunk_source"), Some(Datum::String(value)) if value == "a,d"));
+
+        set_source(&mut session, "a,b,c");
+        let numeric = session.start_eval(1, LingoExpr::PutBefore(
+            Box::new(LingoExpr::IntLiteral(2)),
+            Box::new(item_chunk(2, None, "chunk_source")),
+        )).unwrap();
+        assert!(matches!(datum_result(&mut session, numeric), Datum::Void));
+        assert!(matches!(global_datum(&mut session, "chunk_source"), Some(Datum::String(value)) if value == "a,2b,c"));
+
+        set_source(&mut session, "a,b,c");
+        let list = session.start_eval(1, LingoExpr::PutBefore(
+            Box::new(LingoExpr::ListLiteral(vec![LingoExpr::IntLiteral(1), LingoExpr::IntLiteral(2)])),
+            Box::new(item_chunk(2, None, "chunk_source")),
+        )).unwrap();
+        assert!(matches!(datum_result(&mut session, list), Datum::Void));
+        assert!(matches!(global_datum(&mut session, "chunk_source"), Some(Datum::String(value)) if value == "a,[1, 2]b,c"));
+    }
+
+    #[test]
+    fn owned_eval_invalid_chunk_start_skips_later_end_side_effect() {
+        let mut session = test_session();
+        let chunk = LingoExpr::ChunkExpr(
+            Symbol::builtin(BuiltInSymbol::Item),
+            Box::new(LingoExpr::ListLiteral(vec![LingoExpr::IntLiteral(1)])),
+            Some(Box::new(LingoExpr::Assignment(
+                Box::new(LingoExpr::Identifier("end_side_effect".to_owned())),
+                Box::new(LingoExpr::IntLiteral(7)),
+            ))),
+            Box::new(LingoExpr::StringLiteral("a,b".to_owned())),
+        );
+        let id = session.start_eval(1, chunk).unwrap();
+        assert!(matches!(session.turn_eval(id), EvalTurn::Complete(Err(_))));
+        assert!(global_datum(&mut session, "end_side_effect").is_none());
+    }
+
+    #[test]
+    fn owned_eval_chunk_fallback_re_evaluates_original_target() {
+        let mut session = test_session();
+        let initialize = session.start_eval(1, LingoExpr::Assignment(
+            Box::new(LingoExpr::Identifier("fallback_count".to_owned())),
+            Box::new(LingoExpr::IntLiteral(0)),
+        )).unwrap();
+        let _ = datum_result(&mut session, initialize);
+        let target = LingoExpr::ListAccess(
+            Box::new(LingoExpr::ObjProp(
+                Box::new(LingoExpr::Assignment(
+                    Box::new(LingoExpr::Identifier("fallback_count".to_owned())),
+                    Box::new(LingoExpr::Add(
+                        Box::new(LingoExpr::Identifier("fallback_count".to_owned())),
+                        Box::new(LingoExpr::IntLiteral(1)),
+                    )),
+                )),
+                "line".to_owned(),
+            )),
+            Box::new(LingoExpr::IntLiteral(1)),
+        );
+        let id = session.start_eval(1, target).unwrap();
+        assert!(matches!(session.turn_eval(id), EvalTurn::Complete(Err(_))));
+        assert!(matches!(global_datum(&mut session, "fallback_count"), Some(Datum::Int(2))));
+    }
+
+    #[test]
+    fn owned_command_lazily_reports_later_parse_error_after_prior_assignment() {
+        let mut session = test_session();
+        let id = session.start_command_eval(1, vec![
+            "put 7 into prior_assignment".to_owned(),
+            "put ???".to_owned(),
+        ]).unwrap();
+        assert!(matches!(session.turn_eval(id), EvalTurn::Complete(Err(_))));
+        assert!(matches!(global_datum(&mut session, "prior_assignment"), Some(Datum::Int(7))));
+    }
+
+}

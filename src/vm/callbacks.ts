@@ -3,18 +3,24 @@ import {
   JsBridgeBreakpoint,
   OnScriptErrorData,
   loadExternalXtra,
+  registerExternalXtraHost,
   registerVmCallbacks,
   resolveAndLoadMovieXtras,
   setXtraRegistry,
   getXtraRegistry,
 } from "dirplayer-js-api";
-import { createFlashInstance, destroyFlashInstance, destroyAllFlashInstances, initFlashBridge } from "../services/flashPlayerManager";
+import { createFlashInstanceForOwner, destroyFlashInstance, destroyAllFlashInstances, initFlashBridge, localConnectionSendForOwner, playFlashForOwner } from "../services/flashPlayerManager";
 import store from "../store";
 import { breakpointListChanged, castLibNameChanged, castListChanged, castMemberChanged, castMemberListChanged, channelChanged, channelDisplayNameChanged, channelDisplayNamesChanged, datumSnapshot, debugContentAdded, debugMessageAdded, debugMessagesCleared, frameChanged, globalsChanged, movieLoaded, movieLoadFailed, onScriptError, removeTimeoutHandle, scopeListChanged, scoreChanged, scriptErrorCleared, scriptInstanceSnapshot, setTimeoutHandle } from "../store/vmSlice";
-import { OnMovieLoadedCallbackData, trigger_timeout, exportW3dObj, exportW3dRaw, listW3dMembers, get_breakpoints } from 'vm-rust'
+import type { BrowserPlayerHandle, OnMovieLoadedCallbackData } from 'vm-rust'
+import type { DebugContent } from "dirplayer-js-api";
 import { DatumRef, IVMScope, JsBridgeDatum, MemberSnapshot, ScoreSnapshot, ScoreSpriteSnapshot } from ".";
 import { onMemberSelected } from "../store/uiSlice";
 import { isUIShown } from "../utils/debug";
+
+export type VmCallbackRegistration = (() => void) & {
+  rebindOwner: (ownerKey: string) => void;
+};
 
 export function clearAllTimeouts() {
   const handles = store.getState().vm.timeoutHandles;
@@ -24,14 +30,18 @@ export function clearAllTimeouts() {
   });
 }
 
-export function initVmCallbacks() {
+export function initVmCallbacks(browserHandle: BrowserPlayerHandle): VmCallbackRegistration {
   // Initialize the Flash/Ruffle bridge (registers global JS functions for WASM to call)
-  initFlashBridge();
+  let disposeFlashBridge = initFlashBridge(browserHandle);
+  let flashHost = disposeFlashBridge.host;
+  const disposeExternalXtraHost = registerExternalXtraHost(browserHandle);
 
   // Expose W3D debug tools on window for console access
-  (window as any).exportW3dObj = exportW3dObj;
-  (window as any).exportW3dRaw = exportW3dRaw;
-  (window as any).listW3dMembers = listW3dMembers;
+  (window as any).exportW3dObj = (castLib: number, castMember: number) =>
+    browserHandle.export_w3d_obj(castLib, castMember);
+  (window as any).exportW3dRaw = (castLib: number, castMember: number) =>
+    browserHandle.export_w3d_raw(castLib, castMember);
+  (window as any).listW3dMembers = () => browserHandle.list_w3d_members();
 
   // Expose external xtra loader + registry API so hosts (or devtools)
   // can drive plugin loading interactively. Namespaced with `dirplayer_`
@@ -46,10 +56,10 @@ export function initVmCallbacks() {
   //   await dirplayer_resolveAndLoadMovieXtras()
   //   dirplayer_getXtraRegistry()
   const w = window as any;
-  w.dirplayer_loadExternalXtra = loadExternalXtra;
+  w.dirplayer_loadExternalXtra = (url: string) => loadExternalXtra(url, browserHandle);
   w.dirplayer_setXtraRegistry = setXtraRegistry;
   w.dirplayer_getXtraRegistry = getXtraRegistry;
-  w.dirplayer_resolveAndLoadMovieXtras = resolveAndLoadMovieXtras;
+  w.dirplayer_resolveAndLoadMovieXtras = () => resolveAndLoadMovieXtras(browserHandle);
 
   // Expose trace log download on window
   (window as any).downloadTraceLog = () => {
@@ -75,7 +85,7 @@ export function initVmCallbacks() {
     }
   };
 
-  registerVmCallbacks({
+  const callbacks = {
     onMovieLoaded: (result: OnMovieLoadedCallbackData) => {
       // Offer trace log download if one was recorded
       try {
@@ -94,7 +104,7 @@ export function initVmCallbacks() {
       // pushes it again. The script gutter therefore came up blank after a
       // movie load even though the breakpoints were live, and only reappeared
       // when the next add/remove finally sent a list.
-      store.dispatch(breakpointListChanged(get_breakpoints() as JsBridgeBreakpoint[]));
+      store.dispatch(breakpointListChanged(browserHandle.get_breakpoints() as JsBridgeBreakpoint[]));
     },
     onMovieLoadFailed: (path: string, error: string) => {
       store.dispatch(movieLoadFailed(`Failed to load movie: ${error}`));
@@ -156,7 +166,7 @@ export function initVmCallbacks() {
       console.log(message);
       store.dispatch(debugMessageAdded(message));
     },
-    onDebugContent: (content) => {
+    onDebugContent: (content: DebugContent) => {
       store.dispatch(debugContentAdded(content));
     },
     onScheduleTimeout: (timeoutName: string, periodMs: number) => {
@@ -167,7 +177,7 @@ export function initVmCallbacks() {
         clearInterval(previous as Parameters<typeof clearInterval>[0]);
       }
       const handle = setInterval(() => {
-        trigger_timeout(timeoutName)
+        browserHandle.trigger_timeout(timeoutName)
       }, periodMs);
       store.dispatch(setTimeoutHandle({ name: timeoutName, handle }))
     },
@@ -197,19 +207,27 @@ export function initVmCallbacks() {
     onChannelDisplayNamesChanged: (names: Record<number, string>) => {
       store.dispatch(channelDisplayNamesChanged(names));
     },
-    onFlashMemberLoaded: (spriteNum: number, castLib: number, castMember: number, swfData: Uint8Array, width: number, height: number, pausedAtStart: boolean, assertedFrame: number) => {
+    onFlashMemberLoaded: (spriteNum: number, castLib: number, castMember: number, swfData: Uint8Array, width: number, height: number, pausedAtStart: boolean, assertedFrame: number, ownerKey: string) => {
       // Copy immediately - swfData is a view into WASM memory that may be invalidated
       const swfDataCopy = new Uint8Array(swfData);
       console.log(`Flash member loaded: sprite#${spriteNum} ${castLib}:${castMember} ${width}x${height} (${swfDataCopy.length} bytes, first=[${Array.from(swfDataCopy.slice(0, 4)).join(',')}], pausedAtStart=${pausedAtStart}, assertedFrame=${assertedFrame})`);
-      createFlashInstance(spriteNum, castLib, castMember, swfDataCopy, width, height, pausedAtStart, assertedFrame)
+      if (ownerKey !== flashHost.ownerKey || flashHost.disposed) return;
+      createFlashInstanceForOwner(flashHost, spriteNum, castLib, castMember, swfDataCopy, width, height, pausedAtStart, assertedFrame)
         .catch(e => console.error('Failed to create Flash instance:', e));
     },
-    onFlashMemberUnloaded: (spriteNum: number) => {
-      destroyFlashInstance(spriteNum);
+    onFlashMemberUnloaded: (spriteNum: number, ownerKey: string) => {
+      if (ownerKey === flashHost.ownerKey) destroyFlashInstance(flashHost, spriteNum);
     },
-    onFlashResetAll: () => {
-      destroyAllFlashInstances();
+    onFlashResetAll: (ownerKey: string) => {
+      // Rust holds the handle mutably while dispatching this callback. Use the
+      // captured owner capability instead of re-entering owner_identity().
+      if (ownerKey === flashHost.ownerKey) destroyAllFlashInstances(flashHost);
     },
+    onFlashPlayOwned: (spriteNum: number) => {
+      if (!flashHost.disposed) playFlashForOwner(flashHost, spriteNum);
+    },
+    onFlashLocalConnectionSendOwned: (name: string, method: string, argsJson: string) =>
+      localConnectionSendForOwner(flashHost, name, method, argsJson),
     onStageSizeChanged: (width: number, height: number, center: boolean) => {
       const inner = document.getElementById('stage_canvas_container');
       if (inner) {
@@ -223,5 +241,23 @@ export function initVmCallbacks() {
         }
       }
     },
-  });
+  };
+  let disposeRegistered = registerVmCallbacks(callbacks, browserHandle.owner_identity());
+  const disposeVmCallbacks = (() => {
+    disposeFlashBridge();
+    disposeExternalXtraHost();
+    disposeRegistered();
+  }) as VmCallbackRegistration;
+  disposeVmCallbacks.rebindOwner = (ownerKey: string) => {
+    // Rebind the closure-held Flash host together with VM callbacks. The old
+    // generation is disposed before the new bridge is published, so late
+    // Ruffle loads cannot attach to a replacement owner.
+    disposeFlashBridge();
+    disposeFlashBridge = initFlashBridge(browserHandle);
+    flashHost = disposeFlashBridge.host;
+    disposeExternalXtraHost.rebindOwner();
+    disposeRegistered();
+    disposeRegistered = registerVmCallbacks(callbacks, ownerKey);
+  };
+  return disposeVmCallbacks;
 }

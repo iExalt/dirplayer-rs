@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use crate::{
     director::lingo::datum::{Datum, DatumType, datum_bool},
     player::{
-        DirPlayer, ScriptError, bitmap::bitmap::{Bitmap, BuiltInPalette, PaletteRef}, cast_lib::CastMemberRef, cast_member::CastMemberType, datum_ref::DatumRef, sprite::ColorRef, symbols::{builtin::BuiltInSymbol, symbol::Symbol}
+        DirPlayer, ScriptError, bitmap::bitmap::{Bitmap, BuiltInPalette, PaletteRef}, cast_lib::CastMemberRef, cast_member::CastMemberType, datum_ref::DatumRef, handlers::datum_handlers::cast_member_ref::checked_get_datum, sprite::ColorRef, symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable}
     },
 };
 
@@ -18,10 +18,11 @@ pub struct VectorShapeMemberHandlers;
 impl VectorShapeMemberHandlers {
     pub fn get_prop(
         player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
         member_ref: &CastMemberRef,
         prop: Symbol,
     ) -> Result<Datum, ScriptError> {
-        let prop = prop.into_builtin_or_error()?;
+        let prop = prop.into_builtin_or_error(symbols)?;
 
         // The .image getter rasterizes the polygon into a fresh ephemeral
         // bitmap and needs `&mut player.bitmap_manager`, which conflicts
@@ -69,7 +70,7 @@ impl VectorShapeMemberHandlers {
                 })
                 .collect();
             let new_curve_count = vs.new_curve_count;
-            return Self::build_vertex_list(player, verts, new_curve_count);
+            return Self::build_vertex_list(player, symbols, verts, new_curve_count);
         }
 
         // `member.vertex` (chunk expression) — Director returns the list of
@@ -155,11 +156,12 @@ impl VectorShapeMemberHandlers {
     /// is not routed here.
     pub fn call(
         player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
         datum: &DatumRef,
         handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        let member_ref = match player.get_datum(datum) {
+        let member_ref = match checked_get_datum(player, datum, symbols)? {
             Datum::CastMember(r) => r.to_owned(),
             _ => return Err(ScriptError::new(
                 "Cannot call vectorShape handler on non-cast-member".to_string(),
@@ -170,11 +172,11 @@ impl VectorShapeMemberHandlers {
             // Inserts a vertex at the given 1-based index (Director 11.5
             // Scripting Dictionary). Optional trailing ints are the two
             // Bezier control-handle offsets, relative to the vertex.
-            "addVertex" => Self::add_vertex(player, &member_ref, args),
+            "addVertex" => Self::add_vertex(player, symbols, &member_ref, args),
             // deleteVertex(index) — removes the vertex at the 1-based index.
-            "deleteVertex" => Self::delete_vertex(player, &member_ref, args),
+            "deleteVertex" => Self::delete_vertex(player, symbols, &member_ref, args),
             // moveVertex(index, dx, dy) — offsets an existing vertex.
-            "moveVertex" => Self::move_vertex(player, &member_ref, args),
+            "moveVertex" => Self::move_vertex(player, symbols, &member_ref, args),
             // `member.vertex[i]` by reference (compiled as
             // getPropRef(member, #vertex, i)) — returns a writable
             // VectorVertexRef so `.handle1`/`.handle2`/`.vertex` reads and
@@ -182,12 +184,12 @@ impl VectorShapeMemberHandlers {
             // player_get_obj_prop / player_set_obj_prop). The plain
             // `getPropRef(member, #vertexList)` form (no index) has no
             // chunk semantics, so it falls through to a normal prop read.
-            "getPropRef" => Self::get_vertex_ref(player, &member_ref, args),
+            "getPropRef" => Self::get_vertex_ref(player, symbols, &member_ref, args),
             // `member.vertex[i] = value` (compiled as
             // setProp(member, #vertex, i, value)). Sets the vertex location
             // from a point value (or a full [#vertex/#handle1/#handle2]
             // property list, mirroring vertexList entries).
-            "setProp" => Self::set_vertex_by_index(player, &member_ref, args),
+            "setProp" => Self::set_vertex_by_index(player, symbols, &member_ref, args),
             _ => Err(ScriptError::new(format!(
                 "No handler {} for vectorShape member", handler_name
             ))),
@@ -200,6 +202,7 @@ impl VectorShapeMemberHandlers {
     /// fallback resolves it as a normal by-value property instead.
     fn get_vertex_ref(
         player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
         member_ref: &CastMemberRef,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
@@ -208,13 +211,13 @@ impl VectorShapeMemberHandlers {
                 "vectorShape getPropRef without an index".to_string(),
             ));
         }
-        let prop = player.get_datum(&args[0]).string_value().unwrap_or_default();
+        let prop = checked_get_datum(player, &args[0], symbols)?.string_value(symbols).unwrap_or_default();
         if !prop.eq_ignore_ascii_case("vertex") {
             return Err(ScriptError::new(format!(
                 "vectorShape getPropRef unsupported for {}", prop
             )));
         }
-        let index = player.get_datum(&args[1]).int_value()?;
+        let index = checked_get_datum(player, &args[1], symbols)?.int_value()?;
         let count = Self::vertex_count(player, member_ref)?;
         let pos = (index - 1).max(0) as usize;
         if pos >= count {
@@ -229,6 +232,7 @@ impl VectorShapeMemberHandlers {
     /// (point value) or replace the whole vertex (property-list value).
     fn set_vertex_by_index(
         player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
         member_ref: &CastMemberRef,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
@@ -237,14 +241,14 @@ impl VectorShapeMemberHandlers {
                 "No handler setProp for vectorShape member"
             )));
         }
-        let prop = player.get_datum(&args[0]).string_value().unwrap_or_default();
+        let prop = checked_get_datum(player, &args[0], symbols)?.string_value(symbols).unwrap_or_default();
         if !prop.eq_ignore_ascii_case("vertex") {
             return Err(ScriptError::new(format!(
                 "vectorShape setProp unsupported for {}", prop
             )));
         }
-        let index = player.get_datum(&args[1]).int_value()?;
-        let (pt, _) = player.get_datum(&args[2]).to_point_inline()?;
+        let index = checked_get_datum(player, &args[1], symbols)?.int_value()?;
+        let (pt, _) = checked_get_datum(player, &args[2], symbols)?.to_point_inline()?;
         let pos = (index - 1).max(0) as usize;
         Self::with_vs_mut(player, member_ref, |vs| {
             if let Some(v) = vs.vertices.get_mut(pos) {
@@ -361,6 +365,7 @@ impl VectorShapeMemberHandlers {
 
     fn add_vertex(
         player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
         member_ref: &CastMemberRef,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
@@ -369,16 +374,17 @@ impl VectorShapeMemberHandlers {
                 "addVertex requires (index, point)".to_string(),
             ));
         }
-        let index = player.get_datum(&args[0]).int_value()?;
-        let (pt, _) = player.get_datum(&args[1]).to_point_inline()?;
+        let index = checked_get_datum(player, &args[0], symbols)?.int_value()?;
+        let (pt, _) = checked_get_datum(player, &args[1], symbols)?.to_point_inline()?;
         // Optional Bezier control-handle offsets (relative to the vertex).
-        let read_i = |i: usize| -> i32 {
+        let read_i = |i: usize| -> Result<i32, ScriptError> {
             args.get(i)
-                .map(|a| player.get_datum(a).int_value().unwrap_or(0))
-                .unwrap_or(0)
+                .map(|a| Ok(checked_get_datum(player, a, symbols)?.int_value().unwrap_or(0)))
+                .transpose()
+                .map(|v| v.unwrap_or(0))
         };
         let (h1x, h1y, h2x, h2y) =
-            (read_i(2) as f32, read_i(3) as f32, read_i(4) as f32, read_i(5) as f32);
+            (read_i(2)? as f32, read_i(3)? as f32, read_i(4)? as f32, read_i(5)? as f32);
         let vertex = crate::director::enums::VectorShapeVertex {
             x: pt[0] as f32,
             y: pt[1] as f32,
@@ -402,13 +408,14 @@ impl VectorShapeMemberHandlers {
 
     fn delete_vertex(
         player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
         member_ref: &CastMemberRef,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
         if args.is_empty() {
             return Err(ScriptError::new("deleteVertex requires (index)".to_string()));
         }
-        let index = player.get_datum(&args[0]).int_value()?;
+        let index = checked_get_datum(player, &args[0], symbols)?.int_value()?;
         let mut removed = false;
         Self::with_vs_mut(player, member_ref, |vs| {
             let pos = (index - 1).max(0) as usize;
@@ -423,6 +430,7 @@ impl VectorShapeMemberHandlers {
 
     fn move_vertex(
         player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
         member_ref: &CastMemberRef,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
@@ -431,9 +439,9 @@ impl VectorShapeMemberHandlers {
                 "moveVertex requires (index, dx, dy)".to_string(),
             ));
         }
-        let index = player.get_datum(&args[0]).int_value()?;
-        let dx = player.get_datum(&args[1]).int_value()? as f32;
-        let dy = player.get_datum(&args[2]).int_value()? as f32;
+        let index = checked_get_datum(player, &args[0], symbols)?.int_value()?;
+        let dx = checked_get_datum(player, &args[1], symbols)?.int_value()? as f32;
+        let dy = checked_get_datum(player, &args[2], symbols)?.int_value()? as f32;
         let mut moved = false;
         Self::with_vs_mut(player, member_ref, |vs| {
             let pos = (index - 1).max(0) as usize;
@@ -449,11 +457,13 @@ impl VectorShapeMemberHandlers {
 
     pub fn set_prop(
         player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
         member_ref: &CastMemberRef,
         prop: Symbol,
         value: Datum,
     ) -> Result<(), ScriptError> {
-        let prop = prop.into_builtin_or_error()?;
+        crate::player::compare::validate_direct_symbol_fields(&value, symbols)?;
+        let prop = prop.into_builtin_or_error(symbols)?;
         // `regPoint` writes both vs.reg_point AND the outer
         // cast_member.reg_point (so the generic `the regPoint of member`
         // getter sees it). Apply outer first to avoid the vs-borrow
@@ -492,14 +502,20 @@ impl VectorShapeMemberHandlers {
                 Vec::with_capacity(items.len());
             let mut new_curve_count = 0usize;
             for item_ref in &items {
-                let entry = player.get_datum(item_ref);
+                let entry = checked_get_datum(player, item_ref, symbols)?;
                 // A `[#newCurve]` marker is a linear list holding the symbol
                 // (not a prop-list). Count it and move on.
                 if let Datum::List(_, elems, _) = &entry {
-                    let is_new_curve = elems.iter().any(|e| {
-                        player.get_datum(e).string_value()
-                            .map_or(false, |s| s.eq_ignore_ascii_case("newCurve"))
-                    });
+                    let mut is_new_curve = false;
+                    for e in elems {
+                        let s = checked_get_datum(player, e, symbols)?
+                            .string_value(symbols)
+                            .unwrap_or_default();
+                        if s.eq_ignore_ascii_case("newCurve") {
+                            is_new_curve = true;
+                            break;
+                        }
+                    }
                     if is_new_curve {
                         new_curve_count += 1;
                         continue;
@@ -513,10 +529,16 @@ impl VectorShapeMemberHandlers {
                 };
                 // Tolerate a #newCurve key inside a prop-list form too (older
                 // round-trips) — count it and skip the point parsing.
-                let is_new_curve = pairs.iter().any(|(k_ref, _)| {
-                    player.get_datum(k_ref).string_value()
-                        .map_or(false, |k| k.eq_ignore_ascii_case("newCurve"))
-                });
+                let mut is_new_curve = false;
+                for (k_ref, _) in &pairs {
+                    let k = checked_get_datum(player, k_ref, symbols)?
+                        .string_value(symbols)
+                        .unwrap_or_default();
+                    if k.eq_ignore_ascii_case("newCurve") {
+                        is_new_curve = true;
+                        break;
+                    }
+                }
                 if is_new_curve {
                     new_curve_count += 1;
                     continue;
@@ -529,9 +551,9 @@ impl VectorShapeMemberHandlers {
                 for (k_ref, val_ref) in &pairs {
                     // Keys are symbols (#vertex); string_value handles both
                     // Symbol and String forms.
-                    let key = player.get_datum(k_ref).string_value().unwrap_or_default();
+                    let key = checked_get_datum(player, k_ref, symbols)?.string_value(symbols).unwrap_or_default();
                     // Skip keys whose value isn't a point (defensive).
-                    let pt = match player.get_datum(val_ref).to_point_inline() {
+                    let pt = match checked_get_datum(player, val_ref, symbols)?.to_point_inline() {
                         Ok((pt, _)) => pt,
                         Err(_) => continue,
                     };
@@ -637,11 +659,13 @@ impl VectorShapeMemberHandlers {
             },
             // ---- Fill mode + gradient ---------------------------------
             BuiltInSymbol::FillMode => {
-                vs.fill_mode = parse_fill_mode(&value)?;
+                vs.fill_mode = parse_fill_mode(&value, symbols)?;
                 Ok(())
             },
             BuiltInSymbol::GradientType => {
-                vs.gradient_type = value.symbol_value()?.into_builtin_or_error()?;
+                vs.gradient_type = value
+                    .symbol_value(symbols)?
+                    .into_builtin_or_error(symbols)?;
                 Ok(())
             },
             BuiltInSymbol::FillScale => {
@@ -663,7 +687,9 @@ impl VectorShapeMemberHandlers {
             },
             // ---- Display / scale / origin -----------------------------
             BuiltInSymbol::ScaleMode => {
-                vs.scale_mode = value.symbol_value()?.into_builtin_or_error()?;
+                vs.scale_mode = value
+                    .symbol_value(symbols)?
+                    .into_builtin_or_error(symbols)?;
                 Ok(())
             },
             BuiltInSymbol::Scale => {
@@ -695,7 +721,7 @@ impl VectorShapeMemberHandlers {
                 Ok(())
             },
             BuiltInSymbol::OriginMode => {
-                let s = value.symbol_value()?.into_builtin_or_error()?;
+                let s = value.symbol_value(symbols)?.into_builtin_or_error(symbols)?;
                 if s == BuiltInSymbol::Point {
                     vs.center_reg_point = false;
                 }
@@ -713,6 +739,7 @@ impl VectorShapeMemberHandlers {
     /// cast-member borrow before doing the allocations.
     fn build_vertex_list(
         player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
         verts: Vec<(i32, i32, i32, i32, i32, i32, bool)>,
         new_curve_count: usize,
     ) -> Result<Datum, ScriptError> {
@@ -741,7 +768,7 @@ impl VectorShapeMemberHandlers {
         // these as a linear list holding just the symbol — `[#newCurve]` — not
         // a prop-list, so emit Datum::List([#newCurve]) to round-trip exactly.
         for _ in 0..new_curve_count {
-            let sym = player.alloc_datum(Datum::Symbol(Symbol::from_str(&"newCurve".to_string())));
+            let sym = player.alloc_datum(Datum::Symbol(symbols.intern("newCurve")));
             let marker = player.alloc_datum(Datum::List(
                 DatumType::List,
                 VecDeque::from(vec![sym]),
@@ -1027,14 +1054,18 @@ impl VectorShapeMemberHandlers {
 
 /// `set the fillMode` accepts either a #symbol (`#none`/`#solid`/`#gradient`)
 /// or a 0/1/2 integer. Map to the FLSH-stored u32 enum (offset 0x84).
-fn parse_fill_mode(value: &Datum) -> Result<u32, ScriptError> {
+fn parse_fill_mode(value: &Datum, symbols: &SymbolTable) -> Result<u32, ScriptError> {
     if let Datum::Symbol(s) = value {
-        let symbol = s.into_builtin_or_error()?;
+        let symbol = s
+            .into_builtin_or_error(symbols)?;
         Ok(match symbol {
             BuiltInSymbol::None => 0u32,
             BuiltInSymbol::Solid => 1u32,
             BuiltInSymbol::Gradient => 2u32,
-            _ => return Err(ScriptError::new(format!("invalid fillMode {}", s))),
+            _ => return Err(ScriptError::new(format!(
+                "invalid fillMode {}",
+                symbols.display(s).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
+            ))),
         })
     } else {
         Ok(value.int_value()? as u32)

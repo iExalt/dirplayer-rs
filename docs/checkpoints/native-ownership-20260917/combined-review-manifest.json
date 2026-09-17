@@ -1,0 +1,150 @@
+{
+  "dirplayer-js-api/index.d.ts": {
+    "before": "fa3db1cd694b1b310cc25401311be8ea609d3f8ea31a360781a5664fbcb39d82",
+    "after": "98d4b69f00c386c64b0773b6155f212b569d08918856cc1a53d2864c5bd77124"
+  },
+  "dirplayer-js-api/index.js": {
+    "before": "598b11008fa0b9c8b6c7e0b3b734b794519aac1d7e6eb741fda30247820876e5",
+    "after": "e9a104029112961a370e4a18e60bde646cbebed1edb3414ba4305ed766e71b35"
+  },
+  "mise.toml": {
+    "before": "f28fcb0af19c6237098e0ae17bd2ce63636b368eba9ce175dbe869f1cf07d8a7",
+    "after": "59b70f9481edd03bc212690415a799891dabbfb1c30a9b837f4700df7c6977dd"
+  },
+  "scripts/flash-owner-lifecycle.test.mjs": {
+    "before": "430b7808084abc118b5a502b8328ca824ecdbfc137101f0a0f421b063f4a61d7",
+    "after": "721c8ae3ad48bb93262409253b8891040d1b365710840bc663383f213a092849"
+  },
+  "scripts/owner-scoped-vm-callbacks.test.mjs": {
+    "before": "ad98aa8c44e896288623682a2173fc820e297ebce2a048094b2dcf930f4c6c5e",
+    "after": "5aa15907c9c51b69f50e61804fa6666d66849ccfc10663f40451c576e10b005c"
+  },
+  "src/services/flashPlayerManager.ts": {
+    "before": "7de2bdc594efe5512814b3b2aeeb4b65cfd4bd8a428da752db52e6c8f9c5c222",
+    "after": "a97fde861ae5a1d2f41fca7a77333da894520b9bc4c4a9f76adafa99e0edf084"
+  },
+  "src/vm/callbacks.ts": {
+    "before": "612f8aee89fb6cbbae9bcb7b1369b327a5f83670131cfd1151f76dfd4a297585",
+    "after": "d5156b5d91466f7814e213c836ed58407cceabaa2c020365707195f7f24702e3"
+  },
+  "vm-rust/src/director/lingo/datum.rs": {
+    "before": "99b569f5920e77b01fc163a9bf85b6d255cf8b8cbd91c1d9d76aeb690f47f191",
+    "after": "22566ef33e30d40b3f5f9cd2e73e9ef588ff7220c4541a1991c8910ef88fe845"
+  },
+  "vm-rust/src/js_api.rs": {
+    "before": "7038570ee196cf6712976111c4276173c52f942a6980ee61f3b513ccf1d6d485",
+    "after": "df2030d8d42358724a2de658de042820729f05b4e666a733ff1b2c2ddbf9c13d"
+  },
+  "vm-rust/src/lib.rs": {
+    "before": "43f9038f8db4c3a214dae686e4731843b51a1cee715fd5b52ad16edb99726610",
+    "after": "47a650c91d10eed8bdf084e24f4722f59c1a8eda6eaa44e8fe95f19d8ec5ca84"
+  },
+  "vm-rust/src/player/bytecode/handler_manager.rs": {
+    "before": "90d03624dc84b9a041b8172819e266673c25780f06bc8383d0f9e772c98e7927",
+    "after": "a5cac5a06f6c401871b04abbc39f558948766387c8dc8c33a95c538816774924"
+  },
+  "vm-rust/src/player/cast_lib.rs": {
+    "before": "b52171f7b6303b2efca1c37236a24b2756c365163608d5d6a8363576c63944d1",
+    "after": "47caafd003ce51cabbeb86cb6622530963354d1e79f4a2aa346aa508c2c15960"
+  },
+  "vm-rust/src/player/cast_manager.rs": {
+    "before": "4c61778867579fe3829ca890ef6e70be3ef12e2a9e16924f6a6f3adcb6507f39",
+    "after": "10656d56d45107b49be10cbe30198733c6dc1aaad9b6edc7bdaf27fe4d09a639"
+  },
+  "vm-rust/src/player/commands.rs": {
+    "before": "59bc0a6417e89ad79469f57da7593fbf427e640595ad6ebf06b0b987bff1d7d6",
+    "after": "82cbbdf9c8f5d4fdbed7b5844fd0fc4bd346ab36ea573add6976f50fdda3ae52"
+  },
+  "vm-rust/src/player/driver.rs": {
+    "before": "f31d8446db0f89c364debd42f56300267ab88f433da428c100bce9e328c94b22",
+    "after": "1b421dd1377909d4813bebe3edbd9f77a1ee7ff7498540096d01678593125ee2"
+  },
+  "vm-rust/src/player/eval.rs": {
+    "before": "3ce01caac14a7e6c1a4d064ca63f1628dc00a6550b6c58dd14ded7f40f082a6e",
+    "after": "f9018940ea0a96569f9d6f697ae598e8ce17b03d207ed895f09f1f092609e34e"
+  },
+  "vm-rust/src/player/events.rs": {
+    "before": "9a9212e12537e7bcd4072c754884b0e22444257a1c8e27044d1e5f0fb34f626c",
+    "after": "309af6d0bef3e68477a44854d15b3df69e8127b1b788953100e4c83388b68138"
+  },
+  "vm-rust/src/player/font/mod.rs": {
+    "before": "938128e4c87ab6721a96b6b5ec658cc7011ab1df217972615adc37d2915d0bdc",
+    "after": "a6da93935e9f225994533723bf78d25b7e3aacdbde7b3e19b14e8548710fd2eb"
+  },
+  "vm-rust/src/player/handlers/datum_handlers/flash_object.rs": {
+    "before": "96af6cd87b2a70457ffec50055a0cca3fb06f2cf3df8960d98b5759546ed56b7",
+    "after": "59549e6c267ad714502d8093c1b6b1e80738473c784b8b32fe7741d666f3e36d"
+  },
+  "vm-rust/src/player/handlers/datum_handlers/mod.rs": {
+    "before": "1a8de07f18baed92d86b015c90ba4dc2f3a0d8d2a6b3003cf65c4fd9de60ca5b",
+    "after": "739cf68d5cde0a0314afd7d3ea31f3129f5bd897c92089e192746f54d28510c1"
+  },
+  "vm-rust/src/player/handlers/datum_handlers/sound_channel.rs": {
+    "before": "e704f80ad032af03295176b01963de34846fe9fe1ebde5d86ffb2966f88a1c33",
+    "after": "be8214dc75e495f0b9f6236443ae3e5a723228c86dad7e1973ce3c3c41993659"
+  },
+  "vm-rust/src/player/handlers/datum_handlers/sprite.rs": {
+    "before": "91e4177d2acd45797ff4ecab84ab545169e61849460b0f5a5e5f11c77c418b75",
+    "after": "edf57c91481fbd835791c10bcd100f07c57cb51102c82517e02fdadaadf50c6f"
+  },
+  "vm-rust/src/player/host_events.rs": {
+    "before": null,
+    "after": "295636b39a279e340d4273c2bdf1d0849087663046631020ea20c84644358a5c"
+  },
+  "vm-rust/src/player/mod.rs": {
+    "before": "2419795e785c594edcb5e3f53f541f98b0bca91154281120c67a9982585da069",
+    "after": "7ef33739bf2a9b5cfc4487e493c7a9cca137730e7ddd9d7ec5cb54002010b5ca"
+  },
+  "vm-rust/src/player/session.rs": {
+    "before": "4e4fc9e262ee01450703d9f6ff802b49dc7174c17adb8414575f301f1a312037",
+    "after": "0aba4291f740d5847f6ea2d04dd6ba5be53ec9be750b60fa405958bce189b615"
+  },
+  "vm-rust/src/player/session_callback_tests.rs": {
+    "before": "f629aaee21797dacecec1f28e95de3c5d533bd85a0a32a5da10473d87f1240e4",
+    "after": "ebc7fc3e80e9acf74226058061b6653c9b047b62bb1322f80d6767a0d16de27d"
+  },
+  "vm-rust/src/player/testing_browser.rs": {
+    "before": "ddf5b12f02edf791f1dda098ea5a8f71ee426fd10995c4273e41b7bd57abf4f1",
+    "after": "3776f046c2db56410798c7892809f2333c44e441d785e86e2caa6af590b0bf3e"
+  },
+  "vm-rust/src/player/xtra/budapi/mod.rs": {
+    "before": "b67972c5de488d7f61868be2a450fb58efa64f730eb8ace382e4800c8ffa4115",
+    "after": "fa5b12b03d60a6d37d11f1323ba5a8f81c00b8f6383dc2aaa32edd933cfcca6e"
+  },
+  "vm-rust/src/player/xtra/curl/mod.rs": {
+    "before": "ba294c29be45bec4530b5e575e626f1c253eff51800623ee6504d5aa661503ca",
+    "after": "cd03eae98caec4f219ffdaae6f011fae975f0385f11d7a333ee61a07466bad99"
+  },
+  "vm-rust/src/player/xtra/manager.rs": {
+    "before": "d1ae523341bbcc1b8ab05d53dc0bd8aa3cdf8b41bfaa26605a768e62ce134411",
+    "after": "0faceb8ae37c307d63845d5ac0da69d313ea0d6830e5a89a229884b7f88a850b"
+  },
+  "vm-rust/src/player/xtra/openurl/mod.rs": {
+    "before": "fb0cbf05d972d60c6c903442122fb074f10a7050230734eae1a4658f89033dba",
+    "after": "d46258cc79a5d92894efae1e1b5eec6dea76099fe8212006224e73f47891a32e"
+  },
+  "vm-rust/tests/browser_templates/dirplayer-js-api.js": {
+    "before": "101f83e41361217f88723ab1afc4056773931b57207f7b7fa545a425e0862da0",
+    "after": "6193f637fa30fda20ad93e1785fed59eb0469cf39d95f37d55ab470e8750f78e"
+  },
+  "vm-rust/tests/browser_templates/index.template.html": {
+    "before": "bab31335d70b94760d09ad3781acc18ccf8e5f8d6ac6c01151bb2e78b9623b2f",
+    "after": "24b3b5a9664b87d318141defe798d7d209967b44dee5bfe755b41b9f07092bf8"
+  },
+  "vm-rust/tests/e2e/dirplayer_test_movies/browser_handle.rs": {
+    "before": "9ec9ac289adf709595ed239c54616195a1ec77e355911c63d21e5aaea8225a9a",
+    "after": "7c7fb3b8e97a8ae2cbf183bea1353ba4e0da0f4d043496f3dad81a7194623937"
+  },
+  "vm-rust/tests/e2e/dirplayer_test_movies/budapi.rs": {
+    "before": null,
+    "after": "d982116a17394b5400bc7b610114d4d9f8d4e98effb6777c80c588974654abaf"
+  },
+  "vm-rust/tests/e2e/dirplayer_test_movies/mod.rs": {
+    "before": "20f6680f19f05cff3088d36eb774e92b9642a5857de1581b0d3f309d5bc6b82e",
+    "after": "28f915da7976a8c9a5d3f089567343b33da787ff3f03913b2fd57ea71056069f"
+  },
+  "vm-rust/tests/e2e/dirplayer_test_movies/nested.rs": {
+    "before": "1c031a1852d45b767658db9582392e0f97224ea2834fba47ed29b19c2ed8d682",
+    "after": "f3c61d49641118f28c99c28bf30e6a03542989d2e88437fcd22dd7084c2ca54e"
+  }
+}

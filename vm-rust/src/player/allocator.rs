@@ -7,16 +7,11 @@ use crate::{director::lingo::datum::Datum, player::symbols::symbol::Symbol};
 
 use super::{
     datum_ref::{DatumId, DatumRef},
+    ownership::{OwnerKey, OwnerToken, ReclaimKind},
     script::{ScriptInstance, ScriptInstanceId},
     script_ref::ScriptInstanceRef,
     ScriptError,
 };
-
-/// Flag set during allocator reset to skip DatumRef::drop logic.
-/// During reset, arena entries are cleared one by one; inner DatumRefs
-/// may point to already-freed entries, so we must not dereference their
-/// ref_count pointers.
-pub static mut ALLOCATOR_RESETTING: bool = false;
 
 const ARENA_CHUNK_SIZE: usize = 4096;
 
@@ -68,7 +63,7 @@ impl<T> Arena<T> {
     }
 
     #[inline]
-    pub fn alloc(&mut self, value: T) -> usize {
+    pub(crate) fn alloc(&mut self, value: T) -> usize {
         self.count += 1;
         if let Some(idx) = self.free_list.pop() {
             self.chunks[idx / ARENA_CHUNK_SIZE][idx % ARENA_CHUNK_SIZE] = Some(value);
@@ -82,7 +77,8 @@ impl<T> Arena<T> {
         }
     }
 
-    pub fn insert_at(&mut self, id: usize, value: T) {
+    pub(crate) fn insert_at(&mut self, id: usize, value: T) {
+        assert!(id > 0, "arena ids are one-based");
         let idx = id - 1;
         self.ensure_chunk(idx / ARENA_CHUNK_SIZE);
         let chunk_idx = idx / ARENA_CHUNK_SIZE;
@@ -99,7 +95,7 @@ impl<T> Arena<T> {
     }
 
     #[inline]
-    pub fn remove(&mut self, id: usize) -> Option<T> {
+    pub(crate) fn remove(&mut self, id: usize) -> Option<T> {
         if id == 0 {
             return None;
         }
@@ -134,7 +130,7 @@ impl<T> Arena<T> {
     }
 
     #[inline]
-    pub fn get_mut(&mut self, id: usize) -> Option<&mut T> {
+    pub(crate) fn get_mut(&mut self, id: usize) -> Option<&mut T> {
         if id == 0 {
             return None;
         }
@@ -175,14 +171,14 @@ impl<T> Arena<T> {
         })
     }
 
-    pub fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.chunks.clear();
         self.free_list.clear();
         self.count = 0;
         self.next_slot = 0;
     }
 
-    pub fn clear_individually_reverse(&mut self) {
+    pub(crate) fn clear_individually_reverse(&mut self) {
         for chunk_idx in (0..self.chunks.len()).rev() {
             for slot_idx in (0..ARENA_CHUNK_SIZE).rev() {
                 // Use take() so the slot is set to None BEFORE the value is
@@ -196,7 +192,7 @@ impl<T> Arena<T> {
         self.next_slot = 0;
     }
 
-    pub fn clear_individually(&mut self) {
+    pub(crate) fn clear_individually(&mut self) {
         for chunk_idx in 0..self.chunks.len() {
             for slot_idx in 0..ARENA_CHUNK_SIZE {
                 drop(self.chunks[chunk_idx][slot_idx].take());
@@ -221,21 +217,18 @@ pub struct ScriptInstanceRefEntry {
 }
 
 pub trait ResetableAllocator {
-    fn reset(&mut self);
+    fn reset(&mut self, bitmap_manager: &mut crate::player::bitmap::manager::BitmapManager)
+        -> OwnerToken;
 }
 
-pub trait DatumAllocatorTrait {
-    fn alloc_datum(&mut self, datum: Datum) -> Result<DatumRef, ScriptError>;
+pub(crate) trait DatumAllocatorTrait {
+    fn alloc_datum(
+        &mut self,
+        datum: Datum,
+        bitmap_manager: &mut crate::player::bitmap::manager::BitmapManager,
+    ) -> Result<DatumRef, ScriptError>;
     fn get_datum(&self, id: &DatumRef) -> &Datum;
     fn get_datum_mut(&mut self, id: &DatumRef) -> &mut Datum;
-    /// Free the arena entry for `id`. If the freed entry was holding an
-    /// ephemeral `Datum::BitmapRef`, returns that `BitmapRef` so the caller
-    /// can run `bitmap_manager.decref_ephemeral(...)` outside of the
-    /// allocator's borrow. Returning `None` means no bitmap work is owed.
-    fn on_datum_ref_dropped(
-        &mut self,
-        id: DatumId,
-    ) -> Option<crate::player::bitmap::manager::BitmapRef>;
 }
 
 pub trait ScriptInstanceAllocatorTrait {
@@ -243,12 +236,12 @@ pub trait ScriptInstanceAllocatorTrait {
     fn get_script_instance(&self, instance_ref: &ScriptInstanceRef) -> &ScriptInstance;
     fn get_script_instance_opt(&self, instance_ref: &ScriptInstanceRef) -> Option<&ScriptInstance>;
     fn get_script_instance_mut(&mut self, instance_ref: &ScriptInstanceRef) -> &mut ScriptInstance;
-    fn on_script_instance_ref_dropped(&mut self, id: ScriptInstanceId);
 }
 
 pub struct DatumAllocator {
-    pub datums: Arena<DatumRefEntry>,
-    pub script_instances: Arena<ScriptInstanceRefEntry>,
+    owner: OwnerToken,
+    datums: Arena<DatumRefEntry>,
+    script_instances: Arena<ScriptInstanceRefEntry>,
     script_instance_counter: ScriptInstanceId,
     void_datum: Datum,
     pub int_alloc_count: usize,
@@ -264,13 +257,24 @@ pub struct DatumAllocator {
     /// Symbol -> (datum id, ref_count pointer). Same idea as the int pool: skip
     /// the arena lookup when re-pushing an already-interned symbol.
     symbol_pool: FxHashMap<Symbol, (DatumId, *mut u32)>,
+    #[cfg(test)]
+    reset_fault: bool,
 }
 
 const MAX_SCRIPT_INSTANCE_ID: ScriptInstanceId = 0xFFFFFF;
 
 impl DatumAllocator {
     pub fn default() -> Self {
+        Self::new(OwnerKey::transitional())
+    }
+
+    pub fn new(key: OwnerKey) -> Self {
+        Self::from_owner(OwnerToken::new(key))
+    }
+
+    pub(crate) fn from_owner(owner: OwnerToken) -> Self {
         let mut alloc = DatumAllocator {
+            owner,
             datums: Arena::with_capacity(4096),
             script_instances: Arena::new(),
             script_instance_counter: 1,
@@ -281,9 +285,101 @@ impl DatumAllocator {
             int_pool_ids: [0; INT_POOL_SIZE],
             int_pool_refs: [std::ptr::null_mut(); INT_POOL_SIZE],
             symbol_pool: FxHashMap::default(),
+            #[cfg(test)]
+            reset_fault: false,
         };
         alloc.init_int_pool();
         alloc
+    }
+
+    #[inline]
+    pub fn owner_token(&self) -> OwnerToken { self.owner.clone() }
+
+    /// Drain deferred drops against this allocator. The queue is owner-local;
+    /// the key check protects against accidental transfer between epochs.
+    pub fn drain_reclaims(
+        &mut self,
+        bitmap_manager: &mut crate::player::bitmap::manager::BitmapManager,
+    ) {
+        loop {
+            let pending = self.owner.take_pending();
+            if pending.is_empty() {
+                break;
+            }
+            for item in pending {
+            if item.owner != self.owner.key() {
+                continue;
+            }
+                match item.kind {
+                ReclaimKind::Datum(id) => {
+                    if self.datums.get(id).map_or(false, |entry| unsafe {
+                        *entry.ref_count.get() == 0
+                    }) {
+                        if let Some(bitmap) = self.dealloc_datum(id) {
+                            bitmap_manager.decref_ephemeral(bitmap);
+                        }
+                    }
+                }
+                ReclaimKind::ScriptInstance(id) => {
+                    if self.script_instances.get(id as usize).map_or(false, |entry| unsafe {
+                        *entry.ref_count.get() == 0
+                    }) {
+                        self.dealloc_script_instance(id);
+                    }
+                }
+                }
+            }
+        }
+    }
+
+    fn release_remaining_bitmap_refs(
+        &self,
+        bitmap_manager: &mut crate::player::bitmap::manager::BitmapManager,
+    ) {
+        for (_, entry) in self.datums.iter() {
+            if let Datum::BitmapRef(bitmap) = &entry.datum {
+                bitmap_manager.decref_ephemeral(*bitmap);
+            }
+        }
+    }
+
+    fn valid_datum_ref(&self, reference: &DatumRef) -> Option<DatumId> {
+        let DatumRef::Ref(_) = reference else { return None };
+        let Some(owner) = reference.owner() else { return None };
+        let Some(ptr) = reference.ref_count_ptr() else { return None };
+        if !owner.same_identity(&self.owner) || !owner.is_arena_live() {
+            return None;
+        }
+        let id = reference.unwrap();
+        let entry = self.datums.get(id)?;
+        if entry.ref_count.get() != ptr || entry.id != id {
+            return None;
+        }
+        Some(id)
+    }
+
+    pub(crate) fn try_get_datum(&self, reference: &DatumRef) -> Option<&Datum> {
+        let id = self.valid_datum_ref(reference)?;
+        Some(&self.datums.get(id)?.datum)
+    }
+
+    pub(crate) fn try_get_datum_mut(&mut self, reference: &DatumRef) -> Option<&mut Datum> {
+        let id = self.valid_datum_ref(reference)?;
+        Some(&mut self.datums.get_mut(id)?.datum)
+    }
+
+    fn valid_script_ref(&self, reference: &ScriptInstanceRef) -> Option<ScriptInstanceId> {
+        if !reference.owner().same_identity(&self.owner)
+            || !reference.owner().is_arena_live()
+        {
+            return None;
+        }
+        let id = reference.id();
+        let entry = self.script_instances.get(id as usize)?;
+        if entry.ref_count.get() != reference.ref_count_ptr() || entry.id != id {
+            return None;
+        }
+        Some(id)
     }
 
     fn init_int_pool(&mut self) {
@@ -308,25 +404,54 @@ impl DatumAllocator {
     /// per-push cost under WASM that this avoids.
     #[inline]
     pub fn alloc_int(&mut self, n: i32) -> DatumRef {
+        if !self.owner.is_arena_live() {
+            return DatumRef::Void;
+        }
         if n >= INT_POOL_MIN && n <= INT_POOL_MAX {
             let idx = (n - INT_POOL_MIN) as usize;
-            return DatumRef::Ref(self.int_pool_ids[idx], self.int_pool_refs[idx]);
+            return DatumRef::from_allocated(
+                self.int_pool_ids[idx],
+                self.int_pool_refs[idx],
+                self.owner.clone(),
+            );
         }
-        self.alloc_datum(Datum::Int(n)).unwrap()
+        self.alloc_datum_core(Datum::Int(n)).unwrap()
     }
 
     /// Fast path for pushing a symbol: interned symbols return the cached
     /// immortal ref directly (no `Datum` construction).
     #[inline]
     pub fn alloc_symbol(&mut self, sym: Symbol) -> DatumRef {
-        if let Some(&(id, rc)) = self.symbol_pool.get(&sym) {
-            return DatumRef::Ref(id, rc);
+        if !self.owner.is_arena_live() {
+            return DatumRef::Void;
         }
-        self.alloc_datum(Datum::Symbol(sym)).unwrap()
+        if let Some(&(id, rc)) = self.symbol_pool.get(&sym) {
+            return DatumRef::from_allocated(id, rc, self.owner.clone());
+        }
+        self.alloc_datum_core(Datum::Symbol(sym)).unwrap()
+    }
+
+    #[cfg(test)]
+    fn inject_reset_unwind(&mut self) {
+        self.reset_fault = true;
     }
 
     pub fn contains_datum(&self, id: DatumId) -> bool {
         self.datums.contains(id)
+    }
+
+    pub(crate) fn iter_datums(&self) -> impl Iterator<Item = (DatumId, &DatumRefEntry)> {
+        self.datums.iter()
+    }
+
+    pub(crate) fn get_datum_entry(&self, id: DatumId) -> Option<&DatumRefEntry> {
+        self.datums.get(id)
+    }
+
+    pub(crate) fn iter_script_instances(
+        &self,
+    ) -> impl Iterator<Item = (usize, &ScriptInstanceRefEntry)> {
+        self.script_instances.iter()
     }
 
     pub fn get_free_script_instance_id(&self) -> ScriptInstanceId {
@@ -477,39 +602,49 @@ impl DatumAllocator {
     }
 
     pub fn get_datum_ref(&self, id: DatumId) -> Option<DatumRef> {
+        if !self.owner.is_arena_live() {
+            return None;
+        }
         if let Some(entry) = self.datums.get(id) {
-            Some(DatumRef::from_id(id, entry.ref_count.get()))
+            match DatumRef::from_id(id, entry.ref_count.get(), self.owner.clone()) {
+                DatumRef::Void => None,
+                reference => Some(reference),
+            }
         } else {
             None
         }
     }
 
     pub fn get_script_instance_ref(&self, id: ScriptInstanceId) -> Option<ScriptInstanceRef> {
+        if !self.owner.is_arena_live() {
+            return None;
+        }
         if let Some(entry) = self.script_instances.get(id as usize) {
-            Some(ScriptInstanceRef::from_id(id, entry.ref_count.get()))
+            Some(ScriptInstanceRef::from_id(id, entry.ref_count.get(), self.owner.clone()))
         } else {
             None
         }
     }
 
-    pub fn get_script_instance_entry(
+    pub(crate) fn get_script_instance_entry(
         &self,
         id: ScriptInstanceId,
     ) -> Option<&ScriptInstanceRefEntry> {
         self.script_instances.get(id as usize)
     }
 
-    pub fn get_script_instance_entry_mut(
+    pub(crate) fn get_script_instance_entry_mut(
         &mut self,
         id: ScriptInstanceId,
     ) -> Option<&mut ScriptInstanceRefEntry> {
         self.script_instances.get_mut(id as usize)
     }
-}
 
-impl DatumAllocatorTrait for DatumAllocator {
     #[inline]
-    fn alloc_datum(&mut self, datum: Datum) -> Result<DatumRef, ScriptError> {
+    fn alloc_datum_core(&mut self, datum: Datum) -> Result<DatumRef, ScriptError> {
+        if !self.owner.is_arena_live() {
+            return Err(ScriptError::new("allocator owner is not live".to_string()));
+        }
         if datum.is_void() {
             return Ok(DatumRef::Void);
         }
@@ -519,7 +654,11 @@ impl DatumAllocatorTrait for DatumAllocator {
         if let Datum::Int(n) = &datum {
             if *n >= INT_POOL_MIN && *n <= INT_POOL_MAX {
                 let pool_idx = (*n - INT_POOL_MIN) as usize;
-                return Ok(DatumRef::Ref(self.int_pool_ids[pool_idx], self.int_pool_refs[pool_idx]));
+                return Ok(DatumRef::from_allocated(
+                    self.int_pool_ids[pool_idx],
+                    self.int_pool_refs[pool_idx],
+                    self.owner.clone(),
+                ));
             }
         }
 
@@ -527,7 +666,7 @@ impl DatumAllocatorTrait for DatumAllocator {
         // ref_count pointer avoids the arena lookup on re-push).
         if let Datum::Symbol(s) = &datum {
             if let Some(&(id, rc)) = self.symbol_pool.get(s) {
-                return Ok(DatumRef::Ref(id, rc));
+                return Ok(DatumRef::from_allocated(id, rc, self.owner.clone()));
             }
             // First time seeing this symbol — allocate and register.
             let key = s.clone();
@@ -541,7 +680,7 @@ impl DatumAllocatorTrait for DatumAllocator {
             entry.id = id;
             let rc = entry.ref_count.get();
             self.symbol_pool.insert(key, (id, rc));
-            return Ok(DatumRef::Ref(id, rc));
+            return Ok(DatumRef::from_allocated(id, rc, self.owner.clone()));
         }
 
         let is_int = matches!(&datum, Datum::Int(_));
@@ -549,11 +688,6 @@ impl DatumAllocatorTrait for DatumAllocator {
         // entry — we incref ephemeral bitmaps so they survive as long as at
         // least one arena entry references them. Cast-member-owned bitmaps
         // aren't in `ephemeral_refs` so the incref is a no-op for them.
-        let bitmap_to_incref = if let Datum::BitmapRef(bm_ref) = &datum {
-            Some(*bm_ref)
-        } else {
-            None
-        };
         let entry = DatumRefEntry {
             id: 0,
             ref_count: UnsafeCell::new(1), // Start at 1 to avoid the extra increment in from_id
@@ -566,27 +700,37 @@ impl DatumAllocatorTrait for DatumAllocator {
         if is_int {
             self.int_alloc_count += 1;
         }
-        if let Some(bm_ref) = bitmap_to_incref {
-            // Reach the bitmap manager via PLAYER_OPT. The allocator and
-            // bitmap manager are both fields of DirPlayer; we touch the
-            // bitmap manager AFTER finishing the allocator's own arena work
-            // so the two &mut borrows don't overlap.
-            unsafe {
-                if let Some(player) = crate::player::PLAYER_OPT.as_mut() {
-                    let player_ptr = player as *mut crate::player::DirPlayer;
-                    (*player_ptr).bitmap_manager.incref_ephemeral(bm_ref);
-                }
-            }
+        Ok(DatumRef::from_allocated(id, ref_count_ptr, self.owner.clone()))
+    }
+
+}
+
+impl DatumAllocatorTrait for DatumAllocator {
+    #[inline]
+    fn alloc_datum(
+        &mut self,
+        datum: Datum,
+        bitmap_manager: &mut crate::player::bitmap::manager::BitmapManager,
+    ) -> Result<DatumRef, ScriptError> {
+        let bitmap_to_incref = match &datum {
+            Datum::BitmapRef(bitmap) => Some(*bitmap),
+            _ => None,
+        };
+        let reference = self.alloc_datum_core(datum)?;
+        if let Some(bitmap) = bitmap_to_incref {
+            bitmap_manager.incref_ephemeral(bitmap);
         }
-        Ok(DatumRef::Ref(id, ref_count_ptr))
+        Ok(reference)
     }
 
     #[inline]
     fn get_datum(&self, id: &DatumRef) -> &Datum {
         match id {
-            DatumRef::Ref(id, ..) => {
-                let entry = unsafe { self.datums.get(*id).unwrap_unchecked() };
-                &entry.datum
+            DatumRef::Ref(_) => {
+                let datum_id = self
+                    .valid_datum_ref(id)
+                    .expect("foreign or stale DatumRef");
+                &self.datums.get(datum_id).expect("validated datum disappeared").datum
             }
             DatumRef::Void => &Datum::Void,
         }
@@ -595,26 +739,30 @@ impl DatumAllocatorTrait for DatumAllocator {
     #[inline]
     fn get_datum_mut(&mut self, id: &DatumRef) -> &mut Datum {
         match id {
-            DatumRef::Ref(id, ..) => {
-                let entry = unsafe { self.datums.get_mut(*id).unwrap_unchecked() };
-                &mut entry.datum
+            DatumRef::Ref(_) => {
+                let datum_id = self
+                    .valid_datum_ref(id)
+                    .expect("foreign or stale DatumRef");
+                &mut self
+                    .datums
+                    .get_mut(datum_id)
+                    .expect("validated datum disappeared")
+                    .datum
             }
             DatumRef::Void => &mut self.void_datum,
         }
-    }
-
-    #[inline]
-    fn on_datum_ref_dropped(
-        &mut self,
-        id: DatumId,
-    ) -> Option<crate::player::bitmap::manager::BitmapRef> {
-        self.dealloc_datum(id)
     }
 }
 
 impl ScriptInstanceAllocatorTrait for DatumAllocator {
     fn alloc_script_instance(&mut self, script_instance: ScriptInstance) -> ScriptInstanceRef {
+        assert!(self.owner.is_arena_live(), "allocator owner is not live");
         let id = script_instance.instance_id;
+        assert!(
+            !self.script_instances.contains(id as usize),
+            "duplicate live script instance id {}",
+            id
+        );
         self.script_instance_counter += 1;
         self.script_instances.insert_at(
             id as usize,
@@ -630,23 +778,20 @@ impl ScriptInstanceAllocatorTrait for DatumAllocator {
             .unwrap()
             .ref_count
             .get();
-        ScriptInstanceRef::from_id(id, ref_count_ptr)
+        ScriptInstanceRef::from_id(id, ref_count_ptr, self.owner.clone())
     }
 
     fn get_script_instance(&self, instance_ref: &ScriptInstanceRef) -> &ScriptInstance {
-        &self
-            .script_instances
-            .get(instance_ref.id() as usize)
-            .unwrap()
-            .script_instance
+        self.get_script_instance_opt(instance_ref)
+            .expect("foreign or stale ScriptInstanceRef")
     }
 
     fn get_script_instance_opt(
         &self,
         instance_ref: &ScriptInstanceRef,
     ) -> Option<&ScriptInstance> {
-        self.script_instances
-            .get(instance_ref.id() as usize)
+        self.valid_script_ref(instance_ref)
+            .and_then(|id| self.script_instances.get(id as usize))
             .map(|entry| &entry.script_instance)
     }
 
@@ -654,25 +799,42 @@ impl ScriptInstanceAllocatorTrait for DatumAllocator {
         &mut self,
         instance_ref: &ScriptInstanceRef,
     ) -> &mut ScriptInstance {
-        &mut self
-            .script_instances
-            .get_mut(instance_ref.id() as usize)
-            .unwrap()
-            .script_instance
+        let id = self
+            .valid_script_ref(instance_ref)
+            .expect("foreign or stale ScriptInstanceRef");
+        &mut self.script_instances.get_mut(id as usize).unwrap().script_instance
     }
 
-    fn on_script_instance_ref_dropped(&mut self, id: ScriptInstanceId) {
-        self.dealloc_script_instance(id);
-    }
 }
 
 impl ResetableAllocator for DatumAllocator {
-    fn reset(&mut self) {
+    fn reset(
+        &mut self,
+        bitmap_manager: &mut crate::player::bitmap::manager::BitmapManager,
+    ) -> OwnerToken {
+        let old_owner = self.owner.clone();
+        old_owner.begin_reset();
+        let mut reset_guard = ResetGuard { owner: old_owner.clone(), armed: true };
+
+        // Entries whose final external handle was dropped before reset are
+        // reclaimed while the old arena is still addressable. Drops caused by
+        // clearing arena entries below are stale-safe and skip raw pointers.
+        self.drain_reclaims(bitmap_manager);
+        self.release_remaining_bitmap_refs(bitmap_manager);
+
+        // Invalidate before the arena fields begin dropping. This is the UAF
+        // boundary for every external handle carrying the old token.
+        old_owner.mark_arena_dead();
+
+        #[cfg(test)]
+        if self.reset_fault {
+            self.reset_fault = false;
+            panic!("injected allocator reset unwind");
+        }
+
         // Remove entries individually to ensure proper Drop cleanup.
         // Datum Drop impls may reference other datums, so reverse order
         // helps ensure dependents are dropped before their dependencies.
-        unsafe { ALLOCATOR_RESETTING = true; }
-
         debug!("Removing all datums");
         self.datums.clear_individually_reverse();
 
@@ -681,10 +843,314 @@ impl ResetableAllocator for DatumAllocator {
 
         self.script_instance_counter = 1;
 
-        unsafe { ALLOCATOR_RESETTING = false; }
-
         // Re-create pools after clearing
         self.symbol_pool.clear();
+        self.owner = OwnerToken::new(old_owner.key().next_generation());
         self.init_int_pool();
+        reset_guard.armed = false;
+        self.owner.clone()
+    }
+
+}
+
+struct ResetGuard {
+    owner: OwnerToken,
+    armed: bool,
+}
+
+impl Drop for ResetGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.owner.mark_arena_dead();
+        }
+    }
+}
+
+impl Drop for DatumAllocator {
+    fn drop(&mut self) {
+        // Drop runs before Rust drops the arena fields. Marking the token first
+        // makes every external handle's Drop path skip its raw refcount pointer.
+        self.owner.mark_arena_dead();
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+    use crate::director::lingo::datum::DatumType;
+    use std::collections::VecDeque;
+
+    fn local_test_symbol() -> Symbol {
+        // This value is used only as an opaque hash key. It deliberately does
+        // not consult the process-global symbol interner.
+        Symbol::empty()
+    }
+
+    fn allocator() -> DatumAllocator {
+        DatumAllocator::new(OwnerKey::transitional())
+    }
+
+    #[test]
+    fn foreign_handles_are_rejected_before_arena_access() {
+        let mut first = allocator();
+        let mut second = allocator();
+        let mut first_bitmaps = crate::player::bitmap::manager::BitmapManager::new();
+        let mut second_bitmaps = crate::player::bitmap::manager::BitmapManager::new();
+        let reference = first
+            .alloc_datum(Datum::String("first".into()), &mut first_bitmaps)
+            .unwrap();
+
+        assert!(second.try_get_datum(&reference).is_none());
+        assert!(second.try_get_datum_mut(&reference).is_none());
+        second.drain_reclaims(&mut second_bitmaps);
+        drop(reference);
+    }
+
+    #[test]
+    #[should_panic(expected = "arena ids are one-based")]
+    fn arena_rejects_zero_based_insert_ids() {
+        let mut arena = Arena::<u8>::new();
+        arena.insert_at(0, 1);
+    }
+
+    #[test]
+    fn deferred_reclaim_reaches_children() {
+        let mut alloc = allocator();
+        let mut bitmaps = crate::player::bitmap::manager::BitmapManager::new();
+        let child = alloc
+            .alloc_datum(Datum::String("child".into()), &mut bitmaps)
+            .unwrap();
+        let child_id = child.unwrap();
+        let list = alloc
+            .alloc_datum(
+                Datum::List(
+                    DatumType::List,
+                    VecDeque::from([child.clone()]),
+                    false,
+                ),
+                &mut bitmaps,
+            )
+            .unwrap();
+        let list_id = list.unwrap();
+        drop(child);
+        drop(list);
+
+        alloc.drain_reclaims(&mut bitmaps);
+
+        assert!(!alloc.contains_datum(child_id));
+        assert!(!alloc.contains_datum(list_id));
+    }
+
+    #[test]
+    fn stale_clone_is_safe_after_reset_and_id_reuse() {
+        let mut alloc = allocator();
+        let mut bitmaps = crate::player::bitmap::manager::BitmapManager::new();
+        let old = alloc
+            .alloc_datum(Datum::String("old".into()), &mut bitmaps)
+            .unwrap();
+        let stale = old.clone();
+        let old_owner = alloc.owner_token();
+
+        let new_owner = alloc.reset(&mut bitmaps);
+        assert!(!old_owner.is_arena_live());
+        assert!(!alloc.owner_token().same_identity(&old_owner));
+        assert!(alloc.try_get_datum(&stale).is_none());
+
+        let reused = alloc
+            .alloc_datum(Datum::String("new".into()), &mut bitmaps)
+            .unwrap();
+        assert_eq!(reused.unwrap(), old.unwrap());
+        let stale_after_reset = stale.clone();
+        assert!(alloc.try_get_datum(&reused).is_some());
+        drop(stale_after_reset);
+        assert!(matches!(alloc.try_get_datum(&reused), Some(Datum::String(value)) if value == "new"));
+        drop(stale);
+        drop(old);
+        drop(reused);
+        assert!(new_owner.same_identity(&alloc.owner_token()));
+    }
+
+    #[test]
+    fn bitmap_effect_is_reclaimed_by_owner_queue() {
+        let mut alloc = allocator();
+        let mut bitmaps = crate::player::bitmap::manager::BitmapManager::new();
+        let bitmap = crate::player::bitmap::bitmap::Bitmap::new(
+            1,
+            1,
+            32,
+            32,
+            8,
+            crate::player::bitmap::bitmap::PaletteRef::Default,
+        );
+        let bitmap_id = bitmaps.add_ephemeral_bitmap(bitmap);
+        let reference = alloc
+            .alloc_datum(Datum::BitmapRef(bitmap_id), &mut bitmaps)
+            .unwrap();
+        assert!(bitmaps.get_bitmap(bitmap_id).is_some());
+        drop(reference);
+        alloc.drain_reclaims(&mut bitmaps);
+        assert!(bitmaps.get_bitmap(bitmap_id).is_none());
+    }
+
+    #[test]
+    fn reset_releases_remaining_ephemeral_bitmaps_before_epoch_change() {
+        let mut alloc = allocator();
+        let mut bitmaps = crate::player::bitmap::manager::BitmapManager::new();
+        let bitmap = crate::player::bitmap::bitmap::Bitmap::new(
+            1,
+            1,
+            32,
+            32,
+            8,
+            crate::player::bitmap::bitmap::PaletteRef::Default,
+        );
+        let bitmap_id = bitmaps.add_ephemeral_bitmap(bitmap);
+        let reference = alloc
+            .alloc_datum(Datum::BitmapRef(bitmap_id), &mut bitmaps)
+            .unwrap();
+        let _new_owner = alloc.reset(&mut bitmaps);
+        assert!(bitmaps.get_bitmap(bitmap_id).is_none());
+        drop(reference);
+    }
+
+    #[test]
+    fn script_instance_refs_reclaim_without_active_player() {
+        let mut alloc = allocator();
+        let mut bitmaps = crate::player::bitmap::manager::BitmapManager::new();
+        let instance = ScriptInstance {
+            instance_id: 42,
+            script: crate::player::cast_lib::CastMemberRef {
+                cast_lib: 1,
+                cast_member: 1,
+            },
+            ancestor: None,
+            properties: FxHashMap::default(),
+            begin_sprite_called: false,
+        };
+        let reference = alloc.alloc_script_instance(instance);
+        let retained = reference.clone();
+        assert!(alloc.get_script_instance_opt(&reference).is_some());
+        drop(reference);
+        drop(retained);
+        alloc.drain_reclaims(&mut bitmaps);
+        assert!(alloc.get_script_instance_ref(42).is_none());
+    }
+
+    #[test]
+    fn pooled_handles_are_owner_validated_across_reset() {
+        let mut alloc = allocator();
+        let mut bitmaps = crate::player::bitmap::manager::BitmapManager::new();
+        let pooled = alloc.alloc_int(0);
+        let symbol = alloc.alloc_symbol(local_test_symbol());
+        let stale_pooled = pooled.clone();
+        let stale_symbol = symbol.clone();
+        assert!(alloc.try_get_datum(&pooled).is_some());
+        assert!(alloc.try_get_datum(&symbol).is_some());
+
+        let old_owner = alloc.owner_token();
+        let _new_owner = alloc.reset(&mut bitmaps);
+        assert!(!old_owner.is_arena_live());
+        assert!(alloc.try_get_datum(&stale_pooled).is_none());
+        assert!(alloc.try_get_datum(&stale_symbol).is_none());
+        drop(stale_pooled.clone());
+        drop(stale_symbol.clone());
+        let fresh_int = alloc.alloc_int(0);
+        let fresh_symbol = alloc.alloc_symbol(local_test_symbol());
+        assert!(alloc.try_get_datum(&fresh_int).is_some());
+        assert!(alloc.try_get_datum(&fresh_symbol).is_some());
+    }
+
+    #[test]
+    fn allocators_are_isolated_when_created_inside_threads() {
+        use std::sync::{Arc, Barrier};
+
+        let barrier = Arc::new(Barrier::new(2));
+        let first_barrier = barrier.clone();
+        let first = std::thread::spawn(move || {
+            let mut alloc = allocator();
+            let mut bitmaps = crate::player::bitmap::manager::BitmapManager::new();
+            first_barrier.wait();
+            let reference = alloc
+                .alloc_datum(Datum::String("first".into()), &mut bitmaps)
+                .unwrap();
+            let value = match alloc.try_get_datum(&reference) {
+                Some(Datum::String(value)) => value.clone(),
+                _ => String::new(),
+            };
+            drop(reference);
+            alloc.drain_reclaims(&mut bitmaps);
+            value
+        });
+        let second_barrier = barrier;
+        let second = std::thread::spawn(move || {
+            let mut alloc = allocator();
+            let mut bitmaps = crate::player::bitmap::manager::BitmapManager::new();
+            second_barrier.wait();
+            let reference = alloc
+                .alloc_datum(Datum::String("second".into()), &mut bitmaps)
+                .unwrap();
+            let value = match alloc.try_get_datum(&reference) {
+                Some(Datum::String(value)) => value.clone(),
+                _ => String::new(),
+            };
+            drop(reference);
+            alloc.drain_reclaims(&mut bitmaps);
+            value
+        });
+
+        assert_eq!(first.join().unwrap(), "first");
+        assert_eq!(second.join().unwrap(), "second");
+    }
+
+    #[test]
+    fn reset_unwind_invalidates_handles_and_rejects_allocations_until_recovery() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+
+        let mut alloc = allocator();
+        let mut bitmaps = crate::player::bitmap::manager::BitmapManager::new();
+        let retained = alloc
+            .alloc_datum(Datum::String("before-unwind".into()), &mut bitmaps)
+            .unwrap();
+        let old_owner = alloc.owner_token();
+        alloc.inject_reset_unwind();
+
+        let result = catch_unwind(AssertUnwindSafe(|| alloc.reset(&mut bitmaps)));
+        assert!(result.is_err());
+        assert!(!old_owner.is_arena_live());
+        assert!(alloc
+            .alloc_datum(Datum::String("rejected".into()), &mut bitmaps)
+            .is_err());
+        assert!(matches!(alloc.alloc_int(1), DatumRef::Void));
+        assert!(matches!(alloc.alloc_symbol(local_test_symbol()), DatumRef::Void));
+        let script = ScriptInstance {
+            instance_id: 7,
+            script: crate::player::cast_lib::CastMemberRef { cast_lib: 1, cast_member: 1 },
+            ancestor: None,
+            properties: FxHashMap::default(),
+            begin_sprite_called: false,
+        };
+        assert!(catch_unwind(AssertUnwindSafe(|| alloc.alloc_script_instance(script))).is_err());
+
+        let mut recovered = allocator();
+        let mut recovered_bitmaps = crate::player::bitmap::manager::BitmapManager::new();
+        assert!(recovered
+            .alloc_datum(Datum::String("recovered".into()), &mut recovered_bitmaps)
+            .is_ok());
+        drop(retained);
+    }
+
+    #[test]
+    fn allocator_drop_invalidates_external_handles_before_arena_drop() {
+        let mut alloc = allocator();
+        let mut bitmaps = crate::player::bitmap::manager::BitmapManager::new();
+        let reference = alloc
+            .alloc_datum(Datum::String("drop".into()), &mut bitmaps)
+            .unwrap();
+        let owner = alloc.owner_token();
+        drop(alloc);
+        assert!(!owner.is_arena_live());
+        let stale_clone = reference.clone();
+        drop(stale_clone);
+        drop(reference);
     }
 }

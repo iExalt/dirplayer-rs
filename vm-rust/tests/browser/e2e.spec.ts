@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { spawnSync } from "child_process";
+import { spawn, spawnSync } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
 import { fileURLToPath } from "url";
@@ -8,6 +8,94 @@ import { PNG } from "pngjs";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SNAPSHOTS_BASE = path.join(__dirname, "..", "snapshots");
 const UPDATE_SNAPSHOTS = process.env.SNAPSHOT_UPDATE === "1";
+let multiuserServer: ReturnType<typeof spawn> | undefined;
+const MULTIUSER_TEST_NAME = "test_multiuser_socket_lifecycle";
+const FILEIO_TEST_NAME = "test_fileio_open_remote";
+const FIXTURE_TEST_NAMES = [MULTIUSER_TEST_NAME, FILEIO_TEST_NAME];
+const RUN_MULTIUSER_FIXTURE = (() => {
+  const filter = process.env.E2E_FILTER;
+  if (!filter) return true;
+  return filter
+    .split(",")
+    .map((part) => part.trim().toLowerCase())
+    .filter(Boolean)
+    .some((part) => FIXTURE_TEST_NAMES.some((name) => name.includes(part)));
+})();
+
+async function startMultiuserFixture(): Promise<number> {
+  const helper = path.join(__dirname, "multiuser-server.mjs");
+  const child = spawn(process.env.BUN_BIN || "bun", [helper], {
+    stdio: ["ignore", "pipe", "inherit"],
+  });
+  multiuserServer = child;
+  return new Promise((resolve, reject) => {
+    let output = "";
+    let settled = false;
+    const settle = (error: Error | null, port?: number) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.stdout?.off("data", onData);
+      child.off("error", onError);
+      child.off("exit", onExit);
+      if (error) reject(error);
+      else resolve(port!);
+    };
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM");
+      settle(new Error(`multiuser fixture did not start within 5 seconds: ${output}`));
+    }, 5000);
+    const onData = (chunk: Buffer | string) => {
+      output += chunk.toString();
+      const match = output.match(/MULTIUSER_TEST_SERVER_READY (\d+)/);
+      if (match) {
+        settle(null, Number(match[1]));
+      }
+    };
+    const onError = (error: Error) => settle(error);
+    const onExit = (code: number | null, signal: string | null) => {
+      settle(new Error(`multiuser fixture exited before ready (${code ?? signal}): ${output}`));
+    };
+    child.stdout?.on("data", onData);
+    child.once("error", onError);
+    child.once("exit", onExit);
+  });
+}
+
+test.beforeEach(async ({ page }) => {
+  if (!RUN_MULTIUSER_FIXTURE) return;
+  const port = await startMultiuserFixture();
+  await page.addInitScript((fixturePort) => {
+    (window as any).__multiuserTestWsBase = `ws://127.0.0.1:${fixturePort}`;
+    (window as any).__fileIoTestHttpBase = `http://127.0.0.1:${fixturePort}`;
+  }, port);
+});
+
+test.afterEach(async () => {
+  const child = multiuserServer;
+  multiuserServer = undefined;
+  if (!child) return;
+  const waitForExit = (timeoutMs: number) => new Promise<boolean>((resolve) => {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      resolve(true);
+      return;
+    }
+    const timer = setTimeout(() => {
+      child.off("exit", onExit);
+      resolve(false);
+    }, timeoutMs);
+    const onExit = () => {
+      clearTimeout(timer);
+      resolve(true);
+    };
+    child.once("exit", onExit);
+  });
+  child.kill("SIGTERM");
+  if (!(await waitForExit(1000))) {
+    child.kill("SIGKILL");
+    await waitForExit(1000);
+  }
+});
 
 interface TestResult {
   name: string;
@@ -260,5 +348,18 @@ test("browser e2e tests", async ({ page }) => {
   }
 
   // Assert all tests passed
+  expect(testResults!.tests.length).toBeGreaterThan(0);
+  const requestedFilters = (process.env.E2E_FILTER || "")
+    .toLowerCase()
+    .split(",")
+    .map((filter) => filter.trim())
+    .filter(Boolean);
+  if (requestedFilters.length > 0) {
+    expect(
+      testResults!.tests.every((test) =>
+        requestedFilters.some((filter) => test.name.toLowerCase().includes(filter))
+      )
+    ).toBe(true);
+  }
   expect(testResults!.failed).toBe(0);
 });

@@ -8,8 +8,8 @@ use crate::{
         DatumRef, DirPlayer, ScriptError, bitmap::{bitmap::{self, Bitmap, BuiltInPalette, PaletteRef}, drawing::CopyPixelsParams, mask::BitmapMask, palette_map::PaletteMap}, cast_lib::CastMemberRef, font::{
             BitmapFont, DrawTextParams, bitmap_font_copy_char_scaled, get_text_index_at_pos, measure_text
         }, handlers::datum_handlers::{
-            cast_member_ref::borrow_member_mut, string_chunk::StringChunkUtils,
-        }, symbols::{builtin::BuiltInSymbol, symbol::Symbol}
+            cast_member_ref::{borrow_member_mut_with_player, checked_get_datum}, string_chunk::StringChunkUtils,
+        }, symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable}
     },
 };
 
@@ -359,14 +359,23 @@ pub struct OutlineCharStyle {
 
 pub struct FontMemberHandlers {}
 
+fn builtin_symbol(symbol: &Symbol, symbols: &SymbolTable) -> Result<Option<BuiltInSymbol>, ScriptError> {
+    match symbol.into_builtin_or_error(symbols) {
+        Ok(value) => Ok(Some(value)),
+        Err(crate::player::symbols::symbol::SymbolError::NotBuiltin { .. }) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
 impl FontMemberHandlers {
     pub fn call(
         player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
         datum: &DatumRef,
         handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        let member_ref = player.get_datum(datum).to_member_ref()?;
+        let member_ref = checked_get_datum(player, datum, symbols)?.to_member_ref()?;
         let member = player
             .movie
             .cast_manager
@@ -375,27 +384,27 @@ impl FontMemberHandlers {
         let text = member.member_type.as_text().unwrap();
         match handler_name {
             "count" => {
-                let count_of = player.get_datum(&args[0]).symbol_value()?;
+                let count_of = checked_get_datum(player, &args[0], symbols)?.symbol_value(symbols)?;
                 if args.len() != 1 {
                     return Err(ScriptError::new("count requires 1 argument".to_string()));
                 }
                 let delimiter = player.movie.item_delimiter;
                 let count = StringChunkUtils::resolve_chunk_count(
                     &text.text,
-                    StringChunkType::from(count_of),
+                    StringChunkType::from_symbol(&count_of, symbols)?,
                     delimiter,
                 )?;
                 Ok(player.alloc_datum(Datum::Int(count as i32)))
             }
             "getPropRef" => {
-                let prop_name = player.get_datum(&args[0]).symbol_value()?;
-                let start = player.get_datum(&args[1]).int_value()?;
+                let prop_name = checked_get_datum(player, &args[0], symbols)?.symbol_value(symbols)?;
+                let start = checked_get_datum(player, &args[1], symbols)?.int_value()?;
                 let end = if args.len() > 2 {
-                    player.get_datum(&args[2]).int_value()?
+                    checked_get_datum(player, &args[2], symbols)?.int_value()?
                 } else {
                     start
                 };
-                let chunk_expr = StringChunkType::from(prop_name);
+                let chunk_expr = StringChunkType::from_symbol(&prop_name, symbols)?;
                 let chunk_expr = StringChunkExpr {
                     chunk_type: chunk_expr,
                     start,
@@ -411,7 +420,7 @@ impl FontMemberHandlers {
                 )))
             }
             "locToCharPos" => {
-                let (pt_vals, _flags) = player.get_datum(&args[0]).to_point_inline()?;
+                let (pt_vals, _flags) = checked_get_datum(player, &args[0], symbols)?.to_point_inline()?;
                 let x = pt_vals[0] as i32;
                 let y = pt_vals[1] as i32;
 
@@ -2355,8 +2364,8 @@ impl FontMemberHandlers {
         Ok(())
     }
 
-    fn parse_alignment(value: Datum) -> Result<TextAlignment, ScriptError> {
-        let s = value.string_value()?.to_ascii_lowercase();
+    fn parse_alignment(value: Datum, symbols: &SymbolTable) -> Result<TextAlignment, ScriptError> {
+        let s = value.string_value(symbols)?.to_ascii_lowercase();
         match s.as_str() {
             "left" => Ok(TextAlignment::Left),
             "center" => Ok(TextAlignment::Center),
@@ -2371,6 +2380,7 @@ impl FontMemberHandlers {
 
     pub fn get_prop(
         player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
         cast_member_ref: &CastMemberRef,
         prop: Symbol,
     ) -> Result<Datum, ScriptError> {
@@ -2382,7 +2392,7 @@ impl FontMemberHandlers {
 
         match &member.member_type {
             CastMemberType::Text(text_data) => {
-                match prop.into_builtin() {
+                match builtin_symbol(&prop, symbols)? {
                     Some(BuiltInSymbol::Text) => Ok(Datum::String(text_data.text.clone())),
                     Some(BuiltInSymbol::Alignment) => Ok(Datum::String(text_data.alignment.to_string())),
                     Some(BuiltInSymbol::WordWrap) => Ok(datum_bool(text_data.word_wrap)),
@@ -2448,7 +2458,7 @@ impl FontMemberHandlers {
                         let (width, height) =
                             measure_text(&text_clone, &font, None, fixed_line_space, top_spacing, 0);
 
-                        match prop.into_builtin() {
+                        match builtin_symbol(&prop, symbols)? {
                             Some(BuiltInSymbol::Rect) => Ok(Datum::Rect([0.0, 0.0, width as f64, height as f64], 0)),
                             Some(BuiltInSymbol::Height) => Ok(Datum::Int(height as i32)),
                             Some(BuiltInSymbol::Image) => {
@@ -2549,12 +2559,12 @@ impl FontMemberHandlers {
                     }
                     _ => Err(ScriptError::new(format!(
                         "Cannot get castMember property {} for Text member",
-                        prop
+                        symbols.display(&prop).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
                     ))),
                 }
             }
 
-            CastMemberType::Font(font_data) => match prop.into_builtin() {
+            CastMemberType::Font(font_data) => match builtin_symbol(&prop, symbols)? {
                 Some(BuiltInSymbol::Text) => Ok(Datum::String(font_data.preview_text.clone())),
                 Some(BuiltInSymbol::PreviewText) => Ok(Datum::String(font_data.preview_text.clone())),
                 Some(BuiltInSymbol::PreviewHtml) => {
@@ -2570,34 +2580,44 @@ impl FontMemberHandlers {
                 Some(BuiltInSymbol::Size) => Ok(Datum::Int(font_data.font_info.size as i32)),
                 _ => Err(ScriptError::new(format!(
                     "Cannot get castMember property {} for Font member",
-                    prop
+                    symbols.display(&prop).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
                 ))),
             },
 
             _ => Err(ScriptError::new(format!(
                 "Cannot get castMember property {} for this member type",
-                prop
+                symbols.display(&prop).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
             ))),
         }
     }
 
     pub fn set_prop(
         player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
         member_ref: &CastMemberRef,
         prop: Symbol,
         value: Datum,
     ) -> Result<(), ScriptError> {
-        borrow_member_mut(
+        crate::player::compare::validate_direct_symbol_fields(&value, symbols)?;
+        let prop_name = symbols
+            .display(&prop)
+            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
+            .to_owned();
+        borrow_member_mut_with_player(
+            player,
+            symbols,
             member_ref,
-            |player| (), // no extra data needed
-            |cast_member, _| {
+            |player, symbols| (), // no extra data needed
+            |cast_member, _, symbols| {
                 if let CastMemberType::Font(font_member) = &mut cast_member.member_type {
-                    let prop = prop.into_builtin_or_error()?;
+                    let prop = builtin_symbol(&prop, symbols)?.ok_or_else(|| {
+                        ScriptError::new(format!("Cannot set castMember prop '{}' for Font member", prop_name))
+                    })?;
 
                     match prop {
-                        BuiltInSymbol::Text => font_member.preview_text = value.string_value()?,
+                        BuiltInSymbol::Text => font_member.preview_text = value.string_value(symbols)?,
                         BuiltInSymbol::Html => {
-                            let html_string = value.string_value()?;
+                            let html_string = value.string_value(symbols)?;
                             let spans = HtmlParser::parse_html(&html_string).map_err(|e| {
                                 ScriptError::new(format!("Failed to parse HTML: {}", e))
                             })?;
@@ -2609,19 +2629,19 @@ impl FontMemberHandlers {
                             font_member.fixed_line_space = value.int_value()? as u16
                         }
                         BuiltInSymbol::Alignment => {
-                            font_member.alignment = Self::parse_alignment(value)?;
+                            font_member.alignment = Self::parse_alignment(value, symbols)?;
                         }
                         _ => {
                             return Err(ScriptError::new(format!(
                                 "Cannot set castMember prop '{}' for Font member",
-                                prop
+                                prop_name
                             )))
                         }
                     }
                 } else {
                     return Err(ScriptError::new(format!(
                         "Cannot set castMember prop '{}' for non-Font member",
-                        prop
+                        prop_name
                     )));
                 }
                 Ok(())

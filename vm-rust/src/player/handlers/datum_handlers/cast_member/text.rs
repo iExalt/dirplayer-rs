@@ -11,13 +11,17 @@ use crate::{
             drawing::CopyPixelsParams,
         }, cast_lib::CastMemberRef, font::{DrawTextParams, GlyphPreference, get_glyph_preference, get_text_index_at_pos, measure_text, measure_text_wrapped}, handlers::datum_handlers::{
             cast_member::font::{FontMemberHandlers, HtmlParser, HtmlStyle, OutlineCharStyle, StyledSpan, TextAlignment},
-            cast_member_ref::borrow_member_mut, string_chunk::StringChunkUtils,
-        }, symbols::{builtin::BuiltInSymbol, symbol::Symbol}
+            cast_member_ref::{borrow_member_mut_with_player, checked_get_datum}, string_chunk::StringChunkUtils,
+        }, symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable}
     },
 };
 
 pub struct TextMemberHandlers {}
 const DEBUG_TEXT_IMAGE: bool = true;
+
+fn builtin_symbol(symbol: &Symbol, symbols: &SymbolTable) -> Result<BuiltInSymbol, ScriptError> {
+    Ok(symbol.into_builtin_or_error(symbols)?)
+}
 
 /// Per-line vertical step in pixels for `linePosToLocV` / `locVToLinePos`.
 /// Matches what `charPosToLoc` in [handlers/manager.rs] uses: explicit
@@ -223,11 +227,12 @@ struct ParsedRtf {
 impl TextMemberHandlers {
     pub fn call(
         player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
         datum: &DatumRef,
         handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
-        let member_ref = player.get_datum(datum).to_member_ref()?;
+        let member_ref = checked_get_datum(player, datum, symbols)?.to_member_ref()?;
         let member = player
             .movie
             .cast_manager
@@ -236,28 +241,27 @@ impl TextMemberHandlers {
         let text = member.member_type.as_text().unwrap();
         match handler_name {
             "count" => {
-                let count_of = player.get_datum(&args[0]).symbol_value()?;
+                let count_of = checked_get_datum(player, &args[0], symbols)?.symbol_value(symbols)?;
                 if args.len() != 1 {
                     return Err(ScriptError::new("count requires 1 argument".to_string()));
                 }
                 let delimiter = player.movie.item_delimiter;
                 let count = StringChunkUtils::resolve_chunk_count(
                     &text.text,
-                    StringChunkType::from(count_of),
+                    StringChunkType::from_symbol(&count_of, symbols)?,
                     delimiter,
                 )?;
                 Ok(player.alloc_datum(Datum::Int(count as i32)))
             }
             "getPropRef" => {
-                let prop_name = player.get_datum(&args[0]).symbol_value()?;
-                let start = player.get_datum(&args[1]).int_value()?;
+                let prop_name = checked_get_datum(player, &args[0], symbols)?.symbol_value(symbols)?;
+                let start = checked_get_datum(player, &args[1], symbols)?.int_value()?;
                 let end = if args.len() > 2 {
-                    player.get_datum(&args[2]).int_value()?
+                    checked_get_datum(player, &args[2], symbols)?.int_value()?
                 } else {
                     start
                 };
-                let chunk_type = std::panic::catch_unwind(|| StringChunkType::from(prop_name))
-                    .map_err(|_| ScriptError::new(format!("Invalid chunk type '{}' for text member getPropRef", prop_name)))?;
+                let chunk_type = StringChunkType::from_symbol(&prop_name, symbols)?;
                 let chunk_expr = StringChunkExpr {
                     chunk_type,
                     start,
@@ -273,7 +277,7 @@ impl TextMemberHandlers {
                 )))
             }
             "locToCharPos" => {
-                let (pt_vals, _flags) = player.get_datum(&args[0]).to_point_inline()?;
+                let (pt_vals, _flags) = checked_get_datum(player, &args[0], symbols)?.to_point_inline()?;
                 let x = pt_vals[0] as i32;
                 let y = pt_vals[1] as i32;
 
@@ -295,12 +299,12 @@ impl TextMemberHandlers {
             // Director 11.5 Scripting Dictionary p.618/619. Shared core handles
             // both field and text members (see scroll_member_by_lines).
             "scrollByLine" => {
-                let amount = player.get_datum(&args[0]).to_float()?;
+                let amount = checked_get_datum(player, &args[0], symbols)?.to_float()?;
                 scroll_member_by_lines(player, &member_ref, amount);
                 Ok(DatumRef::Void)
             }
             "scrollByPage" => {
-                let amount = player.get_datum(&args[0]).to_float()?;
+                let amount = checked_get_datum(player, &args[0], symbols)?.to_float()?;
                 scroll_member_by_pages(player, &member_ref, amount);
                 Ok(DatumRef::Void)
             }
@@ -319,14 +323,14 @@ impl TextMemberHandlers {
             // the cursor; or overlapping into the previous line's
             // click bucket).
             "linePosToLocV" => {
-                let line_num = player.get_datum(&args[0]).int_value()?.max(1);
+                let line_num = checked_get_datum(player, &args[0], symbols)?.int_value()?.max(1);
                 let line_step = line_step_px(text.fixed_line_space, text.font_size);
                 let baseline_offset = (line_step * 3) / 4;
                 let y = text.top_spacing as i32 + (line_num - 1) * line_step + baseline_offset;
                 Ok(player.alloc_datum(Datum::Int(y)))
             }
             "locVToLinePos" => {
-                let loc_v = player.get_datum(&args[0]).int_value()?;
+                let loc_v = checked_get_datum(player, &args[0], symbols)?.int_value()?;
                 let line_step = line_step_px(text.fixed_line_space, text.font_size).max(1);
                 // Director uses bare \r as its line separator. Rust's
                 // `str::lines()` only splits on \n / \r\n, so a \r-separated
@@ -340,10 +344,10 @@ impl TextMemberHandlers {
             }
             "setProp" => {
                 // setProp(#line, index, value) or setProp(#word, index, value) etc.
-                let prop_name = player.get_datum(&args[0]).symbol_value()?;
-                let index = player.get_datum(&args[1]).int_value()?;
-                let new_value = player.get_datum(&args[2]).string_value()?;
-                let chunk_type = StringChunkType::from(prop_name);
+                let prop_name = checked_get_datum(player, &args[0], symbols)?.symbol_value(symbols)?;
+                let index = checked_get_datum(player, &args[1], symbols)?.int_value()?;
+                let new_value = checked_get_datum(player, &args[2], symbols)?.string_value(symbols)?;
+                let chunk_type = StringChunkType::from_symbol(&prop_name, symbols)?;
                 let chunk_expr = StringChunkExpr {
                     chunk_type,
                     start: index,
@@ -370,7 +374,7 @@ impl TextMemberHandlers {
                         "{handler_name} requires 1 argument"
                     )));
                 }
-                let new_str = player.get_datum(&args[0]).string_value()?
+                let new_str = checked_get_datum(player, &args[0], symbols)?.string_value(symbols)?
                     .trim_end_matches('\0')
                     .to_string();
                 let cast_member = player
@@ -407,6 +411,7 @@ impl TextMemberHandlers {
 
     pub fn get_prop(
         player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
         cast_member_ref: &CastMemberRef,
         prop: &str,
     ) -> Result<Datum, ScriptError> {
@@ -2327,10 +2332,13 @@ impl TextMemberHandlers {
     }
 
     pub fn set_prop(
+        player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
         member_ref: &CastMemberRef,
         prop: &str,
         value: Datum,
     ) -> Result<(), ScriptError> {
+        crate::player::compare::validate_direct_symbol_fields(&value, symbols)?;
         // Director property names are case-insensitive
         let prop_lc = prop.to_ascii_lowercase();
         match prop_lc.as_str() {
@@ -2340,10 +2348,12 @@ impl TextMemberHandlers {
             // ALREADY offsets the draw origin by `text_member.info.scroll_top`. Only
             // the accessor was missing, so dkbarrel's help panel
             // (`Generic Help Dialog box` sets `member(...).scrollTop`) never moved.
-            "scrolltop" => borrow_member_mut(
+            "scrolltop" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |_player| value.int_value(),
-                |cast_member, v| -> Result<(), ScriptError> {
+                |_player, symbols| value.int_value(),
+                |cast_member, v, symbols| -> Result<(), ScriptError> {
                     let v = v?;
                     if let Some(text_member) = cast_member.member_type.as_text_mut() {
                         if let Some(info) = text_member.info.as_mut() {
@@ -2353,10 +2363,12 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "text" => borrow_member_mut(
+            "text" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.string_value(),
-                |cast_member, value| {
+                |player, symbols| value.string_value(symbols),
+                |cast_member, value, symbols| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     let new_text = value?.trim_end_matches('\0').to_string();
 
@@ -2393,34 +2405,42 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "alignment" => borrow_member_mut(
+            "alignment" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.symbol_value(),
-                |cast_member, value| {
-                    cast_member.member_type.as_text_mut().unwrap().alignment = value?.into_builtin_or_error()?;
+                |player, symbols| value.symbol_value(symbols),
+                |cast_member, value, symbols| {
+                    cast_member.member_type.as_text_mut().unwrap().alignment = builtin_symbol(&value?, symbols)?;
                     Ok(())
                 },
             ),
-            "wordwrap" => borrow_member_mut(
+            "wordwrap" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.bool_value(),
-                |cast_member, value| {
+                |player, symbols| value.bool_value(),
+                |cast_member, value, symbols| {
                     cast_member.member_type.as_text_mut().unwrap().word_wrap = value?;
                     Ok(())
                 },
             ),
-            "width" => borrow_member_mut(
+            "width" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.int_value(),
-                |cast_member, value| {
+                |player, symbols| value.int_value(),
+                |cast_member, value, symbols| {
                     cast_member.member_type.as_text_mut().unwrap().width = value? as u16;
                     Ok(())
                 },
             ),
-            "font" => borrow_member_mut(
+            "font" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.string_value(),
-                |cast_member, value| {
+                |player, symbols| value.string_value(symbols),
+                |cast_member, value, symbols| {
                     let font_name = value?;
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     text_member.font = font_name.clone();
@@ -2430,10 +2450,12 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "fontsize" => borrow_member_mut(
+            "fontsize" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.int_value(),
-                |cast_member, value| {
+                |player, symbols| value.int_value(),
+                |cast_member, value, symbols| {
                     let size = value? as u16;
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     text_member.font_size = size;
@@ -2443,9 +2465,11 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "fontstyle" => borrow_member_mut(
+            "fontstyle" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| {
+                |player, symbols| {
                     // Lingo accepts fontStyle as a list of symbols
                     // (`[#plain, #bold]`), a single symbol (`#plain`), or a
                     // bare string (`"plain"`). The previous unwrap() on
@@ -2458,27 +2482,30 @@ impl TextMemberHandlers {
                     match value {
                         Datum::List(_, items, _) => {
                             for x in items {
-                                item_strings.push(player.get_datum(&x).symbol_value()?);
+                                item_strings.push(checked_get_datum(player, &x, symbols)?.symbol_value(symbols)?);
                             }
                         }
                         _ => {
                             // Best-effort: try symbol conversion, otherwise empty.
-                            if let Ok(s) = value.symbol_value() {
-                                if !s.is_empty() {
+                            if let Ok(s) = value.symbol_value(symbols) {
+                                if !s.eq_builtin(BuiltInSymbol::EmptyString) {
                                     item_strings.push(s);
                                 }
                             }
                         }
                     }
-                    Ok(item_strings)
+                    Ok::<Vec<Symbol>, ScriptError>(item_strings)
                 },
-                |cast_member, value| {
-                    let styles = value?;
+                |cast_member, value, symbols| {
+                    let styles: Vec<Symbol> = value?;
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     let bold = styles.iter().any(|s| s.eq_builtin(BuiltInSymbol::Bold));
                     let italic = styles.iter().any(|s| s.eq_builtin(BuiltInSymbol::Italic));
                     let underline = styles.iter().any(|s| s.eq_builtin(BuiltInSymbol::Underline));
-                    text_member.font_style = styles.iter().map(|s| s.into_builtin_or_error()).collect::<Result<_, _>>()?;
+                        text_member.font_style = styles
+                            .iter()
+                            .map(|s| builtin_symbol(s, symbols))
+                            .collect::<Result<_, _>>()?;
                     for span in &mut text_member.html_styled_spans {
                         span.style.bold = bold;
                         span.style.italic = italic;
@@ -2487,10 +2514,12 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "fixedlinespace" => borrow_member_mut(
+            "fixedlinespace" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.int_value(),
-                |cast_member, value| {
+                |player, symbols| value.int_value(),
+                |cast_member, value, symbols| {
                     cast_member
                         .member_type
                         .as_text_mut()
@@ -2499,35 +2528,43 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "topspacing" => borrow_member_mut(
+            "topspacing" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.int_value(),
-                |cast_member, value| {
+                |player, symbols| value.int_value(),
+                |cast_member, value, symbols| {
                     cast_member.member_type.as_text_mut().unwrap().top_spacing = value? as i16;
                     Ok(())
                 },
             ),
-            "boxtype" => borrow_member_mut(
+            "boxtype" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.symbol_value(),
-                |cast_member, value| {
-                    cast_member.member_type.as_text_mut().unwrap().box_type = value?.into_builtin_or_error()?;
+                |player, symbols| value.symbol_value(symbols),
+                |cast_member, value, symbols| {
+                    cast_member.member_type.as_text_mut().unwrap().box_type = builtin_symbol(&value?, symbols)?;
                     Ok(())
                 },
             ),
-            "antialias" => borrow_member_mut(
+            "antialias" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.bool_value(),
-                |cast_member, value| {
+                |player, symbols| value.bool_value(),
+                |cast_member, value, symbols| {
                     cast_member.member_type.as_text_mut().unwrap().anti_alias = value?;
                     Ok(())
                 },
             ),
-            "html" => borrow_member_mut(
+            "html" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.string_value(),
-                |cast_member, value| {
-                    let html_string = value?;
+                |player, symbols| value.string_value(symbols),
+                |cast_member, value, symbols| {
+                    let html_string: String = value?;
                     let spans = HtmlParser::parse_html(&html_string).map_err(|e| {
                         ScriptError::new(format!("Failed to parse HTML: {}", e))
                     })?;
@@ -2655,9 +2692,11 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "rect" => borrow_member_mut(
+            "rect" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |_player| {
+                |_player, symbols| {
                     let (vals, _flags) = value.to_rect_inline()?;
 
                     let r1 = vals[1] as i16;
@@ -2665,10 +2704,10 @@ impl TextMemberHandlers {
                     let r3 = vals[3] as i16;
                     let r2 = vals[2] as i16;
 
-                    Ok((r1, r0, r3, r2))
+                    Ok::<(i16, i16, i16, i16), ScriptError>((r1, r0, r3, r2))
                 },
-                |cast_member, value| {
-                    let value = value?;
+                |cast_member, value, symbols| {
+                    let value: (i16, i16, i16, i16) = value?;
                     let text_data = cast_member.member_type.as_text_mut().unwrap();
                     let left = value.1;
                     let top = value.0;
@@ -2693,10 +2732,12 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "height" => borrow_member_mut(
+            "height" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.int_value(),
-                |cast_member, value| {
+                |player, symbols| value.int_value(),
+                |cast_member, value, symbols| {
                     let text_data = cast_member.member_type.as_text_mut().unwrap();
                     // Explicit `member.height = …` resizes even #adjust members
                     // (see the `rect` setter for the bake-stretch rationale).
@@ -2705,10 +2746,12 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "forecolor" | "color" => borrow_member_mut(
+            "forecolor" | "color" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.int_value(),
-                |cast_member, value| {
+                |player, symbols| value.int_value(),
+                |cast_member, value, symbols| {
                     let color_val = value?;
                     // If value > 255, treat as RGB, otherwise as palette index
                     if color_val > 255 {
@@ -2735,10 +2778,12 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "bgcolor" | "backcolor" => borrow_member_mut(
+            "bgcolor" | "backcolor" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.int_value(),
-                |cast_member, value| {
+                |player, symbols| value.int_value(),
+                |cast_member, value, symbols| {
                     let color_val = value?;
                     // If value > 255, treat as RGB, otherwise as palette index
                     if color_val > 255 {
@@ -2752,19 +2797,23 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "lineheight" => borrow_member_mut(
+            "lineheight" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.int_value(),
-                |cast_member, value| {
+                |player, symbols| value.int_value(),
+                |cast_member, value, symbols| {
                     cast_member.member_type.as_text_mut().unwrap().fixed_line_space = value? as u16;
                     Ok(())
                 },
             ),
             // TextInfo (3D text / D6+ text member) property setters
-            "tunneldepth" => borrow_member_mut(
+            "tunneldepth" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.int_value(),
-                |cast_member, value| {
+                |player, symbols| value.int_value(),
+                |cast_member, value, symbols| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
                         info.tunnel_depth = value? as u16;
@@ -2772,10 +2821,12 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "beveldepth" => borrow_member_mut(
+            "beveldepth" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.int_value(),
-                |cast_member, value| {
+                |player, symbols| value.int_value(),
+                |cast_member, value, symbols| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
                         info.bevel_depth = value? as u16;
@@ -2783,10 +2834,12 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "smoothness" => borrow_member_mut(
+            "smoothness" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.int_value(),
-                |cast_member, value| {
+                |player, symbols| value.int_value(),
+                |cast_member, value, symbols| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
                         info.smoothness = value? as u32;
@@ -2794,10 +2847,12 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "reflectivity" => borrow_member_mut(
+            "reflectivity" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.float_value().or_else(|_| value.int_value().map(|i| i as f64)),
-                |cast_member, value| {
+                |player, symbols| value.float_value().or_else(|_| value.int_value().map(|i| i as f64)),
+                |cast_member, value, symbols| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
                         info.reflectivity = value? as u32;
@@ -2805,10 +2860,12 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "beveltype" => borrow_member_mut(
+            "beveltype" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.string_value(),
-                |cast_member, value| {
+                |player, symbols| value.string_value(symbols),
+                |cast_member, value, symbols| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
                         let val = value?;
@@ -2822,10 +2879,12 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "displaymode" => borrow_member_mut(
+            "displaymode" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.string_value(),
-                |cast_member, value| {
+                |player, symbols| value.string_value(symbols),
+                |cast_member, value, symbols| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
                         let val = value?;
@@ -2838,10 +2897,12 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "directionalpreset" => borrow_member_mut(
+            "directionalpreset" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.string_value(),
-                |cast_member, value| {
+                |player, symbols| value.string_value(symbols),
+                |cast_member, value, symbols| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
                         let val = value?;
@@ -2862,10 +2923,12 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "texturetype" => borrow_member_mut(
+            "texturetype" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.string_value(),
-                |cast_member, value| {
+                |player, symbols| value.string_value(symbols),
+                |cast_member, value, symbols| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
                         let val = value?;
@@ -2879,10 +2942,12 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "directionalcolor" => borrow_member_mut(
+            "directionalcolor" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.int_value(),
-                |cast_member, value| {
+                |player, symbols| value.int_value(),
+                |cast_member, value, symbols| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
                         let color_val = value?;
@@ -2895,10 +2960,12 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "ambientcolor" => borrow_member_mut(
+            "ambientcolor" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.int_value(),
-                |cast_member, value| {
+                |player, symbols| value.int_value(),
+                |cast_member, value, symbols| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
                         let color_val = value?;
@@ -2910,10 +2977,12 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "specularcolor" => borrow_member_mut(
+            "specularcolor" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.int_value(),
-                |cast_member, value| {
+                |player, symbols| value.int_value(),
+                |cast_member, value, symbols| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
                         let color_val = value?;
@@ -2925,20 +2994,22 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "cameraposition" => borrow_member_mut(
+            "cameraposition" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| {
+                |player, symbols| {
                     let list = value.to_list()?;
                     if list.len() >= 3 {
-                        let x = player.get_datum(&list[0]).float_value()?;
-                        let y = player.get_datum(&list[1]).float_value()?;
-                        let z = player.get_datum(&list[2]).float_value()?;
+                        let x = checked_get_datum(player, &list[0], symbols)?.float_value()?;
+                        let y = checked_get_datum(player, &list[1], symbols)?.float_value()?;
+                        let z = checked_get_datum(player, &list[2], symbols)?.float_value()?;
                         Ok((x, y, z))
                     } else {
                         Err(ScriptError::new("cameraPosition requires a vector with 3 elements".to_string()))
                     }
                 },
-                |cast_member, value| {
+                |cast_member, value, symbols| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
                         let (x, y, z) = value?;
@@ -2949,20 +3020,22 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "camerarotation" => borrow_member_mut(
+            "camerarotation" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| {
+                |player, symbols| {
                     let list = value.to_list()?;
                     if list.len() >= 3 {
-                        let x = player.get_datum(&list[0]).float_value()?;
-                        let y = player.get_datum(&list[1]).float_value()?;
-                        let z = player.get_datum(&list[2]).float_value()?;
+                        let x = checked_get_datum(player, &list[0], symbols)?.float_value()?;
+                        let y = checked_get_datum(player, &list[1], symbols)?.float_value()?;
+                        let z = checked_get_datum(player, &list[2], symbols)?.float_value()?;
                         Ok((x, y, z))
                     } else {
                         Err(ScriptError::new("cameraRotation requires a vector with 3 elements".to_string()))
                     }
                 },
-                |cast_member, value| {
+                |cast_member, value, symbols| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
                         let (x, y, z) = value?;
@@ -2973,10 +3046,12 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "texturemember" => borrow_member_mut(
+            "texturemember" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.string_value(),
-                |cast_member, value| {
+                |player, symbols| value.string_value(symbols),
+                |cast_member, value, symbols| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
                         info.texture_member = value?;
@@ -2984,13 +3059,15 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "displayface" => borrow_member_mut(
+            "displayface" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| {
+                |player, symbols| {
                     let list = value.to_list()?;
                     let mut face_mask: i32 = 0;
                     for item_ref in list {
-                        let face_str = player.get_datum(&item_ref).string_value()?;
+                        let face_str = checked_get_datum(player, &item_ref, symbols)?.string_value(symbols)?;
                         match face_str.trim_start_matches('#') {
                             "front" => face_mask |= 1,
                             "tunnel" => face_mask |= 2,
@@ -3002,20 +3079,23 @@ impl TextMemberHandlers {
                     if face_mask == 7 {
                         face_mask = -1;
                     }
-                    Ok(face_mask)
+                    Ok::<i32, ScriptError>(face_mask)
                 },
-                |cast_member, value| {
+                |cast_member, value, symbols| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
+                    let value: i32 = value?;
                     if let Some(ref mut info) = text_member.info {
-                        info.display_face = value?;
+                        info.display_face = value;
                     }
                     Ok(())
                 },
             ),
-            "editable" => borrow_member_mut(
+            "editable" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.bool_value(),
-                |cast_member, value| {
+                |player, symbols| value.bool_value(),
+                |cast_member, value, symbols| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
                         info.editable = value?;
@@ -3023,10 +3103,12 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "autotab" => borrow_member_mut(
+            "autotab" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.bool_value(),
-                |cast_member, value| {
+                |player, symbols| value.bool_value(),
+                |cast_member, value, symbols| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
                         info.auto_tab = value?;
@@ -3034,10 +3116,12 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "directtostage" => borrow_member_mut(
+            "directtostage" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.bool_value(),
-                |cast_member, value| {
+                |player, symbols| value.bool_value(),
+                |cast_member, value, symbols| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
                         info.direct_to_stage = value?;
@@ -3045,10 +3129,12 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "prerender" => borrow_member_mut(
+            "prerender" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.string_value(),
-                |cast_member, value| {
+                |player, symbols| value.string_value(symbols),
+                |cast_member, value, symbols| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
                         let val = value?;
@@ -3062,10 +3148,12 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "savebitmap" => borrow_member_mut(
+            "savebitmap" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.bool_value(),
-                |cast_member, value| {
+                |player, symbols| value.bool_value(),
+                |cast_member, value, symbols| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
                         info.save_bitmap = value?;
@@ -3073,10 +3161,12 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "kerning" => borrow_member_mut(
+            "kerning" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.bool_value(),
-                |cast_member, value| {
+                |player, symbols| value.bool_value(),
+                |cast_member, value, symbols| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
                         info.kerning = value?;
@@ -3084,10 +3174,12 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "kerningthreshold" => borrow_member_mut(
+            "kerningthreshold" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.int_value(),
-                |cast_member, value| {
+                |player, symbols| value.int_value(),
+                |cast_member, value, symbols| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
                         info.kerning_threshold = value? as u32;
@@ -3095,10 +3187,12 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "usehypertextstyles" => borrow_member_mut(
+            "usehypertextstyles" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.bool_value(),
-                |cast_member, value| {
+                |player, symbols| value.bool_value(),
+                |cast_member, value, symbols| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
                         info.use_hypertext_styles = value?;
@@ -3106,10 +3200,12 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "antialiasthreshold" => borrow_member_mut(
+            "antialiasthreshold" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.int_value(),
-                |cast_member, value| {
+                |player, symbols| value.int_value(),
+                |cast_member, value, symbols| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
                         info.anti_alias_threshold = value? as u32;
@@ -3117,10 +3213,12 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "scrolltop" => borrow_member_mut(
+            "scrolltop" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.int_value(),
-                |cast_member, value| {
+                |player, symbols| value.int_value(),
+                |cast_member, value, symbols| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
                         info.scroll_top = value? as u32;
@@ -3128,10 +3226,12 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "centerregpoint" => borrow_member_mut(
+            "centerregpoint" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.bool_value(),
-                |cast_member, value| {
+                |player, symbols| value.bool_value(),
+                |cast_member, value, symbols| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if text_member.info.is_none() {
                         text_member.info = Some(TextInfo::default());
@@ -3142,10 +3242,12 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "rtf" => borrow_member_mut(
+            "rtf" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.string_value(),
-                |cast_member, value| {
+                |player, symbols| value.string_value(symbols),
+                |cast_member, value, symbols| {
                     let rtf_string = value?;
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
 
@@ -3197,42 +3299,52 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "charspacing" => borrow_member_mut(
+            "charspacing" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |_player| value.int_value(),
-                |cast_member, value| {
+                |_player, symbols| value.int_value(),
+                |cast_member, value, symbols| {
                     cast_member.member_type.as_text_mut().unwrap().char_spacing = value?;
                     Ok(())
                 },
             ),
-            "bottomspacing" => borrow_member_mut(
+            "bottomspacing" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |_player| value.int_value(),
-                |cast_member, value| {
+                |_player, symbols| value.int_value(),
+                |cast_member, value, symbols| {
                     cast_member.member_type.as_text_mut().unwrap().bottom_spacing = value? as i16;
                     Ok(())
                 },
             ),
-            "selstart" => borrow_member_mut(
+            "selstart" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |_player| value.int_value(),
-                |cast_member, value| {
+                |_player, symbols| value.int_value(),
+                |cast_member, value, symbols| {
                     cast_member.member_type.as_text_mut().unwrap().sel_start = value?;
                     Ok(())
                 },
             ),
-            "selend" => borrow_member_mut(
+            "selend" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |_player| value.int_value(),
-                |cast_member, value| {
+                |_player, symbols| value.int_value(),
+                |cast_member, value, symbols| {
                     cast_member.member_type.as_text_mut().unwrap().sel_end = value?;
                     Ok(())
                 },
             ),
-            "selectedtext" => borrow_member_mut(
+            "selectedtext" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |_player| value.string_value(),
-                |cast_member, value| {
+                |_player, symbols| value.string_value(symbols),
+                |cast_member, value, symbols| {
                     let s = value?;
                     let text = cast_member.member_type.as_text_mut().unwrap();
                     let len = text.text.len() as i32;
@@ -3246,19 +3358,23 @@ impl TextMemberHandlers {
                     Ok(())
                 },
             ),
-            "antialiastype" => borrow_member_mut(
+            "antialiastype" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |_player| value.symbol_value(),
-                |cast_member, value| {
-                    cast_member.member_type.as_text_mut().unwrap().anti_alias_type = value?.into_builtin_or_error()?;
+                |_player, symbols| value.symbol_value(symbols),
+                |cast_member, value, symbols| {
+                    cast_member.member_type.as_text_mut().unwrap().anti_alias_type = builtin_symbol(&value?, symbols)?;
                     Ok(())
                 },
             ),
             "tabs" => {
                 use crate::player::cast_member::TabStop;
-                borrow_member_mut(
+                borrow_member_mut_with_player(
+                    player,
+                    symbols,
                     member_ref,
-                    |player| {
+                    |player, symbols| {
                         // tabs is a list of prop lists: [[#type: #right, #position: 200]]
                         let list_result = value.to_list_tuple();
                         let tab_items = if let Ok((_, items, _)) = list_result {
@@ -3268,20 +3384,20 @@ impl TextMemberHandlers {
                         };
                         let mut tab_stops = Vec::new();
                         for item_ref in &tab_items {
-                            let item_datum = player.get_datum(item_ref);
+                            let item_datum = checked_get_datum(player, item_ref, symbols)?;
                             if let Ok((entries, _)) = item_datum.to_map_tuple() {
                                 let entries = entries.clone();
                                 let mut tab_type = BuiltInSymbol::Left;
                                 let mut position = 0i32;
                                 for (key_ref, val_ref) in &entries {
-                                    let key = player.get_datum(key_ref).symbol_value().unwrap_or(Symbol::empty()).into_builtin();
+                                    let key = checked_get_datum(player, key_ref, symbols)?.symbol_value(symbols).unwrap_or(Symbol::empty()).into_builtin();
                                     match key {
                                         Some(BuiltInSymbol::Type) => {
-                                            let t = player.get_datum(val_ref).symbol_value().unwrap_or(Symbol::empty()).into_builtin().unwrap_or(BuiltInSymbol::Left);
+                                            let t = checked_get_datum(player, val_ref, symbols)?.symbol_value(symbols).unwrap_or(Symbol::empty()).into_builtin().unwrap_or(BuiltInSymbol::Left);
                                             tab_type = t;
                                         }
                                         Some(BuiltInSymbol::Position) => {
-                                            position = player.get_datum(val_ref).int_value().unwrap_or(0);
+                                            position = checked_get_datum(player, val_ref, symbols)?.int_value().unwrap_or(0);
                                         }
                                         _ => {}
                                     }
@@ -3289,9 +3405,10 @@ impl TextMemberHandlers {
                                 tab_stops.push(TabStop { tab_type, position });
                             }
                         }
-                        tab_stops
+                        Ok::<Vec<TabStop>, ScriptError>(tab_stops)
                     },
-                    |cast_member, tab_stops| {
+                    |cast_member, tab_stops, symbols| {
+                        let tab_stops: Vec<TabStop> = tab_stops?;
                         if let Some(text) = cast_member.member_type.as_text_mut() {
                             text.tab_stops = tab_stops;
                         }

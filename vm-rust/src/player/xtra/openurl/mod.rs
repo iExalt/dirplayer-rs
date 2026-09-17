@@ -10,7 +10,7 @@
 
 use crate::{
     director::lingo::datum::Datum,
-    player::{reserve_player_mut, reserve_player_ref, DatumRef, ScriptError},
+    player::{reserve_player_mut, reserve_player_ref, DatumRef, ScriptError, symbols::symbol_table::SymbolTable},
 };
 
 pub struct OpenUrlXtra;
@@ -20,9 +20,9 @@ impl OpenUrlXtra {
         name.eq_ignore_ascii_case("gsOpenURL")
     }
 
-    pub fn call_handler(name: &str, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn call_handler(name: &str, args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
         match_ci!(name, {
-            "gsOpenURL" => gs_open_url(args),
+            "gsOpenURL" => gs_open_url(args, symbols),
             _ => Err(ScriptError::new(format!(
                 "OpenURL: no handler {}",
                 name
@@ -31,12 +31,12 @@ impl OpenUrlXtra {
     }
 }
 
-fn gs_open_url(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+fn gs_open_url(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
     let url = reserve_player_ref(|player| {
         let arg = args.get(0).ok_or_else(|| {
             ScriptError::new("gsOpenURL requires a URL argument".to_string())
         })?;
-        player.get_datum(arg).string_value()
+        player.get_datum(arg).string_value(symbols)
     })?;
 
     let ok = open_url_in_browser(&url);

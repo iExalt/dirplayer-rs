@@ -43,7 +43,10 @@
 //! Every handler returns VOID — `TStdXtra_IMoaMmXScript::Call` dispatches on
 //! the selector and never writes `callPtr->resultValue`.
 
-use crate::player::{reserve_player_mut, DatumRef, ScriptError};
+use crate::player::{
+    driver::checked_internal_datum,
+    DatumRef, DirPlayer, ScriptError, symbols::symbol_table::SymbolTable,
+};
 
 /// Fake environment installed by the LeechProtectionRemovalHelp Xtra.
 ///
@@ -108,34 +111,31 @@ impl LeechProtectionXtra {
         )
     }
 
-    pub fn call_handler(name: &str, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    /// Owner-bound static dispatch. The Xtra mutates player-level overrides,
+    /// so the player and its session symbol table must travel together through
+    /// this call; no ambient player is consulted.
+    pub(crate) fn call_handler_explicit(
+        player: &mut DirPlayer,
+        name: &str,
+        args: &[DatumRef],
+        symbols: &mut SymbolTable,
+    ) -> Result<DatumRef, ScriptError> {
         match_ci!(name, {
-            "setTheMoviePath" => set_string(name, args, |o, v| o.movie_path = Some(v)),
-            "setTheMovieName" => set_string(name, args, |o, v| o.movie_name = Some(v)),
-            "setTheEnvironment_shockMachine" => set_int(name, args, |o, v| o.shock_machine = Some(v)),
-            "setTheEnvironment_shockMachineVersion" => set_string(name, args, |o, v| o.shock_machine_version = Some(v)),
-            "setThePlatform" => set_string(name, args, |o, v| o.platform = Some(v)),
-            "setTheRunMode" => set_string(name, args, |o, v| o.run_mode = Some(v)),
-            "setTheEnvironment_productBuildVersion" => set_string(name, args, |o, v| o.product_build_version = Some(v)),
-            "setTheProductVersion" => set_string(name, args, |o, v| o.product_version = Some(v)),
-            "setTheEnvironment_osVersion" => set_string(name, args, |o, v| o.os_version = Some(v)),
-            "setTheMachineType" => set_int(name, args, |o, v| o.machine_type = Some(v)),
-            "setExternalParam" => set_external_param(args),
-            // "force" is stronger than "set": the movie's own writes to these
-            // two are dropped for the rest of the session (see
-            // `Movie::set_prop`), which is what defeats a leech check that
-            // re-asserts `the exitLock` before testing it.
-            "forceTheExitLock" => set_int(name, args, |o, v| o.forced_exit_lock = Some(v != 0)),
-            "forceTheSafePlayer" => set_int(name, args, |o, v| o.forced_safe_player = Some(v != 0)),
-            "disableGoToNetMovie" => set_flag(|o| o.disable_goto_net_movie = true),
-            "disableGoToNetPage" => set_flag(|o| o.disable_goto_net_page = true),
-            // The real Xtra patches the Shockwave 3D Asset Xtra's hardcoded
-            // "bad driver" blacklist, which makes Director refuse hardware
-            // acceleration (and sometimes any 3D at all) on machines whose
-            // GPU/driver string it doesn't recognise. dirplayer renders W3D
-            // through WebGL2 and keeps no such blacklist, so there is nothing
-            // to patch — accept the call and do nothing rather than raising
-            // "no handler", which would abort the movie's setup script.
+            "setTheMoviePath" => set_string_explicit(player, name, args, symbols, |o, v| o.movie_path = Some(v)),
+            "setTheMovieName" => set_string_explicit(player, name, args, symbols, |o, v| o.movie_name = Some(v)),
+            "setTheEnvironment_shockMachine" => set_int_explicit(player, name, args, symbols, |o, v| o.shock_machine = Some(v)),
+            "setTheEnvironment_shockMachineVersion" => set_string_explicit(player, name, args, symbols, |o, v| o.shock_machine_version = Some(v)),
+            "setThePlatform" => set_string_explicit(player, name, args, symbols, |o, v| o.platform = Some(v)),
+            "setTheRunMode" => set_string_explicit(player, name, args, symbols, |o, v| o.run_mode = Some(v)),
+            "setTheEnvironment_productBuildVersion" => set_string_explicit(player, name, args, symbols, |o, v| o.product_build_version = Some(v)),
+            "setTheProductVersion" => set_string_explicit(player, name, args, symbols, |o, v| o.product_version = Some(v)),
+            "setTheEnvironment_osVersion" => set_string_explicit(player, name, args, symbols, |o, v| o.os_version = Some(v)),
+            "setTheMachineType" => set_int_explicit(player, name, args, symbols, |o, v| o.machine_type = Some(v)),
+            "setExternalParam" => set_external_param_explicit(player, args, symbols),
+            "forceTheExitLock" => set_int_explicit(player, name, args, symbols, |o, v| o.forced_exit_lock = Some(v != 0)),
+            "forceTheSafePlayer" => set_int_explicit(player, name, args, symbols, |o, v| o.forced_safe_player = Some(v != 0)),
+            "disableGoToNetMovie" => { player.env_overrides.disable_goto_net_movie = true; Ok(DatumRef::Void) },
+            "disableGoToNetPage" => { player.env_overrides.disable_goto_net_page = true; Ok(DatumRef::Void) },
             "bugfixShockwave3DBadDriverList" => Ok(DatumRef::Void),
             _ => Err(ScriptError::new(format!(
                 "LeechProtectionRemovalHelp: no handler {}",
@@ -145,45 +145,60 @@ impl LeechProtectionXtra {
     }
 }
 
-fn set_string(
+fn set_string_explicit(
+    player: &mut DirPlayer,
     name: &str,
-    args: &Vec<DatumRef>,
+    args: &[DatumRef],
+    symbols: &SymbolTable,
     apply: impl FnOnce(&mut EnvOverrides, String),
 ) -> Result<DatumRef, ScriptError> {
-    reserve_player_mut(|player| {
-        let value = args
-            .get(0)
-            .ok_or_else(|| {
-                ScriptError::new(format!("LeechProtectionRemovalHelp: {} requires 1 argument", name))
-            })
-            .and_then(|arg| player.get_datum(arg).string_value())?;
-        apply(&mut player.env_overrides, value);
-        Ok(DatumRef::Void)
-    })
+    let value = args
+        .first()
+        .ok_or_else(|| ScriptError::new(format!("LeechProtectionRemovalHelp: {} requires 1 argument", name)))
+        .and_then(|arg| checked_internal_datum(player, symbols, arg)?.string_value(symbols))?;
+    apply(&mut player.env_overrides, value);
+    Ok(DatumRef::Void)
 }
 
-fn set_int(
+fn set_int_explicit(
+    player: &mut DirPlayer,
     name: &str,
-    args: &Vec<DatumRef>,
+    args: &[DatumRef],
+    symbols: &SymbolTable,
     apply: impl FnOnce(&mut EnvOverrides, i32),
 ) -> Result<DatumRef, ScriptError> {
-    reserve_player_mut(|player| {
-        let value = args
-            .get(0)
-            .ok_or_else(|| {
-                ScriptError::new(format!("LeechProtectionRemovalHelp: {} requires 1 argument", name))
-            })
-            .and_then(|arg| player.get_datum(arg).int_value())?;
-        apply(&mut player.env_overrides, value);
-        Ok(DatumRef::Void)
-    })
+    let value = args
+        .first()
+        .ok_or_else(|| ScriptError::new(format!("LeechProtectionRemovalHelp: {} requires 1 argument", name)))
+        .and_then(|arg| checked_internal_datum(player, symbols, arg)?.int_value())?;
+    apply(&mut player.env_overrides, value);
+    Ok(DatumRef::Void)
 }
 
-fn set_flag(apply: impl FnOnce(&mut EnvOverrides)) -> Result<DatumRef, ScriptError> {
-    reserve_player_mut(|player| {
-        apply(&mut player.env_overrides);
-        Ok(DatumRef::Void)
-    })
+fn set_external_param_explicit(
+    player: &mut DirPlayer,
+    args: &[DatumRef],
+    symbols: &SymbolTable,
+) -> Result<DatumRef, ScriptError> {
+    let name = args
+        .first()
+        .ok_or_else(|| ScriptError::new("LeechProtectionRemovalHelp: setExternalParam requires a name".to_owned()))
+        .and_then(|arg| checked_internal_datum(player, symbols, arg)?.string_value(symbols))?;
+    if name.is_empty() {
+        return Ok(DatumRef::Void);
+    }
+    let value = args
+        .get(1)
+        .map(|arg| checked_internal_datum(player, symbols, arg)?.string_value(symbols))
+        .transpose()?
+        .unwrap_or_default();
+    let existing = player
+        .external_params
+        .keys()
+        .find(|key| key.eq_ignore_ascii_case(&name))
+        .cloned();
+    player.external_params.insert(existing.unwrap_or(name), value);
+    Ok(DatumRef::Void)
 }
 
 /// `setExternalParam name, value` — writes straight into the player's external
@@ -195,128 +210,123 @@ fn set_flag(apply: impl FnOnce(&mut EnvOverrides)) -> Result<DatumRef, ScriptErr
 ///
 /// The Xtra's own message table documents "name must not be empty"; an empty
 /// name is silently ignored.
-fn set_external_param(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-    reserve_player_mut(|player| {
-        let name = args
-            .get(0)
-            .ok_or_else(|| {
-                ScriptError::new(
-                    "LeechProtectionRemovalHelp: setExternalParam requires a name".to_string(),
-                )
-            })
-            .and_then(|arg| player.get_datum(arg).string_value())?;
-        if name.is_empty() {
-            return Ok(DatumRef::Void);
-        }
-        let value = match args.get(1) {
-            Some(arg) => player.get_datum(arg).string_value()?,
-            None => String::new(),
-        };
-        // Case-insensitive replace: `externalParamValue` matches names
-        // case-insensitively, so two entries differing only in case would make
-        // the lookup order-dependent.
-        let existing = player
-            .external_params
-            .keys()
-            .find(|k| k.eq_ignore_ascii_case(&name))
-            .cloned();
-        match existing {
-            Some(key) => {
-                player.external_params.insert(key, value);
-            }
-            None => {
-                player.external_params.insert(name, value);
-            }
-        }
-        Ok(DatumRef::Void)
-    })
-}
-
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     //! Run with:
     //!   cargo test --lib --manifest-path vm-rust/Cargo.toml leechprotection
 
     use crate::director::lingo::datum::Datum;
-    use crate::player::symbols::symbol::Symbol;
-    use crate::player::symbols::symbol_table::init_symbol_table;
-    use crate::player::testing::{run_test, TestPlayer};
-    use crate::player::xtra::manager::try_call_xtra_static_handler;
-    use crate::player::{reserve_player_mut, DatumRef, ScriptError};
+    use crate::player::symbols::{builtin::BuiltInSymbol, symbol::Symbol};
+    use crate::player::session::{RuntimeSession, RuntimeSessionHandle};
+    use crate::player::symbols::symbol_table::SymbolOwner;
+    use crate::player::testing::run_test;
+    use crate::player::xtra::manager::try_call_xtra_static_handler_explicit;
+    use crate::player::{DatumRef, ScriptError};
 
     /// Call an LPRH handler the way a movie would — through the static
     /// dispatcher, so the manager wiring is under test too.
-    fn call(handler: &str, args: &[Datum]) {
-        let arg_refs: Vec<DatumRef> = reserve_player_mut(|player| {
-            Ok::<_, ScriptError>(args.iter().map(|d| player.alloc_datum(d.clone())).collect())
-        })
-        .unwrap();
-        try_call_xtra_static_handler(handler, &arg_refs)
-            .unwrap_or_else(|| panic!("{} was not dispatched to any Xtra", handler))
-            .unwrap_or_else(|e| panic!("{} failed: {:?}", handler, e));
+    fn test_session() -> RuntimeSessionHandle {
+        let session = RuntimeSession::new(SymbolOwner { session: 0x4c50_5248, generation: 1 }).into_handle();
+        let (tx, _rx) = async_std::channel::unbounded();
+        assert!(session.borrow_mut().add_player(1, tx));
+        session
+    }
+
+    fn call(session: &RuntimeSessionHandle, handler: &str, args: &[Datum]) {
+        session
+            .borrow_mut()
+            .with_player(1, |context| {
+                let arg_refs: Vec<DatumRef> = args
+                    .iter()
+                    .map(|datum| context.player.alloc_datum(datum.clone()))
+                    .collect();
+                try_call_xtra_static_handler_explicit(
+                    context.player,
+                    context.symbols,
+                    handler,
+                    &arg_refs,
+                )
+                .unwrap_or_else(|| panic!("{} was not dispatched to any Xtra", handler))
+                .unwrap_or_else(|e| panic!("{} failed: {:?}", handler, e))
+            })
+            .expect("test harness player must exist");
     }
 
     /// `the <prop>` as a string, via the same getter the bytecode uses.
-    fn movie_prop(prop: &str) -> Datum {
-        reserve_player_mut(|player| {
-            let r = player.get_movie_prop(Symbol::from_str(prop))?;
-            Ok::<_, ScriptError>(player.get_datum(&r).clone())
-        })
-        .unwrap()
+    fn movie_prop(session: &RuntimeSessionHandle, prop: &str) -> Datum {
+        session
+            .borrow_mut()
+            .with_player(1, |context| {
+                let symbol = context.symbols.intern(prop);
+                let r = context.player.get_movie_prop(context.symbols, symbol)?;
+                Ok::<_, ScriptError>(context.player.get_datum(&r).clone())
+            })
+            .expect("test harness player must exist")
+            .unwrap()
     }
 
-    fn movie_prop_string(prop: &str) -> String {
-        movie_prop(prop).string_value().unwrap()
+    fn movie_prop_string(session: &RuntimeSessionHandle, prop: &str) -> String {
+        session
+            .borrow_mut()
+            .with_player(1, |context| {
+                let symbol = context.symbols.intern(prop);
+                let r = context.player.get_movie_prop(context.symbols, symbol)?;
+                context.player.get_datum(&r).string_value(context.symbols)
+            })
+            .expect("test harness player must exist")
+            .unwrap()
     }
 
     /// Lingo-formatted `the <prop>` — for the list-valued ones.
-    fn movie_prop_formatted(prop: &str) -> String {
-        reserve_player_mut(|player| {
-            let r = player.get_movie_prop(Symbol::from_str(prop))?;
-            Ok::<_, ScriptError>(crate::player::datum_formatting::format_datum(&r, player))
-        })
-        .unwrap()
+    fn movie_prop_formatted(session: &RuntimeSessionHandle, prop: &str) -> String {
+        session
+            .borrow_mut()
+            .with_player(1, |context| {
+                let symbol = context.symbols.intern(prop);
+                let r = context.player.get_movie_prop(context.symbols, symbol)?;
+                crate::player::datum_formatting::format_datum(&r, context.symbols, context.player)
+            })
+            .expect("test harness player must exist")
+            .unwrap()
     }
 
     #[test]
     fn fakes_the_environment() {
-        init_symbol_table();
         run_test(async {
-            let _player = TestPlayer::new();
-
             // The README's own usage example, minus the trailing `go`.
-            call("setTheMoviePath", &[Datum::String(
+            let session = test_session();
+            call(&session, "setTheMoviePath", &[Datum::String(
                 "http://addictinggames.com/newGames/metalmayhemworldtour/".to_string(),
             )]);
-            call("setTheMovieName", &[Datum::String("metalmayhemworldtour.dcr".to_string())]);
-            call("setTheEnvironment_shockMachine", &[Datum::Int(0)]);
-            call("setThePlatform", &[Datum::String("Macintosh,PowerPC".to_string())]);
-            call("setTheRunMode", &[Datum::String("Author".to_string())]);
-            call("setTheEnvironment_productBuildVersion", &[Datum::String("593".to_string())]);
-            call("setTheProductVersion", &[Datum::String("11.5".to_string())]);
-            call("setTheEnvironment_osVersion", &[Datum::String("Windows,6,2,148,2,".to_string())]);
-            call("setTheMachineType", &[Datum::Int(72)]);
+            call(&session, "setTheMovieName", &[Datum::String("metalmayhemworldtour.dcr".to_string())]);
+            call(&session, "setTheEnvironment_shockMachine", &[Datum::Int(0)]);
+            call(&session, "setThePlatform", &[Datum::String("Macintosh,PowerPC".to_string())]);
+            call(&session, "setTheRunMode", &[Datum::String("Author".to_string())]);
+            call(&session, "setTheEnvironment_productBuildVersion", &[Datum::String("593".to_string())]);
+            call(&session, "setTheProductVersion", &[Datum::String("11.5".to_string())]);
+            call(&session, "setTheEnvironment_osVersion", &[Datum::String("Windows,6,2,148,2,".to_string())]);
+            call(&session, "setTheMachineType", &[Datum::Int(72)]);
 
             assert_eq!(
-                movie_prop_string("moviePath"),
+                movie_prop_string(&session, "moviePath"),
                 "http://addictinggames.com/newGames/metalmayhemworldtour/"
             );
             // `the path` is the same directory string.
             assert_eq!(
-                movie_prop_string("path"),
+                movie_prop_string(&session, "path"),
                 "http://addictinggames.com/newGames/metalmayhemworldtour/"
             );
             // The name is taken verbatim, NOT derived from the path.
-            assert_eq!(movie_prop_string("movieName"), "metalmayhemworldtour.dcr");
-            assert_eq!(movie_prop_string("movie"), "metalmayhemworldtour.dcr");
-            assert_eq!(movie_prop_string("platform"), "Macintosh,PowerPC");
-            assert_eq!(movie_prop_string("runMode"), "Author");
-            assert_eq!(movie_prop_string("productVersion"), "11.5");
-            assert_eq!(movie_prop("machineType").int_value().unwrap(), 72);
+            assert_eq!(movie_prop_string(&session, "movieName"), "metalmayhemworldtour.dcr");
+            assert_eq!(movie_prop_string(&session, "movie"), "metalmayhemworldtour.dcr");
+            assert_eq!(movie_prop_string(&session, "platform"), "Macintosh,PowerPC");
+            assert_eq!(movie_prop_string(&session, "runMode"), "Author");
+            assert_eq!(movie_prop_string(&session, "productVersion"), "11.5");
+            assert_eq!(movie_prop(&session, "machineType").int_value().unwrap(), 72);
 
             // …and the propList form agrees, including the entries that have no
             // standalone `the <prop>` accessor.
-            let env = movie_prop_formatted("environmentPropList");
+            let env = movie_prop_formatted(&session, "environmentPropList");
             assert!(env.contains("#platform: \"Macintosh,PowerPC\""), "{env}");
             assert!(env.contains("#runMode: \"Author\""), "{env}");
             assert!(env.contains("#productVersion: \"11.5\""), "{env}");
@@ -327,78 +337,61 @@ mod tests {
 
     #[test]
     fn external_params_keep_insertion_order() {
-        init_symbol_table();
         run_test(async {
-            let _player = TestPlayer::new();
+            let session = test_session();
 
-            call("setExternalParam", &[Datum::String("src".to_string()), Datum::String("/a.dcr".to_string())]);
-            call("setExternalParam", &[Datum::String("sw2".to_string()), Datum::String("121220".to_string())]);
+            call(&session, "setExternalParam", &[Datum::String("src".to_string()), Datum::String("/a.dcr".to_string())]);
+            call(&session, "setExternalParam", &[Datum::String("sw2".to_string()), Datum::String("121220".to_string())]);
             // An empty name is documented as invalid and must not add an entry.
-            call("setExternalParam", &[Datum::String(String::new()), Datum::String("x".to_string())]);
+            call(&session, "setExternalParam", &[Datum::String(String::new()), Datum::String("x".to_string())]);
             // Re-setting updates in place rather than appending.
-            call("setExternalParam", &[Datum::String("SRC".to_string()), Datum::String("/b.dcr".to_string())]);
+            call(&session, "setExternalParam", &[Datum::String("SRC".to_string()), Datum::String("/b.dcr".to_string())]);
 
-            reserve_player_mut(|player| {
-                let params: Vec<(String, String)> = player
-                    .external_params
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
-                assert_eq!(
-                    params,
-                    vec![
-                        ("src".to_string(), "/b.dcr".to_string()),
-                        ("sw2".to_string(), "121220".to_string()),
-                    ]
-                );
-                Ok::<_, ScriptError>(())
-            })
-            .unwrap();
+            session.borrow_mut().with_player(1, |context| {
+                let params: Vec<(String, String)> = context.player
+                    .external_params.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                assert_eq!(params, vec![("src".to_string(), "/b.dcr".to_string()), ("sw2".to_string(), "121220".to_string())]);
+            }).expect("test harness player must exist");
         });
     }
 
     #[test]
     fn forced_props_survive_a_movie_write() {
-        init_symbol_table();
         run_test(async {
-            let _player = TestPlayer::new();
+            let session = test_session();
 
-            call("forceTheExitLock", &[Datum::Int(0)]);
-            call("forceTheSafePlayer", &[Datum::Int(0)]);
+            call(&session, "forceTheExitLock", &[Datum::Int(0)]);
+            call(&session, "forceTheSafePlayer", &[Datum::Int(0)]);
 
             // A leech check re-asserting the value it wants must not stick.
-            reserve_player_mut(|player| {
-                player.set_movie_prop(Symbol::from_str("exitLock"), Datum::Int(1))
-            })
-            .unwrap();
+            session.borrow_mut().with_player(1, |context| {
+                context.player.set_movie_prop(context.symbols, Symbol::builtin(BuiltInSymbol::ExitLock), Datum::Int(1))
+            }).expect("test harness player must exist").unwrap();
 
-            assert_eq!(movie_prop("exitLock").int_value().unwrap(), 0);
-            assert_eq!(movie_prop("safePlayer").int_value().unwrap(), 0);
+            assert_eq!(movie_prop(&session, "exitLock").int_value().unwrap(), 0);
+            assert_eq!(movie_prop(&session, "safePlayer").int_value().unwrap(), 0);
 
             // And forcing it the other way reports the other way.
-            call("forceTheExitLock", &[Datum::Int(1)]);
-            assert_eq!(movie_prop("exitLock").int_value().unwrap(), 1);
+            call(&session, "forceTheExitLock", &[Datum::Int(1)]);
+            assert_eq!(movie_prop(&session, "exitLock").int_value().unwrap(), 1);
         });
     }
 
     #[test]
     fn disable_flags_are_set() {
-        init_symbol_table();
         run_test(async {
-            let _player = TestPlayer::new();
+            let session = test_session();
 
-            call("disableGoToNetMovie", &[]);
-            call("disableGoToNetPage", &[]);
+            call(&session, "disableGoToNetMovie", &[]);
+            call(&session, "disableGoToNetPage", &[]);
             // Documented no-op — must dispatch rather than raise "no handler",
             // which would abort the movie's setup script.
-            call("bugfixShockwave3DBadDriverList", &[]);
+            call(&session, "bugfixShockwave3DBadDriverList", &[]);
 
-            reserve_player_mut(|player| {
-                assert!(player.env_overrides.disable_goto_net_movie);
-                assert!(player.env_overrides.disable_goto_net_page);
-                Ok::<_, ScriptError>(())
-            })
-            .unwrap();
+            session.borrow_mut().with_player(1, |context| {
+                assert!(context.player.env_overrides.disable_goto_net_movie);
+                assert!(context.player.env_overrides.disable_goto_net_page);
+            }).expect("test harness player must exist");
         });
     }
 }

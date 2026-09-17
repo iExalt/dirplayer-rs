@@ -16,7 +16,10 @@ use base64::Engine;
 
 use crate::{
     director::lingo::datum::{Datum, DatumType},
-    player::{reserve_player_mut, reserve_player_ref, DatumRef, ScriptError},
+    player::{
+        reserve_player_mut, reserve_player_ref, symbols::symbol_table::SymbolTable, DatumRef, DirPlayer,
+        ScriptError,
+    },
 };
 
 const BUDAPI_VERSION: &str = "5.0";
@@ -41,69 +44,79 @@ impl BudApiXtra {
             }
     }
 
-    pub fn call_handler(name: &str, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        dispatch(name, args)
+    pub fn call_handler(
+        player: &mut DirPlayer,
+        name: &str,
+        args: &Vec<DatumRef>,
+        symbols: &SymbolTable,
+    ) -> Result<DatumRef, ScriptError> {
+        dispatch(player, name, args, symbols)
     }
 }
 
-fn dispatch(name: &str, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+fn dispatch(
+    player: &mut DirPlayer,
+    name: &str,
+    args: &Vec<DatumRef>,
+    symbols: &SymbolTable,
+) -> Result<DatumRef, ScriptError> {
     match_ci!(name, {
         // -- Information ------------------------------------------------
         "baVersion" => ok_string(BUDAPI_VERSION),
-        "baSysFolder" => ba_sys_folder(args),
-        "baCpuInfo" => ba_cpu_info(args),
+        "baSysFolder" => ba_sys_folder(args, symbols),
+        "baCpuInfo" => ba_cpu_info(args, symbols),
         "baDiskInfo" => ok_int(-1),
         "baDiskList" => empty_list(),
         "baMemoryInfo" => ok_int(0),
         "baFindApp" => ok_string(""),
         "baReadIni" | "baWriteIni" | "baDeleteIniEntry" | "baDeleteIniSection" | "baFlushIni" => ok_int(0),
-        "baReadRegString" | "baReadRegMulti" | "baReadRegBinary" => default_string(args),
-        "baReadRegNumber" => default_int(args),
+        "baReadRegString" | "baReadRegMulti" | "baReadRegBinary" => default_string(args, symbols),
+        "baReadRegNumber" => default_int(args, symbols),
         "baWriteRegString" | "baWriteRegNumber" | "baWriteRegBinary" | "baWriteRegMulti" | "baDeleteReg" => ok_int(0),
         "baRegKeyList" | "baRegValueList" => empty_list(),
         "baSoundCard" => ok_int(1),
-        "baFontInstalled" => ba_font_installed(args),
-        "baFontList" => ba_font_list(args),
+        "baFontInstalled" => ba_font_installed(args, symbols),
+        "baFontList" => ba_font_list(args, symbols),
         "baFontStyleList" => empty_list(),
         "baCommandArgs" => ok_string(""),
         "baPrevious" => ok_int(0),
-        "baScreenInfo" => ba_screen_info(args),
+        "baScreenInfo" => ba_screen_info(args, symbols),
 
         // -- System -----------------------------------------------------
         "baDisableDiskErrors" => ok_int(0),
-        "baDisableKeys" => { KEYS_DISABLED.store(int_arg_or(args, 0, 0)? != 0, Ordering::Relaxed); ok_int(0) },
-        "baDisableMouse" => { MOUSE_DISABLED.store(int_arg_or(args, 0, 0)? != 0, Ordering::Relaxed); ok_int(0) },
+        "baDisableKeys" => { KEYS_DISABLED.store(int_arg_or(args, 0, 0, symbols)? != 0, Ordering::Relaxed); ok_int(0) },
+        "baDisableMouse" => { MOUSE_DISABLED.store(int_arg_or(args, 0, 0, symbols)? != 0, Ordering::Relaxed); ok_int(0) },
         "baDisableSwitching" => ok_int(0),
-        "baDisableScreenSaver" => { SCREENSAVER_DISABLED.store(int_arg_or(args, 0, 0)? != 0, Ordering::Relaxed); ok_int(0) },
+        "baDisableScreenSaver" => { SCREENSAVER_DISABLED.store(int_arg_or(args, 0, 0, symbols)? != 0, Ordering::Relaxed); ok_int(0) },
         "baScreenSaverTime" | "baSetScreenSaver" | "baSetWallpaper" | "baSetPattern"
             | "baSetDisplay" | "baSetDisplayEx" | "baExitWindows" | "baWinHelp"
             | "baHideTaskBar" | "baSetCurrentDir" | "baPlaceCursor" | "baRestrictCursor"
             | "baFreeCursor" | "baSetSystemTime" | "baEjectDisk" | "baInstallFont"
             | "baCreatePMGroup" | "baDeletePMGroup" | "baCreatePMIcon" | "baDeletePMIcon"
             | "baRefreshDesktop" | "baSetPrinter" | "baPrintDlg" | "baPageSetupDlg" => ok_int(0),
-        "baRunProgram" | "baShell" => ba_open_url(args),
-        "baMsgBox" => ba_msg_box(args),
-        "baMsgBoxEx" => ba_msg_box(args),
-        "baCopyText" => ba_copy_text(args),
+        "baRunProgram" | "baShell" => ba_open_url(args, symbols),
+        "baMsgBox" => ba_msg_box(args, symbols),
+        "baMsgBoxEx" => ba_msg_box(args, symbols),
+        "baCopyText" => ba_copy_text(args, symbols),
         "baPasteText" => ba_paste_text(),
-        "baEncryptText" => ba_encrypt_text(args),
-        "baDecryptText" => ba_decrypt_text(args),
-        "baSetVolume" => { let v = int_arg_or(args, 1, 100)?.clamp(0, 255) as u8; SOUND_VOLUME.store(v, Ordering::Relaxed); ok_int(0) },
+        "baEncryptText" => ba_encrypt_text(args, symbols),
+        "baDecryptText" => ba_decrypt_text(args, symbols),
+        "baSetVolume" => { let v = int_arg_or(args, 1, 100, symbols)?.clamp(0, 255) as u8; SOUND_VOLUME.store(v, Ordering::Relaxed); ok_int(0) },
         "baGetVolume" => ok_int(SOUND_VOLUME.load(Ordering::Relaxed) as i32),
-        "baEnvironment" => ba_environment(args),
+        "baEnvironment" => ba_environment(args, symbols),
         "baSetEnvironment" => ok_int(0),
         "baAdministrator" => ok_int(0),
         "baUserName" | "baComputerName" => ok_string(""),
         "baKeyIsDown" | "baKeyBeenPressed" => ok_int(0),
-        "baSleep" => ba_sleep(args),
+        "baSleep" => ba_sleep(args, symbols),
         "baPMGroupList" | "baPMIconList" | "baPMSubGroupList" => empty_list(),
-        "baSystemTime" => ba_system_time(args),
+        "baSystemTime" => ba_system_time(args, symbols),
         "baPrinterInfo" => ok_string(""),
 
         // -- File -------------------------------------------------------
-        "baFileExists" => ba_file_exists(args),
-        "baFolderExists" => ba_folder_exists(args),
-        "baFileSize" => ba_file_size(args),
+        "baFileExists" => ba_file_exists(player, args, symbols),
+        "baFolderExists" => ba_folder_exists(player, args, symbols),
+        "baFileSize" => ba_file_size(player, args, symbols),
         "baCreateFolder" | "baDeleteFolder" | "baRenameFile" | "baDeleteFile"
             | "baDeleteXFiles" | "baXDelete" | "baSetFileDate" | "baSetFileAttributes"
             | "baRecycleFile" | "baCopyFile" | "baCopyXFiles" | "baXCopy" | "baMakeShortcut"
@@ -111,17 +124,17 @@ fn dispatch(name: &str, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         "baFileAge" => ok_int(-1),
         "baFileDate" | "baFileDateEx" => ok_string(""),
         "baFileAttributes" => ok_string(""),
-        "baFileList" | "baFolderList" => ba_file_list(args),
+        "baFileList" | "baFolderList" => ba_file_list(player, args, symbols),
         "baFindFirstFile" | "baFindNextFile" => ok_string(""),
         "baGetFilename" | "baGetFolder" => ok_string(""),
         "baFileVersion" => ok_string(""),
         "baEncryptFile" => ok_int(0),
         "baFindDrive" => ok_string(""),
-        "baOpenFile" | "baOpenURL" => ba_open_url(args),
+        "baOpenFile" | "baOpenURL" => ba_open_url(args, symbols),
         "baPrintFile" => ok_int(0),
-        "baShortFileName" | "baLongFileName" => default_string(args),
-        "baTempFileName" => ba_temp_file_name(args),
-        "baResolveShortcut" => default_string(args),
+        "baShortFileName" | "baLongFileName" => default_string(args, symbols),
+        "baTempFileName" => ba_temp_file_name(args, symbols),
+        "baResolveShortcut" => default_string(args, symbols),
 
         // -- Window functions (all browser no-ops) ----------------------
         "baWindowInfo" => ok_string(""),
@@ -169,16 +182,37 @@ fn empty_list() -> Result<DatumRef, ScriptError> {
     })
 }
 
-fn int_arg_or(args: &Vec<DatumRef>, idx: usize, default: i32) -> Result<i32, ScriptError> {
+fn int_arg_or(
+    args: &Vec<DatumRef>,
+    idx: usize,
+    default: i32,
+    _symbols: &SymbolTable,
+) -> Result<i32, ScriptError> {
     reserve_player_ref(|player| match args.get(idx) {
         Some(a) => player.get_datum(a).int_value(),
         None => Ok(default),
     })
 }
 
-fn string_arg(args: &Vec<DatumRef>, idx: usize) -> Result<String, ScriptError> {
+fn string_arg_explicit(
+    player: &DirPlayer,
+    args: &Vec<DatumRef>,
+    idx: usize,
+    symbols: &SymbolTable,
+) -> Result<String, ScriptError> {
+    match args.get(idx) {
+        Some(a) => player.get_datum(a).string_value(symbols),
+        None => Ok(String::new()),
+    }
+}
+
+fn string_arg(
+    args: &Vec<DatumRef>,
+    idx: usize,
+    symbols: &SymbolTable,
+) -> Result<String, ScriptError> {
     reserve_player_ref(|player| match args.get(idx) {
-        Some(a) => player.get_datum(a).string_value(),
+        Some(a) => player.get_datum(a).string_value(symbols),
         None => Ok(String::new()),
     })
 }
@@ -187,21 +221,21 @@ fn string_arg(args: &Vec<DatumRef>, idx: usize) -> Result<String, ScriptError> {
 /// verbatim when the underlying read fails. In WASM the read effectively
 /// always fails, so we just echo the default back. Default is in arg[2] for
 /// baReadRegString-style calls, and arg[0] for shortname-style getters.
-fn default_string(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+fn default_string(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
     let default_idx = if args.len() >= 3 { 2 } else { 0 };
-    let s = string_arg(args, default_idx)?;
+    let s = string_arg(args, default_idx, symbols)?;
     reserve_player_mut(|player| Ok(player.alloc_datum(Datum::String(s))))
 }
 
-fn default_int(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-    let n = int_arg_or(args, 2, 0)?;
+fn default_int(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+    let n = int_arg_or(args, 2, 0, symbols)?;
     reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Int(n))))
 }
 
 // -- Information ------------------------------------------------------------
 
-fn ba_sys_folder(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-    let kind = string_arg(args, 0)?;
+fn ba_sys_folder(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+    let kind = string_arg(args, 0, symbols)?;
     let path = match kind.to_ascii_lowercase().as_str() {
         "temp" | "windows" | "system" | "program files" | "appdata" | "localappdata" => "/",
         _ => "/",
@@ -209,8 +243,8 @@ fn ba_sys_folder(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     ok_string(path)
 }
 
-fn ba_cpu_info(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-    let kind = string_arg(args, 0)?;
+fn ba_cpu_info(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+    let kind = string_arg(args, 0, symbols)?;
     let value = match kind.to_ascii_lowercase().as_str() {
         "vendor" => "WebAssembly",
         "name" => "WASM Virtual CPU",
@@ -224,21 +258,27 @@ fn ba_cpu_info(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     ok_string(value)
 }
 
-fn ba_screen_info(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-    let kind = string_arg(args, 0)?;
+fn ba_screen_info(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+    let kind = string_arg(args, 0, symbols)?;
     let screen = web_sys::window().and_then(|w| w.screen().ok());
     let result = match kind.to_ascii_lowercase().as_str() {
         "width" => screen.as_ref().and_then(|s| s.width().ok()).unwrap_or(0),
         "height" => screen.as_ref().and_then(|s| s.height().ok()).unwrap_or(0),
-        "depth" | "colordepth" => screen.as_ref().and_then(|s| s.color_depth().ok()).unwrap_or(24),
-        "pixeldepth" => screen.as_ref().and_then(|s| s.pixel_depth().ok()).unwrap_or(24),
+        "depth" | "colordepth" => screen
+            .as_ref()
+            .and_then(|s| s.color_depth().ok())
+            .unwrap_or(24),
+        "pixeldepth" => screen
+            .as_ref()
+            .and_then(|s| s.pixel_depth().ok())
+            .unwrap_or(24),
         _ => 0,
     };
     ok_int(result)
 }
 
-fn ba_font_installed(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-    let name = string_arg(args, 0)?;
+fn ba_font_installed(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+    let name = string_arg(args, 0, symbols)?;
     if name.is_empty() {
         return ok_int(0);
     }
@@ -274,15 +314,15 @@ fn ba_font_installed(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     let baseline_b = measure("72px serif");
     let candidate_a = measure(&format!("72px '{}', monospace", name));
     let candidate_b = measure(&format!("72px '{}', serif", name));
-    let installed = (candidate_a - baseline_a).abs() > 0.5
-        || (candidate_b - baseline_b).abs() > 0.5;
+    let installed =
+        (candidate_a - baseline_a).abs() > 0.5 || (candidate_b - baseline_b).abs() > 0.5;
     ok_int(if installed { 1 } else { 0 })
 }
 
-fn ba_font_list(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+fn ba_font_list(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
     // Browsers don't expose a font enumeration API on the open web (FontFace
     // API is privacy-gated). Always return the canonical web-safe set.
-    let _ = string_arg(args, 0)?;
+    let _ = string_arg(args, 0, symbols)?;
     let names = [
         "Arial",
         "Arial Black",
@@ -309,8 +349,8 @@ use wasm_bindgen::JsCast;
 
 // -- System / clipboard / time ---------------------------------------------
 
-fn ba_open_url(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-    let target = string_arg(args, 0)?;
+fn ba_open_url(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+    let target = string_arg(args, 0, symbols)?;
     let ok = match web_sys::window() {
         Some(w) => w.open_with_url_and_target(&target, "_blank").is_ok(),
         None => false,
@@ -318,9 +358,9 @@ fn ba_open_url(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     ok_int(if ok { 1 } else { 0 })
 }
 
-fn ba_msg_box(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-    let message = string_arg(args, 0)?;
-    let caption = string_arg(args, 1).unwrap_or_default();
+fn ba_msg_box(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+    let message = string_arg(args, 0, symbols)?;
+    let caption = string_arg(args, 1, symbols).unwrap_or_default();
     let text = if caption.is_empty() {
         message
     } else {
@@ -332,8 +372,8 @@ fn ba_msg_box(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     ok_int(1)
 }
 
-fn ba_copy_text(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-    let text = string_arg(args, 0)?;
+fn ba_copy_text(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+    let text = string_arg(args, 0, symbols)?;
     let _ = text;
     // navigator.clipboard.writeText is async and requires a user gesture.
     // Lingo expects a sync return — we kick off the write and return success
@@ -360,8 +400,8 @@ fn ba_paste_text() -> Result<DatumRef, ScriptError> {
     ok_string(&cached)
 }
 
-fn ba_environment(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-    let name = string_arg(args, 0)?;
+fn ba_environment(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+    let name = string_arg(args, 0, symbols)?;
     let value = match name.to_ascii_uppercase().as_str() {
         "USERLANGUAGE" | "LANG" => web_sys::window()
             .map(|w| w.navigator().language().unwrap_or_default())
@@ -374,11 +414,11 @@ fn ba_environment(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     ok_string(&value)
 }
 
-fn ba_sleep(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+fn ba_sleep(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
     // We can't block the WASM thread; busy-wait `Date.now()` instead so
     // callers get the time delay they asked for (without making the page
     // unresponsive — we cap at 500ms to avoid runaway scripts).
-    let ms = int_arg_or(args, 0, 0)?.clamp(0, 500) as f64;
+    let ms = int_arg_or(args, 0, 0, symbols)?.clamp(0, 500) as f64;
     if let Some(perf) = web_sys::window().and_then(|w| w.performance()) {
         let end = perf.now() + ms;
         while perf.now() < end {
@@ -388,9 +428,9 @@ fn ba_sleep(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     ok_int(0)
 }
 
-fn ba_system_time(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+fn ba_system_time(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
     use chrono::{Datelike, Local, Timelike};
-    let format = string_arg(args, 0).unwrap_or_default();
+    let format = string_arg(args, 0, symbols).unwrap_or_default();
     let now = Local::now();
     let formatted = match format.to_ascii_uppercase().as_str() {
         "" | "LONG" => now.format("%A, %B %e, %Y %H:%M:%S").to_string(),
@@ -411,64 +451,47 @@ fn ba_system_time(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
 
 // -- File ops via FileIO virtual filesystem --------------------------------
 
-fn ba_file_exists(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-    let path = string_arg(args, 0)?;
-    let exists = crate::player::xtra::fileio::borrow_fileio_manager_mut(|m| {
-        m.virtual_fs.contains_key(&path) || m.virtual_fs.contains_key(path.trim_start_matches('/'))
+fn ba_file_exists(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+    let path = string_arg_explicit(player, args, 0, symbols)?;
+    let exists = player.with_xtra_manager_state(|state, _| {
+        state.fileio.virtual_fs.contains_key(&path)
+            || state.fileio.virtual_fs.contains_key(path.trim_start_matches('/'))
     });
-    ok_int(if exists { 1 } else { 0 })
+    Ok(player.alloc_datum(Datum::Int(if exists { 1 } else { 0 })))
 }
 
-fn ba_folder_exists(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-    let path = string_arg(args, 0)?;
-    // Treat any prefix that matches one or more files as an existing folder.
-    let prefix = if path.ends_with('/') { path.clone() } else { format!("{}/", path) };
-    let exists = crate::player::xtra::fileio::borrow_fileio_manager_mut(|m| {
-        m.virtual_fs.keys().any(|k| k.starts_with(&prefix))
+fn ba_folder_exists(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+    let path = string_arg_explicit(player, args, 0, symbols)?;
+    let prefix = if path.ends_with('/') { path } else { format!("{}/", path) };
+    let exists = player.with_xtra_manager_state(|state, _| {
+        state.fileio.virtual_fs.keys().any(|k| k.starts_with(&prefix))
     });
-    ok_int(if exists { 1 } else { 0 })
+    Ok(player.alloc_datum(Datum::Int(if exists { 1 } else { 0 })))
 }
 
-fn ba_file_size(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-    let path = string_arg(args, 0)?;
-    let size = crate::player::xtra::fileio::borrow_fileio_manager_mut(|m| {
-        m.virtual_fs
-            .get(&path)
-            .or_else(|| m.virtual_fs.get(path.trim_start_matches('/')))
-            .map(|d| d.len() as i32)
-            .unwrap_or(-1)
+fn ba_file_size(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+    let path = string_arg_explicit(player, args, 0, symbols)?;
+    let size = player.with_xtra_manager_state(|state, _| {
+        state.fileio.virtual_fs.get(&path)
+            .or_else(|| state.fileio.virtual_fs.get(path.trim_start_matches('/')))
+            .map(|d| d.len() as i32).unwrap_or(-1)
     });
-    ok_int(size)
+    Ok(player.alloc_datum(Datum::Int(size)))
 }
 
-fn ba_file_list(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-    let folder = string_arg(args, 0).unwrap_or_default();
-    let _pattern = string_arg(args, 1).unwrap_or_default();
-    let prefix = if folder.is_empty() {
-        String::new()
-    } else if folder.ends_with('/') {
-        folder.clone()
-    } else {
-        format!("{}/", folder)
-    };
-    let files = crate::player::xtra::fileio::borrow_fileio_manager_mut(|m| {
-        m.virtual_fs
-            .keys()
-            .filter(|k| k.starts_with(&prefix))
-            .cloned()
-            .collect::<Vec<_>>()
+fn ba_file_list(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+    let folder = string_arg_explicit(player, args, 0, symbols).unwrap_or_default();
+    let _pattern = string_arg_explicit(player, args, 1, symbols).unwrap_or_default();
+    let prefix = if folder.is_empty() { String::new() } else if folder.ends_with('/') { folder } else { format!("{}/", folder) };
+    let files = player.with_xtra_manager_state(|state, _| {
+        state.fileio.virtual_fs.keys().filter(|k| k.starts_with(&prefix)).cloned().collect::<Vec<_>>()
     });
-    reserve_player_mut(|player| {
-        let refs: std::collections::VecDeque<DatumRef> = files
-            .into_iter()
-            .map(|f| player.alloc_datum(Datum::String(f)))
-            .collect();
-        Ok(player.alloc_datum(Datum::List(DatumType::List, refs, false)))
-    })
+    let refs: std::collections::VecDeque<DatumRef> = files.into_iter().map(|f| player.alloc_datum(Datum::String(f))).collect();
+    Ok(player.alloc_datum(Datum::List(DatumType::List, refs, false)))
 }
 
-fn ba_temp_file_name(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-    let prefix = string_arg(args, 0).unwrap_or_default();
+fn ba_temp_file_name(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+    let prefix = string_arg(args, 0, symbols).unwrap_or_default();
     let mut raw = [0u8; 8];
     let _ = getrandom::fill(&mut raw);
     let suffix: String = raw.iter().map(|b| format!("{:02x}", b)).collect();
@@ -492,9 +515,9 @@ fn xor_with_key(data: &[u8], key: &[u8]) -> Vec<u8> {
         .collect()
 }
 
-fn ba_encrypt_text(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-    let text = string_arg(args, 0)?;
-    let key = string_arg(args, 1)?;
+fn ba_encrypt_text(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+    let text = string_arg(args, 0, symbols)?;
+    let key = string_arg(args, 1, symbols)?;
     let bytes: Vec<u8> = text.chars().map(|c| c as u8).collect();
     let key_bytes: Vec<u8> = key.chars().map(|c| c as u8).collect();
     let cipher = xor_with_key(&bytes, &key_bytes);
@@ -502,9 +525,9 @@ fn ba_encrypt_text(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
     ok_string(&encoded)
 }
 
-fn ba_decrypt_text(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-    let text = string_arg(args, 0)?;
-    let key = string_arg(args, 1)?;
+fn ba_decrypt_text(args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+    let text = string_arg(args, 0, symbols)?;
+    let key = string_arg(args, 1, symbols)?;
     let cipher = match base64::engine::general_purpose::STANDARD.decode(text.as_bytes()) {
         Ok(v) => v,
         Err(_) => return ok_string(""),

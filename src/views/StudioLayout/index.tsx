@@ -5,9 +5,9 @@ import ScoreInspector from '../ScoreInspector';
 import PlaybackControls from '../../components/PlaybackControls';
 import CastInspector from '../CastInspector';
 import { useAppDispatch, useAppSelector, useMemberSubscriptions } from '../../store/hooks';
+import { useVMHandle } from '../../components/VMProvider';
 import { useEffect, useMemo } from 'react';
 import { onMemberSelected } from '../../store/uiSlice';
-import { player_set_preview_member_ref } from 'vm-rust';
 import { ICastMemberIdentifier } from '../../vm';
 import { useSelectedObjects } from '../../hooks/selection';
 import { selectScriptError } from '../../store/vmSlice';
@@ -20,6 +20,7 @@ import { studioLayoutModel } from './layout';
 import MessageInspector from '../MessageInspector';
 
 const StudioLayout = () => {
+  const handle = useVMHandle();
   const castSnapshots = useAppSelector((state) => state.vm.castSnapshots);
   const { memberRef: selectedMemberRef } = useSelectedObjects();
   const selectedMemberId: ICastMemberIdentifier | undefined = useMemo(
@@ -37,11 +38,11 @@ const StudioLayout = () => {
 
   useEffect(() => {
     if (selectedMemberId) {
-      player_set_preview_member_ref(selectedMemberId.castNumber, selectedMemberId.memberNumber);
+      handle.set_preview_member_ref(selectedMemberId.castNumber, selectedMemberId.memberNumber);
     }
-  }, [selectedMemberId]);
+  }, [handle, selectedMemberId]);
 
-  useMemberSubscriptions();
+  useMemberSubscriptions(handle);
   
   const castNames = useAppSelector((state) => state.vm.castNames);
   const scriptError = useAppSelector((state) => selectScriptError(state.vm));

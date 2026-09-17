@@ -20,9 +20,10 @@ pub mod subdivision;
 pub mod text3d;
 
 pub use types::W3dScene;
+use crate::player::symbols::symbol_table::SymbolTable;
 
 /// Parse W3D data (IFX container) and return the scene.
-pub fn parse_w3d(data: &[u8]) -> Result<W3dScene, String> {
+pub fn parse_w3d(data: &[u8], symbols: &mut SymbolTable) -> Result<W3dScene, String> {
     let actual_data = find_ifx_start(data)
         .ok_or_else(|| format!(
             "No IFX magic found in {} bytes (first bytes: {:02X?})",
@@ -30,7 +31,7 @@ pub fn parse_w3d(data: &[u8]) -> Result<W3dScene, String> {
             &data[..data.len().min(16)]
         ))?;
 
-    let mut parser = parser::W3dFileParser::new(actual_data.to_vec());
+    let mut parser = parser::W3dFileParser::new(actual_data.to_vec(), symbols);
     parser.parse()?;
     Ok(parser.scene)
 }

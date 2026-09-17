@@ -1,4 +1,7 @@
-use crate::{director::lingo::datum::Datum, player::symbols::symbol::Symbol};
+use crate::{
+    director::lingo::datum::Datum,
+    player::symbols::{symbol::Symbol, symbol::{SymbolError}, symbol_table::SymbolTable},
+};
 use crate::player::script_ref::ScriptInstanceRef;
 use super::{VirtualScriptHandler, VirtualScriptRegistry};
 use crate::player::{DatumRef, DirPlayer, ScriptError};
@@ -6,18 +9,27 @@ use crate::player::{DatumRef, DirPlayer, ScriptError};
 pub struct JavascriptProxy;
 
 impl VirtualScriptHandler for JavascriptProxy {
-    fn has_handler(&self, name: Symbol) -> bool {
-        matches!(name.as_lower_str(), "new" | "newjavascriptproxy" | "javascriptproxy" | "call")
+    fn has_handler(&self, symbols: &SymbolTable, name: Symbol) -> Result<bool, ScriptError> {
+        Ok(matches!(
+            symbols
+                .lower(&name)
+                .map_err(|_| ScriptError::from(SymbolError::Foreign))?,
+            "new" | "newjavascriptproxy" | "javascriptproxy" | "call"
+        ))
     }
 
     fn call_handler(
         &self,
         player: &mut DirPlayer,
+        symbols: &SymbolTable,
         instance: Option<&ScriptInstanceRef>,
         name: Symbol,
         _args: &Vec<DatumRef>,
     ) -> Result<Option<DatumRef>, ScriptError> {
-        match name.as_lower_str() {
+        match symbols
+            .lower(&name)
+            .map_err(|_| ScriptError::from(SymbolError::Foreign))?
+        {
             "new" | "newjavascriptproxy" | "javascriptproxy" => {
                 if let Some(instance_ref) = instance {
                     // Called on an existing instance — return self
@@ -31,7 +43,7 @@ impl VirtualScriptHandler for JavascriptProxy {
                     let script_ref = VirtualScriptRegistry::find_by_name(player, "JavaScriptProxy")
                         .ok_or_else(|| ScriptError::new("JavaScriptProxy script not found".to_string()))?;
                     let (_instance_ref, datum_ref) =
-                        VirtualScriptRegistry::create_instance(player, &script_ref);
+                        VirtualScriptRegistry::create_instance(player, symbols, &script_ref)?;
                     Ok(Some(datum_ref))
                 }
             }

@@ -7,12 +7,11 @@ use crate::director::file::read_director_file_bytes;
 pub use crate::director::static_datum::StaticDatum;
 use crate::player::{
     bitmap::bitmap::{get_system_default_palette, Bitmap, PaletteRef},
-    events::run_event_loop,
-    fire_pending_timeouts,
-    reserve_player_mut, reserve_player_ref, run_single_frame,
-    DirPlayer, PlayerVMExecutionItem, PLAYER_OPT,
+    commands::run_command_loop,
+    PlayerVMExecutionItem,
 };
 pub use crate::player::testing_shared::{TestHarness, SnapshotOutput};
+use crate::player::testing_shared::HarnessRuntime;
 use crate::rendering::render_stage_to_bitmap;
 
 /// Global lock to ensure only one TestPlayer runs at a time.
@@ -23,36 +22,29 @@ static TEST_LOCK: Mutex<()> = Mutex::new(());
 pub struct TestPlayer {
     _tx: channel::Sender<PlayerVMExecutionItem>,
     _lock: std::sync::MutexGuard<'static, ()>,
+    runtime: HarnessRuntime,
 }
 
 impl TestPlayer {
     pub fn new() -> Self {
         let lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
-        let (tx, _rx) = channel::unbounded();
-        let (event_tx, event_rx) = channel::unbounded();
+        let (tx, rx) = channel::unbounded();
 
-        unsafe {
-            crate::player::PLAYER_TX = Some(tx.clone());
-            crate::player::PLAYER_EVENT_TX = Some(event_tx.clone());
-            crate::player::xtra::multiuser::MULTIUSER_XTRA_MANAGER_OPT =
-                Some(crate::player::xtra::multiuser::MultiuserXtraManager::new());
-            crate::player::xtra::xmlparser::XMLPARSER_XTRA_MANAGER_OPT =
-                Some(crate::player::xtra::xmlparser::XmlParserXtraManager::new());
-            crate::player::xtra::curl::CURL_XTRA_MANAGER_OPT =
-                Some(crate::player::xtra::curl::CurlXtraManager::new());
-            PLAYER_OPT = Some(DirPlayer::new(tx.clone()));
-        }
-
+        let runtime = HarnessRuntime::new(tx.clone());
+        let command_session = runtime.session();
+        let command_player_id = runtime.player_id();
+        let command_owner = runtime.owner().clone();
         crate::player::spawn_player_local(async move {
-            run_event_loop(event_rx).await;
+            run_command_loop(rx, command_session, command_player_id, command_owner).await;
         });
-
-        TestPlayer { _tx: tx, _lock: lock }
+        TestPlayer { _tx: tx, _lock: lock, runtime }
     }
 }
 
 impl TestHarness for TestPlayer {
+    fn harness_runtime(&self) -> &HarnessRuntime { &self.runtime }
+
     fn asset_path(&self, relative: &str) -> String {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let workspace_root = std::path::Path::new(manifest_dir).parent().unwrap();
@@ -118,52 +110,62 @@ impl TestHarness for TestPlayer {
         let dir_file = read_director_file_bytes(&data_bytes, &file_name, &base_url)
             .unwrap_or_else(|e| panic!("Failed to parse {}: {:?}", file_name, e));
 
-        reserve_player_mut(|player| {
-            player.is_playing = true;
-            player.is_script_paused = false;
+        self.runtime.with_context(|context| {
+            context.player.is_playing = true;
+            context.player.is_script_paused = false;
         });
 
-        unsafe {
-            let player = crate::player::player_mut();
-            player.load_movie_from_dir(dir_file).await;
-        }
+        crate::player::load_movie_from_dir_owned(
+            self.runtime.session(),
+            self.runtime.player_id(),
+            self.runtime.owner().clone(),
+            dir_file,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("movie load failed: {}", error));
     }
 
     async fn step_frame(&mut self) -> bool {
-        fire_pending_timeouts().await;
-        let (is_playing, _) = run_single_frame().await;
-        let delay_ms = reserve_player_ref(|player| {
-            let tempo = player.movie.get_effective_tempo();
+        crate::player::fire_pending_timeouts_owned(
+            self.runtime.session(),
+            self.runtime.player_id(),
+            self.runtime.owner().clone(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("timeout dispatch failed: {}", error));
+        let (is_playing, _) = crate::player::run_single_frame_owned(
+            self.runtime.session(),
+            self.runtime.player_id(),
+            self.runtime.owner().clone(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("frame execution failed: {}", error));
+        let delay_ms = self.runtime.with_context(|context| {
+            let tempo = context.player.movie.get_effective_tempo();
             if tempo > 0 { 1000 / tempo } else { 33 }
-        });
+        }).unwrap_or(33);
         std::thread::sleep(std::time::Duration::from_millis(delay_ms as u64));
         is_playing
     }
 
     fn snapshot_stage(&self) -> SnapshotOutput {
-        reserve_player_mut(|player| {
-            let w = player.movie.rect.width() as u16;
-            let h = player.movie.rect.height() as u16;
+        self.runtime.with_context(|context| {
+            let w = context.player.movie.rect.width() as u16;
+            let h = context.player.movie.rect.height() as u16;
             let mut bitmap = Bitmap::new(w, h, 32, 32, 0, PaletteRef::BuiltIn(get_system_default_palette()));
-            render_stage_to_bitmap(player, &mut bitmap, None);
+            render_stage_to_bitmap(context.player, &mut bitmap, None);
             SnapshotOutput::Rgba {
                 width: w as u32,
                 height: h as u32,
                 data: bitmap.data,
             }
-        })
+        }).unwrap_or_else(|| panic!("harness player was replaced"))
     }
 }
 
 impl Drop for TestPlayer {
     fn drop(&mut self) {
-        unsafe {
-            if let Some(player) = PLAYER_OPT.take() {
-                std::mem::forget(player);
-            }
-            crate::player::PLAYER_TX = None;
-            crate::player::PLAYER_EVENT_TX = None;
-        }
+        self.runtime.retire_current();
     }
 }
 

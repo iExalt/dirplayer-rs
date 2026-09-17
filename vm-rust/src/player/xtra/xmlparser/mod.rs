@@ -1,11 +1,29 @@
-use std::collections::VecDeque;
 use fxhash::FxHashMap;
+use std::collections::VecDeque;
 use xml::reader::{EventReader, XmlEvent};
 
 use crate::{
     director::lingo::datum::{Datum, DatumType},
-    player::{DatumRef, ScriptError, reserve_player_mut, symbols::{builtin::BuiltInSymbol, symbol::Symbol}},
+    player::{
+        symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable},
+        DatumRef, DirPlayer, OwnerToken, ScriptError,
+    },
 };
+
+fn with_player<T>(player: &mut DirPlayer, callback: impl FnOnce(&mut DirPlayer) -> T) -> T {
+    callback(player)
+}
+
+fn with_player_ref<T>(player: &DirPlayer, callback: impl FnOnce(&DirPlayer) -> T) -> T {
+    callback(player)
+}
+
+fn checked_player_datum<'a>(player: &'a DirPlayer, datum_ref: &DatumRef) -> Result<&'a Datum, ScriptError> {
+    player.allocator.try_get_datum(datum_ref).ok_or_else(|| ScriptError::new_code(
+        crate::player::ScriptErrorCode::InvalidReference,
+        "foreign or stale XmlParser argument".to_owned(),
+    ))
+}
 
 /// Represents a parsed XML node
 #[derive(Clone, Debug)]
@@ -26,6 +44,7 @@ pub struct XmlParserXtraInstance {
     pub error: Option<String>,
     pub ignore_whitespace: bool,
     pub done_parsing: bool,
+    pub generation: u64,
 }
 
 impl XmlParserXtraInstance {
@@ -35,6 +54,7 @@ impl XmlParserXtraInstance {
             error: None,
             ignore_whitespace: false,
             done_parsing: true,
+            generation: 0,
         }
     }
 
@@ -53,7 +73,9 @@ impl XmlParserXtraInstance {
 
         for event in parser {
             match event {
-                Ok(XmlEvent::StartElement { name, attributes, .. }) => {
+                Ok(XmlEvent::StartElement {
+                    name, attributes, ..
+                }) => {
                     let node = XmlNode {
                         name: name.local_name,
                         attributes: attributes
@@ -111,19 +133,24 @@ impl XmlParserXtraInstance {
     }
 
     /// Convert the parsed XML tree to a Lingo property list structure
-    fn node_to_prop_list(node: &XmlNode) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    fn node_to_prop_list(
+        player: &mut DirPlayer,
+        node: &XmlNode,
+        symbols: &mut SymbolTable,
+    ) -> Result<DatumRef, ScriptError> {
+        {
             // Create #name property
             let name_key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Name)));
             let name_value = player.alloc_datum(Datum::String(node.name.clone()));
 
             // Create #attributes property list and #attributeName/#attributeValue lists
-            let attributes_key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Attributes)));
+            let attributes_key =
+                player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Attributes)));
             let mut attr_pairs: VecDeque<(DatumRef, DatumRef)> = VecDeque::new();
             let mut attr_name_refs: VecDeque<DatumRef> = VecDeque::new();
             let mut attr_value_pairs: VecDeque<(DatumRef, DatumRef)> = VecDeque::new();
             for (attr_name, attr_value) in &node.attributes {
-                let attr_key = player.alloc_datum(Datum::Symbol(Symbol::from_str(attr_name)));
+                let attr_key = player.alloc_datum(Datum::Symbol(symbols.intern(attr_name)));
                 let attr_val = player.alloc_datum(Datum::String(attr_value.clone()));
                 attr_pairs.push_back((attr_key, attr_val));
                 attr_name_refs.push_back(player.alloc_datum(Datum::String(attr_name.clone())));
@@ -132,9 +159,13 @@ impl XmlParserXtraInstance {
                 attr_value_pairs.push_back((av_key, av_val));
             }
             let attributes_value = player.alloc_datum(Datum::PropList(attr_pairs, false));
-            let attr_name_key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::AttributeName)));
-            let attr_name_value = player.alloc_datum(Datum::List(DatumType::List, attr_name_refs, false));
-            let attr_value_key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::AttributeValue)));
+            let attr_name_key =
+                player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::AttributeName)));
+            let attr_name_value =
+                player.alloc_datum(Datum::List(DatumType::List, attr_name_refs, false));
+            let attr_value_key = player.alloc_datum(Datum::Symbol(Symbol::builtin(
+                BuiltInSymbol::AttributeValue,
+            )));
             // `XMLnode.attributeValue[ attributeNameOrNumber ]` (Director 11.5
             // Scripting Dictionary, `attributeValue`) — indexable by attribute
             // NAME as well as by position. A property list serves both through
@@ -147,14 +178,15 @@ impl XmlParserXtraInstance {
             let attr_value_value = player.alloc_datum(Datum::PropList(attr_value_pairs, false));
 
             // Create #child list and collect #charData
-            let child_key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Child)));
+            let child_key =
+                player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Child)));
             let mut children_refs: VecDeque<DatumRef> = VecDeque::new();
             let mut char_data = String::new();
 
             for child in &node.children {
                 match child {
                     XmlNodeChild::Element(child_node) => {
-                        let child_ref = Self::node_to_prop_list_inner(player, child_node)?;
+                        let child_ref = Self::node_to_prop_list_inner(player, symbols, child_node)?;
                         children_refs.push_back(child_ref);
                     }
                     XmlNodeChild::Text(text) => {
@@ -170,7 +202,8 @@ impl XmlParserXtraInstance {
             let children_value =
                 player.alloc_datum(Datum::List(DatumType::List, children_refs, false));
 
-            let chardata_key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::CharData)));
+            let chardata_key =
+                player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::CharData)));
             let chardata_value = player.alloc_datum(Datum::String(char_data));
 
             let prop_list = Datum::PropList(
@@ -186,12 +219,13 @@ impl XmlParserXtraInstance {
             );
 
             Ok(player.alloc_datum(prop_list))
-        })
+        }
     }
 
     /// Inner helper to convert node to prop list when player is already borrowed
     fn node_to_prop_list_inner(
         player: &mut crate::player::DirPlayer,
+        symbols: &mut SymbolTable,
         node: &XmlNode,
     ) -> Result<DatumRef, ScriptError> {
         // Create #name property
@@ -199,12 +233,13 @@ impl XmlParserXtraInstance {
         let name_value = player.alloc_datum(Datum::String(node.name.clone()));
 
         // Create #attributes property list and #attributeName/#attributeValue lists
-        let attributes_key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Attributes)));
+        let attributes_key =
+            player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Attributes)));
         let mut attr_pairs: VecDeque<(DatumRef, DatumRef)> = VecDeque::new();
         let mut attr_name_refs: VecDeque<DatumRef> = VecDeque::new();
         let mut attr_value_pairs: VecDeque<(DatumRef, DatumRef)> = VecDeque::new();
         for (attr_name, attr_value) in &node.attributes {
-            let attr_key = player.alloc_datum(Datum::Symbol(Symbol::from_str(attr_name)));
+            let attr_key = player.alloc_datum(Datum::Symbol(symbols.intern(attr_name)));
             let attr_val = player.alloc_datum(Datum::String(attr_value.clone()));
             attr_pairs.push_back((attr_key, attr_val));
             attr_name_refs.push_back(player.alloc_datum(Datum::String(attr_name.clone())));
@@ -213,9 +248,13 @@ impl XmlParserXtraInstance {
             attr_value_pairs.push_back((av_key, av_val));
         }
         let attributes_value = player.alloc_datum(Datum::PropList(attr_pairs, false));
-        let attr_name_key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::AttributeName)));
-        let attr_name_value = player.alloc_datum(Datum::List(DatumType::List, attr_name_refs, false));
-        let attr_value_key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::AttributeValue)));
+        let attr_name_key =
+            player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::AttributeName)));
+        let attr_name_value =
+            player.alloc_datum(Datum::List(DatumType::List, attr_name_refs, false));
+        let attr_value_key = player.alloc_datum(Datum::Symbol(Symbol::builtin(
+            BuiltInSymbol::AttributeValue,
+        )));
         let attr_value_value = player.alloc_datum(Datum::PropList(attr_value_pairs, false));
 
         // Create #child list and collect #charData
@@ -226,7 +265,7 @@ impl XmlParserXtraInstance {
         for child in &node.children {
             match child {
                 XmlNodeChild::Element(child_node) => {
-                    let child_ref = Self::node_to_prop_list_inner(player, child_node)?;
+                    let child_ref = Self::node_to_prop_list_inner(player, symbols, child_node)?;
                     children_refs.push_back(child_ref);
                 }
                 XmlNodeChild::Text(text) => {
@@ -239,10 +278,10 @@ impl XmlParserXtraInstance {
             }
         }
 
-        let children_value =
-            player.alloc_datum(Datum::List(DatumType::List, children_refs, false));
+        let children_value = player.alloc_datum(Datum::List(DatumType::List, children_refs, false));
 
-        let chardata_key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::CharData)));
+        let chardata_key =
+            player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::CharData)));
         let chardata_value = player.alloc_datum(Datum::String(char_data));
 
         let prop_list = Datum::PropList(
@@ -261,34 +300,32 @@ impl XmlParserXtraInstance {
     }
 
     /// makeList handler - converts parsed XML to Lingo property list
-    pub fn make_list(&self) -> Result<DatumRef, ScriptError> {
+    pub fn make_list(&self, player: &mut DirPlayer, symbols: &mut SymbolTable) -> Result<DatumRef, ScriptError> {
         if let Some(ref root) = self.parsed_root {
-            Self::node_to_prop_list(root)
+            Self::node_to_prop_list(player, root, symbols)
         } else {
             Ok(DatumRef::Void)
         }
     }
 
     /// Convert a text node to a prop list with empty name
-    fn text_node_to_prop_list_inner(
-        player: &mut crate::player::DirPlayer,
-        text: &str,
-    ) -> DatumRef {
+    fn text_node_to_prop_list_inner(player: &mut crate::player::DirPlayer, text: &str) -> DatumRef {
         let name_key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Name)));
         let name_value = player.alloc_datum(Datum::String(String::new()));
 
-        let attributes_key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Attributes)));
+        let attributes_key =
+            player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Attributes)));
         let attributes_value = player.alloc_datum(Datum::PropList(VecDeque::new(), false));
 
-        let chardata_key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::CharData)));
+        let chardata_key =
+            player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::CharData)));
         let chardata_value = player.alloc_datum(Datum::String(text.to_string()));
 
         let text_key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Text)));
         let text_value = player.alloc_datum(Datum::String(text.to_string()));
 
         let child_key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Child)));
-        let child_value =
-            player.alloc_datum(Datum::List(DatumType::List, VecDeque::new(), false));
+        let child_value = player.alloc_datum(Datum::List(DatumType::List, VecDeque::new(), false));
 
         let prop_list = Datum::PropList(
             VecDeque::from(vec![
@@ -304,66 +341,81 @@ impl XmlParserXtraInstance {
         player.alloc_datum(prop_list)
     }
 
-    fn text_node_to_prop_list(text: &str) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            Ok(Self::text_node_to_prop_list_inner(player, text))
-        })
+    fn text_node_to_prop_list(player: &mut DirPlayer, text: &str) -> Result<DatumRef, ScriptError> {
+        Ok(Self::text_node_to_prop_list_inner(player, text))
     }
 }
 
 pub struct XmlParserXtraManager {
     pub instances: FxHashMap<u32, XmlParserXtraInstance>,
     pub instance_counter: u32,
+    pub generation_counter: u64,
+    pub owner: OwnerToken,
 }
 
 impl XmlParserXtraManager {
     pub fn new() -> Self {
+        Self::new_with_owner(OwnerToken::transitional())
+    }
+
+    pub fn new_with_owner(owner: OwnerToken) -> Self {
         XmlParserXtraManager {
             instances: FxHashMap::default(),
             instance_counter: 0,
+            generation_counter: 0,
+            owner,
         }
     }
 
-    pub fn create_instance(&mut self, _args: &Vec<DatumRef>) -> u32 {
-        self.instance_counter += 1;
-        self.instances
-            .insert(self.instance_counter, XmlParserXtraInstance::new());
-        self.instance_counter
+    pub(crate) fn rebind_owner(&mut self, owner: OwnerToken) { self.owner = owner; }
+
+    pub(crate) fn reset(&mut self) {
+        self.instances.clear();
+        self.instance_counter = 0;
     }
 
-    pub fn has_instance_async_handler(_name: &str) -> bool {
-        // parseURL could be async, but we'll implement it synchronously for now
-        false
+    pub(crate) fn create_instance_explicit(&mut self, _args: &[DatumRef]) -> Result<u32, ScriptError> {
+        if !self.owner.is_arena_live() {
+            return Err(ScriptError::new_code(crate::player::ScriptErrorCode::Abort, "XmlParser owner was retired".to_owned()));
+        }
+        self.instance_counter = self.instance_counter.checked_add(1).ok_or_else(|| ScriptError::new("XmlParser instance id exhausted".to_owned()))?;
+        self.generation_counter = self.generation_counter.checked_add(1).ok_or_else(|| ScriptError::new("XmlParser instance generation exhausted".to_owned()))?;
+        let mut instance = XmlParserXtraInstance::new();
+        instance.generation = self.generation_counter;
+        self.instances.insert(self.instance_counter, instance);
+        Ok(self.instance_counter)
     }
 
-    pub async fn call_instance_async_handler(
-        handler_name: &str,
+    pub(crate) fn instance_generation(&self, instance_id: u32) -> Option<u64> {
+        self.instances.get(&instance_id).map(|instance| instance.generation)
+    }
+
+    pub(crate) fn call_instance_handler_explicit(
+        &mut self,
+        player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
         instance_id: u32,
-        _args: &Vec<DatumRef>,
-    ) -> Result<DatumRef, ScriptError> {
-        Err(ScriptError::new(format!(
-            "No async handler {} found for XmlParser xtra instance #{}",
-            handler_name, instance_id
-        )))
-    }
-
-    pub fn call_instance_handler(
         handler_name: &str,
-        instance_id: u32,
-        args: &Vec<DatumRef>,
+        args: &[DatumRef],
     ) -> Result<DatumRef, ScriptError> {
-        let manager = unsafe { XMLPARSER_XTRA_MANAGER_OPT.as_mut().unwrap() };
+        let manager = self;
+        if !manager.owner.same_identity(&player.owner) || !manager.owner.is_arena_live() {
+            return Err(ScriptError::new_code(
+                crate::player::ScriptErrorCode::Abort,
+                "XmlParser owner was retired".to_owned(),
+            ));
+        }
         let instance = manager.instances.get_mut(&instance_id).ok_or_else(|| {
             ScriptError::new(format!("XmlParser instance #{} not found", instance_id))
         })?;
 
         match handler_name.to_lowercase().as_str() {
             "parsestring" => {
-                let xml_string = crate::player::reserve_player_ref(|player| {
+                let xml_string = with_player_ref(player, |player| {
                     let arg = args.get(0).ok_or_else(|| {
                         ScriptError::new("parseString requires a string argument".to_string())
                     })?;
-                    player.get_datum(arg).string_value()
+                    checked_player_datum(player, arg)?.string_value(symbols)
                 })?;
 
                 let result = instance.parse_string(&xml_string);
@@ -392,36 +444,34 @@ impl XmlParserXtraManager {
                     .error
                     .clone()
                     .unwrap_or_else(|| format!("XML parsing error: {}", result));
-                reserve_player_mut(|player| Ok(player.alloc_datum(Datum::String(message))))
+                with_player(player, |player| Ok(player.alloc_datum(Datum::String(message))))
             }
-            "makelist" => instance.make_list(),
+            "makelist" => instance.make_list(player, symbols),
             "makesublist" => {
                 // makeSubList returns a property list for the root node (or could be called on child refs)
-                instance.make_list()
+                instance.make_list(player, symbols)
             }
             "geterror" => {
                 if let Some(ref error) = instance.error {
-                    reserve_player_mut(|player| {
-                        Ok(player.alloc_datum(Datum::String(error.clone())))
-                    })
+                    with_player(player, 
+                        |player| Ok(player.alloc_datum(Datum::String(error.clone()))),
+                    )
                 } else {
                     Ok(DatumRef::Void)
                 }
             }
             "ignorewhitespace" => {
-                let ignore = crate::player::reserve_player_ref(|player| {
+                let ignore = with_player_ref(player, |player| {
                     let arg = args.get(0).ok_or_else(|| {
-                        ScriptError::new(
-                            "ignoreWhiteSpace requires a boolean argument".to_string(),
-                        )
+                        ScriptError::new("ignoreWhiteSpace requires a boolean argument".to_string())
                     })?;
-                    player.get_datum(arg).bool_value()
+                    checked_player_datum(player, arg)?.bool_value()
                 })?;
 
                 instance.ignore_whitespace = ignore;
                 Ok(DatumRef::Void)
             }
-            "doneparsing" => reserve_player_mut(|player| {
+            "doneparsing" => with_player(player, |player| {
                 Ok(player.alloc_datum(Datum::Int(if instance.done_parsing { 1 } else { 0 })))
             }),
             "parseurl" => {
@@ -436,9 +486,9 @@ impl XmlParserXtraManager {
             "count" => {
                 // count(#child) returns the number of children
                 // count(#attribute) returns the number of attributes
-                let prop_name = crate::player::reserve_player_ref(|player| {
+                let prop_name = with_player_ref(player, |player| {
                     if let Some(arg) = args.get(0) {
-                        player.get_datum(arg).symbol_value()
+                        checked_player_datum(player, arg)?.symbol_value(symbols)
                     } else {
                         Ok(Symbol::builtin(BuiltInSymbol::Child)) // Default to child count
                     }
@@ -450,24 +500,24 @@ impl XmlParserXtraManager {
                         Some(BuiltInSymbol::Attribute | BuiltInSymbol::Attributes) => 0, // Parser object has no attributes
                         _ => 0,
                     };
-                    reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Int(count))))
+                    with_player(player, |player| Ok(player.alloc_datum(Datum::Int(count))))
                 } else {
-                    reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Int(0))))
+                    with_player(player, |player| Ok(player.alloc_datum(Datum::Int(0))))
                 }
             }
             "child" => {
                 // child[n] returns the nth child node
-                let index = crate::player::reserve_player_ref(|player| {
+                let index = with_player_ref(player, |player| {
                     let arg = args.get(0).ok_or_else(|| {
                         ScriptError::new("child requires an index argument".to_string())
                     })?;
-                    player.get_datum(arg).int_value()
+                    checked_player_datum(player, arg)?.int_value()
                 })?;
 
                 if let Some(ref root) = instance.parsed_root {
                     // The parser object has one child: the root element (index 1)
                     if index == 1 {
-                        XmlParserXtraInstance::node_to_prop_list(root)
+                        XmlParserXtraInstance::node_to_prop_list(player, root, symbols)
                     } else {
                         Ok(DatumRef::Void)
                     }
@@ -478,7 +528,7 @@ impl XmlParserXtraManager {
             "name" => {
                 // Returns the tag name of the root element
                 if let Some(ref root) = instance.parsed_root {
-                    reserve_player_mut(|player| {
+                    with_player(player, |player| {
                         Ok(player.alloc_datum(Datum::String(root.name.clone())))
                     })
                 } else {
@@ -487,19 +537,18 @@ impl XmlParserXtraManager {
             }
             "attributename" => {
                 // attributeName[n] returns the name of the nth attribute
-                let index = crate::player::reserve_player_ref(|player| {
+                let index = with_player_ref(player, |player| {
                     let arg = args.get(0).ok_or_else(|| {
                         ScriptError::new("attributeName requires an index argument".to_string())
                     })?;
-                    player.get_datum(arg).int_value()
+                    checked_player_datum(player, arg)?.int_value()
                 })?;
 
                 if let Some(ref root) = instance.parsed_root {
                     let idx = (index - 1) as usize;
                     if idx < root.attributes.len() {
-                        reserve_player_mut(|player| {
-                            Ok(player
-                                .alloc_datum(Datum::String(root.attributes[idx].0.clone())))
+                        with_player(player, |player| {
+                            Ok(player.alloc_datum(Datum::String(root.attributes[idx].0.clone())))
                         })
                     } else {
                         Ok(DatumRef::Void)
@@ -510,15 +559,15 @@ impl XmlParserXtraManager {
             }
             "attributevalue" => {
                 // attributeValue[n] or attributeValue["name"] returns the attribute value
-                let (by_index, index, attr_name) = crate::player::reserve_player_ref(|player| {
+                let (by_index, index, attr_name) = with_player_ref(player, |player| {
                     let arg = args.get(0).ok_or_else(|| {
                         ScriptError::new("attributeValue requires an argument".to_string())
                     })?;
-                    let datum = player.get_datum(arg);
+                    let datum = checked_player_datum(player, arg)?;
                     if datum.is_int() || datum.is_number() {
                         Ok((true, datum.int_value()?, String::new()))
                     } else {
-                        Ok((false, 0, datum.string_value()?))
+                        Ok::<_, ScriptError>((false, 0, datum.string_value(symbols)?))
                     }
                 })?;
 
@@ -526,10 +575,9 @@ impl XmlParserXtraManager {
                     if by_index {
                         let idx = (index - 1) as usize;
                         if idx < root.attributes.len() {
-                            reserve_player_mut(|player| {
-                                Ok(player.alloc_datum(Datum::String(
-                                    root.attributes[idx].1.clone(),
-                                )))
+                            with_player(player, |player| {
+                                Ok(player
+                                    .alloc_datum(Datum::String(root.attributes[idx].1.clone())))
                             })
                         } else {
                             Ok(DatumRef::Void)
@@ -539,7 +587,7 @@ impl XmlParserXtraManager {
                         if let Some((_, value)) =
                             root.attributes.iter().find(|(name, _)| name == &attr_name)
                         {
-                            reserve_player_mut(|player| {
+                            with_player(player, |player| {
                                 Ok(player.alloc_datum(Datum::String(value.clone())))
                             })
                         } else {
@@ -553,16 +601,16 @@ impl XmlParserXtraManager {
             "getprop" | "getpropref" => {
                 // getPropRef(#child, n) returns a property list for the nth child
                 // getPropRef(#attribute, n) returns the nth attribute as [name, value]
-                let (prop_name, index) = crate::player::reserve_player_ref(|player| {
+                let (prop_name, index) = with_player_ref(player, |player| {
                     let prop_arg = args.get(0).ok_or_else(|| {
                         ScriptError::new("getPropRef requires a property name".to_string())
                     })?;
                     let index_arg = args.get(1).ok_or_else(|| {
                         ScriptError::new("getPropRef requires an index".to_string())
                     })?;
-                    let prop_name = player.get_datum(prop_arg).symbol_value()?;
-                    let index = player.get_datum(index_arg).int_value()?;
-                    Ok((prop_name, index))
+                    let prop_name = checked_player_datum(player, prop_arg)?.symbol_value(symbols)?;
+                    let index = checked_player_datum(player, index_arg)?.int_value()?;
+                    Ok::<_, ScriptError>((prop_name, index))
                 })?;
 
                 if let Some(ref root) = instance.parsed_root {
@@ -570,7 +618,7 @@ impl XmlParserXtraManager {
                         Some(BuiltInSymbol::Child | BuiltInSymbol::Children) => {
                             // The parser object has one child: the root element (index 1)
                             if index == 1 {
-                                XmlParserXtraInstance::node_to_prop_list(root)
+                                XmlParserXtraInstance::node_to_prop_list(player, root, symbols)
                             } else {
                                 Ok(DatumRef::Void)
                             }
@@ -578,10 +626,9 @@ impl XmlParserXtraManager {
                         Some(BuiltInSymbol::Attribute | BuiltInSymbol::Attributes) => {
                             let idx = (index - 1) as usize;
                             if idx < root.attributes.len() {
-                                reserve_player_mut(|player| {
+                                with_player(player, |player| {
                                     let (name, value) = &root.attributes[idx];
-                                    let name_ref =
-                                        player.alloc_datum(Datum::String(name.clone()));
+                                    let name_ref = player.alloc_datum(Datum::String(name.clone()));
                                     let value_ref =
                                         player.alloc_datum(Datum::String(value.clone()));
                                     Ok(player.alloc_datum(Datum::List(
@@ -607,15 +654,6 @@ impl XmlParserXtraManager {
         }
     }
 }
-
-pub fn borrow_xmlparser_manager_mut<T>(
-    callback: impl FnOnce(&mut XmlParserXtraManager) -> T,
-) -> T {
-    let manager = unsafe { XMLPARSER_XTRA_MANAGER_OPT.as_mut().unwrap() };
-    callback(manager)
-}
-
-pub static mut XMLPARSER_XTRA_MANAGER_OPT: Option<XmlParserXtraManager> = None;
 
 /// Strip earlier occurrences of duplicate attributes within each element's
 /// opening tag. Matches Director's XML Xtra behavior: last attribute wins.
@@ -674,7 +712,9 @@ pub fn dedup_duplicate_attributes(xml: &str) -> String {
         while j < bytes.len() {
             let ch = bytes[j];
             if let Some(q) = in_quote {
-                if ch == q { in_quote = None; }
+                if ch == q {
+                    in_quote = None;
+                }
             } else if ch == b'"' || ch == b'\'' {
                 in_quote = Some(ch);
             } else if ch == b'>' {
@@ -699,68 +739,105 @@ pub fn dedup_duplicate_attributes(xml: &str) -> String {
 /// keeping only the last occurrence of each attribute name.
 fn rewrite_tag_dedup(tag: &str) -> String {
     // Fast path: tags without `=` have no attributes.
-    if !tag.contains('=') { return tag.to_string(); }
+    if !tag.contains('=') {
+        return tag.to_string();
+    }
 
     let bytes = tag.as_bytes();
     // Find end of element name: after `<` (or `</`), up to whitespace or `/`/`>`.
     let mut p = 1; // skip `<`
-    if p < bytes.len() && bytes[p] == b'/' { p += 1; } // `</…>`
+    if p < bytes.len() && bytes[p] == b'/' {
+        p += 1;
+    } // `</…>`
     let name_start = p;
     while p < bytes.len() {
         let ch = bytes[p];
-        if ch.is_ascii_whitespace() || ch == b'/' || ch == b'>' { break; }
+        if ch.is_ascii_whitespace() || ch == b'/' || ch == b'>' {
+            break;
+        }
         p += 1;
     }
     let name_end = p;
-    if name_start == name_end { return tag.to_string(); }
+    if name_start == name_end {
+        return tag.to_string();
+    }
 
     // Parse attributes: (name, value, with_quotes_string) tuples, in order.
     #[derive(Default)]
-    struct Attr { name: String, raw: String }
+    struct Attr {
+        name: String,
+        raw: String,
+    }
     let mut attrs: Vec<Attr> = Vec::new();
 
     let mut q = p;
     while q < bytes.len() {
         // Skip whitespace.
-        while q < bytes.len() && bytes[q].is_ascii_whitespace() { q += 1; }
+        while q < bytes.len() && bytes[q].is_ascii_whitespace() {
+            q += 1;
+        }
         // End of tag?
-        if q >= bytes.len() || bytes[q] == b'/' || bytes[q] == b'>' { break; }
+        if q >= bytes.len() || bytes[q] == b'/' || bytes[q] == b'>' {
+            break;
+        }
         // Read attribute name.
         let a_name_start = q;
         while q < bytes.len() {
             let ch = bytes[q];
-            if ch.is_ascii_whitespace() || ch == b'=' || ch == b'/' || ch == b'>' { break; }
+            if ch.is_ascii_whitespace() || ch == b'=' || ch == b'/' || ch == b'>' {
+                break;
+            }
             q += 1;
         }
         let a_name_end = q;
-        if a_name_start == a_name_end { break; }
+        if a_name_start == a_name_end {
+            break;
+        }
         let a_name = &tag[a_name_start..a_name_end];
         // Skip whitespace + `=` + whitespace.
-        while q < bytes.len() && bytes[q].is_ascii_whitespace() { q += 1; }
+        while q < bytes.len() && bytes[q].is_ascii_whitespace() {
+            q += 1;
+        }
         if q >= bytes.len() || bytes[q] != b'=' {
             // Valueless attribute (rare in Director) — keep as-is.
-            attrs.push(Attr { name: a_name.to_string(), raw: a_name.to_string() });
+            attrs.push(Attr {
+                name: a_name.to_string(),
+                raw: a_name.to_string(),
+            });
             continue;
         }
         q += 1;
-        while q < bytes.len() && bytes[q].is_ascii_whitespace() { q += 1; }
-        if q >= bytes.len() { break; }
+        while q < bytes.len() && bytes[q].is_ascii_whitespace() {
+            q += 1;
+        }
+        if q >= bytes.len() {
+            break;
+        }
         // Read quoted or unquoted value.
         let v_start = q;
         let quote = bytes[q];
         if quote == b'"' || quote == b'\'' {
             q += 1;
-            while q < bytes.len() && bytes[q] != quote { q += 1; }
-            if q < bytes.len() { q += 1; } // consume closing quote
+            while q < bytes.len() && bytes[q] != quote {
+                q += 1;
+            }
+            if q < bytes.len() {
+                q += 1;
+            } // consume closing quote
         } else {
             while q < bytes.len() {
                 let ch = bytes[q];
-                if ch.is_ascii_whitespace() || ch == b'/' || ch == b'>' { break; }
+                if ch.is_ascii_whitespace() || ch == b'/' || ch == b'>' {
+                    break;
+                }
                 q += 1;
             }
         }
         let raw = format!("{}={}", a_name, &tag[v_start..q]);
-        attrs.push(Attr { name: a_name.to_string(), raw });
+        attrs.push(Attr {
+            name: a_name.to_string(),
+            raw,
+        });
     }
 
     // Deduplicate: keep only the LAST occurrence of each name.
@@ -776,12 +853,18 @@ fn rewrite_tag_dedup(tag: &str) -> String {
     let suffix = {
         // Trailing `/` or just `>`.
         let end = bytes.len() - 1; // index of `>`
-        if end > 0 && bytes[end - 1] == b'/' { "/>" } else { ">" }
+        if end > 0 && bytes[end - 1] == b'/' {
+            "/>"
+        } else {
+            ">"
+        }
     };
     let mut rebuilt = String::with_capacity(tag.len());
     rebuilt.push_str(&tag[0..name_end]);
     for (idx, attr) in attrs.iter().enumerate() {
-        if !keep[idx] { continue; }
+        if !keep[idx] {
+            continue;
+        }
         rebuilt.push(' ');
         rebuilt.push_str(&attr.raw);
     }

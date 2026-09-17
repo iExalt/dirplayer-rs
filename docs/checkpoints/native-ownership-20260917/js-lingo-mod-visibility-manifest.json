@@ -1,0 +1,9 @@
+{
+  "path": "vm-rust/src/player/js_lingo/mod.rs",
+  "base_source": "/private/tmp/dirplayer-combined-reviewed-20260916/vm-rust/src/player/js_lingo/mod.rs",
+  "base_sha256": "91acc6b2842264f3f8e3ecfc9a31fd2b8e10741aa1173a9e14b15aa9ef084b51",
+  "after_sha256": "67d138776f6a21cdccbb7e176b04780074c8f331a5afaa9044f6f2855ad3c9b4",
+  "patch": "/private/tmp/dirplayer-xtra-owned-20260916/js-lingo-mod-visibility.patch",
+  "patch_sha256": "c78de75157527728428c1b2a58689982b7049863ad45279e13aa910e64664506",
+  "reason": "testing_browser.rs is built as the library for browser integration tests, so the generated payload module must be available outside cfg(test)."
+}

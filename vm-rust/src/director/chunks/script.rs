@@ -4,7 +4,7 @@ use itertools::Itertools;
 use crate::director::{chunks::literal::{LiteralStore, LiteralType}, lingo::datum::Datum};
 
 use super::handler::{HandlerDef, HandlerRecord};
-use crate::director::static_datum::StaticDatum;
+use crate::director::static_datum::{StaticDatum, static_datum_from_literal};
 use std::collections::{hash_map::Entry, HashMap};
 
 #[derive(Clone)]
@@ -96,7 +96,7 @@ impl ScriptChunk {
             if let Some(literal) = literals.get(i) {
                 // Property has a default value from the literal
                 if let Entry::Vacant(entry) = property_defaults.entry(*prop_id) {
-                    entry.insert(StaticDatum::from(literal));
+                    entry.insert(static_datum_from_literal(literal));
                 }
             }
             // Properties without literals will be initialized to Void in ScriptInstance::new()

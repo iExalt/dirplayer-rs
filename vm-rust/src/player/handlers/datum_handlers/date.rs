@@ -1,6 +1,11 @@
 use crate::{
     director::lingo::datum::Datum,
-    player::{DatumRef, DirPlayer, ScriptError, reserve_player_mut, symbols::{builtin::BuiltInSymbol, symbol::Symbol}},
+    player::{
+        compare::validate_direct_symbol_fields,
+        session::ExecutionContext,
+        DatumRef, DirPlayer, ScriptError,
+        symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable},
+    },
 };
 
 pub struct DateObject {
@@ -27,12 +32,17 @@ pub struct DateDatumHandlers;
 
 impl DateDatumHandlers {
     pub fn call(
-        datum: &DatumRef,
+        runtime: &mut ExecutionContext<'_>,
+        datum: DatumRef,
         handler_name: Symbol,
-        args: &Vec<DatumRef>,
+        args: &[DatumRef],
     ) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let date_id = player.get_datum(datum).to_date_ref()?;
+        runtime.with_player_and_symbols(|player, symbols| {
+            let handler_name_display = symbols
+                .display(&handler_name)
+                .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+            let datum_value = checked_datum(player, &datum, symbols)?;
+            let date_id = datum_value.to_date_ref()?;
             let date_obj = player
                 .date_objects
                 .get(&date_id)
@@ -55,7 +65,7 @@ impl DateDatumHandlers {
                         ));
                     }
                     // Accept Float (from getTime + offset arithmetic) or Int.
-                    let time = player.get_datum(&args[0]).float_value()? as i64;
+                    let time = checked_datum(player, &args[0], symbols)?.float_value()? as i64;
                     let date_obj = player.date_objects.get_mut(&date_id).ok_or_else(|| {
                         ScriptError::new(format!("Date object {} not found", date_id))
                     })?;
@@ -97,7 +107,7 @@ impl DateDatumHandlers {
                             "setFullYear requires a year argument".to_string(),
                         ));
                     }
-                    let year = player.get_datum(&args[0]).int_value()?;
+                    let year = checked_datum(player, &args[0], symbols)?.int_value()?;
                     let mut js_date = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(
                         date_obj.timestamp_ms as f64,
                     ));
@@ -114,7 +124,7 @@ impl DateDatumHandlers {
                             "setYear requires a year argument".to_string(),
                         ));
                     }
-                    let year_offset = player.get_datum(&args[0]).int_value()?;
+                    let year_offset = checked_datum(player, &args[0], symbols)?.int_value()?;
                     let mut js_date = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(
                         date_obj.timestamp_ms as f64,
                     ));
@@ -130,7 +140,7 @@ impl DateDatumHandlers {
                             "setMonth requires a month argument".to_string(),
                         ));
                     }
-                    let month = player.get_datum(&args[0]).int_value()?;
+                    let month = checked_datum(player, &args[0], symbols)?.int_value()?;
                     let mut js_date = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(
                         date_obj.timestamp_ms as f64,
                     ));
@@ -146,7 +156,7 @@ impl DateDatumHandlers {
                             "setDate requires a date argument".to_string(),
                         ));
                     }
-                    let date = player.get_datum(&args[0]).int_value()?;
+                    let date = checked_datum(player, &args[0], symbols)?.int_value()?;
                     let mut js_date = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(
                         date_obj.timestamp_ms as f64,
                     ));
@@ -162,7 +172,7 @@ impl DateDatumHandlers {
                             "setHours requires an hours argument".to_string(),
                         ));
                     }
-                    let hours = player.get_datum(&args[0]).int_value()?;
+                    let hours = checked_datum(player, &args[0], symbols)?.int_value()?;
                     let mut js_date = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(
                         date_obj.timestamp_ms as f64,
                     ));
@@ -178,7 +188,7 @@ impl DateDatumHandlers {
                             "setMinutes requires a minutes argument".to_string(),
                         ));
                     }
-                    let minutes = player.get_datum(&args[0]).int_value()?;
+                    let minutes = checked_datum(player, &args[0], symbols)?.int_value()?;
                     let mut js_date = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(
                         date_obj.timestamp_ms as f64,
                     ));
@@ -194,7 +204,7 @@ impl DateDatumHandlers {
                             "setSeconds requires a seconds argument".to_string(),
                         ));
                     }
-                    let seconds = player.get_datum(&args[0]).int_value()?;
+                    let seconds = checked_datum(player, &args[0], symbols)?.int_value()?;
                     let mut js_date = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(
                         date_obj.timestamp_ms as f64,
                     ));
@@ -206,7 +216,7 @@ impl DateDatumHandlers {
                 }
                 _ => Err(ScriptError::new(format!(
                     "No handler {} for date",
-                    handler_name
+                    handler_name_display
                 ))),
             }
         })
@@ -214,6 +224,7 @@ impl DateDatumHandlers {
 
     pub fn get_prop(
         player: &mut DirPlayer,
+        symbols: &SymbolTable,
         datum: &DatumRef,
         prop: Symbol,
     ) -> Result<DatumRef, ScriptError> {
@@ -221,11 +232,22 @@ impl DateDatumHandlers {
             return Ok(player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Date))));
         }
 
-        let date_id = player.get_datum(datum).to_date_ref()?;
+        let prop_builtin = prop.into_builtin();
+        let datum = match datum {
+            DatumRef::Void => &Datum::Void,
+            _ => player
+                .allocator
+                .try_get_datum(datum)
+                .ok_or_else(|| ScriptError::new(format!("invalid datum reference {datum}")))?,
+        };
+        let date_id = datum.to_date_ref()?;
         let date_obj = player
             .date_objects
             .get(&date_id)
             .ok_or_else(|| ScriptError::new(format!("Date object {} not found", date_id)))?;
+        let prop_name = symbols
+            .display(&prop)
+            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
         let js_date = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(
             date_obj.timestamp_ms as f64,
         ));
@@ -234,7 +256,7 @@ impl DateDatumHandlers {
         // expose the common time-of-day properties so the JavaScript-style
         // members (`hour`, `minute`, `seconds`) work alongside the existing
         // method accessors (`getHours`, …).
-        match prop.into_builtin() {
+        match prop_builtin {
             Some(BuiltInSymbol::Day) => Ok(player.alloc_datum(Datum::Int(js_date.get_date() as i32))),
             Some(BuiltInSymbol::Month) => Ok(player.alloc_datum(Datum::Int(js_date.get_month() as i32 + 1))),
             Some(BuiltInSymbol::Year) => Ok(player.alloc_datum(Datum::Int(js_date.get_full_year() as i32))),
@@ -249,13 +271,14 @@ impl DateDatumHandlers {
             Some(BuiltInSymbol::Time) => Ok(player.alloc_datum(Datum::Float(date_obj.timestamp_ms as f64))),
             _ => Err(ScriptError::new(format!(
                 "Cannot get date property {}",
-                prop
+                prop_name
             ))),
         }
     }
 
     pub fn set_prop(
         player: &mut DirPlayer,
+        symbols: &SymbolTable,
         datum: &DatumRef,
         prop: Symbol,
         value: &DatumRef,
@@ -287,7 +310,7 @@ impl DateDatumHandlers {
             }
             _ => return Err(ScriptError::new(format!(
                 "Cannot set date property {}",
-                prop
+                symbols.display(&prop).unwrap_or("<foreign symbol>")
             ))),
         };
 
@@ -295,4 +318,20 @@ impl DateDatumHandlers {
         obj.timestamp_ms = js_date.get_time() as i64;
         Ok(())
     }
+}
+
+fn checked_datum<'a>(
+    player: &'a DirPlayer,
+    datum: &DatumRef,
+    symbols: &SymbolTable,
+) -> Result<&'a Datum, ScriptError> {
+    let value = match datum {
+        DatumRef::Void => &Datum::Void,
+        _ => player
+            .allocator
+            .try_get_datum(datum)
+            .ok_or_else(|| ScriptError::new(format!("invalid datum reference {datum}")))?,
+    };
+    validate_direct_symbol_fields(value, symbols)?;
+    Ok(value)
 }

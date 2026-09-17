@@ -14,9 +14,9 @@
 //! at the boundary in [`build_contacts`]. The solver's effective-mass /
 //! Baumgarte / friction-cone math.
 
-use crate::player::{cast_member::{
+use crate::player::{ScriptError, cast_member::{
     PhysXBodyType, PhysXConstraintKind, PhysXPhysicsState, PhysXShapeKind,
-}, symbols::symbol::Symbol};
+}, symbols::{symbol::Symbol, symbol_table::SymbolTable}};
 use super::physx_gu::{
     self as gu, contact_box_box, contact_capsule_capsule, contact_sphere_box, contact_sphere_capsule,
     contact_sphere_sphere, q_integrate, q_rotate, q_rotate_inv, v_add, v_cross, v_dot, v_len_sq,
@@ -61,8 +61,8 @@ struct ContactConstraint {
 /// Step the world by `dt` seconds, sub-stepping `sub_steps` times.
 /// Mirrors `havok_physics::step_native(state, dt, sub_steps)` and the
 /// C# `PxsContext::Simulate(dt)`.
-pub fn step_native(state: &mut PhysXPhysicsState, dt: f64, sub_steps: u32) {
-    if state.paused || !state.initialized { return; }
+pub fn step_native(state: &mut PhysXPhysicsState, dt: f64, sub_steps: u32, symbols: &SymbolTable) -> Result<(), ScriptError> {
+    if state.paused || !state.initialized { return Ok(()); }
     // Clear pending collisions at the start of a tick. The narrowphase
     // appends a (bodyA_id, bodyB_id, points, normals) entry per colliding
     // pair on the LAST substep so Director's notifyCollisions only sees
@@ -72,7 +72,7 @@ pub fn step_native(state: &mut PhysXPhysicsState, dt: f64, sub_steps: u32) {
     let h = dt / n as f64;
     for substep in 0..n {
         let is_last = substep == n - 1;
-        sub_step(state, h, is_last);
+        sub_step(state, h, is_last, symbols)?;
     }
     // Forces/torques accumulated by Lingo applyForce/applyTorque are consumed
     // by exactly one simulate() (PxRigidBody::addForce lifetime).
@@ -81,6 +81,7 @@ pub fn step_native(state: &mut PhysXPhysicsState, dt: f64, sub_steps: u32) {
         body.pending_torque = [0.0; 3];
     }
     state.sim_time += dt;
+    Ok(())
 }
 
 /// Lingo `applyLinearImpulse(J [, localPoint])` — decompile ground truth
@@ -155,11 +156,13 @@ pub(crate) fn apply_lingo_torque(
 /// Canonical (min, max) pair key for collision filter lookups. Mirrors C#'s
 /// `World.PairKey` so pairs added via `disableCollision(A,B)` find the same
 /// key whether the broadphase iterates (A,B) or (B,A).
-fn pair_key_names(a: Symbol, b: Symbol) -> (Symbol, Symbol) {
-    if a.as_str() < b.as_str() { (a, b) } else { (b, a) }
+fn pair_key_names(a: Symbol, b: Symbol, symbols: &SymbolTable) -> Result<(Symbol, Symbol), ScriptError> {
+    let a_name = symbols.display(&a).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+    let b_name = symbols.display(&b).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+    Ok(if a_name < b_name { (a, b) } else { (b, a) })
 }
 
-fn sub_step(state: &mut PhysXPhysicsState, dt: f64, is_last: bool) {
+fn sub_step(state: &mut PhysXPhysicsState, dt: f64, is_last: bool, symbols: &SymbolTable) -> Result<(), ScriptError> {
 
     // ---- 1. Apply gravity + damping to velocities ----
     let g = state.gravity;
@@ -211,7 +214,7 @@ fn sub_step(state: &mut PhysXPhysicsState, dt: f64, is_last: bool) {
             if global_off { continue; }
             if state.body_collision_disabled.contains(&bi.name) { continue; }
             if state.body_collision_disabled.contains(&bj.name) { continue; }
-            let key = pair_key_names(bi.name, bj.name);
+            let key = pair_key_names(bi.name.clone(), bj.name.clone(), symbols)?;
             if state.disabled_collision_pairs.contains(&key) { continue; }
             if aabb_overlap(&aabbs[i], &aabbs[j]) { pairs.push((i, j)); }
         }
@@ -238,9 +241,9 @@ fn sub_step(state: &mut PhysXPhysicsState, dt: f64, is_last: bool) {
                 if is_last && constraints.len() > n_before {
                     let body_id = state.bodies[body_idx].id;
                     let terrain = &state.terrains[terrain_idx];
-                    let name_a = state.bodies[body_idx].name;
-                    let name_b = terrain.name;
-                    let key = pair_key_names(name_a, name_b);
+                    let name_a = state.bodies[body_idx].name.clone();
+                    let name_b = terrain.name.clone();
+                    let key = pair_key_names(name_a.clone(), name_b.clone(), symbols)?;
                     let callbacks_off = state.all_callbacks_disabled
                         || state.body_callback_disabled.contains(&name_a)
                         || state.body_callback_disabled.contains(&name_b)
@@ -268,10 +271,10 @@ fn sub_step(state: &mut PhysXPhysicsState, dt: f64, is_last: bool) {
         if is_last && constraints.len() > n_before {
             let body_a_id = state.bodies[i].id;
             let body_b_id = state.bodies[j].id;
-            let name_a = state.bodies[i].name;
-            let name_b = state.bodies[j].name;
+            let name_a = state.bodies[i].name.clone();
+            let name_b = state.bodies[j].name.clone();
             // Honor pair-callback filter (chapter 15 disableCollisionCallback).
-            let key = pair_key_names(name_a, name_b);
+            let key = pair_key_names(name_a.clone(), name_b.clone(), symbols)?;
             let callbacks_off = state.all_callbacks_disabled
                 || state.body_callback_disabled.contains(&name_a)
                 || state.body_callback_disabled.contains(&name_b)
@@ -356,6 +359,7 @@ fn sub_step(state: &mut PhysXPhysicsState, dt: f64, is_last: bool) {
         }
     }
 
+    Ok(())
 }
 
 // ==========================================================================

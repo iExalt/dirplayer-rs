@@ -1,4 +1,4 @@
-use crate::player::symbols::symbol::Symbol;
+use crate::player::symbols::{builtin::BuiltInSymbol, symbol::Symbol};
 /// Primitive generator parameter parsing (Plane, Box, Sphere, Cylinder).
 /// These just store parameters; actual mesh generation is deferred to rendering.
 
@@ -507,7 +507,7 @@ pub fn extrude_alpha_mask_to_mesh(
     }
 
     super::types::ClodDecodedMesh {
-        name: crate::player::symbols::symbol::Symbol::from_str("Text"),
+        name: crate::player::symbols::symbol::Symbol::builtin(BuiltInSymbol::Text),
         positions,
         normals,
         tex_coords: vec![tex_coords],
@@ -634,7 +634,7 @@ pub fn extrude_alpha_mask_smooth(
     tunnel_depth: f32,
 ) -> super::types::ClodDecodedMesh {
     let mut mesh = super::types::ClodDecodedMesh::default();
-    mesh.name = Symbol::from_str("Text");
+    mesh.name = Symbol::builtin(BuiltInSymbol::Text);
     if width < 2 || height < 2 || rgba.len() < (width as usize) * (height as usize) * 4 {
         return mesh;
     }
@@ -808,7 +808,7 @@ pub fn extrude_text_to_mesh(
     }
 
     super::types::ClodDecodedMesh {
-        name: crate::player::symbols::symbol::Symbol::from_str("Text"),
+        name: crate::player::symbols::symbol::Symbol::builtin(BuiltInSymbol::Text),
         positions: all_positions,
         normals: all_normals,
         tex_coords: Vec::new(),

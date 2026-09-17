@@ -53,14 +53,16 @@ type TVmCallbacks = {
   onChannelDisplayNameChanged: (channelNumber: number, displayName: string) => void,
   onChannelDisplayNamesChanged: (names: Record<number, string>) => void,
   onExternalEvent?: (event: string) => void,
-  onFlashMemberLoaded?: (spriteNum: number, castLib: number, castMember: number, swfData: Uint8Array, width: number, height: number, pausedAtStart: boolean, assertedFrame: number) => void,
-  onFlashMemberUnloaded?: (spriteNum: number) => void,
-  onFlashResetAll?: () => void,
+  onFlashMemberLoaded?: (spriteNum: number, castLib: number, castMember: number, swfData: Uint8Array, width: number, height: number, pausedAtStart: boolean, assertedFrame: number, ownerKey: string) => void,
+  onFlashMemberUnloaded?: (spriteNum: number, ownerKey: string) => void,
+  onFlashResetAll?: (ownerKey: string) => void,
+  onFlashPlayOwned?: (spriteNum: number) => void,
+  onFlashLocalConnectionSendOwned?: (name: string, method: string, argsJson: string) => boolean,
   onStageSizeChanged?: (width: number, height: number, center: boolean) => void,
 }
 declare let vmCallbacks: TVmCallbacks | undefined;
 
-export function registerVmCallbacks(callbacks: TVmCallbacks);
+export function registerVmCallbacks(callbacks: TVmCallbacks, ownerKey?: string): () => void;
 
 /**
  * Promise that resolves the next time vm-rust fires onMovieLoaded.
@@ -86,7 +88,16 @@ export function whenMovieLoaded(): Promise<any>;
  *   - "anything"      → resolved against the current movie base
  *                       (set via setXtraMovieBase)
  */
-export function loadExternalXtra(url: string): Promise<string>;
+export interface ExternalXtraHostHandle {
+  external_xtra_host_dispatch(opId: number, args: Uint8Array): Uint8Array;
+  owner_identity(): string;
+  register_external_xtra(name: string): void;
+  complete_external_xtra_load(name: string, capability: string, success: boolean): void;
+}
+export function loadExternalXtra(url: string, hostHandle?: ExternalXtraHostHandle): Promise<string>;
+export function registerExternalXtraHost(handle: ExternalXtraHostHandle): (() => void) & {
+  rebindOwner(): void;
+};
 
 /**
  * Set the base URL used for movie-relative xtra resolution (the
@@ -168,7 +179,7 @@ export function loadDefaultXtraRegistry(path?: string): Promise<Record<string, s
  * AFTER `load_movie_file` (which parses the XTRl) and BEFORE `play()`
  * so Lingo sees its xtras registered.
  */
-export function resolveAndLoadMovieXtras(): Promise<{
+export function resolveAndLoadMovieXtras(hostHandle?: ExternalXtraHostHandle): Promise<{
   loaded: string[];
   skipped: string[];
   failed: { name: string; url: string; error: string }[];
@@ -181,7 +192,7 @@ export function resolveAndLoadMovieXtras(): Promise<{
  * key `dirplayer_external_xtras`; polyfill: init-script attribute;
  * extension: chrome.storage; Electron: app config).
  */
-export function loadExternalXtras(urls: string[]): Promise<string[]>;
+export function loadExternalXtras(urls: string[], hostHandle?: ExternalXtraHostHandle): Promise<string[]>;
 
 /**
  * Resolves once every load initiated so far has finished (success or
@@ -198,6 +209,7 @@ export function dispatchExternalXtraStaticHandler(
   xtraName: string,
   handler: string,
   args: Uint8Array,
+  ownerKey: string,
 ): Uint8Array | undefined;
 
 export function dispatchExternalXtraInstanceHandler(
@@ -205,16 +217,18 @@ export function dispatchExternalXtraInstanceHandler(
   instanceId: number,
   handler: string,
   args: Uint8Array,
+  ownerKey: string,
 ): Uint8Array | undefined;
 
 export function createExternalXtraInstance(
   xtraName: string,
   args: Uint8Array,
+  ownerKey: string,
 ): Uint8Array | undefined;
 
-export function destroyExternalXtraInstance(xtraName: string, instanceId: number): void;
+export function destroyExternalXtraInstance(xtraName: string, instanceId: number, ownerKey: string): void;
 
-export function externalXtraHasStaticHandler(xtraName: string, handler: string): number;
+export function externalXtraHasStaticHandler(xtraName: string, handler: string, ownerKey: string): number;
 
 /**
  * Called BY vm-rust when Lingo hits `new(xtra "X")` for a name that
@@ -229,4 +243,4 @@ export function externalXtraHasStaticHandler(xtraName: string, handler: string):
  * registry-driven implementation if it needs custom semantics (e.g. a
  * user-confirmation prompt before loading).
  */
-export function onRequestXtraLoad(name: string): void;
+export function onRequestXtraLoad(name: string, ownerKey?: string, capability?: string): void;

@@ -1,0 +1,42 @@
+{
+  "source_checkout": "/Users/clliaw/Projects/dirplayer-rs",
+  "status": "source-only-selected-snapshot",
+  "files": [
+    {
+      "path": "ruffle/core/src/lib.rs",
+      "sha256": "7bdfe1696406f86512ef3e0ded0a68d05b81bf697ec1e539881a3ab094f19664"
+    },
+    {
+      "path": "ruffle/core/src/context.rs",
+      "sha256": "6d923e96435099509b2ca656d56bb014f80f2f572400befdd71e871a0f388d8b"
+    },
+    {
+      "path": "ruffle/core/src/player.rs",
+      "sha256": "1227da1986550072b54aff36aa474f089fa69c411a8daf628b7852356edb4085"
+    },
+    {
+      "path": "ruffle/core/src/avm1/object.rs",
+      "sha256": "1a40ae1705ac8ec4a93a27ffa3546a80e59d96cf28e84caf943c0453fccb75f9"
+    },
+    {
+      "path": "ruffle/web/src/builder.rs",
+      "sha256": "a1cd11366f40fb585b7493e8da867c27ba1e46ca92e6bf3941be87888f7ae5f1"
+    },
+    {
+      "path": "ruffle/web/src/lib.rs",
+      "sha256": "8a0b32c540a0aedcf86a77c1ce8d83e8f2b65201c35b3a78e201207598940eba"
+    },
+    {
+      "path": "ruffle/web/packages/core/src/internal/player/inner.tsx",
+      "sha256": "dc5f9a60086674bbe2d391b162d3fb55b20eeab801ba59e1bb51cd13c36a84fd"
+    },
+    {
+      "path": "ruffle/web/packages/core/src/internal/player/ruffle-player-element.tsx",
+      "sha256": "15a500b8d986a57d8839b9b89bf9b921bc75096435929442a4df4740f266f999"
+    },
+    {
+      "path": "ruffle/web/packages/core/src/load-ruffle.ts",
+      "sha256": "76b85092dbcabf22805fe3c136c43b2c1bc98000431a3e70f30357c970bfdf62"
+    }
+  ]
+}

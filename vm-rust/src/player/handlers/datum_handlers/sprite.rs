@@ -6,13 +6,17 @@ use crate::director::lingo::datum::Datum;
 use crate::player::symbols::builtin::BuiltInSymbol;
 use crate::player::symbols::symbol::Symbol;
 use crate::player::{
+    allocator::ScriptInstanceAllocatorTrait,
+    compare::validate_direct_symbol_fields,
     cast_member::CastMemberType,
     font::{get_text_index_at_pos, DrawTextParams},
-    player_call_script_handler, player_handle_scope_return,
-    reserve_player_mut, reserve_player_ref,
+    player_handle_scope_return,
+    owner_key_string, reserve_player_mut, reserve_player_ref,
     script::{script_get_prop, script_set_prop},
     script_ref::ScriptInstanceRef, DatumRef, DirPlayer, ScriptError, ScriptErrorCode,
+    session::ExecutionContext,
     score::{get_concrete_sprite_rect, get_sprite_rect_in_context},
+    symbols::symbol_table::SymbolTable,
 };
 
 use super::script_instance::ScriptInstanceUtils;
@@ -32,10 +36,11 @@ use super::script_instance::ScriptInstanceUtils;
 /// came out black.
 fn sprite_camera_list(
     player: &DirPlayer,
+    symbols: &SymbolTable,
     sprite_num: i16,
-) -> Vec<crate::player::sprite::SpriteCamera> {
+) -> Result<Vec<crate::player::sprite::SpriteCamera>, ScriptError> {
     let Some(sprite) = player.movie.score.get_sprite(sprite_num) else {
-        return vec![];
+        return Ok(vec![]);
     };
     let mut cams: Vec<_> = sprite.w3d_camera.iter().cloned().collect();
     cams.extend(sprite.w3d_cameras.iter().cloned());
@@ -43,26 +48,146 @@ fn sprite_camera_list(
         // Same default the renderer picks when no camera is active: the member's
         // "DefaultView", else its first view node.
         use crate::director::chunks::w3d::types::W3dNodeType;
-        let name = sprite
+        let name = if let Some(scene) = sprite
             .member
             .as_ref()
             .and_then(|m| player.movie.cast_manager.find_member_by_ref(m))
             .and_then(|m| m.member_type.as_shockwave3d())
             .and_then(|o| o.parsed_scene.as_ref())
-            .and_then(|sc| {
-                sc.nodes
-                    .iter()
-                    .find(|n| {
-                        n.node_type == W3dNodeType::View
-                            && n.name.eq_ignore_ascii_case("DefaultView")
-                    })
-                    .or_else(|| sc.nodes.iter().find(|n| n.node_type == W3dNodeType::View))
-                    .map(|n| n.name.as_str().to_string())
-            })
-            .unwrap_or_else(|| "DefaultView".to_string());
+        {
+            let mut first_view = None;
+            let mut default_view = None;
+            for node in &scene.nodes {
+                if node.node_type != W3dNodeType::View {
+                    continue;
+                }
+                if first_view.is_none() {
+                    first_view = Some(node);
+                }
+                if symbols
+                    .lower(&node.name)
+                    .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
+                    .eq_ignore_ascii_case("DefaultView")
+                {
+                    default_view = Some(node);
+                    break;
+                }
+            }
+            match default_view.or(first_view) {
+                Some(node) => symbols
+                    .display(&node.name)
+                    .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
+                    .to_owned(),
+                None => "DefaultView".to_string(),
+            }
+        } else {
+            "DefaultView".to_string()
+        };
         cams.push(crate::player::sprite::SpriteCamera { member: None, name });
     }
-    cams
+    Ok(cams)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn camera_foreign_view_name_returns_invalid_reference() {
+        let mut session = crate::player::session::RuntimeSession::new(
+            crate::player::symbols::symbol_table::SymbolOwner {
+                session: 903,
+                generation: 1,
+            },
+        );
+        let (tx, _rx) = async_std::channel::unbounded();
+        assert!(session.add_player(1, tx));
+        let mut foreign_symbols = crate::player::symbols::symbol_table::SymbolTable::with_owner(
+            crate::player::symbols::symbol_table::SymbolOwner {
+                session: 904,
+                generation: 1,
+            },
+        );
+        let foreign_name = foreign_symbols.intern("foreignView");
+
+        let result = session
+            .with_player(1, |mut runtime| {
+                runtime
+                    .player
+                    .movie
+                    .score
+                    .channels
+                    .push(crate::player::score::SpriteChannel::new(0));
+                runtime
+                    .player
+                    .movie
+                    .score
+                    .channels
+                    .push(crate::player::score::SpriteChannel::new(1));
+                let mut scene = crate::director::chunks::w3d::types::W3dScene::default();
+                scene.nodes.push(crate::director::chunks::w3d::types::W3dNode {
+                    name: foreign_name,
+                    node_type: crate::director::chunks::w3d::types::W3dNodeType::View,
+                    ..Default::default()
+                });
+                let info = crate::director::enums::Shockwave3dInfo {
+                    loops: false,
+                    duration: 0,
+                    direct_to_stage: false,
+                    animation_enabled: false,
+                    preload: false,
+                    reg_point: (0, 0),
+                    default_rect: (0, 0, 640, 480),
+                    camera_position: None,
+                    camera_rotation: None,
+                    bg_color: None,
+                    ambient_color: None,
+                };
+                let scene = std::rc::Rc::new(scene);
+                let w3d = crate::player::cast_member::Shockwave3dMember {
+                    info: info.clone(),
+                    w3d_data: Vec::new(),
+                    source_scene: Some(scene.clone()),
+                    parsed_scene: Some(scene.clone()),
+                    runtime_state: crate::player::cast_member::Shockwave3dRuntimeState::from_info(
+                        &info,
+                        Some(scene.as_ref()),
+                    ),
+                    converted_from_text: false,
+                    text3d_state: None,
+                    text3d_source: None,
+                };
+                runtime
+                    .player
+                    .movie
+                    .cast_manager
+                    .casts
+                    .push(crate::player::cast_lib::CastLib::test_external(1, 0));
+                runtime.player.movie.cast_manager.casts[0].members.insert(
+                    1,
+                    crate::player::cast_member::CastMember::new(
+                        1,
+                        crate::player::cast_member::CastMemberType::Shockwave3d(w3d),
+                    ),
+                );
+                runtime.player.movie.score.channels[1].sprite.member = Some(
+                    crate::player::cast_lib::CastMemberRef {
+                        cast_lib: 1,
+                        cast_member: 1,
+                    },
+                );
+                let receiver = runtime.player.alloc_datum(Datum::SpriteRef(1));
+                SpriteDatumHandlers::call(
+                    &mut runtime,
+                    &receiver,
+                    "cameracount",
+                    &vec![],
+                )
+            })
+            .unwrap();
+
+        assert_eq!(result.unwrap_err().code, ScriptErrorCode::InvalidReference);
+    }
 }
 
 /// Write an ordered camera list back to the sprite's primary + extras split.
@@ -74,6 +199,36 @@ fn set_sprite_camera_list(
     let sprite = player.movie.score.get_sprite_mut(sprite_num);
     sprite.w3d_camera = if cams.is_empty() { None } else { Some(cams.remove(0)) };
     sprite.w3d_cameras = cams;
+}
+
+fn checked_datum<'a>(runtime: &'a ExecutionContext<'_>, datum_ref: &DatumRef) -> Result<&'a Datum, ScriptError> {
+    checked_player_datum(runtime.player, runtime.symbols, datum_ref)
+}
+
+fn checked_player_datum<'a>(player: &'a DirPlayer, symbols: &SymbolTable, datum_ref: &DatumRef) -> Result<&'a Datum, ScriptError> {
+    let datum = match datum_ref {
+        DatumRef::Void => &Datum::Void,
+        _ => player.allocator.try_get_datum(datum_ref).ok_or_else(|| {
+            ScriptError::new_code(ScriptErrorCode::InvalidReference, format!("invalid datum reference {datum_ref}"))
+        })?,
+    };
+    validate_direct_symbol_fields(datum, symbols)?;
+    Ok(datum)
+}
+
+fn checked_script_instance(player: &DirPlayer, instance_ref: &ScriptInstanceRef) -> Result<(), ScriptError> {
+    if player.allocator.get_script_instance_opt(instance_ref).is_none() {
+        return Err(ScriptError::new_code(
+            ScriptErrorCode::InvalidReference,
+            "foreign or stale ScriptInstanceRef".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn checked_sprite_num(runtime: &mut ExecutionContext<'_>, datum: &DatumRef) -> Result<i16, ScriptError> {
+    checked_datum(runtime, datum)?;
+    runtime.with_player(|player| player.get_datum(datum).to_sprite_ref())
 }
 
 // JS bridge names use the `dirplayer_` prefix so this fork's globals don't
@@ -96,8 +251,8 @@ extern "C" {
     fn ruffle_goto_frame(sprite_num: i32, frame_or_label: &str);
     #[wasm_bindgen(js_name = "dirplayer_ruffleStop")]
     fn ruffle_stop(sprite_num: i32);
-    #[wasm_bindgen(js_name = "dirplayer_rufflePlay")]
-    fn ruffle_play(sprite_num: i32);
+    #[wasm_bindgen(js_name = "dirplayer_rufflePlayOwned")]
+    fn ruffle_play_owned(owner_key: &str, sprite_num: i32);
     #[wasm_bindgen(js_name = "dirplayer_ruffleRewind")]
     fn ruffle_rewind(sprite_num: i32);
     #[wasm_bindgen(js_name = "dirplayer_ruffleCallFrame")]
@@ -126,7 +281,7 @@ extern "C" {
 /// AS-initialized), so a Flash interop call reads/writes a live instance rather
 /// than returning null. Bounded (~10s) so a sprite that never gets a ready
 /// instance falls back to the caller's existing lazy-handle / VOID behaviour.
-async fn wait_for_flash_ready(sprite_num: i16) {
+pub(crate) async fn wait_for_flash_ready(sprite_num: i16) {
     for _ in 0..100u32 {
         let ready = is_flash_instance_ready(sprite_num as i32)
             .ok()
@@ -241,6 +396,187 @@ impl SpriteDatumUtils {
 }
 
 impl SpriteDatumHandlers {
+    pub(crate) async fn execute_async_request(
+        session: crate::player::session::RuntimeSessionHandle,
+        request: crate::player::driver::SpriteAsyncRequest,
+    ) -> Result<DatumRef, ScriptError> {
+        let owner_live = session
+            .borrow_mut()
+            .with_player(request.player_id, |context| {
+                request.owner.same_identity(&context.player.owner)
+                    && request.owner.is_arena_live()
+            })
+            .unwrap_or(false);
+        if !owner_live {
+            return Err(crate::player::cancelled_scope_error());
+        }
+        let (handler_name, flash_sprite) = session
+            .borrow_mut()
+            .with_player(request.player_id, |context| -> Result<(String, Option<i32>), ScriptError> {
+                if !request.owner.same_identity(&context.player.owner)
+                    || !request.owner.is_arena_live()
+                {
+                    return Err(crate::player::cancelled_scope_error());
+                }
+                let handler_name = context
+                    .symbols
+                    .display(&request.handler)
+                    .map(str::to_owned)
+                    .map_err(|_| ScriptError::new_code(
+                        ScriptErrorCode::InvalidReference,
+                        "foreign or stale sprite handler symbol".to_owned(),
+                    ))?;
+                let flash_sprite = Self::resolve_sprite_flash_member_explicit(
+                    context.player,
+                    context.symbols,
+                    &request.receiver,
+                )?
+                .and_then(|(sprite_num, cast_lib, cast_member)| {
+                    context
+                        .player
+                        .movie
+                        .cast_manager
+                        .find_member_by_ref(&crate::player::cast_lib::CastMemberRef {
+                            cast_lib,
+                            cast_member,
+                        })
+                        .filter(|member| {
+                            matches!(
+                                member.member_type,
+                                CastMemberType::Flash(_)
+                            )
+                        })
+                        .map(|_| sprite_num)
+                });
+                Ok((handler_name, flash_sprite))
+            })
+            .ok_or_else(crate::player::cancelled_scope_error)??;
+        let handler_lower = handler_name.to_lowercase();
+        let waits_for_ready = matches!(
+            handler_lower.as_str(),
+            "getvariable" | "setvariable" | "callfunction" | "setcallback"
+        );
+        let sprite_num = flash_sprite
+            .map(|number| number as i16)
+            .or_else(|| waits_for_ready.then_some(request.sprite_num));
+        if let Some(sprite_num) = sprite_num {
+            let ready = is_flash_instance_ready(sprite_num as i32)
+                .ok()
+                .and_then(|value| value.as_bool())
+                .unwrap_or(true);
+            if !ready {
+                session
+                    .borrow_mut()
+                    .with_player(request.player_id, |context| {
+                        if !request.owner.same_identity(&context.player.owner)
+                            || !request.owner.is_arena_live()
+                        {
+                            return Err(crate::player::cancelled_scope_error());
+                        }
+                        context.player.pre_dispatch_flash_members();
+                        Ok(())
+                    })
+                    .ok_or_else(crate::player::cancelled_scope_error)??;
+                wait_for_flash_ready(sprite_num).await;
+            }
+            session
+                .borrow_mut()
+                .with_player(request.player_id, |context| {
+                    if !request.owner.same_identity(&context.player.owner)
+                        || !request.owner.is_arena_live()
+                    {
+                        return Err(crate::player::cancelled_scope_error());
+                    }
+                    context.player.flash_ready_sprites.insert(sprite_num);
+                    Ok(())
+                })
+                .ok_or_else(crate::player::cancelled_scope_error)??;
+        }
+        if waits_for_ready {
+            return session
+                .borrow_mut()
+                .with_player(request.player_id, |mut context| {
+                    Self::call(&mut context, &request.receiver, &handler_name, &request.args)
+                })
+                .ok_or_else(crate::player::cancelled_scope_error)?;
+        }
+        if let Some(sprite_num) = flash_sprite {
+            let json_args = session
+                .borrow_mut()
+                .with_player(request.player_id, |context| -> Result<String, ScriptError> {
+                    let parts: Result<Vec<String>, ScriptError> = request
+                        .args
+                        .iter()
+                        .map(|argument| {
+                            let value = checked_player_datum(
+                                context.player,
+                                context.symbols,
+                                argument,
+                            )?;
+                            Ok(match value {
+                                Datum::Int(value) => value.to_string(),
+                                Datum::Float(value) => value.to_string(),
+                                Datum::String(value) => format!("{value:?}"),
+                                Datum::Symbol(value) => format!(
+                                    "{:?}",
+                                    context.symbols.display(value).map_err(|_| {
+                                        ScriptError::new_code(
+                                            ScriptErrorCode::InvalidReference,
+                                            "foreign or stale Flash argument symbol".to_owned(),
+                                        )
+                                    })?
+                                ),
+                                _ => "null".to_owned(),
+                            })
+                        })
+                        .collect();
+                    Ok(format!("[{}]", parts?.join(",")))
+                })
+                .ok_or_else(crate::player::cancelled_scope_error)??;
+            match ruffle_call_function(
+                sprite_num,
+                &root_flash_path(&handler_name),
+                &json_args,
+            ) {
+                Ok(value) => {
+                    let datum = if let Some(value) = value.as_string() {
+                        Datum::String(value)
+                    } else if let Some(value) = value.as_bool() {
+                        Datum::Int(if value { 1 } else { 0 })
+                    } else if let Some(value) = value.as_f64() {
+                        if value.fract() == 0.0 && value.abs() < i32::MAX as f64 {
+                            Datum::Int(value as i32)
+                        } else {
+                            Datum::Float(value)
+                        }
+                    } else {
+                        Datum::Void
+                    };
+                    return session
+                        .borrow_mut()
+                        .with_player(request.player_id, |context| {
+                            if !request.owner.same_identity(&context.player.owner)
+                                || !request.owner.is_arena_live()
+                            {
+                                return Err(crate::player::cancelled_scope_error());
+                            }
+                            Ok(context.player.alloc_datum(datum))
+                        })
+                        .ok_or_else(crate::player::cancelled_scope_error)?;
+                }
+                Err(error) => {
+                    warn!("sprite direct Flash method '{}' error: {:?}", handler_name, error);
+                }
+            }
+            return Ok(DatumRef::Void);
+        }
+        // Attached script handlers are started by RuntimeSession before this
+        // direct host executor is reached. A non-Flash sprite with no such
+        // handler follows Director's silent-void behavior.
+        Ok(DatumRef::Void)
+    }
+
+
     /// Resolve a sprite datum to (sprite_num, cast_lib, cast_member). The
     /// sprite_num is the lookup key for the per-sprite Ruffle instance;
     /// cast_lib/cast_member are still needed by callers that build
@@ -261,6 +597,20 @@ impl SpriteDatumHandlers {
                 None => Ok(None),
             }
         })
+    }
+
+    fn resolve_sprite_flash_member_explicit(
+        player: &DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+    ) -> Result<Option<(i32, i32, i32)>, ScriptError> {
+        let sprite_num = checked_player_datum(player, symbols, datum)?.to_sprite_ref()?;
+        let Some(sprite) = player.movie.score.get_sprite(sprite_num) else {
+            return Ok(None);
+        };
+        Ok(sprite.member.as_ref().map(|member| (
+            sprite_num as i32, member.cast_lib, member.cast_member,
+        )))
     }
 
     /// Returns true if the handler should be called via the async path.
@@ -324,6 +674,7 @@ impl SpriteDatumHandlers {
     }
 
     pub fn call(
+        runtime: &mut ExecutionContext<'_>,
         datum: &DatumRef,
         handler_name: &str,
         args: &Vec<DatumRef>,
@@ -345,13 +696,14 @@ impl SpriteDatumHandlers {
             // Shares the hit-test core with `the mouseChar` / the global
             // `pointToChar()` builtin.
             "pointtochar" => {
-                reserve_player_mut(|player| {
-                    if args.is_empty() {
-                        return Err(ScriptError::new(
-                            "pointToChar requires 1 argument (point)".to_string(),
-                        ));
-                    }
-                    let sprite_num = player.get_datum(datum).to_sprite_ref()?;
+                if args.is_empty() {
+                    return Err(ScriptError::new(
+                        "pointToChar requires 1 argument (point)".to_string(),
+                    ));
+                }
+                let sprite_num = checked_sprite_num(runtime, datum)?;
+                checked_datum(runtime, &args[0])?;
+                runtime.with_player(|player| {
                     let (pt_vals, _f) = player.get_datum(&args[0]).to_point_inline()?;
                     let result = crate::player::compute_char_at(
                         player, sprite_num, pt_vals[0] as i32, pt_vals[1] as i32,
@@ -360,14 +712,14 @@ impl SpriteDatumHandlers {
                 })
             }
             "intersects" => {
-                reserve_player_mut(|player| {
-                    if args.is_empty() {
-                        return Err(ScriptError::new(
-                            "intersects requires 1 argument (sprite number)".to_string(),
-                        ));
-                    }
-
-                    let sprite_num = player.get_datum(datum).to_sprite_ref()?;
+                if args.is_empty() {
+                    return Err(ScriptError::new(
+                        "intersects requires 1 argument (sprite number)".to_string(),
+                    ));
+                }
+                let sprite_num = checked_sprite_num(runtime, datum)?;
+                checked_datum(runtime, &args[0])?;
+                runtime.with_player(|player| {
                     let other_sprite_num =
                         player.get_datum(&args[0]).int_value()? as i16;
 
@@ -408,8 +760,10 @@ impl SpriteDatumHandlers {
             // clearAtRender defaulted to TRUE wiped the skybox, the 3D world and the
             // menu UI that had already been drawn that frame.
             "camera" => {
-                reserve_player_mut(|player| {
-                    let sprite_num = player.get_datum(datum).to_sprite_ref()?;
+                let sprite_num = checked_sprite_num(runtime, datum)?;
+                if let Some(arg) = args.first() { checked_datum(runtime, arg)?; }
+                let player = &mut *runtime.player;
+                {
                     let index = if !args.is_empty() {
                         player.get_datum(&args[0]).int_value().unwrap_or(1)
                     } else { 1 };
@@ -417,7 +771,7 @@ impl SpriteDatumHandlers {
                         .and_then(|s| s.member.as_ref())
                         .cloned()
                         .unwrap_or(crate::player::cast_lib::NULL_CAST_MEMBER_REF);
-                    let cams = sprite_camera_list(player, sprite_num as i16);
+                    let cams = sprite_camera_list(player, &*runtime.symbols, sprite_num as i16)?;
                     let idx = (index.max(1) as usize) - 1;
                     match cams.get(idx) {
                         Some(c) => {
@@ -428,24 +782,28 @@ impl SpriteDatumHandlers {
                                     cast_lib,
                                     cast_member,
                                     object_type: BuiltInSymbol::Camera,
-                                    name: Symbol::from_str(&c.name),
+                                    name: runtime.symbols.intern(&c.name),
                                 },
                             )))
                         }
                         None => Ok(DatumRef::Void),
                     }
-                })
+                }
             }
             "cameracount" => {
-                reserve_player_mut(|player| {
-                    let sprite_num = player.get_datum(datum).to_sprite_ref()?;
-                    let count = sprite_camera_list(player, sprite_num as i16).len().max(1) as i32;
+                let sprite_num = checked_sprite_num(runtime, datum)?;
+                let player = &mut *runtime.player;
+                {
+                    let count = sprite_camera_list(player, &*runtime.symbols, sprite_num as i16)?.len().max(1) as i32;
                     Ok(player.alloc_datum(Datum::Int(count)))
-                })
+                }
             }
             "addcamera" => {
-                reserve_player_mut(|player| {
-                    let sprite_num = player.get_datum(datum).to_sprite_ref()?;
+                let sprite_num = checked_sprite_num(runtime, datum)?;
+                if let Some(arg) = args.first() { checked_datum(runtime, arg)?; }
+                if let Some(arg) = args.get(1) { checked_datum(runtime, arg)?; }
+                let player = &mut *runtime.player;
+                {
                     // addCamera(cameraRef, index)
                     // index 1 = primary camera, 2+ = additional cameras rendered on top
                     // A camera reference carries the member that owns it; that member
@@ -455,7 +813,11 @@ impl SpriteDatumHandlers {
                         match player.get_datum(&args[0]) {
                             Datum::Shockwave3dObjectRef(r) => Some(crate::player::sprite::SpriteCamera {
                                 member: Some((r.cast_lib, r.cast_member)),
-                                name: r.name.as_str().to_string(),
+                                name: runtime
+                                    .symbols
+                                    .display(&r.name)
+                                    .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
+                                    .to_owned(),
                             }),
                             Datum::String(s) if !s.is_empty() => Some(crate::player::sprite::SpriteCamera {
                                 member: None,
@@ -489,7 +851,7 @@ impl SpriteDatumHandlers {
                         // list already holds the member's default camera at index 1 (see
                         // sprite_camera_list), so a plain append layers over the world
                         // rather than replacing it.
-                        let mut cams = sprite_camera_list(player, sprite_num as i16);
+                        let mut cams = sprite_camera_list(player, &*runtime.symbols, sprite_num as i16)?;
                         let at = match index {
                             Some(i) => i.saturating_sub(1).min(cams.len()),
                             None => cams.len(), // addCamera(cam) — append
@@ -498,7 +860,7 @@ impl SpriteDatumHandlers {
                         set_sprite_camera_list(player, sprite_num as i16, cams);
                     }
                     Ok(player.alloc_datum(Datum::Void))
-                })
+                }
             }
             // Director 11.5 Scripting Dictionary, `deleteCamera`:
             // "sprite(whichSprite).deleteCamera(cameraOrIndex) … removes the camera
@@ -509,16 +871,22 @@ impl SpriteDatumHandlers {
             // the documented `deleteCamera` fell through to the async path and did
             // nothing: [PS] Fade could never drop its camera.
             "deletecamera" | "removecamera" => {
-                reserve_player_mut(|player| {
-                    let sprite_num = player.get_datum(datum).to_sprite_ref()?;
+                let sprite_num = checked_sprite_num(runtime, datum)?;
+                if let Some(arg) = args.first() { checked_datum(runtime, arg)?; }
+                let player = &mut *runtime.player;
+                {
                     let target = args.first().map(|a| player.get_datum(a).clone());
                     // Mirror addCamera: one ordered list, so removing index 1 promotes
                     // the next camera instead of being a silent no-op.
-                    let mut cams = sprite_camera_list(player, sprite_num as i16);
+                    let mut cams = sprite_camera_list(player, &*runtime.symbols, sprite_num as i16)?;
                     let at = match &target {
-                        Some(Datum::Shockwave3dObjectRef(r)) => cams
-                            .iter()
-                            .position(|c| r.name.eq_ignore_ascii_case(&c.name)),
+                        Some(Datum::Shockwave3dObjectRef(r)) => {
+                            let target_name = runtime
+                                .symbols
+                                .lower(&r.name)
+                                .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+                            cams.iter().position(|c| target_name.eq_ignore_ascii_case(&c.name))
+                        }
                         Some(Datum::String(name)) => cams
                             .iter()
                             .position(|c| c.name.eq_ignore_ascii_case(name)),
@@ -535,40 +903,47 @@ impl SpriteDatumHandlers {
                     }
                     set_sprite_camera_list(player, sprite_num as i16, cams);
                     Ok(player.alloc_datum(Datum::Void))
-                })
+                }
             }
             "getprop" => {
-                reserve_player_mut(|player| {
-                    if args.is_empty() {
-                        return Err(ScriptError::new(
-                            "getProp requires at least 1 argument".to_string(),
-                        ));
-                    }
-
-                    let sprite_num = player.get_datum(datum).to_sprite_ref()?;
-
+                if args.is_empty() {
+                    return Err(ScriptError::new(
+                        "getProp requires at least 1 argument".to_string(),
+                    ));
+                }
+                let sprite_num = checked_sprite_num(runtime, datum)?;
+                checked_datum(runtime, &args[0])?;
+                let player = &mut *runtime.player;
+                let symbols = &mut *runtime.symbols;
+                {
                     // Get the property name from the first arg
-                    let prop_name = player.get_datum(&args[0]).symbol_value()?;
+                    let prop_name = player.get_datum(&args[0]).symbol_value(symbols)?;
 
                     // First, try to get it as a built-in sprite property
                     match crate::player::score::sprite_get_prop(
                         player,
+                        symbols,
                         sprite_num as i16,
-                        prop_name,
+                        prop_name.clone(),
                     ) {
                         Ok(prop_datum) => {
                             let result = player.last_sprite_prop_ref.take()
                                 .unwrap_or_else(|| player.alloc_datum(prop_datum));
+                            checked_player_datum(player, symbols, &result)?;
 
                             // If there's a second argument, it's a sub-property access
                             if args.len() > 1 {
-                                return crate::player::handlers::types::TypeUtils::get_sub_prop(
-                                    &result, &args[1], player,
-                                );
+                                checked_player_datum(player, symbols, &args[1])?;
+                                let sub = crate::player::handlers::types::TypeUtils::get_sub_prop(
+                                    &result, &args[1], player, symbols,
+                                )?;
+                                checked_player_datum(player, symbols, &sub)?;
+                                return Ok(sub);
                             }
 
                             return Ok(result);
                         }
+                        Err(error) if error.code == ScriptErrorCode::InvalidReference => return Err(error),
                         Err(_) => {
                             // Not a built-in sprite property, try script instances
                         }
@@ -584,47 +959,63 @@ impl SpriteDatumHandlers {
 
                     // Try to get the property from the sprite's script instances
                     for instance_ref in instance_refs {
-                        if let Ok(result) = script_get_prop(
+                        checked_script_instance(player, &instance_ref)?;
+                        match script_get_prop(
                             player,
+                            symbols,
                             &instance_ref,
-                            prop_name,
+                            prop_name.clone(),
                         ) {
-                            // If there's a second argument, it's a sub-property access
-                            if args.len() > 1 {
-                                return crate::player::handlers::types::TypeUtils::get_sub_prop(
-                                    &result, &args[1], player,
-                                );
+                            Ok(result) => {
+                                checked_player_datum(player, symbols, &result)?;
+                                // If there's a second argument, it's a sub-property access
+                                if args.len() > 1 {
+                                    checked_player_datum(player, symbols, &args[1])?;
+                                    let sub = crate::player::handlers::types::TypeUtils::get_sub_prop(
+                                        &result, &args[1], player, symbols,
+                                    )?;
+                                    checked_player_datum(player, symbols, &sub)?;
+                                    return Ok(sub);
+                                }
+                                return Ok(result);
                             }
-                            return Ok(result);
+                            Err(error) if error.code == ScriptErrorCode::InvalidReference => return Err(error),
+                            Err(_) => {}
                         }
                     }
 
                     // If not found anywhere, return void
                     Ok(DatumRef::Void)
-                })
+                }
             }
             // getAt / getaProp: bracket access on sprite, e.g. sprite(9)[#pLevel]
             "getat" | "getaprop" => {
-                reserve_player_mut(|player| {
-                    if args.is_empty() {
-                        return Err(ScriptError::new(
-                            "getAt requires 1 argument".to_string(),
-                        ));
-                    }
-
-                    let sprite_num = player.get_datum(datum).to_sprite_ref()?;
-                    let prop_name = player.get_datum(&args[0]).symbol_value()?;
+                if args.is_empty() {
+                    return Err(ScriptError::new(
+                        "getAt requires 1 argument".to_string(),
+                    ));
+                }
+                let sprite_num = checked_sprite_num(runtime, datum)?;
+                checked_datum(runtime, &args[0])?;
+                let player = &mut *runtime.player;
+                let symbols = &mut *runtime.symbols;
+                {
+                    let prop_name = player.get_datum(&args[0]).symbol_value(symbols)?;
 
                     // Try built-in sprite property first
                     match crate::player::score::sprite_get_prop(
                         player,
+                        symbols,
                         sprite_num as i16,
-                        prop_name,
+                        prop_name.clone(),
                     ) {
                         Ok(prop_datum) => {
-                            return Ok(player.last_sprite_prop_ref.take()
-                                .unwrap_or_else(|| player.alloc_datum(prop_datum)));
+                            let result = player.last_sprite_prop_ref.take()
+                                .unwrap_or_else(|| player.alloc_datum(prop_datum));
+                            checked_player_datum(player, symbols, &result)?;
+                            return Ok(result);
                         }
+                        Err(error) if error.code == ScriptErrorCode::InvalidReference => return Err(error),
                         Err(_) => {}
                     }
 
@@ -638,37 +1029,51 @@ impl SpriteDatumHandlers {
                         return Ok(DatumRef::Void);
                     }
                     let fallback = sprite.unwrap().script_instance_list.clone();
-                    let instance_refs =
-                        player.get_sprite_script_instance_ids(sprite_num, fallback.as_slice());
+                    let instance_refs = crate::player::score::get_sprite_script_instance_ids_checked(
+                        player,
+                        &*symbols,
+                        sprite_num,
+                        fallback.as_slice(),
+                    )?;
                     for instance_ref in instance_refs {
-                        if let Ok(result) = script_get_prop(player, &instance_ref, prop_name) {
-                            return Ok(result);
+                        checked_script_instance(player, &instance_ref)?;
+                        match script_get_prop(player, symbols, &instance_ref, prop_name.clone()) {
+                            Ok(result) => {
+                                checked_player_datum(player, symbols, &result)?;
+                                return Ok(result);
+                            }
+                            Err(error) if error.code == ScriptErrorCode::InvalidReference => return Err(error),
+                            Err(_) => {}
                         }
                     }
 
                     Ok(DatumRef::Void)
-                })
+                }
             }
             "getpropref" => {
-                reserve_player_mut(|player| {
-                    if args.is_empty() {
-                        return Err(ScriptError::new(
-                            "getPropRef requires at least 1 argument".to_string(),
-                        ));
-                    }
-
-                    let sprite_num = player.get_datum(datum).to_sprite_ref()?;
-                    let prop_name = player.get_datum(&args[0]).symbol_value()?;
+                if args.is_empty() {
+                    return Err(ScriptError::new(
+                        "getPropRef requires at least 1 argument".to_string(),
+                    ));
+                }
+                let sprite_num = checked_sprite_num(runtime, datum)?;
+                checked_datum(runtime, &args[0])?;
+                let player = &mut *runtime.player;
+                let symbols = &mut *runtime.symbols;
+                {
+                    let prop_name = player.get_datum(&args[0]).symbol_value(symbols)?;
 
                     // Get the property value (this handles scriptInstanceList cache etc.)
                     match crate::player::score::sprite_get_prop(
                         player,
+                        symbols,
                         sprite_num as i16,
-                        prop_name,
+                        prop_name.clone(),
                     ) {
                         Ok(prop_datum) => {
                             let result = player.last_sprite_prop_ref.take()
                                 .unwrap_or_else(|| player.alloc_datum(prop_datum));
+                            checked_player_datum(player, symbols, &result)?;
 
                             // If there's a second argument, it's an index into
                             // the property value. A property list is indexed by
@@ -680,12 +1085,15 @@ impl SpriteDatumHandlers {
                             // index into prop_list with 0". Mirror the PropList
                             // handler's key lookup here.
                             if args.len() > 1 {
+                                checked_player_datum(player, symbols, &args[1])?;
                                 let list_datum = player.get_datum(&result).clone();
                                 match list_datum {
                                     Datum::PropList(pairs, pairs_sorted) => {
-                                        return crate::player::handlers::datum_handlers::prop_list::PropListUtils::get_by_key(
-                                            &pairs, &args[1], &player.allocator, pairs_sorted,
-                                        );
+                                        let selected = crate::player::handlers::datum_handlers::prop_list::PropListUtils::get_by_key(
+                                            &pairs, &args[1], &player.allocator, symbols, pairs_sorted,
+                                        )?;
+                                        checked_player_datum(player, symbols, &selected)?;
+                                        return Ok(selected);
                                     }
                                     Datum::List(_, item_refs, _) => {
                                         let index = player.get_datum(&args[1]).int_value()?;
@@ -695,7 +1103,9 @@ impl SpriteDatumHandlers {
                                                 index, item_refs.len()
                                             )));
                                         }
-                                        return Ok(item_refs[(index - 1) as usize].clone());
+                                        let selected = item_refs[(index - 1) as usize].clone();
+                                        checked_player_datum(player, symbols, &selected)?;
+                                        return Ok(selected);
                                     }
                                     _ => {
                                         let index = player.get_datum(&args[1]).int_value().unwrap_or(0);
@@ -709,6 +1119,7 @@ impl SpriteDatumHandlers {
 
                             return Ok(result);
                         }
+                        Err(error) if error.code == ScriptErrorCode::InvalidReference => return Err(error),
                         Err(_) => {
                             // Not a built-in sprite property, try script instances
                         }
@@ -721,40 +1132,59 @@ impl SpriteDatumHandlers {
                     }
                     let instance_refs = sprite.unwrap().script_instance_list.clone();
                     for instance_ref in instance_refs {
-                        if let Ok(result) = script_get_prop(player, &instance_ref, prop_name) {
-                            if args.len() > 1 {
-                                return crate::player::handlers::types::TypeUtils::get_sub_prop(
-                                    &result, &args[1], player,
-                                );
+                        checked_script_instance(player, &instance_ref)?;
+                        match script_get_prop(player, symbols, &instance_ref, prop_name.clone()) {
+                            Ok(result) => {
+                                checked_player_datum(player, symbols, &result)?;
+                                if args.len() > 1 {
+                                    checked_player_datum(player, symbols, &args[1])?;
+                                    let sub = crate::player::handlers::types::TypeUtils::get_sub_prop(
+                                        &result, &args[1], player, symbols,
+                                    )?;
+                                    checked_player_datum(player, symbols, &sub)?;
+                                    return Ok(sub);
+                                }
+                                return Ok(result);
                             }
-                            return Ok(result);
+                            Err(error) if error.code == ScriptErrorCode::InvalidReference => return Err(error),
+                            Err(_) => {}
                         }
                     }
 
                     Ok(DatumRef::Void)
-                })
+                }
             }
             // setAt / setaProp: bracket assignment on sprite, e.g. sprite(9)[#pLevel] = value
             "setat" | "setaprop" => {
-                reserve_player_mut(|player| {
-                    if args.len() < 2 {
-                        return Err(ScriptError::new(
-                            "setAt requires 2 arguments".to_string(),
-                        ));
-                    }
-
-                    let sprite_num = player.get_datum(datum).to_sprite_ref()?;
-                    let prop_name = player.get_datum(&args[0]).symbol_value()?;
+                if args.len() < 2 {
+                    return Err(ScriptError::new(
+                        "setAt requires 2 arguments".to_string(),
+                    ));
+                }
+                let sprite_num = checked_sprite_num(runtime, datum)?;
+                checked_datum(runtime, &args[0])?;
+                let prop_name = {
+                    let player = &mut *runtime.player;
+                    let symbols = &mut *runtime.symbols;
+                    player.get_datum(&args[0]).symbol_value(symbols)?
+                };
+                checked_datum(runtime, &args[1])?;
+                let player = &mut *runtime.player;
+                let symbols = &mut *runtime.symbols;
+                {
                     let value = player.get_datum(&args[1]).clone();
                     let value_ref = &args[1];
 
                     // Try built-in sprite property first
                     match crate::player::score::sprite_set_prop(
+                        player,
+                        symbols,
                         sprite_num as i16,
-                        prop_name,
+                        prop_name.clone(),
                         value,
                     ) {
                         Ok(_) => return Ok(DatumRef::Void),
+                        Err(error) if error.code == ScriptErrorCode::InvalidReference => return Err(error),
                         Err(_) => {}
                     }
 
@@ -765,24 +1195,31 @@ impl SpriteDatumHandlers {
                     }
                     let instance_refs = sprite.unwrap().script_instance_list.clone();
                     for instance_ref in instance_refs {
-                        if let Ok(_) = script_set_prop(player, &instance_ref, prop_name, value_ref, false) {
-                            return Ok(DatumRef::Void);
+                        checked_script_instance(player, &instance_ref)?;
+                        match script_set_prop(player, symbols, &instance_ref, prop_name.clone(), value_ref, false) {
+                            Ok(()) => return Ok(DatumRef::Void),
+                            Err(error) if error.code == ScriptErrorCode::InvalidReference => return Err(error),
+                            Err(_) => {}
                         }
                     }
 
+                    let prop_display = symbols
+                        .display(&prop_name)
+                        .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
                     Err(ScriptError::new(format!(
-                        "Property {} not found on sprite {}", prop_name, sprite_num
+                        "Property {} not found on sprite {}", prop_display, sprite_num
                     )))
-                })
+                }
             }
             "pointtoword" => {
-                reserve_player_mut(|player| {
-                    if args.is_empty() {
-                        return Err(ScriptError::new(
-                            "pointToWord requires 1 argument (point)".to_string(),
-                        ));
-                    }
-
+                if args.is_empty() {
+                    return Err(ScriptError::new(
+                        "pointToWord requires 1 argument (point)".to_string(),
+                    ));
+                }
+                let _sprite_num = checked_sprite_num(runtime, datum)?;
+                checked_datum(runtime, &args[0])?;
+                runtime.with_player(|player| {
                     let (text, char_index) = match SpriteDatumUtils::get_text_char_index_at_point(player, datum, &args[0])? {
                         Some(r) => r,
                         None => return Ok(player.alloc_datum(Datum::Int(-1))),
@@ -810,13 +1247,14 @@ impl SpriteDatumHandlers {
                 })
             }
             "pointtoline" => {
-                reserve_player_mut(|player| {
-                    if args.is_empty() {
-                        return Err(ScriptError::new(
-                            "pointToLine requires 1 argument (point)".to_string(),
-                        ));
-                    }
-
+                if args.is_empty() {
+                    return Err(ScriptError::new(
+                        "pointToLine requires 1 argument (point)".to_string(),
+                    ));
+                }
+                let _sprite_num = checked_sprite_num(runtime, datum)?;
+                checked_datum(runtime, &args[0])?;
+                runtime.with_player(|player| {
                     let (text, char_index) = match SpriteDatumUtils::get_text_char_index_at_point(player, datum, &args[0])? {
                         Some(r) => r,
                         None => return Ok(player.alloc_datum(Datum::Int(-1))),
@@ -841,23 +1279,23 @@ impl SpriteDatumHandlers {
             }
             // Flash (SWF) sprite methods
             "gotoframe" => {
-                if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member(datum)? {
+                if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member_explicit(runtime.player, runtime.symbols, datum)? {
                     // Pass the raw arg as a string — Lingo callers use
                     // either a numeric frame or a string label (e.g.
                     // `sprite(N).gotoFrame("warm0")`). The JS bridge
                     // parses the string and routes to GotoFrame(int) or
                     // an AS1 `gotoAndStop(label)` call as appropriate.
-                    let frame_or_label = reserve_player_ref(|player| {
+                    let frame_or_label = runtime.with_player_and_symbols(|player, symbols| {
                         if args.is_empty() { return Ok("1".to_string()); }
-                        player.get_datum(&args[0]).string_value()
+                        player.get_datum(&args[0]).string_value(symbols)
                     })?;
                     ruffle_goto_frame(sn, &frame_or_label);
                 }
                 Ok(DatumRef::Void)
             }
             "callframe" => {
-                if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member(datum)? {
-                    let frame = reserve_player_ref(|player| {
+                if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member_explicit(runtime.player, runtime.symbols, datum)? {
+                    let frame = runtime.with_player_and_symbols(|player, symbols| {
                         if args.is_empty() { return Ok(1); }
                         player.get_datum(&args[0]).int_value()
                     })?;
@@ -866,24 +1304,25 @@ impl SpriteDatumHandlers {
                 Ok(DatumRef::Void)
             }
             "stop" => {
-                if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member(datum)? {
+                if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member_explicit(runtime.player, runtime.symbols, datum)? {
                     ruffle_stop(sn);
                 }
                 Ok(DatumRef::Void)
             }
             "play" => {
-                if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member(datum)? {
+                if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member_explicit(runtime.player, runtime.symbols, datum)? {
                     // play() overrides a prior `sprite.frame = N` hold — clear
                     // the asserted frame so a fresh instance plays, not pins.
-                    reserve_player_mut(|player| {
+                    runtime.with_player_and_symbols(|player, symbols| {
                         player.movie.score.get_sprite_mut(sn as i16).flash_asserted_frame = None;
                     });
-                    ruffle_play(sn);
+                    let owner_key = owner_key_string(&runtime.player.owner);
+                    ruffle_play_owned(&owner_key, sn);
                 }
                 Ok(DatumRef::Void)
             }
             "rewind" => {
-                if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member(datum)? {
+                if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member_explicit(runtime.player, runtime.symbols, datum)? {
                     ruffle_rewind(sn);
                 }
                 Ok(DatumRef::Void)
@@ -896,7 +1335,7 @@ impl SpriteDatumHandlers {
             // divergence). bogey_nights' bogeyman #hiding relies on hold to
             // actually halt the idle SWF.
             "hold" => {
-                if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member(datum)? {
+                if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member_explicit(runtime.player, runtime.symbols, datum)? {
                     ruffle_stop(sn);
                 }
                 Ok(DatumRef::Void)
@@ -912,8 +1351,8 @@ impl SpriteDatumHandlers {
                 // deferred `gDemoFlash.play()`. We capture the sprite's cast
                 // member when available (so cast-based lookups still work) but
                 // always bind the handle to the sprite number as the primary key.
-                let sn = reserve_player_ref(|player| player.get_datum(datum).to_sprite_ref())?;
-                let (cl, cm) = reserve_player_ref(|player| {
+                let sn = runtime.with_player_and_symbols(|player, symbols| player.get_datum(datum).to_sprite_ref())?;
+                let (cl, cm) = runtime.with_player_and_symbols(|player, symbols| {
                     player
                         .movie
                         .score
@@ -922,9 +1361,9 @@ impl SpriteDatumHandlers {
                         .map(|m| (m.cast_lib, m.cast_member))
                         .unwrap_or((0, 0))
                 });
-                let (path, return_as_object) = reserve_player_ref(|player| {
-                    if args.is_empty() { return Ok((String::new(), false)); }
-                    let p = player.get_datum(&args[0]).string_value()?;
+                let (path, return_as_object) = runtime.with_player_and_symbols(|player, symbols| {
+                    if args.is_empty() { return Ok::<_, ScriptError>((String::new(), false)); }
+                    let p = player.get_datum(&args[0]).string_value(symbols)?;
                     // Second arg: 0 = return as Flash object reference, otherwise string
                     let as_obj = if args.len() >= 2 {
                         player.get_datum(&args[1]).int_value().unwrap_or(1) == 0
@@ -961,7 +1400,7 @@ impl SpriteDatumHandlers {
                             let is_object_coercion =
                                 s.starts_with("[object ") || s.starts_with("[type ");
                             if !is_object_coercion {
-                                return reserve_player_mut(|player| {
+                                return runtime.with_player_and_symbols(|player, symbols| {
                                     Ok(player.alloc_datum(Datum::String(s)))
                                 });
                             }
@@ -970,7 +1409,7 @@ impl SpriteDatumHandlers {
                     }
                     // Return a sprite-bound FlashObjectRef for use with
                     // setCallback / call / play etc. Never VOID for the object form.
-                    return reserve_player_mut(|player| {
+                    return runtime.with_player_and_symbols(|player, symbols| {
                         use crate::director::lingo::datum::FlashObjectRef;
                         Ok(player.alloc_datum(Datum::FlashObjectRef(
                             FlashObjectRef::from_path_with_sprite(&rooted, cl, cm, sn as i32),
@@ -988,7 +1427,7 @@ impl SpriteDatumHandlers {
                 // `flash_sprite_loaded`, treat the value read as not-ready (VOID)
                 // so the frame's `if cont = 1 ... else go(the frame)` loop holds
                 // until the new member loads and its real value can be read.
-                let member_ready = reserve_player_ref(|player| {
+                let member_ready = runtime.with_player_and_symbols(|player, symbols| {
                     (cl == 0 && cm == 0)
                         || player.flash_sprite_loaded.contains(&(sn, cl, cm))
                 });
@@ -1021,19 +1460,19 @@ impl SpriteDatumHandlers {
                         } else {
                             Datum::Void
                         };
-                        return reserve_player_mut(|player| Ok(player.alloc_datum(datum)));
+                        return runtime.with_player_and_symbols(|player, symbols| Ok(player.alloc_datum(datum)));
                     }
                     Err(e) => warn!("sprite.getVariable error: {:?}", e),
                 }
                 Ok(DatumRef::Void)
             }
             "setvariable" => {
-                if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member(datum)? {
-                    let path = reserve_player_ref(|player| {
-                        player.get_datum(&args[0]).string_value()
+                if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member_explicit(runtime.player, runtime.symbols, datum)? {
+                    let path = runtime.with_player_and_symbols(|player, symbols| {
+                        player.get_datum(&args[0]).string_value(symbols)
                     })?;
-                    let value = reserve_player_ref(|player| {
-                        player.get_datum(&args[1]).string_value()
+                    let value = runtime.with_player_and_symbols(|player, symbols| {
+                        player.get_datum(&args[1]).string_value(symbols)
                     })?;
                     if let Err(e) = ruffle_set_variable(sn, &root_flash_path(&path), &value) {
                         warn!("sprite.setVariable error: {:?}", e);
@@ -1042,13 +1481,13 @@ impl SpriteDatumHandlers {
                 Ok(DatumRef::Void)
             }
             "callfunction" => {
-                if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member(datum)? {
-                    let path = reserve_player_ref(|player| {
-                        player.get_datum(&args[0]).string_value().map(|p| root_flash_path(&p))
+                if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member_explicit(runtime.player, runtime.symbols, datum)? {
+                    let path = runtime.with_player_and_symbols(|player, symbols| {
+                        player.get_datum(&args[0]).string_value(symbols).map(|p| root_flash_path(&p))
                     })?;
                     let args_xml = if args.len() > 1 {
-                        reserve_player_ref(|player| {
-                            player.get_datum(&args[1]).string_value()
+                        runtime.with_player_and_symbols(|player, symbols| {
+                            player.get_datum(&args[1]).string_value(symbols)
                         })?
                     } else {
                         String::new()
@@ -1056,7 +1495,7 @@ impl SpriteDatumHandlers {
                     match ruffle_call_function(sn, &path, &args_xml) {
                         Ok(val) => {
                             if let Some(s) = val.as_string() {
-                                return reserve_player_mut(|player| {
+                                return runtime.with_player_and_symbols(|player, symbols| {
                                     Ok(player.alloc_datum(Datum::String(s)))
                                 });
                             }
@@ -1067,13 +1506,13 @@ impl SpriteDatumHandlers {
                 Ok(DatumRef::Void)
             }
             "hittest" => {
-                if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member(datum)? {
+                if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member_explicit(runtime.player, runtime.symbols, datum)? {
                     // Director's `sprite.hitTest(point)` takes a *stage* point
                     // (e.g. `sprite(5).hitTest(_mouse.mouseLoc)`). Accept a
                     // Point datum, or a legacy two-int (x, y) form. Rebase to
                     // sprite-local pixels (the classifier's coordinate space)
                     // by subtracting the sprite's top-left.
-                    let (sx, sy) = reserve_player_ref(|player| -> Result<(i32, i32), ScriptError> {
+                    let (sx, sy) = runtime.with_player_and_symbols(|player, symbols| -> Result<(i32, i32), ScriptError> {
                         match player.get_datum(&args[0]) {
                             Datum::Point([px, py], _) => Ok((*px as i32, *py as i32)),
                             other => {
@@ -1087,7 +1526,7 @@ impl SpriteDatumHandlers {
                             }
                         }
                     })?;
-                    let rect = reserve_player_ref(|player| {
+                    let rect = runtime.with_player_and_symbols(|player, symbols| {
                         get_sprite_rect_in_context(player, sn as i16)
                     });
                     let lx = (sx - rect.0 as i32) as f64;
@@ -1099,20 +1538,19 @@ impl SpriteDatumHandlers {
                         1 => "normal",
                         _ => "background",
                     };
-                    return reserve_player_mut(|player| {
-                        Ok(player.alloc_datum(Datum::Symbol(Symbol::from_str(&symbol.to_string()))))
-                    });
+                    let symbol = runtime.symbols.intern(symbol);
+                    return Ok(runtime.player.alloc_datum(Datum::Symbol(symbol)));
                 }
                 Ok(DatumRef::Void)
             }
             "getflashproperty" => {
-                if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member(datum)? {
-                    let target = reserve_player_ref(|player| player.get_datum(&args[0]).string_value())?;
-                    let prop_num = reserve_player_ref(|player| player.get_datum(&args[1]).int_value())?;
+                if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member_explicit(runtime.player, runtime.symbols, datum)? {
+                    let target = runtime.with_player_and_symbols(|player, symbols| player.get_datum(&args[0]).string_value(symbols))?;
+                    let prop_num = runtime.with_player_and_symbols(|player, symbols| player.get_datum(&args[1]).int_value())?;
                     match ruffle_get_flash_property(sn, &target, prop_num) {
                         Ok(val) => {
                             if let Some(s) = val.as_string() {
-                                return reserve_player_mut(|player| {
+                                return runtime.with_player_and_symbols(|player, symbols| {
                                     Ok(player.alloc_datum(Datum::String(s)))
                                 });
                             }
@@ -1123,10 +1561,10 @@ impl SpriteDatumHandlers {
                 Ok(DatumRef::Void)
             }
             "setflashproperty" => {
-                if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member(datum)? {
-                    let target = reserve_player_ref(|player| player.get_datum(&args[0]).string_value())?;
-                    let prop_num = reserve_player_ref(|player| player.get_datum(&args[1]).int_value())?;
-                    let value = reserve_player_ref(|player| player.get_datum(&args[2]).string_value())?;
+                if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member_explicit(runtime.player, runtime.symbols, datum)? {
+                    let target = runtime.with_player_and_symbols(|player, symbols| player.get_datum(&args[0]).string_value(symbols))?;
+                    let prop_num = runtime.with_player_and_symbols(|player, symbols| player.get_datum(&args[1]).int_value())?;
+                    let value = runtime.with_player_and_symbols(|player, symbols| player.get_datum(&args[2]).string_value(symbols))?;
                     ruffle_set_flash_property(sn, &target, prop_num, &value);
                 }
                 Ok(DatumRef::Void)
@@ -1134,7 +1572,22 @@ impl SpriteDatumHandlers {
             "setcallback" => {
                 // setCallback(flashObject, flashMethod, lingoHandler, lingoTarget)
                 if args.len() >= 3 {
-                    reserve_player_mut(|player| {
+                    checked_datum(runtime, &args[0])?;
+                    if let Some(target) = args.get(3) {
+                        checked_datum(runtime, target)?;
+                    }
+                    let lingo_value = checked_datum(runtime, &args[2])?.clone();
+                    let lingo_handler = lingo_value
+                        .symbol_value(runtime.symbols)
+                        .unwrap_or_else(|_| Symbol::empty());
+                    let lingo_name = runtime
+                        .symbols
+                        .display(&lingo_handler)
+                        .unwrap_or_default()
+                        .to_owned();
+                    let flash_method = checked_datum(runtime, &args[1])
+                        .and_then(|value| value.string_value(runtime.symbols))?;
+                    runtime.with_player_and_symbols(|player, symbols| {
                         let flash_object_path = match player.get_datum(&args[0]) {
                             Datum::FlashObjectRef(fo) => fo.path.clone(),
                             Datum::String(s) => s.clone(),
@@ -1143,11 +1596,6 @@ impl SpriteDatumHandlers {
                                 return Err(ScriptError::new(format!("setCallback: first argument must be a Flash object or string, got {}", type_name)));
                             }
                         };
-                        let flash_method = player.get_datum(&args[1]).string_value()?;
-                        let lingo_handler = player.get_datum(&args[2]).symbol_value().unwrap_or_else(|_| {
-                            player.get_datum(&args[2]).symbol_value().unwrap_or(Symbol::empty())
-                        });
-
                         // Translate _level0 to _root
                         let translated_path = if flash_object_path.starts_with("_level0") {
                             flash_object_path.replace("_level0", "_root")
@@ -1224,7 +1672,10 @@ impl SpriteDatumHandlers {
                         if let Some(target_ref) = lc_target {
                             player.flash_lc_callbacks.insert(
                                 (translated_path.clone(), flash_method.clone()),
-                                (lingo_handler.clone().to_string(), target_ref),
+                                (
+                                    lingo_name.clone(),
+                                    target_ref,
+                                ),
                             );
                         }
 
@@ -1241,7 +1692,7 @@ impl SpriteDatumHandlers {
                                     js_args.push(&flash_method.clone().into());
                                     js_args.push(&cast_lib.into());
                                     js_args.push(&cast_member.into());
-                                    js_args.push(&lingo_handler.as_str().into());
+                                    js_args.push(&lingo_name.clone().into());
                                     js_args.push(&flash_cl.into());
                                     js_args.push(&flash_cm.into());
                                     let _ = func.apply(&JsValue::NULL, &js_args);
@@ -1256,7 +1707,7 @@ impl SpriteDatumHandlers {
                 }
             }
             "mapstagetomember" => {
-                reserve_player_mut(|player| {
+                runtime.with_player_and_symbols(|player, symbols| {
                     if args.is_empty() {
                         return Err(ScriptError::new(
                             "mapStageToMember requires 1 argument (point)".to_string(),
@@ -1318,15 +1769,15 @@ impl SpriteDatumHandlers {
             // findLabel("AttackT.end")` and then steps `sprite.frame = start
             // + counter` — so returning VOID here stalls them outright.
             "findlabel" => {
-                let label = reserve_player_ref(|player| {
+                let label = runtime.with_player_and_symbols(|player, symbols| {
                     if args.is_empty() {
                         return Err(ScriptError::new(
                             "findLabel requires a label name".to_string(),
                         ));
                     }
-                    player.get_datum(&args[0]).string_value()
+                    player.get_datum(&args[0]).string_value(symbols)
                 })?;
-                reserve_player_mut(|player| {
+                runtime.with_player_and_symbols(|player, symbols| {
                     let sprite_num = player.get_datum(datum).to_sprite_ref()?;
                     let frame = player
                         .movie
@@ -1364,15 +1815,15 @@ impl SpriteDatumHandlers {
                 // constructor args are not yet forwarded to a real AS constructor —
                 // that needs a Ruffle-side newObject bridge to physically host the
                 // object (e.g. so a LocalConnection can actually receive messages).
-                let object_type = reserve_player_ref(|player| {
+                let object_type = runtime.with_player_and_symbols(|player, symbols| {
                     if args.is_empty() {
                         return Err(ScriptError::new(
                             "newObject requires at least one argument".to_string(),
                         ));
                     }
-                    player.get_datum(&args[0]).string_value()
+                    player.get_datum(&args[0]).string_value(symbols)
                 })?;
-                reserve_player_mut(|player| {
+                runtime.with_player_and_symbols(|player, symbols| {
                     use crate::director::lingo::datum::FlashObjectRef;
                     let sprite_num = player.get_datum(datum).to_sprite_ref()?;
                     let (cl, cm) = player
@@ -1406,7 +1857,7 @@ impl SpriteDatumHandlers {
                 use super::script::ScriptDatumHandlers;
                 use crate::player::ci_string::CiString;
 
-                reserve_player_mut(|player| {
+                runtime.with_player_and_symbols(|player, symbols| {
                     let sprite_num = player.get_datum(datum).to_sprite_ref()?;
                     if args.is_empty() {
                         return Err(ScriptError::new("setScriptList requires 1 argument".to_string()));
@@ -1425,7 +1876,7 @@ impl SpriteDatumHandlers {
                             Datum::CastMember(r) => r.clone(),
                             _ => continue,
                         };
-                        let props_str = player.get_datum(&pair[1]).string_value().unwrap_or_default();
+                        let props_str = player.get_datum(&pair[1]).string_value(symbols).unwrap_or_default();
                         pairs.push((member_ref, props_str));
                     }
                     Ok((sprite_num, pairs))
@@ -1435,7 +1886,7 @@ impl SpriteDatumHandlers {
                     let mut new_instances: Vec<crate::player::script_ref::ScriptInstanceRef> = Vec::new();
 
                     for (member_ref, props_str) in &pairs {
-                        match ScriptDatumHandlers::create_script_instance(member_ref) {
+                        match ScriptDatumHandlers::create_script_instance(runtime.player, runtime.symbols, member_ref) {
                             Ok((instance_ref, _datum_ref)) => {
                                 // Parse the property string and set properties on the instance
                                 // via script_set_prop (standard Lingo property setter).
@@ -1457,20 +1908,20 @@ impl SpriteDatumHandlers {
                                         } else if val.starts_with('"') && val.ends_with('"') {
                                             Datum::String(val[1..val.len()-1].to_string())
                                         } else if val.starts_with('#') {
-                                            Datum::Symbol(Symbol::from_str(&val[1..]))
+                                            Datum::Symbol(runtime.symbols.intern(&val[1..]))
                                         } else {
                                             Datum::String(val.to_string())
                                         };
-                                        reserve_player_mut(|player| {
-                                            let val_ref = player.alloc_datum(datum_val);
-                                            let _ = crate::player::script::script_set_prop(
-                                                player,
-                                                &instance_ref,
-                                                Symbol::from_str(&key),
-                                                &val_ref,
-                                                false,
-                                            );
-                                        });
+                                        let val_ref = runtime.player.alloc_datum(datum_val);
+                                        let prop_name = runtime.symbols.intern(&key);
+                                        let _ = crate::player::script::script_set_prop(
+                                            runtime.player,
+                                            runtime.symbols,
+                                            &instance_ref,
+                                            prop_name,
+                                            &val_ref,
+                                            false,
+                                        );
                                     }
                                 }
                                 new_instances.push(instance_ref);
@@ -1485,7 +1936,7 @@ impl SpriteDatumHandlers {
                     }
 
                     // Replace the sprite's behavior list
-                    reserve_player_mut(|player| {
+                    runtime.with_player_and_symbols(|player, symbols| {
                         let sprite = player.movie.score.get_sprite_mut(sprite_num);
                         sprite.script_instance_list = new_instances;
                         player.remove_script_instance_list_cache(sprite_num);
@@ -1502,124 +1953,5 @@ impl SpriteDatumHandlers {
         }
     }
 
-    pub async fn call_async(
-        datum: DatumRef,
-        handler_name: Symbol,
-        args: &Vec<DatumRef>,
-    ) -> Result<DatumRef, ScriptError> {
-        // Flash (SWF) interop: block until the sprite's Ruffle instance has
-        // loaded + finished AS init, THEN run the (sync) op against a live
-        // instance. A one-shot Lingo init that reads Flash objects (Coke
-        // Studios' SF gateway: oLoginServlet / oStatusServlet / ...) runs before
-        // the async createFlashInstance completes, so without this wait every
-        // read comes back null and the gateway never connects. The wait is
-        // per-sprite (see wait_for_flash_ready), so it can't stall unrelated
-        // display-only Flash sprites.
-        let name_lower = handler_name.to_lowercase();
-        if matches!(
-            name_lower.as_str(),
-            "getvariable" | "setvariable" | "callfunction" | "setcallback"
-        ) {
-            // Reached only for a sprite NOT yet whitelisted (has_async_handler
-            // routes whitelisted sprites straight to the sync path). If its
-            // instance is ALREADY ready, don't pay for pre_dispatch/the wait —
-            // just whitelist and fall through to the sync arm. Only a genuinely
-            // not-ready sprite kicks off the dispatch + waits: a script can call
-            // into a Flash sprite before the render loop has dispatched its
-            // Ruffle instance (Coke Studios' one-shot `SESSION_createSession`
-            // runs before sprite#1's SWF is dispatched), and without triggering
-            // the dispatch here the wait would block the frame before render ever
-            // dispatches it (deadlock). Whitelist so all later calls are sync.
-            if let Ok(sn) =
-                reserve_player_ref(|player| player.get_datum(&datum).to_sprite_ref())
-            {
-                let ready = is_flash_instance_ready(sn as i32)
-                    .ok()
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(true);
-                if !ready {
-                    reserve_player_mut(|player| player.pre_dispatch_flash_members());
-                    wait_for_flash_ready(sn).await;
-                }
-                reserve_player_mut(|player| {
-                    player.flash_ready_sprites.insert(sn);
-                });
-            }
-            return Self::call(&datum, handler_name.as_str(), args);
-        }
 
-        // First, try the sprite's attached script instances
-        let instance_refs =
-            reserve_player_ref(|player| SpriteDatumUtils::get_script_instance_ids(&datum, player))?;
-        for instance_ref in instance_refs {
-            let handler_ref = reserve_player_ref(|player| {
-                ScriptInstanceUtils::get_script_instance_handler(
-                    handler_name,
-                    &instance_ref,
-                    player,
-                )
-            })?;
-            if let Some(handler_ref) = handler_ref {
-                let result_scope =
-                    player_call_script_handler(Some(instance_ref), handler_ref, args).await?;
-                player_handle_scope_return(&result_scope);
-                return Ok(result_scope.return_value);
-            }
-        }
-
-        // Direct Flash method call: `sprite(N).someFn(args)` on a Flash-member
-        // sprite invokes the SWF's ActionScript function of that name (Director's
-        // Flash asset method surface — e.g. unicraft's `sprite(12).readUnlockLevel()`
-        // / `writeUnlockLevel(n)` save system). No built-in or behaviour handled it,
-        // so forward to Ruffle. Wait for the instance to be ready first (matching the
-        // getVariable/callFunction path); the JS bridge also queues+replays the call
-        // if it fires early, so the side effect (a callback into Lingo) still runs.
-        if let Ok(Some((sn, cl, cm))) = Self::resolve_sprite_flash_member(&datum) {
-            let is_flash = reserve_player_ref(|player| {
-                player.movie.cast_manager
-                    .find_member_by_ref(&crate::player::cast_lib::CastMemberRef { cast_lib: cl, cast_member: cm })
-                    .map(|m| matches!(m.member_type, crate::player::cast_member::CastMemberType::Flash(_)))
-                    .unwrap_or(false)
-            });
-            if is_flash {
-                let ready = is_flash_instance_ready(sn).ok().and_then(|v| v.as_bool()).unwrap_or(true);
-                if !ready {
-                    reserve_player_mut(|player| player.pre_dispatch_flash_members());
-                    wait_for_flash_ready(sn as i16).await;
-                }
-                reserve_player_mut(|player| { player.flash_ready_sprites.insert(sn as i16); });
-                // Ruffle's argsXml is a JSON array (see flashPlayerManager callFunction).
-                let json_args = reserve_player_ref(|player| {
-                    let parts: Vec<String> = args.iter().map(|a| match player.get_datum(a) {
-                        Datum::Int(i) => i.to_string(),
-                        Datum::Float(f) => f.to_string(),
-                        Datum::String(s) => format!("{:?}", s),
-                        Datum::Symbol(s) => format!("{:?}", s),
-                        _ => "null".to_string(),
-                    }).collect();
-                    format!("[{}]", parts.join(","))
-                });
-                match ruffle_call_function(sn, &root_flash_path(handler_name.as_str()), &json_args) {
-                    Ok(val) => {
-                        let datum = if let Some(s) = val.as_string() {
-                            Datum::String(s)
-                        } else if let Some(b) = val.as_bool() {
-                            Datum::Int(if b { 1 } else { 0 })
-                        } else if let Some(n) = val.as_f64() {
-                            if n.fract() == 0.0 && n.abs() < i32::MAX as f64 { Datum::Int(n as i32) } else { Datum::Float(n) }
-                        } else {
-                            Datum::Void
-                        };
-                        return reserve_player_mut(|player| Ok(player.alloc_datum(datum)));
-                    }
-                    Err(e) => warn!("sprite direct Flash method '{}' error: {:?}", handler_name, e),
-                }
-                return Ok(DatumRef::Void);
-            }
-        }
-
-        // In Director, calling a handler on a sprite that doesn't handle it
-        // is silently ignored and returns void.
-        Ok(DatumRef::Void)
-    }
 }

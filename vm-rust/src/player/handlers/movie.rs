@@ -1,73 +1,160 @@
 use log::{debug, warn, error};
+use wasm_bindgen::prelude::wasm_bindgen;
 use crate::{
     director::lingo::datum::{Datum, DatumType},
     player::{
+        compare::validate_direct_symbol_fields, ownership::OwnerToken, session::{ExecutionContext, PlayerId, RuntimeSessionHandle},
         DatumRef, MovieFrameTarget, Score, ScriptError, ScriptErrorCode, ScriptInstanceRef, cast_lib::{CastMemberRef, INVALID_CAST_MEMBER_REF, NULL_CAST_MEMBER_REF}, datum_formatting::format_datum, events::{
-            dispatch_event_to_all_behaviors, dispatch_system_event_to_timeouts, player_dispatch_event_beginsprite, player_invoke_static_event, player_invoke_targeted_event, player_wait_available
-        }, get_score_sprite_mut, handlers::datum_handlers::{player_call_datum_handler, script_instance::ScriptInstanceUtils}, player_call_script_handler, reserve_player_mut, reserve_player_mut_async, reserve_player_ref, score::{concrete_sprite_hit_test, get_sprite_at}, symbols::{builtin::BuiltInSymbol, symbol::Symbol}
+            dispatch_event_to_all_behaviors, player_dispatch_event_beginsprite, player_invoke_static_event, player_invoke_targeted_event, player_wait_available
+        }, get_score_sprite_mut, handlers::datum_handlers::player_call_datum_handler, reserve_player_mut, reserve_player_mut_async, reserve_player_ref, score::{concrete_sprite_hit_test, get_sprite_at}, symbols::{builtin::BuiltInSymbol, symbol::Symbol}
     },
     utils::log_i,
 };
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum MovieAsyncKind {
+    Do,
+    Go,
+    Play,
+    UpdateStage { now_ms: f64 },
+    Nothing,
+    FrameUpdate { now_ms: f64 },
+    /// Initialization phases are split around StartMovie. Director runs the
+    /// frame preparation work first, then StartMovie, then EnterFrame/ExitFrame.
+    InitPrepareFrame { now_ms: f64 },
+    InitEnterFrame,
+    InitExitFrame,
+    InitEnterExitFrame,
+}
+
+/// Owned movie work handed from global dispatch to the session executor.
+/// Driver/evaluator layers attach their own completion capability; this
+/// payload carries only the player lifetime fence and validated arguments.
+#[derive(Clone)]
+pub(crate) struct MovieAsyncRequest {
+    pub(crate) player_id: PlayerId,
+    pub(crate) owner: OwnerToken,
+    pub(crate) kind: MovieAsyncKind,
+    pub(crate) args: Vec<DatumRef>,
+}
+
 pub struct MovieHandlers {}
 
+#[wasm_bindgen(js_name = "dirplayer_rufflePlay")]
+extern "C" {
+    fn movie_ruffle_play(sprite_num: i32);
+}
+
 impl MovieHandlers {
-    pub fn puppet_tempo(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            player.movie.puppet_tempo = player.get_datum(&args[0]).int_value()? as u32;
-            Ok(DatumRef::Void)
+    pub(crate) fn prepare_movie_async(
+        runtime: &mut ExecutionContext<'_>,
+        player_id: PlayerId,
+        kind: MovieAsyncKind,
+        args: &[DatumRef],
+    ) -> Result<MovieAsyncRequest, ScriptError> {
+        if !runtime.player.owner.is_arena_live() {
+            return Err(ScriptError::new_code(
+                ScriptErrorCode::InvalidReference,
+                "movie request owner is retired".to_owned(),
+            ));
+        }
+        if args.len() > 0 {
+            for arg in args {
+                Self::checked_datum(runtime, arg)?;
+            }
+        }
+        if kind == MovieAsyncKind::Do {
+            let code = args
+                .first()
+                .map(|arg| Self::checked_datum(runtime, arg)?.string_value(runtime.symbols))
+                .transpose()?
+                .unwrap_or_default();
+            if code.trim().is_empty() {
+                return Ok(MovieAsyncRequest {
+                    player_id,
+                    owner: runtime.player.owner.clone(),
+                    kind,
+                    args: Vec::new(),
+                });
+            }
+        }
+        Ok(MovieAsyncRequest {
+            player_id,
+            owner: runtime.player.owner.clone(),
+            kind,
+            args: args.to_vec(),
         })
     }
 
-    pub fn script(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let identifier = player.get_datum(&args[0]);
-            let formatted_id = format_datum(&args[0], &player);
-
-            let member_ref = match identifier {
-                Datum::String(script_name) => Ok(player
-                    .movie
-                    .cast_manager
-                    .find_member_ref_by_name(&script_name)),
-                Datum::Int(script_num) => Ok(player
-                    .movie
-                    .cast_manager
-                    .find_member_ref_by_number(*script_num as u32)),
-                Datum::CastMember(cast_member_ref) => Ok(Some(cast_member_ref.clone())),
-                _ => Err(ScriptError::new(format!(
-                    "Invalid identifier for script: {}",
-                    formatted_id
-                ))), // TODO
-            }?;
-            let script = member_ref
-                .to_owned()
-                .and_then(|r| player.movie.cast_manager.get_script_by_ref(&r));
-
-            match script {
-                Some(_) => Ok(player.alloc_datum(Datum::ScriptRef(member_ref.unwrap()))),
-                None => Err(ScriptError::new(format!(
-                    "Script not found {}",
-                    formatted_id
-                ))),
-            }
-        })
+    fn checked_datum<'a>(runtime: &'a ExecutionContext<'_>, datum_ref: &DatumRef) -> Result<&'a Datum, ScriptError> {
+        let datum = match datum_ref {
+            DatumRef::Void => &Datum::Void,
+            _ => runtime.player.allocator.try_get_datum(datum_ref).ok_or_else(|| {
+                ScriptError::new_code(ScriptErrorCode::InvalidReference, format!("invalid datum reference {datum_ref}"))
+            })?,
+        };
+        validate_direct_symbol_fields(datum, runtime.symbols)?;
+        Ok(datum)
     }
 
-    pub fn member(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            if args.len() > 2 {
-                return Err(ScriptError::new(
-                    "Too many arguments for member".to_string(),
-                ));
-            }
-            let member_name_or_num_ref = args.get(0).unwrap();
-            let member_name_or_num = player.get_datum(member_name_or_num_ref);
-            if let Datum::CastMember(_) = &member_name_or_num {
-                return Ok(member_name_or_num_ref.clone());
-            }
+    pub fn puppet_tempo(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let tempo = Self::checked_datum(runtime, &args[0])?.int_value()? as u32;
+        runtime.player.movie.puppet_tempo = tempo;
+        Ok(DatumRef::Void)
+    }
+
+    pub fn script(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let identifier = Self::checked_datum(runtime, &args[0])?.clone();
+        let formatted_id = format_datum(&args[0], runtime.symbols, runtime.player)?;
+
+        let member_ref = match identifier {
+            Datum::String(script_name) => Ok(runtime.player
+                .movie
+                .cast_manager
+                .find_member_ref_by_name(&script_name)),
+            Datum::Int(script_num) => Ok(runtime.player
+                .movie
+                .cast_manager
+                .find_member_ref_by_number(script_num as u32)),
+            Datum::CastMember(cast_member_ref) => Ok(Some(cast_member_ref.clone())),
+            _ => Err(ScriptError::new(format!(
+                "Invalid identifier for script: {}",
+                formatted_id
+            ))), // TODO
+        }?;
+        let script = member_ref
+            .to_owned()
+            .and_then(|r| runtime.player.movie.cast_manager.get_script_by_ref(&r));
+
+        match script {
+            Some(_) => Ok(runtime.player.alloc_datum(Datum::ScriptRef(member_ref.unwrap()))),
+            None => Err(ScriptError::new(format!(
+                "Script not found {}",
+                formatted_id
+            ))),
+        }
+    }
+
+    pub fn member(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        if args.len() > 2 {
+            return Err(ScriptError::new(
+                "Too many arguments for member".to_string(),
+            ));
+        }
+        let member_name_or_num_ref = args.get(0).ok_or_else(|| ScriptError::new("member requires an identifier".to_string()))?;
+        let member_name_or_num = Self::checked_datum(runtime, member_name_or_num_ref)?.clone();
+        if let Datum::CastMember(_) = &member_name_or_num {
+            return Ok(member_name_or_num_ref.clone());
+        }
+        if let Some(cast_ref) = args.get(1) {
+            Self::checked_datum(runtime, cast_ref)?;
+        }
+        let player = &mut *runtime.player;
+        {
             let cast_name_or_num = args.get(1).map(|x| player.get_datum(x));
             let member = player.movie.cast_manager.find_member_ref_by_identifiers(
-                member_name_or_num,
+                runtime.symbols,
+                &member_name_or_num,
                 cast_name_or_num,
                 &player.allocator,
             )?;
@@ -150,521 +237,31 @@ impl MovieHandlers {
                     _ => Ok(player.alloc_datum(Datum::CastMember(INVALID_CAST_MEMBER_REF))),
                 }
             }
-        })
+        }
     }
 
+    /// Compatibility entry point for legacy manager callers.  The actual go
+    /// transition is owner-bound and shared with global dispatch; retaining a
+    /// second ambient implementation here would bypass its lifecycle checks.
     pub async fn go(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        if args.is_empty() {
-            // "go" with no args is gotoLoop: go to nearest marker at or before current frame,
-            // or frame 1 if no markers exist
-            reserve_player_mut(|player| {
-                let current = player.movie.current_frame as i32;
-                let label_frame = player.movie.score.frame_labels.iter()
-                    .rev()
-                    .find(|fl| fl.frame_num <= current)
-                    .map(|fl| fl.frame_num as u32);
-                player.next_frame = Some(label_frame.unwrap_or(1));
-            });
-            return Ok(DatumRef::Void);
-        }
-        // If a second argument is provided, it's a movie path: go frame X of movie "path"
-        let go_to_movie = if args.len() >= 2 {
-            Some(reserve_player_mut(|player| {
-                let movie_path = player.get_datum(&args[1]).string_value()?;
-                let movie_path = if movie_path.contains(".") {
-                    movie_path
-                } else {
-                    let extension = player.movie.file_name.split('.').last().unwrap_or("dcr");
-                    format!("{}.{}", movie_path, extension)
-                };
-
-                // Resolve the first arg into a MovieFrameTarget
-                let datum = player.get_datum(&args[0]);
-                let datum_type = datum.type_enum();
-                let target = match datum_type {
-                    DatumType::Int => MovieFrameTarget::Frame(datum.int_value()? as u32),
-                    DatumType::String => MovieFrameTarget::Label(datum.string_value()?),
-                    DatumType::Symbol => MovieFrameTarget::Label(datum.string_value()?),
-                    _ => MovieFrameTarget::Default,
-                };
-
-                let task_id = player.net_manager.preload_net_thing(movie_path.clone());
-                Ok::<_, ScriptError>((task_id, target, movie_path))
-            })?)
-        } else {
-            None
-        };
-
-        // Director 11.5 Scripting Dictionary, `go()`: calling go() with the
-        // movieName parameter "loads frame 1 of the movie", and "if go() is
-        // called from within a handler, the handler in which it is placed
-        // continues executing" — the REST of the calling handler must see the
-        // NEW movie's cast libraries (Miniclip's wrapper_silentbaystudios
-        // depends on this: it does `go(1, "gameloader.dcr")` and then, in the
-        // same exitFrame, resolves parent scripts that live in gameloader's
-        // second cast). So: wait for the fetch HERE and mount eagerly.
-        //
-        // The wait is a poll loop rather than `net_manager.await_task()`.
-        // Yielding via a timer keeps this independent of the ManualFuture
-        // completer path and gives the spawned fetch task event-loop time.
-        if let Some((task_id, target, movie_path)) = go_to_movie {
-            debug!("[go] go(_, \"{}\") -> net task {}", movie_path, task_id);
-            // Tell maybe_hold_dcr_for_preloader to stand down for this fetch.
-            reserve_player_mut(|player| { player.goto_wait_active = true; });
-            let mut waited_ms: u64 = 0;
-            const POLL_MS: u64 = 25;
-            const TIMEOUT_MS: u64 = 60_000;
-            let done = loop {
-                let (done, state) = reserve_player_ref(|player| {
-                    let state = player.net_manager.try_get_task_state(task_id);
-                    (
-                        state.as_ref().map_or(false, |s| s.result.is_some()),
-                        state.map(|s| (s.bytes_loaded, s.bytes_total)),
-                    )
-                });
-                if done {
-                    break true;
-                }
-                if waited_ms >= TIMEOUT_MS {
-                    break false;
-                }
-                if waited_ms > 0 && waited_ms % 5_000 == 0 {
-                    crate::console_warn!(
-                        "[go] still waiting for task {} ({} ms, state={:?})",
-                        task_id, waited_ms, state
-                    );
-                }
-                let _ = async_std::future::timeout(
-                    std::time::Duration::from_millis(POLL_MS),
-                    std::future::pending::<()>(),
-                )
-                .await;
-                waited_ms += POLL_MS;
-            };
-            reserve_player_mut(|player| { player.goto_wait_active = false; });
-
-            if !done {
-                // Fetch never finished — fall back to the deferred frame-loop
-                // transition so the movie errs loudly instead of freezing.
-                crate::console_error!(
-                    "[go] movie fetch for \"{}\" (task {}) did not finish within {}s; \
-                     deferring the transition to the frame loop",
-                    movie_path, task_id, TIMEOUT_MS / 1000
-                );
-                reserve_player_mut(|player| {
-                    player.pending_goto_net_movie = Some((task_id, target));
-                });
-                return Ok(DatumRef::Void);
-            }
-
-            let mounted = crate::player::mount_net_movie(task_id, target, true).await;
-            // Success is per-transition noise; a FAILED mount means the calling
-            // handler is about to run against the OLD movie's casts, which is
-            // exactly the bug this path exists to prevent — surface that one.
-            if mounted {
-                debug!("[go] eager mount of \"{}\" succeeded after {} ms", movie_path, waited_ms);
-            } else {
-                crate::console_error!(
-                    "[go] eager mount of \"{}\" FAILED after {} ms — the calling handler will continue against the previous movie's casts",
-                    movie_path, waited_ms
-                );
-            }
-            return Ok(DatumRef::Void);
-        }
-
-        let mut frame_advanced = false;
-        let mut enter_frame = 0;
-
-        let destination_frame: u32 = reserve_player_mut(|player| {
-            enter_frame = player.movie.current_frame;
-
-            let datum: &Datum = player.get_datum(&args[0]);
-            let datum_type = datum.type_enum();
-            use crate::player::format_datum;
-
-            debug!("go() called: current_frame={} datum={}", player.movie.current_frame, format_datum(&args[0], player));
-
-            let dest = match datum_type {
-                DatumType::Int => Some(datum.int_value()? as u32),
-
-                // A frame label / marker keyword can arrive as either a string
-                // (`do("go next")`, `go "label"`) or a symbol (decompiled
-                // `go(#next)`), so handle both the same way.
-                DatumType::String | DatumType::Symbol => {
-                    let s = datum.string_value()?;
-                    let key = s.to_ascii_lowercase();
-                    // Director marker-navigation keywords: `next` == marker(1),
-                    // `previous` == marker(-1), `loop` == marker(0) — i.e. the
-                    // next/previous/current MARKER, not the next/previous frame
-                    // (Director 11.5 Scripting Dictionary: `next` keyword ≡
-                    // `the marker(+1)`). mixmaster's buttons do `do("go next")`.
-                    if key == "next" || key == "previous" || key == "loop" {
-                        let mut frames: Vec<u32> = player
-                            .movie
-                            .score
-                            .frame_labels
-                            .iter()
-                            .map(|fl| fl.frame_num as u32)
-                            .collect();
-                        frames.sort_unstable();
-                        frames.dedup();
-                        let current = player.movie.current_frame;
-                        let offset: i32 = match key.as_str() {
-                            "next" => 1,
-                            "previous" => -1,
-                            _ => 0, // loop
-                        };
-                        // marker(offset): index of marker(0) (largest marker <=
-                        // current, i.e. current-if-marked else previous) is
-                        // pos-1, where pos = count of markers <= current.
-                        let dest_frame = if frames.is_empty() {
-                            None
-                        } else {
-                            let pos = frames.partition_point(|&f| f <= current) as i32;
-                            let target = (pos - 1) + offset;
-                            if target >= 0 {
-                                frames.get(target as usize).copied()
-                            } else {
-                                None
-                            }
-                        };
-                        // No such marker (e.g. `go next` past the last marker) →
-                        // stay on the current frame rather than erroring.
-                        Some(dest_frame.unwrap_or(current))
-                    } else {
-                        // An unknown label is a no-op in Director — the playhead
-                        // simply stays put; it is not an error. Same rule as the
-                        // missing-marker case just above.
-                        //
-                        // Movies rely on this. snowcraft installs a debug
-                        // `keyDownScript` that does `go("level" && the key)`
-                        // whenever `integer(the key + 1) < 11`, and a non-numeric
-                        // key coerces to 1 — so every arrow key, letter or
-                        // modifier press builds a garbage label like
-                        // "level <arrow char>". Raising a ScriptError there
-                        // aborted the handler and surfaced an error for what
-                        // Director treats as an ordinary miss.
-                        Some(
-                            player
-                                .movie
-                                .score
-                                .frame_labels
-                                .iter()
-                                .find(|fl| fl.label.eq_ignore_ascii_case(&s))
-                                .map(|fl| fl.frame_num as u32)
-                                .unwrap_or(player.movie.current_frame),
-                        )
-                    }
-                }
-
-                _ => None,
-            };
-
-            let frame = match dest {
-                Some(f) => f,
-                None => {
-                    return Err(ScriptError::new("Unsupported or invalid frame label passed to go()".to_string()));
-                }
-            };
-
-            if player.next_frame.is_none() || frame != player.movie.current_frame {
-                player.next_frame = Some(frame);
-
-                if frame != enter_frame {
-                    frame_advanced = true;
-                }
-            }
-
-            Ok(frame)
-        })?;
-
-        if frame_advanced {
-            let mut execute_frame_change = false;
-
-            if enter_frame < destination_frame {
-                reserve_player_mut(|player| {
-                    player.go_direction = 2; // forwards
-                });
-                execute_frame_change = true;
-            } else if enter_frame > destination_frame {
-                reserve_player_mut(|player| {
-                    player.go_direction = 1; // backwards
-                });
-                execute_frame_change = true;
-            }
-
-            if execute_frame_change {
-                player_wait_available().await;
-
-                // 1. Send endSprite: Frame behaviors -> Sprite behaviors
-                let ended_sprite_nums = reserve_player_mut_async(|player| {
-                    Box::pin(async move {
-                        player.end_all_sprites().await
-                    })
-                }).await;
-
-                player_wait_available().await;
-
-                reserve_player_mut(|player| {
-                    for (score_source, sprite_num) in ended_sprite_nums.iter() {
-                        if let Some(sprite) = get_score_sprite_mut(
-                            &mut player.movie,
-                            &score_source,
-                            *sprite_num as i16,
-                        ) {
-                            sprite.exited = true;
-                        }
-                    }
-
-                    player.advance_frame();
-                    // begin_all_sprites manages frame_script_instance lifecycle —
-                    // it preserves the cached instance while the playhead stays within
-                    // the same frame script's span and recreates it only when the active
-                    // script changes or the span is exited.
-                    player.begin_all_sprites();
-
-                    // Apply tweening after sprites are initialized
-                    player.movie.score.apply_tween_modifiers(player.movie.current_frame);
-                });
-
-                player_wait_available().await;
-
-                // 2. Send beginSprite: Frame behaviors -> Sprite behaviors
-                // Collect behaviors that need initialization
-                let behaviors_to_init: Vec<(ScriptInstanceRef, u32)> = reserve_player_mut(|player| {
-                    let mut behaviors = Vec::new();
-                    for channel_number in player.active_stage_behavior_channels() {
-                        let Some((sprite_num, fallback)) = player
-                            .movie
-                            .score
-                            .channels
-                            .get(channel_number)
-                            .map(|channel| {
-                                (
-                                    channel.sprite.number as u32,
-                                    channel.sprite.script_instance_list.clone(),
-                                )
-                            })
-                        else {
-                            continue;
-                        };
-
-                        for behavior_ref in player.get_sprite_script_instance_ids(
-                            sprite_num as i16,
-                            fallback.as_slice(),
-                        ) {
-                            if player
-                                .allocator
-                                .get_script_instance_entry(behavior_ref.id())
-                                .is_some_and(|entry| !entry.script_instance.begin_sprite_called)
-                            {
-                                behaviors.push((behavior_ref, sprite_num));
-                            }
-                        }
-                    }
-                    behaviors
-                });
-
-                // Initialize behavior default properties
-                for (behavior_ref, sprite_num) in &behaviors_to_init {
-                    if let Err(err) = Score::initialize_behavior_defaults_async(behavior_ref.clone(), *sprite_num).await {
-                        web_sys::console::warn_1(
-                            &format!("Failed to initialize behavior defaults: {}", err.message).into()
-                        );
-                    }
-                }
-
-                player_wait_available().await;
-
-                let begin_sprite_nums = player_dispatch_event_beginsprite(
-                    Symbol::builtin(BuiltInSymbol::BeginSprite),
-                    &vec![]
-                ).await;
-
-                player_wait_available().await;
-
-                reserve_player_mut(|player| {
-                    for sprite_list in begin_sprite_nums.iter() {
-                        for (score_source, sprite_num) in sprite_list.iter() {
-                            if let Some(sprite) = get_score_sprite_mut(
-                                &mut player.movie,
-                                score_source,
-                                *sprite_num as i16,
-                            ) {
-                                for script_ref in &sprite.script_instance_list {
-                                    if let Some(entry) =
-                                        player.allocator.get_script_instance_entry_mut(script_ref.id())
-                                    {
-                                        entry.script_instance.begin_sprite_called = true;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                });
-
-                // Dispatch beginSprite to any remaining behaviors not handled above
-                // (e.g., puppet sprites not in the score's sprite_spans)
-                let remaining_behaviors: Vec<ScriptInstanceRef> = reserve_player_mut(|player| {
-                    behaviors_to_init.iter()
-                        .filter(|(behavior_ref, _)| {
-                            player.allocator.get_script_instance_entry(behavior_ref.id())
-                                .map_or(false, |entry| !entry.script_instance.begin_sprite_called)
-                        })
-                        .map(|(behavior_ref, _)| behavior_ref.clone())
-                        .collect()
-                });
-
-                for behavior_ref in &remaining_behaviors {
-                    let receivers = vec![behavior_ref.clone()];
-                    let _ = player_invoke_targeted_event(
-                        Symbol::builtin(BuiltInSymbol::BeginSprite),
-                        &vec![],
-                        Some(&receivers),
-                    ).await;
-                }
-
-                if !remaining_behaviors.is_empty() {
-                    reserve_player_mut(|player| {
-                        for behavior_ref in &remaining_behaviors {
-                            if let Some(entry) =
-                                player.allocator.get_script_instance_entry_mut(behavior_ref.id())
-                            {
-                                entry.script_instance.begin_sprite_called = true;
-                            }
-                        }
-                    });
-                }
-
-                player_wait_available().await;
-
-                // 3. Send stepFrame to actorList — gate on in_step_frame so a
-                // nested go() (e.g. enterFrame handler calling mach8_go) does
-                // not re-dispatch stepFrame on the same actorList during the
-                // current frame cycle.
-                let step_frame_entered = reserve_player_mut(|player| {
-                    if player.in_step_frame { return true; }
-                    player.in_step_frame = true;
-                    false
-                });
-                if !step_frame_entered {
-                    let (actor_list_snapshot, mut active_actor_ids, mut actor_list_generation) =
-                        reserve_player_ref(|player| player.actor_list_stepframe_snapshot());
-
-                    for (idx, actor_ref) in actor_list_snapshot.iter().enumerate() {
-                        let still_active = active_actor_ids.contains(&actor_ref.unwrap());
-
-                        if still_active {
-                            let result =
-                                player_call_datum_handler(&actor_ref, Symbol::builtin(BuiltInSymbol::StepFrame), &vec![]).await;
-
-                            if let Err(err) = result {
-                                if err.code == ScriptErrorCode::Abort {
-                                    reserve_player_mut(|player| {
-                                        player.is_in_frame_update = false;
-                                        player.in_step_frame = false;
-                                    });
-                                    return Ok(DatumRef::Void);
-                                }
-                                error!("⚠ stepFrame[{}] error: {}", idx, err.message);
-                                reserve_player_mut(|player| {
-                                    player.on_script_error(&err);
-                                    player.is_in_frame_update = false;
-                                    player.in_step_frame = false;
-                                });
-                                return Ok(DatumRef::Void);
-                            }
-
-                            let refreshed_active_ids = reserve_player_ref(|player| {
-                                if player.actor_list_generation != actor_list_generation {
-                                    Some(player.actor_list_active_ids())
-                                } else {
-                                    None
-                                }
-                            });
-
-                            if let Some((next_active_actor_ids, next_actor_list_generation)) = refreshed_active_ids
-                            {
-                                active_actor_ids = next_active_actor_ids;
-                                actor_list_generation = next_actor_list_generation;
-                            }
-                        }
-                    }
-                    reserve_player_mut(|player| { player.in_step_frame = false; });
-                }
-
-                player_wait_available().await;
-
-                // Prevent re-entrant calls
-                let already_updating = reserve_player_mut(|player| {
-                    if player.is_in_frame_update {
-                        return true;
-                    }
-                    player.is_in_frame_update = true;
-                    false
-                });
-
-                if !already_updating {
-                    reserve_player_mut(|player| {
-                        player.in_prepare_frame = true;
-                    });
-
-                    // Relay prepareFrame to timeout targets
-                    dispatch_system_event_to_timeouts(BuiltInSymbol::PrepareFrame, &vec![]).await;
-
-                    // 4. Send prepareFrame: Sprite behaviors -> Frame behaviors
-                    let _ = dispatch_event_to_all_behaviors(Symbol::builtin(BuiltInSymbol::PrepareFrame), &vec![]).await;
-
-                    reserve_player_mut(|player| {
-                        player.in_prepare_frame = false;
-                    });
-
-                    player_wait_available().await;
-
-                    reserve_player_mut(|player| {
-                        player.in_enter_frame = true;
-                    });
-
-                    // 5. Send enterFrame: Sprite behaviors -> Frame behaviors
-                    let _ = dispatch_event_to_all_behaviors(Symbol::builtin(BuiltInSymbol::EnterFrame), &vec![]).await;
-
-                    reserve_player_mut(|player| {
-                        player.in_enter_frame = false;
-                    });
-
-                    player_wait_available().await;
-
-                    reserve_player_mut(|player| {
-                        player.is_in_frame_update = false;
-                    });
-                } else {
-                    // Benign re-entrancy guard (a `go` fired while a frame update
-                    // was already in progress); debug! to keep it out of the
-                    // browser console.
-                    debug!("Failed to run frame update in go function, already updating");
-                }
-            }
-        }
-        
-        if frame_advanced {
-            reserve_player_mut(|player| {
-                player.has_frame_changed_in_go = true;
-            });
-        } else {
-            // go(the frame) — stay on current frame
-            // ONLY set go_same_frame, NOT has_frame_changed_in_go
-            reserve_player_mut(|player| {
-                player.go_same_frame = true;
-            });
-        }
-
-        Ok(DatumRef::Void)
+        let session = crate::player::retained_session_handle()
+            .ok_or_else(|| ScriptError::new("runtime session is not initialized".to_owned()))?;
+        let player_id = crate::player::active_player_id() as PlayerId;
+        let request = session
+            .borrow_mut()
+            .with_player(player_id, |mut context| {
+                Self::prepare_movie_async(&mut context, player_id, MovieAsyncKind::Go, args)
+            })
+            .ok_or_else(cancelled_scope_error)??;
+        debug!("legacy go entry routed through owner-bound movie executor for player {}", player_id);
+        execute_movie_async(session, request).await
     }
 
-    pub fn puppet_sprite(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let sprite_number = player.get_datum(&args[0]).int_value()?;
-            let is_puppet = player.get_datum(&args[1]).int_value()? == 1;
+    pub fn puppet_sprite(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let sprite_number = Self::checked_datum(runtime, &args[0])?.int_value()?;
+        let is_puppet = Self::checked_datum(runtime, &args[1])?.int_value()? == 1;
+        let player = &mut *runtime.player;
+        {
 
             if !is_puppet {
                 // Director defers reverting an unpuppeted sprite to the Score:
@@ -716,11 +313,13 @@ impl MovieHandlers {
             player.refresh_stage_behavior_channel_cache_entry(sprite_number as i16);
             player.invalidate_active_stage_filmloop_cache();
             Ok(DatumRef::Void)
-        })
+        }
     }
 
-    pub fn sprite(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn sprite(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let sprite_datum = Self::checked_datum(runtime, &args[0])?.clone();
+        let player = &mut *runtime.player;
+        {
             // "nameOrNum Required. A string or integer that specifies the name
             // or index position of the sprite." (Director 11.5 Scripting
             // Dictionary, `sprite()`). A string names a span — the Property
@@ -735,7 +334,7 @@ impl MovieHandlers {
             // `getVariable(sprite(pFlashSprite), "_level0", 0)`, so the Flash
             // handle came back VOID, `StartOffGame` was never delivered to the
             // SWF, and the movie sat on its menu frame with a blank stage.
-            let datum = player.get_datum(&args[0]);
+            let datum = &sprite_datum;
             if let Datum::String(name) = datum {
                 let name = name.clone();
                 if let Some(number) = player.movie.score.find_sprite_number_by_name(&name) {
@@ -748,146 +347,21 @@ impl MovieHandlers {
             }
             let sprite_number = datum.int_value()?;
             Ok(player.alloc_datum(Datum::SpriteRef(sprite_number as i16)))
-        })
+        }
     }
 
-    pub async fn send_sprite(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        let (message, remaining_args, receivers) = reserve_player_mut(|player| {
-            let sprite_num = player.get_datum(&args[0]).int_value()
-                .map_err(|e| ScriptError::new(format!("sendSprite: invalid sprite number: {:?}", e)))?;
-            let message = player.get_datum(&args[1]).symbol_value()
-                .map_err(|e| ScriptError::new(format!("sendSprite: invalid message: {:?}", e)))?;
-            let remaining_args = &args[2..].to_vec();
-            let sprite = player.movie.score.get_sprite(sprite_num as i16)
-                .ok_or_else(|| ScriptError::new(format!("sendSprite: sprite {} not found", sprite_num)))?;
-            let fallback = sprite.script_instance_list.clone();
-            let receivers = player.get_sprite_script_instance_ids(
-                sprite_num as i16,
-                fallback.as_slice(),
-            );
-            Ok((message.clone(), remaining_args.clone(), receivers))
-        })?;
-
-        // sendSprite returns the return value of the first handler that handles the message
-        let mut last_return_value = DatumRef::Void;
-        let mut handled_by_sprite = false;
-        for receiver in receivers {
-            let handler_pair = reserve_player_ref(|player| {
-                ScriptInstanceUtils::get_script_instance_handler(
-                    message,
-                    &receiver,
-                    player,
-                )
-            })?;
-
-            if let Some(handler_ref) = handler_pair {
-                match player_call_script_handler(Some(receiver), handler_ref, &remaining_args).await {
-                    Ok(scope) => {
-                        if !scope.passed {
-                            handled_by_sprite = true;
-                        }
-                        // Capture the return value from the handler
-                        if scope.return_value != DatumRef::Void {
-                            last_return_value = scope.return_value;
-                        }
-                    }
-                    Err(err) => {
-                        if err.code != ScriptErrorCode::Abort {
-                            web_sys::console::warn_1(
-                                &format!("⚠ sendSprite continuing after error in handler '{}': {}", message, err.message).into()
-                            );
-                        } else {
-                            return Err(err);
-                        }
-                    }
-                }
-            }
-        }
-
-        if !handled_by_sprite {
-            player_invoke_static_event(message, &remaining_args).await?;
-        }
-
-        Ok(last_return_value)
+    pub fn external_param_count(runtime: &mut ExecutionContext<'_>, _args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let count = runtime.player.external_params.len() as i32;
+        Ok(runtime.player.alloc_datum(Datum::Int(count)))
     }
 
-    pub async fn send_all_sprites(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        let (message, remaining_args, receivers) = reserve_player_mut(|player| {
-            let message = player.get_datum(&args[0]).symbol_value()
-                .map_err(|e| ScriptError::new(format!("sendAllSprites: invalid message: {:?}", e)))?;
-            let remaining_args = &args[1..].to_vec();
-
-            // Collect receivers from stage score
-            let mut receivers: Vec<ScriptInstanceRef> = player.active_stage_script_instance_ids();
-
-            // Also collect receivers from filmloop scores
-            let active_filmloops = player.get_active_filmloop_scores();
-            for (member_ref, filmloop_frame) in active_filmloops {
-                if let Some(filmloop_score) = player
-                    .movie
-                    .cast_manager
-                    .find_member_by_ref(&member_ref)
-                    .and_then(|member| match &member.member_type {
-                        crate::player::cast_member::CastMemberType::FilmLoop(film_loop) => {
-                            Some(&film_loop.score)
-                        }
-                        _ => None,
-                    })
-                {
-                    let filmloop_receivers =
-                        filmloop_score.get_active_script_instance_list_for_frame(filmloop_frame);
-                    receivers.extend(filmloop_receivers);
-                }
-            }
-
-            Ok((message.clone(), remaining_args.clone(), receivers))
-        })?;
-        
-        let mut handled_by_sprite = false;
-        let mut last_return_value = DatumRef::Void;
-        for receiver in receivers {
-            let handler_pair = reserve_player_ref(|player| {
-                ScriptInstanceUtils::get_script_instance_handler(message, &receiver, player)
-            })?;
-            if let Some(handler_ref) = handler_pair {
-                match player_call_script_handler(Some(receiver), handler_ref, &remaining_args).await {
-                    Ok(scope) => {
-                        if !scope.passed {
-                            handled_by_sprite = true;
-                        }
-                        if scope.return_value != DatumRef::Void {
-                            last_return_value = scope.return_value;
-                        }
-                    }
-                    Err(err) => {
-                        web_sys::console::warn_1(
-                            &format!("⚠ sendAllSprites continuing after error in handler: {}", err.message).into()
-                        );
-                    }
-                }
-            }
-        }
-
-        if !handled_by_sprite {
-            player_invoke_static_event(message, &remaining_args).await?;
-        }
-
-        Ok(last_return_value)
-    }
-
-    pub fn external_param_count(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let count = player.external_params.len() as i32;
-            Ok(player.alloc_datum(Datum::Int(count)))
-        })
-    }
-
-    pub fn external_param_name(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let datum = player.get_datum(&args[0]);
+    pub fn external_param_name(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let datum = Self::checked_datum(runtime, &args[0])?.clone();
+        let player = &mut *runtime.player;
+        {
 
             // Case 1: argument is a string (lookup by name, case-insensitive)
-            if let Ok(key) = datum.string_value() {
+            if let Ok(key) = datum.string_value(runtime.symbols) {
                 if player
                     .external_params
                     .keys()
@@ -912,15 +386,16 @@ impl MovieHandlers {
             // Invalid argument type
             log_i("external_param_name(): invalid argument type, returning Void");
             Ok(player.alloc_datum(Datum::Void))
-        })
+        }
     }
 
-    pub fn external_param_value(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let datum = player.get_datum(&args[0]);
+    pub fn external_param_value(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let datum = Self::checked_datum(runtime, &args[0])?.clone();
+        let player = &mut *runtime.player;
+        {
 
             // Case 1: argument is a string (lookup by name)
-            if let Ok(key) = datum.string_value() {
+            if let Ok(key) = datum.string_value(runtime.symbols) {
                 if let Some((_k, value)) = player
                     .external_params
                     .iter()
@@ -949,7 +424,7 @@ impl MovieHandlers {
                 "external_param_value(): invalid argument type, returning Void"
             ));
             Ok(player.alloc_datum(Datum::Void))
-        })
+        }
     }
 
     /// `stopEvent()` — Director 11.5 Scripting Dictionary, Movie method:
@@ -959,63 +434,53 @@ impl MovieHandlers {
     ///
     /// The event-dispatch loops read (and clear) this flag; see
     /// `player_invoke_event_to_instances` / `player_invoke_static_event`.
-    pub fn stop_event(_: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            player.event_stopped = true;
-        });
+    pub fn stop_event(runtime: &mut ExecutionContext<'_>, _args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.player.event_stopped = true;
         Ok(DatumRef::Void)
     }
 
-    pub fn get_pref(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let pref_name = player.get_datum(&args[0]).string_value()?;
-            let storage = web_sys::window()
-                .and_then(|w| w.local_storage().ok().flatten());
-            if let Some(storage) = storage {
-                let key = format!("dirplayer_pref_{}", pref_name);
-                if let Ok(Some(value)) = storage.get_item(&key) {
-                    return Ok(player.alloc_datum(Datum::String(value)));
-                }
+    pub fn get_pref(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let pref_name = Self::checked_datum(runtime, &args[0])?.string_value(runtime.symbols)?;
+        let storage = web_sys::window()
+            .and_then(|w| w.local_storage().ok().flatten());
+        if let Some(storage) = storage {
+            let key = format!("dirplayer_pref_{}", pref_name);
+            if let Ok(Some(value)) = storage.get_item(&key) {
+                return Ok(runtime.player.alloc_datum(Datum::String(value)));
             }
-            Ok(DatumRef::Void)
-        })
+        }
+        Ok(DatumRef::Void)
     }
 
-    pub fn set_pref(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let pref_name = player.get_datum(&args[0]).string_value()?;
-            let pref_value = player.get_datum(&args[1]).string_value()?;
-            let storage = web_sys::window()
-                .and_then(|w| w.local_storage().ok().flatten());
-            if let Some(storage) = storage {
-                let key = format!("dirplayer_pref_{}", pref_name);
-                let _ = storage.set_item(&key, &pref_value);
-            }
-            Ok(DatumRef::Void)
-        })
+    pub fn set_pref(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let pref_name = Self::checked_datum(runtime, &args[0])?.string_value(runtime.symbols)?;
+        let pref_value = Self::checked_datum(runtime, &args[1])?.string_value(runtime.symbols)?;
+        let storage = web_sys::window()
+            .and_then(|w| w.local_storage().ok().flatten());
+        if let Some(storage) = storage {
+            let key = format!("dirplayer_pref_{}", pref_name);
+            let _ = storage.set_item(&key, &pref_value);
+        }
+        Ok(DatumRef::Void)
     }
 
-    pub fn go_to_net_page(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn go_to_net_page(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         if args.is_empty() {
             return Ok(DatumRef::Void);
         }
         // LeechProtectionRemovalHelp `disableGoToNetPage` — swallow the call so
         // a movie's leech check can't bounce the player to the original site.
-        if reserve_player_ref(|player| player.env_overrides.disable_goto_net_page) {
+        if runtime.player.env_overrides.disable_goto_net_page {
             return Ok(DatumRef::Void);
         }
-        let (url, target) = reserve_player_ref(|player| {
-            let url = player.get_datum(&args[0]).string_value()?;
-            let target = if args.len() > 1 {
-                player
-                    .get_datum(&args[1])
-                    .string_value()
-                    .unwrap_or_else(|_| "_blank".to_string())
-            } else {
-                "_blank".to_string()
-            };
-            Ok::<(String, String), ScriptError>((url, target))
-        })?;
+        let url = Self::checked_datum(runtime, &args[0])?.string_value(runtime.symbols)?;
+        let target = if let Some(target_ref) = args.get(1) {
+            Self::checked_datum(runtime, target_ref)?
+                .string_value(runtime.symbols)
+                .unwrap_or_else(|_| "_blank".to_string())
+        } else {
+            "_blank".to_string()
+        };
 
         if let Some(code) = url.strip_prefix("javascript:") {
             // Defer via setTimeout(...,0) so the current WASM call stack
@@ -1039,39 +504,37 @@ impl MovieHandlers {
         Ok(DatumRef::Void)
     }
 
-    pub fn go_to_net_movie(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn go_to_net_movie(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         // LeechProtectionRemovalHelp `disableGoToNetMovie` — see
         // `go_to_net_page`. Note this pins the CURRENT movie in place, so a
         // movie that legitimately navigates by `gotoNetMovie` will stop
         // advancing once the movie's setup script calls this.
-        if reserve_player_ref(|player| player.env_overrides.disable_goto_net_movie) {
+        if runtime.player.env_overrides.disable_goto_net_movie {
             return Ok(DatumRef::Void);
         }
-        reserve_player_mut(|player| {
-            let raw_url = player.get_datum(&args[0]).string_value()?;
+        let raw_url = Self::checked_datum(runtime, &args[0])?.string_value(runtime.symbols)?;
 
-            // Parse URL and extract #fragment marker
-            let (fetch_url, target) = if let Some(hash_pos) = raw_url.find('#') {
-                let url_part = raw_url[..hash_pos].to_string();
-                let fragment = raw_url[hash_pos + 1..].to_string();
-                let target = if fragment.is_empty() {
-                    MovieFrameTarget::Default
-                } else {
-                    MovieFrameTarget::Label(fragment)
-                };
-                (url_part, target)
+        // Parse URL and extract #fragment marker
+        let (fetch_url, target) = if let Some(hash_pos) = raw_url.find('#') {
+            let url_part = raw_url[..hash_pos].to_string();
+            let fragment = raw_url[hash_pos + 1..].to_string();
+            let target = if fragment.is_empty() {
+                MovieFrameTarget::Default
             } else {
-                (raw_url, MovieFrameTarget::Default)
+                MovieFrameTarget::Label(fragment)
             };
+            (url_part, target)
+        } else {
+            (raw_url, MovieFrameTarget::Default)
+        };
 
-            // Start the network fetch (non-blocking)
-            let task_id = player.net_manager.preload_net_thing(fetch_url.clone());
+        // Start the network fetch (non-blocking)
+        let task_id = runtime.player.net_manager.preload_net_thing(fetch_url.clone());
 
-            // Store the pending operation (replaces any previous pending one, cancelling it)
-            player.pending_goto_net_movie = Some((task_id, target));
+        // Store the pending operation (replaces any previous pending one, cancelling it)
+        runtime.player.pending_goto_net_movie = Some((task_id, target));
 
-            Ok(player.alloc_datum(Datum::Int(task_id as i32)))
-        })
+        Ok(runtime.player.alloc_datum(Datum::Int(task_id as i32)))
     }
 
     /// `pass` — "passes an event message to the next location in the message
@@ -1092,353 +555,75 @@ impl MovieHandlers {
     /// and gameLogic opens with `getAt(ballState, player)`. Setting the flag
     /// without stopping the handler ran gameLogic anyway and raised on exactly
     /// the VOID the guard existed to avoid.
-    pub fn pass(_: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn pass(runtime: &mut ExecutionContext<'_>, _args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let player = &mut *runtime.player;
+        {
             let scope_ref = player.current_scope_ref();
             let scope = player.scopes.get_mut(scope_ref).unwrap();
             scope.passed = true;
             scope.stop_requested = true;
             Ok(DatumRef::Void)
-        })
+        }
     }
 
     pub async fn execute_frame_update() -> Result<(), ScriptError> {
-        player_wait_available().await;
-
-        // Prevent re-entrant calls, and skip the update when the playhead already
-        // moved this tick.
-        //
-        // Both conditions must be tested BEFORE claiming `is_in_frame_update`.
-        // Claiming first and then bailing on `has_player_frame_changed` leaked the
-        // claim — the flag is only cleared on the normal path at the end of this
-        // function — so from the first tick where the playhead had moved, every
-        // later call saw `already_updating` and returned immediately. Frame scripts
-        // then never ran again for the rest of the movie: no enterFrame, no
-        // exitFrame, no stepFrame. AreaZero's menu goes through
-        // `[FS] Hold Frame And Loop And Update`, whose enterFrame drives
-        // `gSystem.ScriptManager.enterFrame()` — and with that dead, its camera
-        // rig, timers, triggers and handler list all stopped updating while the
-        // frame loop and timeout intervals kept running, so the movie looked alive
-        // but frozen.
-        let (proceed, already_updating, frame_changed, current_frame) =
-            reserve_player_mut(|player| {
-                let already_updating = player.is_in_frame_update;
-                let frame_changed = player.has_player_frame_changed;
-                let current_frame = player.movie.current_frame;
-                if already_updating || frame_changed {
-                    return (false, already_updating, frame_changed, current_frame);
-                }
-                player.is_in_frame_update = true;
-                (true, already_updating, frame_changed, current_frame)
-            });
-
-        if !proceed {
-            debug!("🔄 execute_frame_update SKIPPED (already_updating={}, frame_changed={}, frame={})",
-                already_updating, frame_changed, current_frame);
-            return Ok(());
-        }
-
-        player_wait_available().await;
-
-        // Sync all cached scriptInstanceLists back to sprite Vecs.
-        // Behaviors added via scriptInstanceList.add() only exist in the cache
-        // until synced — this ensures all event dispatch within this frame sees them.
-        reserve_player_mut(|player| {
-            player.sync_all_script_instance_lists();
-        });
-
-        reserve_player_mut(|player| {
-            player.movie.score.apply_tween_modifiers(player.movie.current_frame);
-        });
-
-        // 1. Send stepFrame to actorList — gate on in_step_frame so a nested
-        // go() does not re-dispatch stepFrame on the same actorList during
-        // the current frame cycle.
-        let step_frame_entered = reserve_player_mut(|player| {
-            if player.in_step_frame { return true; }
-            player.in_step_frame = true;
-            false
-        });
-        if !step_frame_entered {
-            let (actor_list_snapshot, mut active_actor_ids, mut actor_list_generation) =
-                reserve_player_ref(|player| player.actor_list_stepframe_snapshot());
-
-            for (idx, actor_ref) in actor_list_snapshot.iter().enumerate() {
-                let still_active = active_actor_ids.contains(&actor_ref.unwrap());
-
-                if still_active {
-                    let result =
-                        player_call_datum_handler(&actor_ref, Symbol::builtin(BuiltInSymbol::StepFrame), &vec![]).await;
-
-                    if let Err(err) = result {
-                        if err.code == ScriptErrorCode::Abort {
-                            reserve_player_mut(|player| {
-                                player.is_in_frame_update = false;
-                                player.in_step_frame = false;
-                            });
-                            return Err(err);
-                        }
-                        error!("⚠ stepFrame[{}] error: {}", idx, err.message);
-                        reserve_player_mut(|player| {
-                            player.on_script_error(&err);
-                            player.is_in_frame_update = false;
-                            player.in_step_frame = false;
-                        });
-                        return Err(err);
-                    }
-
-                    let refreshed_active_ids = reserve_player_ref(|player| {
-                        if player.actor_list_generation != actor_list_generation {
-                            Some(player.actor_list_active_ids())
-                        } else {
-                            None
-                        }
-                    });
-
-                    if let Some((next_active_actor_ids, next_actor_list_generation)) =
-                        refreshed_active_ids
-                    {
-                        active_actor_ids = next_active_actor_ids;
-                        actor_list_generation = next_actor_list_generation;
-                    }
-                }
-            }
-            reserve_player_mut(|player| { player.in_step_frame = false; });
-        }
-
-        player_wait_available().await;
-
-        reserve_player_mut(|player| {
-            player.in_prepare_frame = true;
-        });
-
-        // mouseEnter/mouseWithin/mouseLeave are per-frame rollover events, not
-        // movement events — Director keeps sending mouseWithin every frame the
-        // pointer stays inside a sprite's active area. Re-evaluate the hovered
-        // set here so a behaviour polling from mouseWithin runs even while the
-        // cursor is still.
-        crate::player::events::dispatch_rollover_events();
-
-        // Animated GIF members: put up whichever frame the elapsed time calls
-        // for. Done here, once per frame, so an animation runs at its own
-        // delays regardless of the movie's tempo.
-        crate::player::gif::tick_gif_animations();
-
-        // Relay prepareFrame to timeout targets
-        dispatch_system_event_to_timeouts(BuiltInSymbol::PrepareFrame, &vec![]).await;
-
-        dispatch_event_to_all_behaviors(Symbol::builtin(BuiltInSymbol::PrepareFrame), &vec![]).await;
-
-        // A prepareFrame handler mounted a new movie via eager go(): stop the
-        // frame update; the new movie runs nothing until its init sequence.
-        if reserve_player_ref(|player| player.pending_movie_init) {
-            reserve_player_mut(|player| {
-                player.in_prepare_frame = false;
-                player.is_in_frame_update = false;
-            });
-            return Ok(());
-        }
-
-        // Tick W3D registered #timeMS events + animation clock + dispatch
-        // any queued PhysX collision callbacks. This is the *real* per-frame
-        // path (the one in mod.rs::start_movie_sequence only fires on
-        // startup); without these the avatar froze on its first frame after
-        // I moved the renderer's dt advance onto runtime_state.
-        crate::player::events::dispatch_w3d_timer_events().await;
-        crate::player::events::tick_w3d_animations().await;
-        crate::player::events::tick_w3d_particles().await;
-        crate::player::events::tick_w3d_collisions().await;
-        crate::player::events::dispatch_physx_collision_callbacks().await;
-
-        reserve_player_mut(|player| {
-            player.in_prepare_frame = false;
-        });
-
-        player_wait_available().await;
-
-        // Skip mid-frame render for performance. Director renders once per
-        // frame after enterFrame. The post-enterFrame render below captures
-        // the final visual state. If a game needs mid-frame visibility,
-        // it can call updateStage() explicitly from prepareFrame.
-        // crate::rendering::draw_frame_immediate();
-
-        reserve_player_mut(|player| {
-            player.in_enter_frame = true;
-        });
-
-        dispatch_event_to_all_behaviors(Symbol::builtin(BuiltInSymbol::EnterFrame), &vec![]).await;
-
-        reserve_player_mut(|player| {
-            player.in_enter_frame = false;
-        });
-
-        // An enterFrame handler mounted a new movie via eager go().
-        if reserve_player_ref(|player| player.pending_movie_init) {
-            reserve_player_mut(|player| {
-                player.is_in_frame_update = false;
-            });
-            return Ok(());
-        }
-
-        // enterFrame handlers are allowed to change the current visual state
-        // (camera/model transforms, tunnelDepth, etc.) without calling
-        // updateStage(), so flush one more redraw before the frame ends.
-        crate::rendering::draw_frame_immediate();
-
-        player_wait_available().await;
-
-        reserve_player_mut(|player| {
-            player.is_in_frame_update = false;
-        });
-
-        Ok(())
+        let session = crate::player::retained_session_handle()
+            .ok_or_else(|| ScriptError::new("runtime session is not initialized".to_owned()))?;
+        let player_id = crate::player::active_player_id() as PlayerId;
+        let owner = session.borrow_mut().with_player(player_id, |context| context.player.owner.clone())
+            .ok_or_else(cancelled_scope_error)?;
+        execute_frame_update_owned(
+            session,
+            player_id,
+            owner,
+            crate::player::testing_shared::now_ms().max(0.0),
+        ).await.map(|_| ())
     }
 
-    pub async fn update_stage(_: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        // An explicit updateStage draws now, handler or not.
-        reserve_player_mut(|player| player.draw_hold_since_ms = None);
-        let should_yield = reserve_player_ref(|player| {
-            // Yield when: mouse handler context, command handler yielding,
-            // yield-safe state, OR mouse is currently down (covers
-            // "repeat while the stillDown" loops called from exitFrame).
-            Ok(player.is_yield_safe()
-                || player.command_handler_yielding
-                || player.in_mouse_command
-                || player.movie.mouse_down)
-        })?;
-
-        // While a keyDown busy-wait loop is running (command_handler_yielding),
-        // the main frame loop is paused to keep its frame scripts from
-        // interleaving with the handler's bytecodes and corrupting the shared
-        // scope stack. But that also freezes any frame-driven animation (fish's
-        // `on prepareFrame` swimming fish) for as long as the key is held. Run
-        // the frame update HERE instead — on this task, nested in the keyDown
-        // handler, so it's sequential (no concurrent scope-stack corruption) —
-        // throttled to the movie tempo so a tight `repeat while keyPressed`
-        // loop calling updateStage() rapidly doesn't fast-forward the movie.
-        // execute_frame_update()'s is_in_frame_update guard blocks the recursive
-        // updateStage() that fires from inside prepareFrame.
-        let run_frame_anim = reserve_player_mut(|player| {
-            if player.is_in_frame_update {
-                return false;
-            }
-            // Two kinds of busy-wait block the main frame loop, and both need
-            // the frame update run from here instead:
-            //
-            //  - keyboard (`command_handler_yielding`, set for keyDown)
-            //  - mouse: `repeat while the stillDown` inside an `on mouseDown`,
-            //    which runs under in_mouse_command with the frame loop skipping
-            //    updates for as long as the button is held.
-            //
-            // snowcraft's throw is the mouse case: you press a kid, hold to
-            // charge the power meter, and drag to aim, all inside that loop.
-            // Shockwave keeps the rest of the playfield animating while you
-            // hold — the other kids walk and duck, snowballs already in flight
-            // keep travelling — because that motion is driven by `prepareFrame`
-            // behaviors. Without this the whole game froze the instant you
-            // grabbed a snowball and only resumed on release.
-            //
-            // execute_frame_update dispatches stepFrame/prepareFrame and
-            // renders; it does NOT advance the playhead, so this animates the
-            // current frame without letting the movie run on behind the
-            // blocked handler.
-            let in_busy_wait = player.command_handler_yielding
-                || (player.in_mouse_command && player.movie.mouse_down);
-            if !in_busy_wait {
-                return false;
-            }
-            let now = js_sys::Date::now();
-            let tempo = player.current_frame_tempo.max(1);
-            let interval = 1000.0 / tempo as f64;
-            if now - player.last_kb_loop_frame_ms >= interval {
-                player.last_kb_loop_frame_ms = now;
-                true
-            } else {
-                false
-            }
-        });
-        if run_frame_anim {
-            if let Err(err) = Self::execute_frame_update().await {
-                if err.code != ScriptErrorCode::Abort {
-                    reserve_player_mut(|player| player.on_script_error(&err));
-                }
-            }
-        }
-
-        // Director's updateStage() forces an immediate stage redraw even from
-        // inside enterFrame/prepareFrame loops. Yielding to the browser event loop
-        // is only needed for busy-wait input handlers.
-        reserve_player_mut(|player| { player.stage_dirty = true; });
-        crate::rendering::draw_frame_immediate();
-
-        // Yield to allow the browser event loop to process pending events
-        // (mouse up/move, keyboard, etc.). This is essential for scripts
-        // using "repeat while the mouseDown" or similar busy-wait loops.
-        // The mouse_up()/mouse_down() WASM exports update movie.mouse_down
-        // immediately via reserve_player_mut, so the state is correct when
-        // the script resumes. The MouseUp command stays queued and won't
-        // dispatch until the current handler finishes.
-        //
-        // Rate-limited to once per YIELD_INTERVAL_MS, because the yield is not
-        // free: `sleep` allocates a gloo_timers Timeout, costing a `setTimeout`
-        // to arm and a `clearTimeout` when the future drops. Yielding on EVERY
-        // updateStage() meant a script looping on it paid two JS timer
-        // operations per iteration — in Argent Free Ride's level load that put
-        // `clearTimeout` at 42% of self time with the tab unresponsive. Once
-        // every 8 ms still hands the browser ~120 chances a second to deliver
-        // input, which is what the busy-wait loops actually need.
-        // `nothing_async` below already throttles for the same reason.
-        const YIELD_INTERVAL_MS: f64 = 8.0;
-        let yield_now = should_yield
-            && reserve_player_mut(|player| {
-                let now = js_sys::Date::now();
-                if now - player.last_update_stage_yield_ms >= YIELD_INTERVAL_MS {
-                    player.last_update_stage_yield_ms = now;
-                    true
-                } else {
-                    false
-                }
-            });
-        if yield_now {
-            async_std::task::sleep(std::time::Duration::from_millis(2)).await;
-        }
-
-        Ok(DatumRef::Void)
+    /// Owner-bound updateStage entrypoint. The caller supplies the frame
+    /// timestamp captured at its host boundary; the animation phase never
+    /// samples a clock after it starts.
+    pub async fn update_stage_at(
+        _args: &Vec<DatumRef>,
+        now_ms: f64,
+    ) -> Result<DatumRef, ScriptError> {
+        let session = crate::player::retained_session_handle()
+            .ok_or_else(|| ScriptError::new("runtime session is not initialized".to_owned()))?;
+        let player_id = crate::player::active_player_id() as PlayerId;
+        let owner = session.borrow_mut().with_player(player_id, |context| context.player.owner.clone())
+            .ok_or_else(cancelled_scope_error)?;
+        execute_movie_async(session, MovieAsyncRequest {
+            player_id,
+            owner,
+            kind: MovieAsyncKind::UpdateStage { now_ms },
+            args: Vec::new(),
+        }).await
     }
 
-    pub async fn nothing_async(_: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        let now = js_sys::Date::now();
-        let should_yield = reserve_player_mut(|player| {
-            // Only count calls inside frame scripts (busy-wait like waitABit).
-            // Reset counter when not in a frame script to prevent accumulation
-            // across unrelated nothing() calls (catalogue items, downloads, etc.)
-            if player.in_frame_script {
-                player.nothing_call_count += 1;
-            } else {
-                player.nothing_call_count = 0;
-                return false;
-            }
-            let many_calls = player.nothing_call_count >= 50;
-            let yield_due = now - player.last_nothing_yield_ms >= 16.0;
-            many_calls && yield_due
-        });
-
-        if should_yield {
-            reserve_player_mut(|player| {
-                player.nothing_call_count = 0;
-                player.last_nothing_yield_ms = now;
-            });
-
-            crate::rendering::draw_frame_immediate();
-
-            async_std::task::sleep(std::time::Duration::from_millis(2)).await;
-        }
-
-        Ok(DatumRef::Void)
+    pub async fn update_stage(_args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        Self::update_stage_at(_args, crate::player::testing_shared::now_ms().max(0.0)).await
     }
 
-    pub fn rollover(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    pub async fn nothing_async(_args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let session = crate::player::retained_session_handle()
+            .ok_or_else(|| ScriptError::new("runtime session is not initialized".to_owned()))?;
+        let player_id = crate::player::active_player_id() as PlayerId;
+        let owner = session.borrow_mut().with_player(player_id, |context| context.player.owner.clone())
+            .ok_or_else(cancelled_scope_error)?;
+        execute_movie_async(session, MovieAsyncRequest {
+            player_id,
+            owner,
+            kind: MovieAsyncKind::Nothing,
+            args: Vec::new(),
+        }).await
+    }
+
+    pub fn rollover(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        if let Some(arg) = args.first() {
+            Self::checked_datum(runtime, arg)?;
+        }
+        let player = &mut *runtime.player;
+        {
             if !args.is_empty() {
                 // rollOver(spriteNum) - returns TRUE if the mouse is over the specified sprite
                 let sprite_num = player.get_datum(&args[0]).int_value()?;
@@ -1455,7 +640,7 @@ impl MovieHandlers {
                 let sprite = get_sprite_at(player, player.mouse_loc.0, player.mouse_loc.1, false);
                 Ok(player.alloc_datum(Datum::Int(sprite.unwrap_or(0) as i32)))
             }
-        })
+        }
     }
 
     pub fn puppet_sound(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
@@ -1524,5 +709,940 @@ impl MovieHandlers {
             player.is_playing = false;
             Ok(DatumRef::Void)
         })
+    }
+}
+
+
+fn cancelled_scope_error() -> ScriptError {
+    crate::player::cancelled_scope_error()
+}
+
+/// Execute a movie request after the evaluator has released its session borrow.
+/// All values crossing this boundary are owned handles; every reacquisition
+/// checks the captured owner before mutating the player.
+pub(crate) async fn execute_movie_async(
+    session: RuntimeSessionHandle,
+    request: MovieAsyncRequest,
+) -> Result<DatumRef, ScriptError> {
+    let player_id = request.player_id;
+    let owner = request.owner.clone();
+    ensure_movie_owner(&session, player_id, &owner)?;
+    match request.kind {
+        MovieAsyncKind::Do => {
+            let source = session.borrow_mut().with_player(player_id, |context| {
+                let Some(value) = request.args.first() else { return Ok(String::new()) };
+                MovieHandlers::checked_datum(&context, value)?;
+                context.player.get_datum(value).string_value(context.symbols)
+            }).ok_or_else(cancelled_scope_error)??;
+            if source.trim().is_empty() || source.trim().eq_ignore_ascii_case("nothing") {
+                return Ok(DatumRef::Void);
+            }
+            // The command evaluator owns all child and host continuations. It
+            // is awaited only after the session borrow used to read `source`.
+            Box::pin(crate::player::eval_lingo_command_owned(session, player_id, owner, source)).await
+        }
+        MovieAsyncKind::Go => execute_go_owned(session, player_id, owner, request.args).await,
+        MovieAsyncKind::Play => execute_play_owned(session, player_id, owner, request.args).await,
+        MovieAsyncKind::UpdateStage { now_ms } => {
+            let should_yield = session.borrow_mut().with_player(player_id, |context| {
+                if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                    return Err(cancelled_scope_error());
+                }
+                context.player.draw_hold_since_ms = None;
+                Ok(context.player.is_yield_safe()
+                    || context.player.command_handler_yielding
+                    || context.player.in_mouse_command
+                    || context.player.movie.mouse_down)
+            }).ok_or_else(cancelled_scope_error)??;
+
+            // updateStage is also the animation pump for Director's busy-wait
+            // input handlers.  Run one owner-bound frame update at movie tempo
+            // while the normal frame loop is suspended, then redraw after all
+            // session borrows have ended.
+            let run_frame_anim = session.borrow_mut().with_player(player_id, |context| {
+                if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                    return Err(cancelled_scope_error());
+                }
+                if context.player.is_in_frame_update {
+                    return Ok(false);
+                }
+                let busy = context.player.command_handler_yielding
+                    || (context.player.in_mouse_command && context.player.movie.mouse_down);
+                if !busy {
+                    return Ok(false);
+                }
+                let now = now_ms;
+                let interval = 1000.0 / context.player.current_frame_tempo.max(1) as f64;
+                if now - context.player.last_kb_loop_frame_ms >= interval {
+                    context.player.last_kb_loop_frame_ms = now;
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }).ok_or_else(cancelled_scope_error)??;
+            if run_frame_anim {
+                execute_frame_update_owned(
+                    session.clone(), player_id, owner.clone(), now_ms,
+                ).await?;
+            }
+            let result = session.borrow_mut().with_player(player_id, |context| {
+                if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                    return Err(cancelled_scope_error());
+                }
+                context.player.stage_dirty = true;
+                Ok(())
+            }).ok_or_else(cancelled_scope_error)??;
+            crate::rendering::draw_frame_for_owner(&session, player_id, &owner)?;
+            let yield_now = should_yield && session.borrow_mut().with_player(player_id, |context| {
+                if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                    return Err(cancelled_scope_error());
+                }
+                let now = now_ms;
+                if now - context.player.last_update_stage_yield_ms >= 8.0 {
+                    context.player.last_update_stage_yield_ms = now;
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }).ok_or_else(cancelled_scope_error)??;
+            if yield_now {
+                async_std::task::sleep(std::time::Duration::from_millis(2)).await;
+            }
+            Ok(DatumRef::Void)
+        }
+        MovieAsyncKind::Nothing => execute_nothing_owned(&session, player_id, &owner).await,
+        MovieAsyncKind::FrameUpdate { now_ms } => execute_frame_update_owned(
+            session,
+            player_id,
+            owner,
+            now_ms,
+        ).await,
+        MovieAsyncKind::InitPrepareFrame { now_ms } => {
+            execute_frame_prepare_owned(
+                session,
+                player_id,
+                owner,
+                now_ms,
+            ).await.map(|_| DatumRef::Void)
+        }
+        MovieAsyncKind::InitEnterFrame => {
+            execute_enter_frame_owned(session, player_id, owner).await.map(|_| DatumRef::Void)
+        }
+        MovieAsyncKind::InitExitFrame => {
+            execute_exit_frame_owned(session, player_id, owner).await.map(|_| DatumRef::Void)
+        }
+        MovieAsyncKind::InitEnterExitFrame => {
+            execute_enter_exit_frame_owned(session, player_id, owner).await.map(|_| DatumRef::Void)
+        }
+    }
+}
+
+fn ensure_movie_owner(
+    session: &RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: &OwnerToken,
+) -> Result<(), ScriptError> {
+    let valid = session.borrow_mut().with_player(player_id, |context| {
+        owner.same_identity(&context.player.owner) && owner.is_arena_live()
+    }).unwrap_or(false);
+    valid.then_some(()).ok_or_else(cancelled_scope_error)
+}
+
+async fn execute_go_owned(
+    session: RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: OwnerToken,
+    args: Vec<DatumRef>,
+) -> Result<DatumRef, ScriptError> {
+    #[derive(Clone)]
+    enum GoTarget {
+        Default,
+        Frame(u32),
+        Label(String),
+    }
+
+    let (target, path) = session.borrow_mut().with_player(player_id, |context| {
+        if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+            return Err(cancelled_scope_error());
+        }
+        let target = match args.first() {
+            None => GoTarget::Default,
+            Some(value) => match MovieHandlers::checked_datum(&context, value)? {
+                Datum::Int(frame) => GoTarget::Frame(*frame as u32),
+                Datum::String(label) => GoTarget::Label(label.clone()),
+                Datum::Symbol(symbol) => GoTarget::Label(
+                    context.symbols.display(symbol).map_err(|_| ScriptError::new_code(
+                        ScriptErrorCode::InvalidReference,
+                        "foreign movie frame label".to_owned(),
+                    ))?.to_owned(),
+                ),
+                _ => return Err(ScriptError::new(
+                    "Unsupported or invalid frame label passed to go()".to_owned(),
+                )),
+            },
+        };
+        let path = args.get(1).map(|value| {
+            MovieHandlers::checked_datum(&context, value)?.string_value(context.symbols)
+        }).transpose()?;
+        Ok((target, path))
+    }).ok_or_else(cancelled_scope_error)??;
+
+    if let Some(mut path) = path {
+        if !path.contains('.') {
+            let extension = session.borrow_mut().with_player(player_id, |context| {
+                context.player.movie.file_name.split('.').last().unwrap_or("dcr").to_owned()
+            }).ok_or_else(cancelled_scope_error)?;
+            path.push('.');
+            path.push_str(&extension);
+        }
+        // The owned loader preserves the target label until the new movie is
+        // mounted; resolve it against the new score below, never the old one.
+        crate::player::load_movie_from_file_owned(
+            session.clone(), player_id, owner.clone(), path,
+        ).await?;
+    }
+
+    let result = session.borrow_mut().with_player(player_id, |context| {
+        if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+            return Err(cancelled_scope_error());
+        }
+        let current = context.player.movie.current_frame;
+        let frame = match &target {
+            GoTarget::Default => context.player.movie.score.frame_labels.iter().rev()
+                .find(|entry| entry.frame_num <= current as i32)
+                .map(|entry| entry.frame_num as u32).unwrap_or(1),
+            GoTarget::Frame(frame) => *frame,
+            GoTarget::Label(label) => context.player.movie.score.frame_labels.iter()
+                .find(|entry| entry.label.eq_ignore_ascii_case(label))
+                .map(|entry| entry.frame_num as u32).unwrap_or(current),
+        };
+        if args.is_empty() {
+            // Bare go() is gotoLoop: it only schedules the nearest marker (or
+            // frame one). The frame pump owns the transition and the command
+            // does not force playback or mark a same-frame go.
+            context.player.next_frame = Some(frame);
+            return Ok(DatumRef::Void);
+        }
+        if frame == current {
+            context.player.go_same_frame = true;
+        } else {
+            context.player.next_frame = Some(frame);
+            context.player.has_frame_changed_in_go = true;
+            context.player.go_direction = if frame > current { 2 } else { 1 };
+        }
+        Ok(DatumRef::Void)
+    }).ok_or_else(cancelled_scope_error)??;
+    Ok(result)
+}
+
+async fn execute_play_owned(
+    session: RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: OwnerToken,
+    args: Vec<DatumRef>,
+) -> Result<DatumRef, ScriptError> {
+    if args.len() >= 2 {
+        let restart = session.borrow_mut().with_player(player_id, |context| {
+            if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                return Err(cancelled_scope_error());
+            }
+            let name = context.player.get_datum(&args[1]).string_value(context.symbols).unwrap_or_default();
+            fn base(value: &str) -> String {
+                value.rsplit(|c| c == '/' || c == '\\').next().unwrap_or(value)
+                    .split('.').next().unwrap_or(value).to_ascii_lowercase()
+            }
+            let current = context.player.movie.file_name.clone();
+            let retained = context.player.movie_reload_data.is_some();
+            Ok(retained && (name.is_empty() || current.is_empty() || base(&name) == base(&current)))
+        }).ok_or_else(cancelled_scope_error)??;
+        if restart {
+            let result = session.borrow_mut().with_player(player_id, |context| {
+                if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                    return Err(cancelled_scope_error());
+                }
+                context.player.pending_restart = true;
+                Ok(DatumRef::Void)
+            }).ok_or_else(cancelled_scope_error)??;
+            Ok(result)
+        } else {
+            execute_go_owned(session, player_id, owner, args).await
+        }
+    } else {
+        let flash_sprite = session.borrow_mut().with_player(player_id, |context| {
+            if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                return Err(cancelled_scope_error());
+            }
+            let Some(sprite_ref) = args.first() else { return Ok(None) };
+            let datum = MovieHandlers::checked_datum(&context, sprite_ref)?;
+            let sprite_num = match datum {
+                Datum::SpriteRef(number) => *number,
+                Datum::Int(number) => *number as i16,
+                _ => return Ok(None),
+            };
+            let Some(sprite) = context.player.movie.score.get_sprite(sprite_num) else { return Ok(None) };
+            let Some(member_ref) = sprite.member.as_ref() else { return Ok(None) };
+            let Some(member) = context.player.movie.cast_manager.find_member_by_ref(member_ref) else { return Ok(None) };
+            if matches!(member.member_type, crate::player::cast_member::CastMemberType::Flash(_)) {
+                context.player.movie.score.get_sprite_mut(sprite_num).flash_asserted_frame = None;
+                Ok(Some(sprite_num as i32))
+            } else {
+                Ok(None)
+            }
+        }).ok_or_else(cancelled_scope_error)??;
+        if let Some(sprite_num) = flash_sprite {
+            // Keep this host call outside the RuntimeSession borrow.  The old
+            // global play path invokes the same per-sprite Ruffle operation.
+            movie_ruffle_play(sprite_num);
+        }
+        Ok(DatumRef::Void)
+    }
+}
+
+async fn execute_nothing_owned(
+    session: &RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: &OwnerToken,
+) -> Result<DatumRef, ScriptError> {
+    // Use the shared cross-platform wall clock. The owned MovieAsync path
+    // also runs in native child tests, where js_sys::Date is unavailable.
+    let now = crate::player::testing_shared::now_ms();
+    let yield_now = session.borrow_mut().with_player(player_id, |context| {
+        if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+            return Err(cancelled_scope_error());
+        }
+        if !context.player.in_frame_script {
+            context.player.nothing_call_count = 0;
+            return Ok(false);
+        }
+        context.player.nothing_call_count += 1;
+        Ok(context.player.nothing_call_count >= 50
+            && now - context.player.last_nothing_yield_ms >= 16.0)
+    }).ok_or_else(cancelled_scope_error)??;
+    if yield_now {
+        session.borrow_mut().with_player(player_id, |context| {
+            if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                return Err(cancelled_scope_error());
+            }
+            context.player.nothing_call_count = 0;
+            context.player.last_nothing_yield_ms = now;
+            Ok(())
+        }).ok_or_else(cancelled_scope_error)??;
+        async_std::task::sleep(std::time::Duration::from_millis(2)).await;
+        session.borrow_mut().with_player(player_id, |context| {
+            if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                return Err(cancelled_scope_error());
+            }
+            Ok(())
+        }).ok_or_else(cancelled_scope_error)??;
+    }
+    Ok(DatumRef::Void)
+}
+
+async fn await_script_action_scope(
+    session: &RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: &OwnerToken,
+    receiver: Option<ScriptInstanceRef>,
+    handler: crate::player::script::ScriptHandlerRef,
+    args: &[DatumRef],
+) -> Result<crate::player::scope::ScopeResult, ScriptError> {
+    ensure_movie_owner(session, player_id, owner)?;
+    let turn = crate::player::player_call_script_handler_turn_in_session_sync(
+        &mut session.borrow_mut(), player_id, receiver, handler, &args.to_vec());
+    match turn {
+        crate::player::ScriptHandlerTurn::Complete(result) => result,
+        crate::player::ScriptHandlerTurn::Waiting => {
+            let (sender, receiver) = async_std::channel::bounded(1);
+            session.borrow_mut().retain_pending_command(crate::player::driver::PendingCommand {
+                player_id,
+                owner: owner.clone(),
+                action: None,
+                started: false,
+                ticket: None,
+                completer: None,
+                event_sender: Some(sender),
+                score_continuation: None,
+                child_completion: None,
+                eval_child: None,
+                eval_sender: None,
+            });
+            match receiver.recv().await {
+                Ok(result) => result,
+                Err(_) => Err(cancelled_scope_error()),
+            }
+        }
+        crate::player::ScriptHandlerTurn::Pending(action) => {
+            let (sender, receiver) = async_std::channel::bounded(1);
+            let ticket = action.ticket().clone();
+            session.borrow_mut().retain_pending_command(crate::player::driver::PendingCommand {
+                player_id,
+                owner: owner.clone(),
+                action: Some(action),
+                started: false,
+                ticket: Some(ticket),
+                completer: None,
+                event_sender: Some(sender),
+                score_continuation: None,
+                child_completion: None,
+                eval_child: None,
+                eval_sender: None,
+            });
+            match receiver.recv().await {
+                Ok(result) => result,
+                Err(_) => Err(cancelled_scope_error()),
+            }
+        }
+    }
+}
+
+async fn await_script_action(
+    session: &RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: &OwnerToken,
+    receiver: Option<ScriptInstanceRef>,
+    handler: crate::player::script::ScriptHandlerRef,
+    args: &[DatumRef],
+) -> Result<(), ScriptError> {
+    await_script_action_scope(session, player_id, owner, receiver, handler, args)
+        .await.map(|_| ())
+}
+
+async fn execute_frame_callback(
+    session: &RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: &OwnerToken,
+    callback: crate::player::events::W3dCallbackRequest,
+) -> Result<(), ScriptError> {
+    crate::player::events::dispatch_w3d_callback_owned(
+        session.clone(),
+        player_id,
+        owner.clone(),
+        callback,
+    )
+    .await
+}
+
+async fn execute_actor_list_stepframe(
+    session: &RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: &OwnerToken,
+) -> Result<(), ScriptError> {
+    let entered = session.borrow_mut().with_player(player_id, |context| {
+        if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+            return Err(cancelled_scope_error());
+        }
+        if context.player.in_step_frame {
+            return Ok(false);
+        }
+        context.player.in_step_frame = true;
+        Ok(true)
+    }).ok_or_else(cancelled_scope_error)??;
+    if !entered {
+        return Ok(());
+    }
+
+    let (snapshot, mut active_ids, mut generation) = session.borrow_mut()
+        .with_player(player_id, |context| context.player.actor_list_stepframe_snapshot())
+        .ok_or_else(cancelled_scope_error)?;
+    let result = async {
+        for (index, actor_ref) in snapshot.iter().enumerate() {
+            if !active_ids.contains(&actor_ref.unwrap()) {
+                continue;
+            }
+            // actorList entries are normally ScriptInstanceRefs. Resolve the
+            // handler immediately before each callback so a preceding actor
+            // may mutate the list or its script handlers without making this
+            // frame use stale handler metadata.
+            let instance = session.borrow_mut().with_player(player_id, |context| {
+                match context.player.get_datum(actor_ref) {
+                    Datum::ScriptInstanceRef(instance) => Some(instance.clone()),
+                    _ => None,
+                }
+            }).ok_or_else(cancelled_scope_error)?;
+            if let Some(instance) = instance {
+                let handler = session.borrow_mut().with_player(player_id, |context| {
+                    crate::player::handlers::datum_handlers::script_instance::ScriptInstanceUtils::get_script_instance_handler(
+                        Symbol::builtin(BuiltInSymbol::StepFrame), &instance, context.player)
+                }).ok_or_else(cancelled_scope_error)??;
+                if let Some(handler) = handler {
+                    await_script_action(session, player_id, owner, Some(instance), handler, &[]).await
+                        .map_err(|error| {
+                            error!("stepFrame[{}] error: {}", index, error.message);
+                            error
+                    })?;
+                }
+            } else {
+                let dispatch = session
+                    .borrow_mut()
+                    .with_player(player_id, |mut context| {
+                        crate::player::handlers::datum_handlers::player_call_datum_handler(
+                            &mut context,
+                            actor_ref,
+                            Symbol::builtin(BuiltInSymbol::StepFrame),
+                            &Vec::new(),
+                        )
+                    })
+                    .ok_or_else(cancelled_scope_error)?;
+                match dispatch {
+                    crate::player::handlers::datum_handlers::DatumDispatch::Sync(result) => {
+                        result.map(|_| ())?;
+                    }
+                    crate::player::handlers::datum_handlers::DatumDispatch::Child {
+                        receiver,
+                        handler_ref,
+                        args,
+                        ..
+                    } => {
+                        await_script_action(
+                            session,
+                            player_id,
+                            owner,
+                            receiver,
+                            handler_ref,
+                            &args,
+                        )
+                        .await?;
+                    }
+                    crate::player::handlers::datum_handlers::DatumDispatch::ChildWithCompletion {
+                        receiver,
+                        handler_ref,
+                        args,
+                        completion,
+                    } => {
+                        let scope = await_script_action_scope(
+                            session,
+                            player_id,
+                            owner,
+                            receiver,
+                            handler_ref,
+                            &args,
+                        )
+                        .await?;
+                        session.borrow_mut().apply_child_completion(
+                            player_id,
+                            completion,
+                            scope.return_value,
+                        )?;
+                    }
+                    crate::player::handlers::datum_handlers::DatumDispatch::Pending {
+                        request,
+                        ..
+                    } => {
+                        // Await the real evaluator request before refreshing
+                        // the actor generation. A pending StepFrame can
+                        // mutate actorList, and advancing the snapshot before
+                        // its completion loses that mutation and reorders the
+                        // next actor.
+                        crate::player::eval::invoke_request_owned(
+                            session.clone(),
+                            player_id,
+                            owner.clone(),
+                            request,
+                        )
+                        .await
+                        .map(|_| ())?;
+                    }
+                }
+            }
+            let refreshed = session.borrow_mut().with_player(player_id, |context| {
+                if context.player.actor_list_generation != generation {
+                    Some(context.player.actor_list_active_ids())
+                } else {
+                    None
+                }
+            }).ok_or_else(cancelled_scope_error)?;
+            if let Some((next_ids, next_generation)) = refreshed {
+                active_ids = next_ids;
+                generation = next_generation;
+            }
+        }
+        Ok::<(), ScriptError>(())
+    }.await;
+    let clear_result = session.borrow_mut().with_player(player_id, |context| {
+        if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+            return false;
+        }
+        context.player.in_step_frame = false;
+        true
+    });
+    if !clear_result.unwrap_or(false) {
+        return Err(cancelled_scope_error());
+    }
+    result.map(|_| ())
+}
+
+/// Run the part of a frame that precedes StartMovie/EnterFrame: actorList
+/// stepFrame, PrepareFrame, W3D timer/animation/particle/collision callbacks.
+/// The caller owns `is_in_frame_update`; this phase deliberately leaves it set
+/// so initialization can place StartMovie between preparation and EnterFrame.
+async fn execute_frame_prepare_owned(
+    session: RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: OwnerToken,
+    now_ms: f64,
+) -> Result<(), ScriptError> {
+    execute_actor_list_stepframe(&session, player_id, &owner).await?;
+    let previous_prepare = session.borrow_mut().with_player(player_id, |context| {
+        if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+            return Err(cancelled_scope_error());
+        }
+        let previous = context.player.in_prepare_frame;
+        context.player.in_prepare_frame = true;
+        context.player.drain_allocator_reclaims();
+        Ok::<bool, ScriptError>(previous)
+    }).ok_or_else(cancelled_scope_error)??;
+    let mut phase_guard = FramePhaseFlagGuard::new(
+        session.clone(), player_id, owner.clone(), FramePhaseFlag::Prepare, previous_prepare,
+    );
+    let result = async {
+        dispatch_timeout_event_owned(
+            &session,
+            player_id,
+            &owner,
+            BuiltInSymbol::PrepareFrame,
+            Vec::new(),
+        ).await?;
+        crate::player::events::player_invoke_global_event_owned(
+            session.clone(), player_id, owner.clone(),
+            Symbol::builtin(BuiltInSymbol::PrepareFrame), Vec::new()).await?;
+        let timer_callbacks = session.borrow_mut().with_player(player_id, |mut context| {
+            if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                return Err(cancelled_scope_error());
+            }
+            crate::player::events::prepare_w3d_timer_events(&mut context, now_ms)
+        }).ok_or_else(cancelled_scope_error)??;
+        for callback in timer_callbacks {
+            execute_frame_callback(&session, player_id, &owner, callback).await?;
+        }
+        let (animation_dt, particle_dt) = session
+            .borrow_mut()
+            .w3d_deltas(player_id, &owner, now_ms)?;
+        let callbacks = session.borrow_mut().with_player(player_id, |mut context| {
+            if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                return Err(cancelled_scope_error());
+            }
+            crate::player::events::tick_w3d_animations(&mut context, animation_dt)?;
+            crate::player::events::tick_w3d_particles(&mut context, particle_dt)?;
+            let dirty = crate::player::events::W3dDirtyTransformInput::new(
+                owner.clone(), context.player.w3d_dirty_transform_ids.clone());
+            let mut callbacks = Vec::new();
+            callbacks.extend(crate::player::events::prepare_w3d_collision_callbacks(&mut context, &dirty)?);
+            callbacks.extend(crate::player::events::prepare_physx_collision_callbacks(&mut context)?);
+            context.player.w3d_dirty_transform_ids.clear();
+            Ok::<Vec<crate::player::events::W3dCallbackRequest>, ScriptError>(callbacks)
+        }).ok_or_else(cancelled_scope_error)??;
+        for callback in callbacks {
+            execute_frame_callback(&session, player_id, &owner, callback).await?;
+        }
+        Ok::<(), ScriptError>(())
+    }.await;
+    if result.is_ok() {
+        phase_guard.clear_now()?;
+    }
+    result
+}
+
+#[derive(Clone, Copy)]
+enum FramePhaseFlag {
+    Prepare,
+    Enter,
+    FrameUpdate,
+}
+
+struct FramePhaseFlagGuard {
+    session: RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: OwnerToken,
+    phase: FramePhaseFlag,
+    previous: bool,
+    armed: bool,
+}
+
+impl FramePhaseFlagGuard {
+    fn new(
+        session: RuntimeSessionHandle,
+        player_id: PlayerId,
+        owner: OwnerToken,
+        phase: FramePhaseFlag,
+        previous: bool,
+    ) -> Self {
+        Self { session, player_id, owner, phase, previous, armed: true }
+    }
+
+    fn clear_now(&mut self) -> Result<(), ScriptError> {
+        let cleared = self.session.borrow_mut().with_player(self.player_id, |context| {
+            if !self.owner.same_identity(&context.player.owner) || !self.owner.is_arena_live() {
+                return false;
+            }
+            match self.phase {
+                FramePhaseFlag::Prepare => context.player.in_prepare_frame = self.previous,
+                FramePhaseFlag::Enter => context.player.in_enter_frame = self.previous,
+                FramePhaseFlag::FrameUpdate => context.player.is_in_frame_update = self.previous,
+            }
+            true
+        }).unwrap_or(false);
+        self.armed = false;
+        cleared.then_some(()).ok_or_else(cancelled_scope_error)
+    }
+}
+
+impl Drop for FramePhaseFlagGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // Owned phase futures never suspend while holding the session borrow.
+        // Drop therefore performs a synchronous owner-checked cleanup. A
+        // failed borrow here would violate that invariant; do not silently
+        // leave a replacement owner with a stale phase flag.
+        let mut session = self.session.borrow_mut();
+        let _ = session.with_player(self.player_id, |context| {
+            if !self.owner.same_identity(&context.player.owner) || !self.owner.is_arena_live() {
+                return;
+            }
+            match self.phase {
+                FramePhaseFlag::Prepare => context.player.in_prepare_frame = self.previous,
+                FramePhaseFlag::Enter => context.player.in_enter_frame = self.previous,
+                FramePhaseFlag::FrameUpdate => context.player.is_in_frame_update = self.previous,
+            }
+        });
+    }
+}
+
+async fn execute_enter_exit_frame_owned(
+    session: RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: OwnerToken,
+) -> Result<(), ScriptError> {
+    execute_enter_frame_owned(session.clone(), player_id, owner.clone()).await?;
+    execute_exit_frame_owned(session, player_id, owner).await
+}
+
+async fn execute_enter_frame_owned(
+    session: RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: OwnerToken,
+) -> Result<(), ScriptError> {
+    let previous_enter = session.borrow_mut().with_player(player_id, |context| {
+        if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+            return Err(cancelled_scope_error());
+        }
+        let previous = context.player.in_enter_frame;
+        context.player.in_enter_frame = true;
+        Ok::<bool, ScriptError>(previous)
+    }).ok_or_else(cancelled_scope_error)??;
+    let mut phase_guard = FramePhaseFlagGuard::new(
+        session.clone(), player_id, owner.clone(), FramePhaseFlag::Enter, previous_enter,
+    );
+    let result = crate::player::events::player_invoke_global_event_owned(
+        session.clone(), player_id, owner.clone(),
+        Symbol::builtin(BuiltInSymbol::EnterFrame), Vec::new()).await;
+    if result.is_ok() {
+        session.borrow_mut().with_player(player_id, |context| {
+            if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                return Err(cancelled_scope_error());
+            }
+            context.player.stage_dirty = true;
+            Ok(())
+        }).ok_or_else(cancelled_scope_error)??;
+        phase_guard.clear_now()?;
+    }
+    result.map(|_| ())
+}
+
+async fn execute_exit_frame_owned(
+    session: RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: OwnerToken,
+) -> Result<(), ScriptError> {
+    crate::player::events::player_invoke_global_event_owned(
+        session, player_id, owner, Symbol::builtin(BuiltInSymbol::ExitFrame), Vec::new()).await?;
+    Ok(())
+}
+
+async fn execute_frame_update_owned(
+    session: RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: OwnerToken,
+    now_ms: f64,
+) -> Result<DatumRef, ScriptError> {
+    let proceed = session.borrow_mut().with_player(player_id, |context| {
+        if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+            return Err(cancelled_scope_error());
+        }
+        if context.player.is_in_frame_update || context.player.has_player_frame_changed {
+            return Ok(false);
+        }
+        context.player.is_in_frame_update = true;
+        context.player.movie.score.apply_tween_modifiers(context.player.movie.current_frame);
+        Ok(true)
+    }).ok_or_else(cancelled_scope_error)??;
+    if !proceed {
+        return Ok(DatumRef::Void);
+    }
+
+    let mut frame_guard = FramePhaseFlagGuard::new(
+        session.clone(),
+        player_id,
+        owner.clone(),
+        FramePhaseFlag::FrameUpdate,
+        false,
+    );
+
+    let result = async {
+        execute_frame_prepare_owned(session.clone(), player_id, owner.clone(), now_ms).await?;
+        let pending_movie_init = session
+            .borrow_mut()
+            .with_player(player_id, |context| {
+                if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                    return Err(cancelled_scope_error());
+                }
+                Ok::<bool, ScriptError>(context.player.pending_movie_init)
+            })
+            .ok_or_else(cancelled_scope_error)??;
+        if pending_movie_init {
+            return Ok::<(), ScriptError>(());
+        }
+        execute_enter_exit_frame_owned(session.clone(), player_id, owner.clone()).await?;
+        crate::rendering::draw_frame_for_owner(&session, player_id, &owner)?;
+        Ok::<(), ScriptError>(())
+    }.await;
+    frame_guard.clear_now()?;
+    result.map(|_| DatumRef::Void)
+}
+
+/// Dispatch a system event to the timeout targets belonging to one player.
+/// The legacy helper discovers a process-global player and therefore cannot
+/// be used by an owned movie turn.  Snapshot the target handles under a short
+/// session borrow, then resolve each handler immediately before invoking it.
+/// This keeps child and deferred host work in the owner-bound session while
+/// preserving timeout ordering and Abort/error handling.
+async fn dispatch_timeout_event_owned(
+    session: &RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: &OwnerToken,
+    handler: BuiltInSymbol,
+    args: Vec<DatumRef>,
+) -> Result<(), ScriptError> {
+    let targets = session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                return Err(cancelled_scope_error());
+            }
+            Ok(context
+                .player
+                .timeout_manager
+                .timeouts
+                .values()
+                .filter(|timeout| timeout.is_scheduled)
+                .map(|timeout| timeout.target_ref.clone())
+                .collect::<Vec<_>>())
+        })
+        .ok_or_else(cancelled_scope_error)??;
+
+    for target in targets {
+        let dispatch = session
+            .borrow_mut()
+            .with_player(player_id, |mut context| {
+                crate::player::handlers::datum_handlers::player_call_datum_handler(
+                    &mut context,
+                    &target,
+                    Symbol::builtin(handler),
+                    &args,
+                )
+            })
+            .ok_or_else(cancelled_scope_error)?;
+        let result = match dispatch {
+            crate::player::handlers::datum_handlers::DatumDispatch::Sync(result) => result,
+            crate::player::handlers::datum_handlers::DatumDispatch::Child {
+                receiver,
+                handler_ref,
+                args,
+                ..
+            } => await_script_action(
+                session,
+                player_id,
+                owner,
+                receiver,
+                handler_ref,
+                &args,
+            )
+            .await
+            .map(|_| DatumRef::Void),
+            crate::player::handlers::datum_handlers::DatumDispatch::ChildWithCompletion {
+                receiver,
+                handler_ref,
+                args,
+                completion,
+            } => {
+                let scope = await_script_action_scope(
+                    session,
+                    player_id,
+                    owner,
+                    receiver,
+                    handler_ref,
+                    &args,
+                )
+                .await?;
+                session
+                    .borrow_mut()
+                    .apply_child_completion(player_id, completion, scope.return_value)?;
+                Ok(DatumRef::Void)
+            }
+            crate::player::handlers::datum_handlers::DatumDispatch::Pending { request, reason } => {
+                session
+                    .borrow_mut()
+                    .retain_deferred_request(player_id, request, reason);
+                Ok(DatumRef::Void)
+            }
+        };
+        if let Err(error) = result {
+            if error.code == ScriptErrorCode::Abort {
+                return Err(error);
+            }
+            if error.code != ScriptErrorCode::HandlerNotFound {
+                log::warn!("timeout system event {:?} error: {}", handler, error.message);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn member_existing_cast_member_does_not_consume_unused_cast_argument() {
+        let mut session = crate::player::session::RuntimeSession::new(
+            crate::player::symbols::symbol_table::SymbolOwner {
+                session: 901,
+                generation: 1,
+            },
+        );
+        let (tx, _rx) = async_std::channel::unbounded();
+        assert!(session.add_player(1, tx));
+        let mut foreign_symbols = crate::player::symbols::symbol_table::SymbolTable::with_owner(
+            crate::player::symbols::symbol_table::SymbolOwner {
+                session: 902,
+                generation: 1,
+            },
+        );
+        let foreign_symbol = foreign_symbols.intern("unusedCast");
+
+        let result = session
+            .with_player(1, |mut runtime| {
+                let existing = runtime.player.alloc_datum(Datum::CastMember(CastMemberRef {
+                    cast_lib: 1,
+                    cast_member: 7,
+                }));
+                let foreign_arg = runtime.player.alloc_datum(Datum::Symbol(foreign_symbol));
+                MovieHandlers::member(&mut runtime, &vec![existing.clone(), foreign_arg])
+                    .map(|returned| returned == existing)
+            })
+            .unwrap();
+
+        assert!(matches!(result, Ok(true)));
     }
 }

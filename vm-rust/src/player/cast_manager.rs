@@ -1,6 +1,6 @@
 use std::{
     cell::{Ref, RefCell},
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     rc::Rc,
 };
 
@@ -14,6 +14,7 @@ use crate::{
     director::{enums::ScriptType, file::DirectorFile, lingo::datum::Datum},
     js_api::JsApi,
     player::cast_lib::CastLib,
+    player::symbols::symbol_table::SymbolTable,
 };
 
 use crate::player::FontManager;
@@ -21,14 +22,21 @@ use crate::player::ci_string::{CiStr, CiString};
 use crate::player::font::FontRef;
 
 use super::{
+    ScriptError,
     allocator::DatumAllocator,
-    bitmap::{bitmap::PaletteRef, manager::{BitmapManager, BitmapRef}, palette_map::PaletteMap},
-    cast_lib::{CastLibState, CastMemberRef, INVALID_CAST_MEMBER_REF},
+    bitmap::{
+        bitmap::PaletteRef,
+        manager::{BitmapManager, BitmapRef},
+        palette_map::PaletteMap,
+    },
+    cast_lib::{
+        CastLibState, CastLoadCapability, CastLoadRequest, CastMemberRef, CastNotification,
+        CastNotificationOutbox, INVALID_CAST_MEMBER_REF,
+    },
     cast_member::{CastMember, CastMemberType},
     handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers,
     net_manager::NetManager,
     script::Script,
-    ScriptError,
 };
 
 pub struct CastManager {
@@ -43,7 +51,8 @@ pub struct CastManager {
     ///
     /// First script wins, exactly like the sequential search it replaces.
     /// Built with `movie_script_cache` and cleared with it.
-    pub movie_script_handler_index: RefCell<Option<FxHashMap<crate::player::symbols::symbol::Symbol, usize>>>,
+    pub movie_script_handler_index:
+        RefCell<Option<FxHashMap<crate::player::symbols::symbol::Symbol, usize>>>,
     /// Superset of every handler name defined by ANY script in ANY cast. Lets
     /// `ext_call` skip the active-script scan for builtin names (voidp/offset/
     /// length, millions in the preloader): if a name is absent here, no script
@@ -56,7 +65,14 @@ pub struct CastManager {
     /// (getObjectManager / getStringServices / getObject — called millions of
     /// times via the preloader's replaceChunks chain) skip the per-call script
     /// scan. Built lazily; invalidated with movie_script_cache on cast load.
-    pub movie_handler_refs: RefCell<Option<FxHashMap<crate::player::symbols::symbol::Symbol, crate::player::script::ScriptHandlerRef>>>,
+    pub movie_handler_refs: RefCell<
+        Option<
+            FxHashMap<
+                crate::player::symbols::symbol::Symbol,
+                crate::player::script::ScriptHandlerRef,
+            >,
+        >,
+    >,
     pub member_name_cache: RefCell<Option<FxHashMap<String, CastMemberRef>>>,
     /// Memo of `find_member_ref_by_number` answers, including misses (`None`),
     /// filled one query at a time. Invalidated with `member_name_cache`.
@@ -69,6 +85,10 @@ pub struct CastManager {
     /// before the next frame. Populated when a member is erased or its slot
     /// reassigned; drained by the renderer at frame start.
     pub pending_texture_invalidations: RefCell<Vec<CastMemberRef>>,
+    /// External casts that must settle before palette and cast-list readiness
+    /// is published for the current preload boundary.
+    required_preloads: HashMap<u32, std::sync::Arc<CastLoadCapability>>,
+    pub preload_state: CastPreloadState,
 }
 
 const IS_WEB: bool = false;
@@ -79,8 +99,15 @@ pub enum CastPreloadReason {
     AfterFrameOne,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CastPreloadState {
+    Idle,
+    Loading,
+    Ready,
+}
+
 impl CastManager {
-    pub const fn empty() -> CastManager {
+    pub fn empty() -> CastManager {
         CastManager {
             casts: Vec::new(),
             movie_script_cache: RefCell::new(None),
@@ -92,15 +119,18 @@ impl CastManager {
             palette_cache: RefCell::new(None),
             palette_version: RefCell::new(0),
             pending_texture_invalidations: RefCell::new(Vec::new()),
+            required_preloads: HashMap::new(),
+            preload_state: CastPreloadState::Idle,
         }
     }
 
-    pub async fn load_from_dir(
+    pub fn load_from_dir(
         &mut self,
         dir: &DirectorFile,
         net_manager: &mut NetManager,
         bitmap_manager: &mut BitmapManager,
-        dir_cache: &mut HashMap<Box<str>, DirectorFile>,
+        dir_cache: &mut HashMap<Box<str>, Rc<DirectorFile>>,
+        symbols: &mut SymbolTable,
     ) {
         let dir_path_uri = &dir.base_path;
         if !IS_WEB || dir_path_uri.host().is_some() {
@@ -129,8 +159,13 @@ impl CastManager {
             };
             debug!(
                 "MCsL entry {}: name='{}' file_path='{}' id={} min={} max={} preload={} has_cast_def={}",
-                index, cast_entry.name, cast_entry.file_path, cast_entry.id,
-                cast_entry.min_member, cast_entry.max_member, cast_entry.preload_settings,
+                index,
+                cast_entry.name,
+                cast_entry.file_path,
+                cast_entry.id,
+                cast_entry.min_member,
+                cast_entry.max_member,
+                cast_entry.preload_settings,
                 cast_def.is_some()
             );
 
@@ -140,7 +175,9 @@ impl CastManager {
                     // Embedded casts: fileName should reference the parent movie (like real Shockwave player).
                     // This ensures Lingo scripts checking fileName.char[end-2..end] = "dcr" work correctly.
                     match &net_manager.base_path {
-                        Some(base) => base.join(&dir.file_name).map_or("".to_string(), |u| u.to_string()),
+                        Some(base) => base
+                            .join(&dir.file_name)
+                            .map_or("".to_string(), |u| u.to_string()),
                         None => dir.file_name.to_string(),
                     }
                 } else {
@@ -155,10 +192,12 @@ impl CastManager {
                 } else {
                     CastLibState::None
                 },
+                pending_load: None,
                 lctx: cast_def.and_then(|x| x.lctx.clone()),
                 members: FxHashMap::default(),
                 scripts: FxHashMap::default(),
-                name_symbols: Vec::new(),
+                pending_js_registrations: Vec::new(),
+                name_symbols: Rc::from(Vec::<crate::player::symbols::symbol::Symbol>::new()),
                 preload_mode: cast_entry.preload_settings,
                 capital_x: false,
                 dir_version: 0,
@@ -167,21 +206,17 @@ impl CastManager {
                 font_table: HashMap::new(),
             };
             if let Some(cast_def) = cast_def {
-                cast.apply_cast_def(dir, cast_def, bitmap_manager, &dir.font_table);
+                cast.apply_cast_def(dir, cast_def, bitmap_manager, &dir.font_table, symbols);
                 self.clear_movie_script_cache();
             }
             casts.push(cast);
         }
         self.casts = casts;
+        self.required_preloads.clear();
+        self.preload_state = CastPreloadState::Idle;
         self.invalidate_member_name_cache();
-        self.preload_casts(
-            CastPreloadReason::MovieLoaded,
-            net_manager,
-            bitmap_manager,
-            dir_cache,
-        )
-        .await;
-        self.resolve_unresolved_palette_refs(bitmap_manager);
+        // External cast requests are returned to RuntimeSession for async fetch
+        // and synchronous apply. Palette resolution waits for that boundary.
         JsApi::dispatch_cast_list_changed();
     }
 
@@ -204,11 +239,15 @@ impl CastManager {
                             // Check if the target member exists as a Palette in the specified castLib.
                             // We must check the member TYPE, not just existence — castlib 2 might
                             // have member #41 as a bitmap, while the actual palette #41 is in castlib 6.
-                            let target_cast = self.casts.iter()
+                            let target_cast = self
+                                .casts
+                                .iter()
                                 .find(|c| c.number == current_cast_lib as u32);
                             let is_palette = target_cast
                                 .and_then(|c| c.find_member_by_number(target_member as u32))
-                                .map_or(false, |m| matches!(m.member_type, CastMemberType::Palette(_)));
+                                .map_or(false, |m| {
+                                    matches!(m.member_type, CastMemberType::Palette(_))
+                                });
                             if !is_palette {
                                 debug!(
                                     "palette resolve: bitmap #{} in castLib {} refs palette member {} in castLib {} — not a palette, will search other castLibs",
@@ -233,8 +272,11 @@ impl CastManager {
         for (bitmap_ref, target_member, _current_cast_lib) in to_resolve {
             let mut found = false;
             for cast in self.casts.iter().rev() {
-                let is_palette = cast.find_member_by_number(target_member as u32)
-                    .map_or(false, |m| matches!(m.member_type, CastMemberType::Palette(_)));
+                let is_palette = cast
+                    .find_member_by_number(target_member as u32)
+                    .map_or(false, |m| {
+                        matches!(m.member_type, CastMemberType::Palette(_))
+                    });
                 if is_palette {
                     debug!(
                         "palette resolve: found palette member {} in castLib {}",
@@ -259,34 +301,145 @@ impl CastManager {
         }
     }
 
-    pub async fn preload_casts(
+    pub fn prepare_preload_requests(
         &mut self,
         reason: CastPreloadReason,
-        net_manager: &mut NetManager,
-        bitmap_manager: &mut BitmapManager,
-        dir_cache: &mut HashMap<Box<str>, DirectorFile>,
-    ) {
+        owner: crate::player::ownership::OwnerKey,
+        dir_cache: &HashMap<Box<str>, Rc<DirectorFile>>,
+        base_path: Option<&Url>,
+        override_base_path: Option<&str>,
+    ) -> Vec<crate::player::cast_lib::CastLoadRequest> {
+        let _ = dir_cache;
+        if self.preload_state != CastPreloadState::Loading {
+            self.required_preloads.clear();
+            self.preload_state = CastPreloadState::Loading;
+        }
+        let mut requests = Vec::new();
         for cast in self.casts.iter_mut() {
-            if cast.is_external && cast.state == CastLibState::None && !cast.file_name.is_empty() {
-                debug!("Cast {} ({}) - Preload Mode: {}", cast.number, ascii_safe(&cast.file_name), cast.preload_mode);
-                match cast.preload_mode {
-                    0 | 1 => {
-                        // Preload: When Needed / After frame one
-                        // Load on both MovieLoaded and AfterFrameOne to ensure casts
-                        // are available even when scripts jump past frame 1 immediately
-                        cast.preload(net_manager, bitmap_manager, dir_cache).await;
+            if !cast.is_external || cast.file_name.is_empty() {
+                continue;
+            }
+            let eligible = match cast.preload_mode {
+                0 | 1 => true,
+                2 => reason == CastPreloadReason::MovieLoaded,
+                _ => false,
+            };
+            if eligible {
+                if cast.state == CastLibState::Loaded {
+                    continue;
+                }
+                if self.required_preloads.contains_key(&cast.number) {
+                    continue;
+                }
+                if cast.state == CastLibState::None {
+                    if let Some(request) = cast.prepare_load(owner, base_path, override_base_path) {
+                        self.required_preloads
+                            .insert(cast.number, request.capability().clone());
+                        requests.push(request);
                     }
-                    2 => {
-                        // Preload: Before frame one
-                        if reason == CastPreloadReason::MovieLoaded {
-                            cast.preload(net_manager, bitmap_manager, dir_cache).await;
-                        }
-                    }
-                    _ => {}
                 }
             }
         }
-        self.invalidate_member_name_cache();
+        requests
+    }
+
+    /// Cancel one exact external cast reservation and its readiness
+    /// requirement. A stale request cannot affect a replacement reservation.
+    pub(crate) fn cancel_preload(&mut self, request: &CastLoadRequest) -> bool {
+        let cast_number = request.cast_number();
+        if self.get_cast_or_null(cast_number).is_none() {
+            return false;
+        }
+        let Some(capability) = self.required_preloads.get(&cast_number) else {
+            return false;
+        };
+        if !std::sync::Arc::ptr_eq(capability, request.capability()) {
+            return false;
+        }
+        let canceled = self.get_cast_mut(cast_number).cancel_load(request);
+        if !canceled {
+            return false;
+        }
+        self.required_preloads.remove(&cast_number);
+        if self.required_preloads.is_empty() {
+            self.preload_state = CastPreloadState::Idle;
+        }
+        true
+    }
+
+    /// Retire an exact requirement without touching the cast slot. This is
+    /// used when a player or cast has already been replaced; a stale request
+    /// must not cancel the replacement reservation.
+    pub(crate) fn retire_preload_requirement(&mut self, request: &CastLoadRequest) -> bool {
+        let cast_number = request.cast_number();
+        // A live matching cast reservation still owns this requirement. Its
+        // cleanup must go through cancel_preload, which also clears the cast's
+        // pending capability. Retirement is reserved for a missing,
+        // replaced, or otherwise non-current cast slot.
+        if self
+            .get_cast_or_null(cast_number)
+            .is_some_and(|cast| cast.is_load_current(request))
+        {
+            return false;
+        }
+        let Some(capability) = self.required_preloads.get(&cast_number) else {
+            return false;
+        };
+        if !std::sync::Arc::ptr_eq(capability, request.capability()) {
+            return false;
+        }
+        self.required_preloads.remove(&cast_number);
+        if self.required_preloads.is_empty() {
+            self.preload_state = CastPreloadState::Idle;
+        }
+        true
+    }
+
+    pub(crate) fn is_preload_current(&self, request: &CastLoadRequest) -> bool {
+        let Some(capability) = self.required_preloads.get(&request.cast_number()) else {
+            return false;
+        };
+        std::sync::Arc::ptr_eq(capability, request.capability())
+            && self
+                .get_cast_or_null(request.cast_number())
+                .is_some_and(|cast| cast.is_load_current(request))
+    }
+
+    pub fn complete_preload(
+        &mut self,
+        request: &CastLoadRequest,
+        bitmap_manager: &mut BitmapManager,
+        outbox: &mut CastNotificationOutbox,
+    ) -> bool {
+        let cast_number = request.cast_number();
+        let Some(capability) = self.required_preloads.get(&cast_number) else {
+            return false;
+        };
+        if !std::sync::Arc::ptr_eq(capability, request.capability()) {
+            return false;
+        }
+        self.required_preloads.remove(&cast_number);
+        if !self.required_preloads.is_empty() {
+            return false;
+        }
+        self.resolve_unresolved_palette_refs(bitmap_manager);
+        self.preload_state = CastPreloadState::Ready;
+        outbox.push(CastNotification::CastListChanged);
+        true
+    }
+
+    pub fn finalize_preloads_if_ready(
+        &mut self,
+        bitmap_manager: &mut BitmapManager,
+        outbox: &mut CastNotificationOutbox,
+    ) -> bool {
+        if self.preload_state != CastPreloadState::Loading || !self.required_preloads.is_empty() {
+            return false;
+        }
+        self.resolve_unresolved_palette_refs(bitmap_manager);
+        self.preload_state = CastPreloadState::Ready;
+        outbox.push(CastNotification::CastListChanged);
+        true
     }
 
     pub fn get_cast(&self, number: u32) -> Result<&CastLib, ScriptError> {
@@ -310,11 +463,7 @@ impl CastManager {
         let index = if number == 0 { 0 } else { number as usize - 1 };
         match self.casts.get_mut(index) {
             Some(cast) => cast,
-            None => panic!(
-                "Cast index out of bounds: {} (# casts={})",
-                number,
-                n_casts
-            ),
+            None => panic!("Cast index out of bounds: {} (# casts={})", number, n_casts),
         }
     }
 
@@ -467,6 +616,7 @@ impl CastManager {
 
     pub fn find_member_ref_by_identifiers(
         &self,
+        symbols: &SymbolTable,
         member_name_or_num: &Datum,
         cast_name_or_num: Option<&Datum>,
         datums: &DatumAllocator,
@@ -477,7 +627,7 @@ impl CastManager {
         {
             None
         } else if cast_name_or_num.is_some_and(|x| x.is_string()) {
-            if let Ok(cast_name) = cast_name_or_num.unwrap().string_value() {
+            if let Ok(cast_name) = cast_name_or_num.unwrap().string_value(symbols) {
                 self.get_cast_by_name(&cast_name)
             } else {
                 warn!(
@@ -498,9 +648,7 @@ impl CastManager {
         } else {
             warn!(
                 "Cast number or name invalid: {}",
-                cast_name_or_num
-                    .map(|x| x.type_str())
-                    .unwrap_or("None")
+                cast_name_or_num.map(|x| x.type_str()).unwrap_or("None")
             );
             None
         };
@@ -559,7 +707,7 @@ impl CastManager {
                         member_name_or_num.type_str()
                     ))))
                 }
-            },
+            }
         };
 
         match member_ref {
@@ -572,12 +720,13 @@ impl CastManager {
 
     pub fn find_member_by_identifiers(
         &self,
+        symbols: &SymbolTable,
         member_name_or_num: &Datum,
         cast_name_or_num: Option<&Datum>,
         datums: &DatumAllocator,
     ) -> Result<Option<&CastMember>, ScriptError> {
         let member_ref =
-            self.find_member_ref_by_identifiers(member_name_or_num, cast_name_or_num, datums)?;
+            self.find_member_ref_by_identifiers(symbols, member_name_or_num, cast_name_or_num, datums)?;
         Ok(member_ref.and_then(|member_ref| self.find_member_by_ref(&member_ref)))
     }
 
@@ -598,7 +747,10 @@ impl CastManager {
         self.find_member_by_slot_number(slot_number)
     }
 
-    pub fn find_member_by_ref_mut(&mut self, member_ref: &CastMemberRef) -> Option<&mut CastMember> {
+    pub fn find_member_by_ref_mut(
+        &mut self,
+        member_ref: &CastMemberRef,
+    ) -> Option<&mut CastMember> {
         if member_ref.cast_lib > 0 {
             let cast = self.casts.get_mut(member_ref.cast_lib as usize - 1)?;
             return cast.find_mut_member_by_number(member_ref.cast_member as u32);
@@ -677,12 +829,13 @@ impl CastManager {
 
     pub fn get_field_value_by_identifiers(
         &self,
+        symbols: &SymbolTable,
         member_name_or_num: &Datum,
         cast_name_or_num: Option<&Datum>,
         datums: &DatumAllocator,
     ) -> Result<String, ScriptError> {
         let member =
-            self.find_member_by_identifiers(member_name_or_num, cast_name_or_num, datums)?;
+            self.find_member_by_identifiers(symbols, member_name_or_num, cast_name_or_num, datums)?;
         match member {
             Some(member) => {
                 if let CastMemberType::Field(field) = &member.member_type {
@@ -692,7 +845,8 @@ impl CastManager {
                 } else {
                     Err(ScriptError::new(format!(
                         "Cast member '{}' is not a field or text member (type: {:?})",
-                        member.name, member.member_type.member_type_id()
+                        member.name,
+                        member.member_type.member_type_id()
                     )))
                 }
             }
@@ -747,15 +901,19 @@ impl CastManager {
     /// The movie script that defines `handler_name`, via the handler index.
     /// Equivalent to walking `get_movie_scripts()` in order and taking the
     /// first script whose `get_own_handler` matches.
-    pub fn find_movie_script_with_handler(&self, handler_name: crate::player::symbols::symbol::Symbol) -> Option<Rc<Script>> {
+    pub fn find_movie_script_with_handler(
+        &self,
+        handler_name: crate::player::symbols::symbol::Symbol,
+    ) -> Option<Rc<Script>> {
         let scripts = self.get_movie_scripts();
         let scripts = scripts.as_ref()?;
         if self.movie_script_handler_index.borrow().is_none() {
-            let mut index: FxHashMap<crate::player::symbols::symbol::Symbol, usize> = FxHashMap::default();
+            let mut index: FxHashMap<crate::player::symbols::symbol::Symbol, usize> =
+                FxHashMap::default();
             for (idx, script) in scripts.iter().enumerate() {
                 for name in script.handlers.keys() {
                     // First definition wins — `or_insert`, never overwrite.
-                    index.entry(*name).or_insert(idx);
+                    index.entry(name.clone()).or_insert(idx);
                 }
             }
             self.movie_script_handler_index.replace(Some(index));
@@ -781,15 +939,20 @@ impl CastManager {
                 for script in cast.scripts.values() {
                     if let ScriptType::Movie = script.script_type {
                         for handler_name in script.handlers.keys() {
-                            map.entry(*handler_name)
-                                .or_insert_with(|| (script.member_ref.clone(), *handler_name));
+                            map.entry(handler_name.clone())
+                                .or_insert_with(|| (script.member_ref.clone(), handler_name.clone()));
                         }
                     }
                 }
             }
             self.movie_handler_refs.replace(Some(map));
         }
-        self.movie_handler_refs.borrow().as_ref().unwrap().get(&name).cloned()
+        self.movie_handler_refs
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .get(&name)
+            .cloned()
     }
 
     /// True if ANY script in ANY cast defines a handler named `name`. Used by
@@ -802,13 +965,17 @@ impl CastManager {
             for cast in &self.casts {
                 for script in cast.scripts.values() {
                     for handler_name in script.handlers.keys() {
-                        set.insert(*handler_name);
+                        set.insert(handler_name.clone());
                     }
                 }
             }
             self.all_handler_names.replace(Some(set));
         }
-        self.all_handler_names.borrow().as_ref().unwrap().contains(&name)
+        self.all_handler_names
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .contains(&name)
     }
 
     /// True if any cast library is mid-load. The frame loop uses this (with
@@ -887,10 +1054,15 @@ impl CastManager {
 
                     if let Some(bitmap_ref) = font_data.bitmap_ref {
                         // DEDUPE: if this bitmap font already exists, just ensure id mappings and skip
-                        if let Some(existing_ref) = Self::has_pfr_bitmap(font_manager, bitmap_ref as u32) {
+                        if let Some(existing_ref) =
+                            Self::has_pfr_bitmap(font_manager, bitmap_ref as u32)
+                        {
                             // Don't overwrite existing mappings; only insert if missing
                             if font_id > 0 {
-                                font_manager.font_by_id.entry(font_id).or_insert(existing_ref);
+                                font_manager
+                                    .font_by_id
+                                    .entry(font_id)
+                                    .or_insert(existing_ref);
                             }
                             font_manager
                                 .font_by_id
@@ -968,7 +1140,9 @@ impl CastManager {
                                 || member_name_upper.contains("ITALIC")
                                 || member_name_upper.contains("OBLIQUE");
                             if !is_styled_variant {
-                                if let Some(prefix_end) = pfr_name.find(|c: char| c == '_' || c == '*' || c == ' ') {
+                                if let Some(prefix_end) =
+                                    pfr_name.find(|c: char| c == '_' || c == '*' || c == ' ')
+                                {
                                     let prefix = &pfr_name[..prefix_end];
                                     if prefix.len() > 1 && prefix != *font_name {
                                         aliases.push(prefix.to_string());
@@ -995,11 +1169,19 @@ impl CastManager {
                             font_manager.font_by_id.entry(font_id).or_insert(font_ref);
                         }
                         // Also map by member number (STXT formatting runs reference fonts by member number)
-                        font_manager.font_by_id.entry(member_number as u16).or_insert(font_ref);
+                        font_manager
+                            .font_by_id
+                            .entry(member_number as u16)
+                            .or_insert(font_ref);
 
                         log::debug!(
                             "Loaded PFR font '{}': ref={}, id={}, member={}, char_size={}x{}, first_char={}",
-                            font_name, font_ref, font_id, member_number, char_width, char_height,
+                            font_name,
+                            font_ref,
+                            font_id,
+                            member_number,
+                            char_width,
+                            char_height,
                             font_data.first_char_num.unwrap_or(32)
                         );
 
@@ -1039,8 +1221,17 @@ impl CastManager {
                             let rc_font = Rc::new(font_data_clone.clone());
 
                             // Create cache keys
-                            let full_key = format!("{}_{}_{}", font_name.clone().to_ascii_lowercase(), font_size, font_style);
-                            let size_key = format!("{}_{}_0", font_name.clone().to_ascii_lowercase(), font_size);
+                            let full_key = format!(
+                                "{}_{}_{}",
+                                font_name.clone().to_ascii_lowercase(),
+                                font_size,
+                                font_style
+                            );
+                            let size_key = format!(
+                                "{}_{}_0",
+                                font_name.clone().to_ascii_lowercase(),
+                                font_size
+                            );
                             let name_key = font_name.clone().to_ascii_lowercase();
 
                             // DEDUPE: already cached => don't create a new FontRef
@@ -1053,7 +1244,10 @@ impl CastManager {
 
                                 if let Some(existing_ref) = existing_ref {
                                     if font_id > 0 {
-                                        font_manager.font_by_id.entry(font_id).or_insert(existing_ref);
+                                        font_manager
+                                            .font_by_id
+                                            .entry(font_id)
+                                            .or_insert(existing_ref);
                                     }
                                     font_manager
                                         .font_by_id
@@ -1068,13 +1262,16 @@ impl CastManager {
                             // Store in cache
                             font_manager
                                 .font_cache
-                                .entry(full_key).or_insert_with(|| Rc::clone(&rc_font));
+                                .entry(full_key)
+                                .or_insert_with(|| Rc::clone(&rc_font));
                             font_manager
                                 .font_cache
-                                .entry(name_key).or_insert_with(|| Rc::clone(&rc_font));
+                                .entry(name_key)
+                                .or_insert_with(|| Rc::clone(&rc_font));
                             font_manager
                                 .font_cache
-                                .entry(size_key).or_insert_with(|| Rc::clone(&rc_font));
+                                .entry(size_key)
+                                .or_insert_with(|| Rc::clone(&rc_font));
 
                             // Store by FontRef
                             let font_ref = font_manager.font_counter;
@@ -1084,12 +1281,18 @@ impl CastManager {
                             if font_id > 0 {
                                 font_manager.font_by_id.entry(font_id).or_insert(font_ref);
                             }
-                            font_manager.font_by_id.entry(member_number as u16).or_insert(font_ref);
+                            font_manager
+                                .font_by_id
+                                .entry(member_number as u16)
+                                .or_insert(font_ref);
 
                             log::debug!(
                                 "Loaded scaled font '{}': ref={}, member={}, char_size={}x{}",
-                                font_name, font_ref, member_number,
-                                font_data_clone.char_width, font_data_clone.char_height
+                                font_name,
+                                font_ref,
+                                member_number,
+                                font_data_clone.char_width,
+                                font_data_clone.char_height
                             );
 
                             loaded_count += 1;
@@ -1108,7 +1311,8 @@ impl CastManager {
         if loaded_count > 0 {
             log::debug!(
                 "Font loading complete: {} loaded, {} skipped, {} cache entries, {} id mappings",
-                loaded_count, skipped_count,
+                loaded_count,
+                skipped_count,
                 font_manager.font_cache.len(),
                 font_manager.font_by_id.len()
             );
@@ -1118,7 +1322,8 @@ impl CastManager {
             debug!("Font cache keys: {:?}", keys);
 
             // Log font_by_id mappings
-            let id_mappings: Vec<(&u16, &crate::player::font::FontRef)> = font_manager.font_by_id.iter().collect();
+            let id_mappings: Vec<(&u16, &crate::player::font::FontRef)> =
+                font_manager.font_by_id.iter().collect();
             debug!("Font by_id mappings: {:?}", id_mappings);
         }
     }

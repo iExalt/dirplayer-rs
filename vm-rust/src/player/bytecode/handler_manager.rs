@@ -1,4 +1,4 @@
-use async_recursion::async_recursion;
+use std::rc::Rc;
 
 use crate::{
     director::{
@@ -6,10 +6,11 @@ use crate::{
         lingo::{constants::get_opcode_name, opcode::OpCode},
     },
     player::{
-        HandlerExecutionResult, PLAYER_OPT, ScriptError, bytecode::{
+        ScopeToken,
+        HandlerExecutionResult, PLAYER_OPT, ScriptError, session::ExecutionContext, bytecode::{
             arithmetics::ArithmeticsBytecodeHandler, flow_control::FlowControlBytecodeHandler,
             stack::StackBytecodeHandler,
-        }, reserve_player_mut, scope::ScopeRef, script::Script, symbols::symbol::Symbol, trace_output
+        }, scope::ScopeRef, script::Script, symbols::symbol::Symbol
     },
 };
 
@@ -22,7 +23,6 @@ thread_local! {
     pub static EXPRESSION_TRACKER: std::cell::RefCell<StackExpressionTracker> =
         std::cell::RefCell::new(StackExpressionTracker::new());
 }
-
 /// Lightweight execution history entry - stores only minimal data
 /// Strings are generated lazily only when dumping on error
 #[derive(Clone, Copy)]
@@ -168,26 +168,35 @@ pub fn dump_execution_history_on_error(error_message: &str) {
 // trace_output is imported from crate::player
 
 #[derive(Clone)]
+pub(crate) struct HandlerCode {
+    pub(crate) script: Rc<Script>,
+    pub(crate) handler: Rc<HandlerDef>,
+    pub(crate) names: Rc<[Symbol]>,
+}
+
+#[derive(Clone)]
 pub struct BytecodeHandlerContext {
-    pub scope_ref: ScopeRef,
-    pub handler_def_ptr: *const HandlerDef,
-    pub script_ptr: *const Script,
-    pub names_ptr: *const Vec<Symbol>,
+    pub(crate) scope: ScopeToken,
+    pub(crate) code: HandlerCode,
     /// Variable-index multiplier for this script (constant for the whole
     /// handler). Cached here so per-opcode variable handlers (getlocal/
     /// setlocal/getparam/getglobal/pushcons/...) don't re-derive it via a
     /// cast lookup on every op — that was pure per-op overhead in tight loops.
-    pub multiplier: u32,
+    pub(crate) multiplier: u32,
+}
+
+impl BytecodeHandlerContext {
+    #[inline(always)]
+    pub(crate) fn scope_ref(&self) -> ScopeRef {
+        self.scope.slot()
+    }
 }
 
 impl BytecodeHandlerContext {
     /// Get a name from the name table by ID without borrowing player.
     #[inline(always)]
     pub fn get_name(&self, name_id: u16) -> Symbol {
-        unsafe {
-            let names = &*self.names_ptr;
-            names[name_id as usize]
-        }
+        self.code.names[name_id as usize].clone()
     }
 }
 pub struct StaticBytecodeHandlerManager {}
@@ -195,78 +204,80 @@ impl StaticBytecodeHandlerManager {
     #[inline(always)]
     pub fn call_sync_handler(
         opcode: OpCode,
+        runtime: &mut ExecutionContext<'_>,
         ctx: &BytecodeHandlerContext,
     ) -> Result<HandlerExecutionResult, ScriptError> {
         match opcode {
-            OpCode::Add => ArithmeticsBytecodeHandler::add(ctx),
-            OpCode::PushInt8 => StackBytecodeHandler::push_int(ctx),
-            OpCode::PushInt16 => StackBytecodeHandler::push_int(ctx),
-            OpCode::PushInt32 => StackBytecodeHandler::push_int(ctx),
-            OpCode::PushArgList => StackBytecodeHandler::push_arglist(ctx),
-            OpCode::PushArgListNoRet => StackBytecodeHandler::push_arglist_no_ret(ctx),
-            OpCode::PushSymb => StackBytecodeHandler::push_symb(ctx),
-            OpCode::Swap => StackBytecodeHandler::swap(ctx),
-            OpCode::PushVarRef => StackBytecodeHandler::push_var_ref(ctx),
-            OpCode::GetProp => GetSetBytecodeHandler::get_prop(ctx),
-            OpCode::GetObjProp => GetSetBytecodeHandler::get_obj_prop(ctx),
-            OpCode::GetMovieProp => GetSetBytecodeHandler::get_movie_prop(ctx),
-            OpCode::Set => GetSetBytecodeHandler::set(ctx),
-            OpCode::Ret => FlowControlBytecodeHandler::ret(ctx),
-            OpCode::JmpIfZ => FlowControlBytecodeHandler::jmp_if_zero(ctx),
-            OpCode::Jmp => FlowControlBytecodeHandler::jmp(ctx),
+            OpCode::Add => ArithmeticsBytecodeHandler::add(runtime, ctx),
+            OpCode::PushInt8 => StackBytecodeHandler::push_int(runtime, ctx),
+            OpCode::PushInt16 => StackBytecodeHandler::push_int(runtime, ctx),
+            OpCode::PushInt32 => StackBytecodeHandler::push_int(runtime, ctx),
+            OpCode::PushArgList => StackBytecodeHandler::push_arglist(runtime, ctx),
+            OpCode::PushArgListNoRet => StackBytecodeHandler::push_arglist_no_ret(runtime, ctx),
+            OpCode::PushSymb => StackBytecodeHandler::push_symb(runtime, ctx),
+            OpCode::Swap => StackBytecodeHandler::swap(runtime, ctx),
+            OpCode::PushVarRef => StackBytecodeHandler::push_var_ref(runtime, ctx),
+            OpCode::GetProp => GetSetBytecodeHandler::get_prop(runtime, ctx),
+            OpCode::GetObjProp => GetSetBytecodeHandler::get_obj_prop(runtime, ctx),
+            OpCode::GetMovieProp => GetSetBytecodeHandler::get_movie_prop(runtime, ctx),
+            OpCode::Set => GetSetBytecodeHandler::set(runtime, ctx),
+            OpCode::Ret => FlowControlBytecodeHandler::ret(runtime, ctx),
+            OpCode::LocalCall => FlowControlBytecodeHandler::local_call(runtime, ctx),
+            OpCode::JmpIfZ => FlowControlBytecodeHandler::jmp_if_zero(runtime, ctx),
+            OpCode::Jmp => FlowControlBytecodeHandler::jmp(runtime, ctx),
             // GetGlobal2 (0x48) / SetGlobal2 (0x4e) are alternate encodings of
             // GetGlobal/SetGlobal emitted by older (D4) compilers; same
             // semantics. hackey initMain uses setGlobal2.
-            OpCode::GetGlobal | OpCode::GetGlobal2 => GetSetBytecodeHandler::get_global(ctx),
-            OpCode::SetGlobal | OpCode::SetGlobal2 => GetSetBytecodeHandler::set_global(ctx),
-            OpCode::PushCons => StackBytecodeHandler::push_cons(ctx),
-            OpCode::PushZero => StackBytecodeHandler::push_zero(ctx),
-            OpCode::GetField => GetSetBytecodeHandler::get_field(ctx),
-            OpCode::GetLocal => GetSetBytecodeHandler::get_local(ctx),
-            OpCode::SetLocal => GetSetBytecodeHandler::set_local(ctx),
-            OpCode::GetParam => GetSetBytecodeHandler::get_param(ctx),
-            OpCode::SetMovieProp => GetSetBytecodeHandler::set_movie_prop(ctx),
-            OpCode::PushPropList => StackBytecodeHandler::push_prop_list(ctx),
-            OpCode::Gt => CompareBytecodeHandler::gt(ctx),
-            OpCode::Lt => CompareBytecodeHandler::lt(ctx),
-            OpCode::GtEq => CompareBytecodeHandler::gt_eq(ctx),
-            OpCode::LtEq => CompareBytecodeHandler::lt_eq(ctx),
-            OpCode::Sub => ArithmeticsBytecodeHandler::sub(ctx),
-            OpCode::EndRepeat => FlowControlBytecodeHandler::end_repeat(ctx),
-            OpCode::SetProp => GetSetBytecodeHandler::set_prop(ctx),
-            OpCode::PushList => StackBytecodeHandler::push_list(ctx),
-            OpCode::Not => CompareBytecodeHandler::not(ctx),
-            OpCode::NtEq => CompareBytecodeHandler::nt_eq(ctx),
-            OpCode::TheBuiltin => GetSetBytecodeHandler::the_built_in(ctx),
-            OpCode::Peek => StackBytecodeHandler::peek(ctx),
-            OpCode::Pop => StackBytecodeHandler::pop(ctx),
-            OpCode::And => CompareBytecodeHandler::and(ctx),
-            OpCode::Eq => CompareBytecodeHandler::eq(ctx),
-            OpCode::SetParam => GetSetBytecodeHandler::set_param(ctx),
-            OpCode::GetChainedProp => GetSetBytecodeHandler::get_chained_prop(ctx),
-            OpCode::ContainsStr => StringBytecodeHandler::contains_str(ctx),
-            OpCode::Contains0Str => StringBytecodeHandler::contains_0str(ctx),
-            OpCode::JoinPadStr => StringBytecodeHandler::join_pad_str(ctx),
-            OpCode::JoinStr => StringBytecodeHandler::join_str(ctx),
-            OpCode::Get => GetSetBytecodeHandler::get(ctx),
-            OpCode::Mod => ArithmeticsBytecodeHandler::mod_handler(ctx),
-            OpCode::GetChunk => StringBytecodeHandler::get_chunk(ctx),
-            OpCode::Put => StringBytecodeHandler::put(ctx),
-            OpCode::Or => CompareBytecodeHandler::or(ctx),
-            OpCode::Inv => ArithmeticsBytecodeHandler::inv(ctx),
-            OpCode::Div => ArithmeticsBytecodeHandler::div(ctx),
-            OpCode::PushFloat32 => StackBytecodeHandler::push_f32(ctx),
-            OpCode::Mul => ArithmeticsBytecodeHandler::mul(ctx),
-            OpCode::PushChunkVarRef => StackBytecodeHandler::push_chunk_var_ref(ctx),
-            OpCode::PushVarRef => StackBytecodeHandler::push_var_ref(ctx),
-            OpCode::DeleteChunk => StringBytecodeHandler::delete_chunk(ctx),
-            OpCode::GetTopLevelProp => GetSetBytecodeHandler::get_top_level_prop(ctx),
-            OpCode::PutChunk => StringBytecodeHandler::put_chunk(ctx),
-            OpCode::OntoSpr => SpriteCompareBytecodeHandler::onto_sprite(ctx),
-            OpCode::IntoSpr => SpriteCompareBytecodeHandler::into_sprite(ctx),
-            OpCode::CallJavaScript => FlowControlBytecodeHandler::call_javascript(ctx),
-            OpCode::StartTell => FlowControlBytecodeHandler::start_tell(ctx),
-            OpCode::EndTell => FlowControlBytecodeHandler::end_tell(ctx),
+            OpCode::GetGlobal | OpCode::GetGlobal2 => GetSetBytecodeHandler::get_global(runtime, ctx),
+            OpCode::SetGlobal | OpCode::SetGlobal2 => GetSetBytecodeHandler::set_global(runtime, ctx),
+            OpCode::PushCons => StackBytecodeHandler::push_cons(runtime, ctx),
+            OpCode::PushZero => StackBytecodeHandler::push_zero(runtime, ctx),
+            OpCode::GetField => GetSetBytecodeHandler::get_field(runtime, ctx),
+            OpCode::GetLocal => GetSetBytecodeHandler::get_local(runtime, ctx),
+            OpCode::SetLocal => GetSetBytecodeHandler::set_local(runtime, ctx),
+            OpCode::GetParam => GetSetBytecodeHandler::get_param(runtime, ctx),
+            OpCode::SetMovieProp => GetSetBytecodeHandler::set_movie_prop(runtime, ctx),
+            OpCode::PushPropList => StackBytecodeHandler::push_prop_list(runtime, ctx),
+            OpCode::Gt => CompareBytecodeHandler::gt(runtime, ctx),
+            OpCode::Lt => CompareBytecodeHandler::lt(runtime, ctx),
+            OpCode::GtEq => CompareBytecodeHandler::gt_eq(runtime, ctx),
+            OpCode::LtEq => CompareBytecodeHandler::lt_eq(runtime, ctx),
+            OpCode::Sub => ArithmeticsBytecodeHandler::sub(runtime, ctx),
+            OpCode::EndRepeat => FlowControlBytecodeHandler::end_repeat(runtime, ctx),
+            OpCode::SetProp => GetSetBytecodeHandler::set_prop(runtime, ctx),
+            OpCode::PushList => StackBytecodeHandler::push_list(runtime, ctx),
+            OpCode::Not => CompareBytecodeHandler::not(runtime, ctx),
+            OpCode::NtEq => CompareBytecodeHandler::nt_eq(runtime, ctx),
+            OpCode::TheBuiltin => GetSetBytecodeHandler::the_built_in(runtime, ctx),
+            OpCode::Peek => StackBytecodeHandler::peek(runtime, ctx),
+            OpCode::Pop => StackBytecodeHandler::pop(runtime, ctx),
+            OpCode::And => CompareBytecodeHandler::and(runtime, ctx),
+            OpCode::Eq => CompareBytecodeHandler::eq(runtime, ctx),
+            OpCode::SetParam => GetSetBytecodeHandler::set_param(runtime, ctx),
+            OpCode::GetChainedProp => GetSetBytecodeHandler::get_chained_prop(runtime, ctx),
+            OpCode::ContainsStr => StringBytecodeHandler::contains_str(runtime, ctx),
+            OpCode::Contains0Str => StringBytecodeHandler::contains_0str(runtime, ctx),
+            OpCode::JoinPadStr => StringBytecodeHandler::join_pad_str(runtime, ctx),
+            OpCode::JoinStr => StringBytecodeHandler::join_str(runtime, ctx),
+            OpCode::Get => GetSetBytecodeHandler::get(runtime, ctx),
+            OpCode::Mod => ArithmeticsBytecodeHandler::mod_handler(runtime, ctx),
+            OpCode::GetChunk => StringBytecodeHandler::get_chunk(runtime, ctx),
+            OpCode::Put => StringBytecodeHandler::put(runtime, ctx),
+            OpCode::Or => CompareBytecodeHandler::or(runtime, ctx),
+            OpCode::Inv => ArithmeticsBytecodeHandler::inv(runtime, ctx),
+            OpCode::Div => ArithmeticsBytecodeHandler::div(runtime, ctx),
+            OpCode::PushFloat32 => StackBytecodeHandler::push_f32(runtime, ctx),
+            OpCode::Mul => ArithmeticsBytecodeHandler::mul(runtime, ctx),
+            OpCode::PushChunkVarRef => StackBytecodeHandler::push_chunk_var_ref(runtime, ctx),
+            OpCode::PushVarRef => StackBytecodeHandler::push_var_ref(runtime, ctx),
+            OpCode::DeleteChunk => StringBytecodeHandler::delete_chunk(runtime, ctx),
+            OpCode::GetTopLevelProp => GetSetBytecodeHandler::get_top_level_prop(runtime, ctx),
+            OpCode::PutChunk => StringBytecodeHandler::put_chunk(runtime, ctx),
+            OpCode::OntoSpr => SpriteCompareBytecodeHandler::onto_sprite(runtime, ctx),
+            OpCode::IntoSpr => SpriteCompareBytecodeHandler::into_sprite(runtime, ctx),
+            OpCode::CallJavaScript => FlowControlBytecodeHandler::call_javascript(runtime, ctx),
+            OpCode::StartTell => FlowControlBytecodeHandler::start_tell(runtime, ctx),
+            OpCode::EndTell => FlowControlBytecodeHandler::end_tell(runtime, ctx),
             _ => {
                 let prim = num::ToPrimitive::to_u16(&opcode).unwrap();
                 let name = get_opcode_name(opcode);
@@ -283,34 +294,12 @@ impl StaticBytecodeHandlerManager {
             OpCode::ExtCall => true,
             OpCode::ObjCall => true,
             OpCode::ObjCallV4 => true,
-            OpCode::LocalCall => true,
             OpCode::SetObjProp => true,
             OpCode::TellCall => true,
             _ => false,
         }
     }
 
-    #[inline(always)]
-    pub async fn call_async_handler(
-        opcode: OpCode,
-        ctx: &BytecodeHandlerContext,
-    ) -> Result<HandlerExecutionResult, ScriptError> {
-        match opcode {
-            OpCode::NewObj => StackBytecodeHandler::new_obj(&ctx).await,
-            OpCode::ExtCall => FlowControlBytecodeHandler::ext_call(&ctx).await,
-            OpCode::ObjCall => FlowControlBytecodeHandler::obj_call(&ctx).await,
-            OpCode::ObjCallV4 => FlowControlBytecodeHandler::obj_call_v4(&ctx).await,
-            OpCode::LocalCall => FlowControlBytecodeHandler::local_call(&ctx).await,
-            OpCode::SetObjProp => GetSetBytecodeHandler::set_obj_prop(&ctx).await,
-            OpCode::TellCall => FlowControlBytecodeHandler::tell_call(&ctx).await,
-            _ => {
-                let prim = num::ToPrimitive::to_u16(&opcode).unwrap();
-                let name = get_opcode_name(opcode);
-                let fmt = format!("No handler for opcode {name} ({prim:#04x})");
-                Err(ScriptError::new(fmt))
-            }
-        }
-    }
 }
 
 /// Synchronous fast path for bytecode dispatch.
@@ -329,6 +318,7 @@ impl StaticBytecodeHandlerManager {
 /// `player_execute_bytecode(&ctx).await`.
 #[inline]
 pub fn try_execute_bytecode_sync(
+    runtime: &mut ExecutionContext<'_>,
     ctx: &BytecodeHandlerContext,
 ) -> Option<Result<HandlerExecutionResult, ScriptError>> {
     let opcode = {
@@ -339,15 +329,15 @@ pub fn try_execute_bytecode_sync(
         // Neopets g349 (a #movie inside dgs_loader) died in its own prepareMovie
         // with "jmp_if_zero: stack underflow … bytecode_index=0" — index 0 being
         // the host scope, while the sub was mid-handler with an empty stack.
-        let player = unsafe { crate::player::player_ref() };
-        let scope = player.scopes.get(ctx.scope_ref).unwrap();
-        let handler = unsafe { &*ctx.handler_def_ptr };
+        let player = &*runtime.player;
+        let scope = player.scopes.get(ctx.scope_ref()).unwrap();
+        let handler = ctx.code.handler.as_ref();
         if scope.bytecode_index >= handler.bytecode_array.len() {
             return Some(Ok(HandlerExecutionResult::Stop));
         }
         handler.bytecode_array[scope.bytecode_index].opcode
     };
-    try_execute_opcode_sync(opcode, ctx)
+    try_execute_opcode_sync(opcode, runtime, ctx)
 }
 
 /// `try_execute_bytecode_sync` for a caller that has ALREADY decoded the
@@ -356,6 +346,7 @@ pub fn try_execute_bytecode_sync(
 #[inline(always)]
 pub fn try_execute_opcode_sync(
     opcode: OpCode,
+    runtime: &mut ExecutionContext<'_>,
     ctx: &BytecodeHandlerContext,
 ) -> Option<Result<HandlerExecutionResult, ScriptError>> {
     if StaticBytecodeHandlerManager::has_async_handler(&opcode) {
@@ -372,193 +363,6 @@ pub fn try_execute_opcode_sync(
         } else {
             None
         };
-        Some(StaticBytecodeHandlerManager::call_sync_handler(opcode, ctx))
+        Some(StaticBytecodeHandlerManager::call_sync_handler(opcode, runtime, ctx))
     }
-}
-
-#[inline(always)]
-pub async fn player_execute_bytecode<'a>(
-    ctx: &BytecodeHandlerContext,
-) -> Result<HandlerExecutionResult, ScriptError> {
-    // let (opcode, bytecode_text, should_trace) = {
-    let (opcode, should_trace) = {
-        let player = unsafe { crate::player::player_ref() };
-        let scope = player.scopes.get(ctx.scope_ref).unwrap();
-
-        let handler = unsafe { &*ctx.handler_def_ptr };
-        let script = unsafe { &*ctx.script_ptr };
-        if scope.bytecode_index >= handler.bytecode_array.len() {
-            return Ok(HandlerExecutionResult::Stop);
-        }
-        let bytecode = &handler.bytecode_array[scope.bytecode_index];
-
-        // Always record to lightweight execution history (minimal overhead - just copying integers)
-        // record_execution(
-        //     num::ToPrimitive::to_u16(&bytecode.opcode).unwrap_or(0),
-        //     bytecode.pos as u32,
-        //     bytecode.obj as i32,
-        //     handler.name_id as u32,
-        //     script.member_ref.cast_lib as u32,
-        //     script.member_ref.cast_member,
-        // );
-
-        let should_trace = player.movie.trace_script;
-        // let bytecode_text = if should_trace {
-        //     let cast = player.movie.cast_manager
-        //         .get_cast(script.member_ref.cast_lib as u32)
-        //         .unwrap();
-        //     let lctx = cast.lctx.as_ref().unwrap();
-        //     let multiplier = crate::director::file::get_variable_multiplier(
-        //         cast.capital_x,
-        //         cast.dir_version
-        //     );
-
-        //     // Generate annotation using expression tracker
-        //     let annotation = EXPRESSION_TRACKER.with(|tracker| {
-        //         let mut tracker = tracker.borrow_mut();
-                
-        //         // Get literals from script
-        //         let script = unsafe { &*ctx.script_ptr };
-        //         let literals = &script.chunk.literals;
-                
-        //         tracker.process_bytecode(bytecode, lctx, handler, multiplier, literals)
-        //     });
-
-        //     // Format like LASM
-        //     let op_name = crate::director::lingo::constants::get_opcode_name(bytecode.opcode);
-        //     let mut text = format!("[{:3}] {}", bytecode.pos, op_name);
-            
-        //     // Add operand for some opcodes
-        //     match bytecode.opcode {
-        //         OpCode::SetLocal | OpCode::GetLocal | OpCode::SetParam | OpCode::GetParam => {
-        //             // These show the variable name in the opcode part
-        //         }
-        //         _ if bytecode.obj != 0 => {
-        //             text.push_str(&format!(" {}", bytecode.obj));
-        //         }
-        //         _ => {}
-        //     }
-            
-        //     // Pad with dots
-        //     let current_len = text.len();
-        //     let target_len = 42;
-        //     if current_len < target_len {
-        //         text.push(' ');
-        //         text.push_str(&".".repeat(target_len - current_len));
-        //     }
-            
-        //     // Add annotation
-        //     if !annotation.is_empty() {
-        //         text.push(' ');
-        //         text.push_str(&annotation);
-        //     }
-            
-        //     text
-        // } else {
-        //     String::new()
-        // };
-
-        // (bytecode.opcode, bytecode_text, should_trace)
-        (bytecode.opcode, should_trace)
-    };
-
-    // Trace bytecode execution before running
-    // if should_trace {
-    //     let trace_file = {
-    //         let player = unsafe { PLAYER_OPT.as_ref().unwrap() };
-    //         let msg = format!("--> {}", bytecode_text);
-    //         trace_output(player, &msg);
-    //         player.movie.trace_log_file.clone()
-    //     };
-    // }
-
-    // Execute the bytecode (profiled under the opcode's name, lazily — the
-    // name lookup is a HashMap hit, so only pay it while recording).
-    let result = {
-        let _op_scope = if crate::player::profiling::is_recording() {
-            Some(crate::player::profiling::ProfileScope::new(
-                crate::director::lingo::constants::get_opcode_name(opcode),
-            ))
-        } else {
-            None
-        };
-        if StaticBytecodeHandlerManager::has_async_handler(&opcode) {
-            StaticBytecodeHandlerManager::call_async_handler(opcode, ctx).await
-        } else {
-            StaticBytecodeHandlerManager::call_sync_handler(opcode, ctx)
-        }
-    };
-
-    // Trace assignment results after execution (for specific opcodes)
-    // if should_trace && result.is_ok() {
-    //     match opcode {
-    //         OpCode::SetLocal | OpCode::SetGlobal | OpCode::SetParam => {
-    //             reserve_player_mut(|player| {
-    //                 let scope = player.scopes.get(ctx.scope_ref).unwrap();
-    //                 let handler = unsafe { &*ctx.handler_def_ptr };
-    //                 let script = unsafe { &*ctx.script_ptr };
-    //                 let bytecode = &handler.bytecode_array[scope.bytecode_index];
-                    
-    //                 // Get lingo_context and multiplier from the cast
-    //                 let cast = player.movie.cast_manager
-    //                     .get_cast(script.member_ref.cast_lib as u32)
-    //                     .unwrap();
-    //                 let lctx = cast.lctx.as_ref().unwrap();
-    //                 let multiplier = crate::director::file::get_variable_multiplier(
-    //                     cast.capital_x,
-    //                     cast.dir_version
-    //                 );
-                    
-    //                 let var_name = match opcode {
-    //                     OpCode::SetLocal => {
-    //                         let local_index = (bytecode.obj as u32 / multiplier) as usize;
-    //                         handler.local_name_ids
-    //                             .get(local_index)
-    //                             .and_then(|&name_id| lctx.names.get(name_id as usize))
-    //                             .map(|s| s.as_str())
-    //                             .unwrap_or("UNKNOWN")
-    //                             .to_string()
-    //                     }
-    //                     OpCode::SetGlobal => {
-    //                         lctx.names
-    //                             .get(bytecode.obj as usize)
-    //                             .map(|s| s.as_str())
-    //                             .unwrap_or("UNKNOWN")
-    //                             .to_string()
-    //                     }
-    //                     OpCode::SetParam => {
-    //                         let param_index = (bytecode.obj as u32 / multiplier) as usize;
-    //                         handler.argument_name_ids
-    //                             .get(param_index)
-    //                             .and_then(|&name_id| lctx.names.get(name_id as usize))
-    //                             .map(|s| s.as_str())
-    //                             .unwrap_or("UNKNOWN")
-    //                             .to_string()
-    //                     }
-    //                     _ => "UNKNOWN".to_string()
-    //                 };
-                    
-    //                 // Get the value that was just set (should be on top of stack or stored)
-    //                 let value_str = if scope.stack.len() > 0 {
-    //                     use crate::player::datum_formatting::format_datum;
-    //                     let value_ref = &scope.stack[scope.stack.len() - 1];
-    //                     format_datum(value_ref, player)
-    //                 } else {
-    //                     "void".to_string()
-    //                 };
-                    
-    //                 let trace_file = player.movie.trace_log_file.clone();
-                    
-
-    //                 let msg = format!("== {} = {}", var_name, value_str);
-    //                 trace_output(player, &msg);
-
-    //                 (trace_file, var_name, value_str)
-    //             });
-    //         }
-    //         _ => {}
-    //     }
-    // }
-
-    result
 }

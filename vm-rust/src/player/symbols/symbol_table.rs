@@ -1,225 +1,245 @@
-use fxhash::FxHashMap;
-use lasso::{Rodeo, Spur};
+use std::{collections::HashMap, rc::Rc};
 
-use crate::player::symbols::builtin::BuiltInSymbol;
+use crate::player::symbols::{builtin::{BuiltInSymbol, BUILTIN_SPECS}, symbol::Symbol};
+
+/// Diagnostic metadata only. Rc identity is the actual authority.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub struct SymbolOwner {
+    pub session: u64,
+    pub generation: u64,
+}
+
+#[derive(Debug)]
+pub(crate) struct SymbolOwnerInner {
+    pub(crate) key: SymbolOwner,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ForeignSymbol;
 
 pub struct SymbolTable {
-    interner: Rodeo,
-    original_strings: FxHashMap<Spur, String>,
-    /// Spurs whose display spelling was claimed by a MOVIE's own name table.
-    /// A builtin spelling may be overridden by the first movie name that
-    /// collides with it; a movie's claim is then final, so a movie that spells
-    /// the same name two ways keeps the FIRST spelling — which is Director's
-    /// first-writer-wins rule. Without this, the last entry in the name table
-    /// would win and an internally inconsistent movie would get whichever
-    /// casing happened to come later.
-    movie_claimed_display: fxhash::FxHashSet<Spur>,
-    /// Display spellings as they stood after `init_builtin_symbols()`, before
-    /// any movie claimed one. `reset_movie_display_claims` restores this so each
-    /// movie starts from the builtin baseline instead of inheriting whatever the
-    /// previously-loaded movie claimed — the interner itself is monotonic (spurs
-    /// must stay valid forever), so only the DISPLAY layer is reset.
-    builtin_display_baseline: FxHashMap<Spur, String>,
-    pub spur_to_builtin: FxHashMap<Spur, BuiltInSymbol>,
-    pub builtin_to_spur: FxHashMap<BuiltInSymbol, Spur>,
+    owner: Rc<SymbolOwnerInner>,
+    dynamic_by_lower: HashMap<String, u32>,
+    dynamic_lower: Vec<String>,
+    dynamic_display: Vec<String>,
+    movie_claimed_dynamic: Vec<bool>,
+    builtin_by_lower: HashMap<String, BuiltInSymbol>,
+    builtin_display: HashMap<BuiltInSymbol, String>,
+    builtin_lower: HashMap<BuiltInSymbol, String>,
+    builtin_display_baseline: HashMap<BuiltInSymbol, String>,
+    movie_claimed_builtins: HashMap<BuiltInSymbol, bool>,
 }
-
-pub static mut SYMBOL_TABLE: Option<SymbolTable> = None;
 
 impl SymbolTable {
-    pub fn new() -> Self {
+    /// A fresh Rc owner is created on every call, even for equal metadata.
+    pub fn new() -> Self { Self::with_owner(SymbolOwner::default()) }
+
+    pub fn with_owner(key: SymbolOwner) -> Self {
+        let owner = Rc::new(SymbolOwnerInner { key });
+        let mut builtin_by_lower = HashMap::new();
+        let mut builtin_display = HashMap::new();
+        for (spelling, builtin) in BUILTIN_SPECS.iter().copied() {
+            builtin_by_lower.insert(spelling.to_lowercase(), builtin.canonical());
+            builtin_display.entry(builtin.canonical()).or_insert_with(|| spelling.to_owned());
+        }
+        let builtin_lower = builtin_display.iter().map(|(b, s)| (*b, s.to_ascii_lowercase())).collect();
+        let builtin_display_baseline = builtin_display.clone();
         Self {
-            interner: Rodeo::default(),
-            original_strings: FxHashMap::default(),
-            movie_claimed_display: fxhash::FxHashSet::default(),
-            builtin_display_baseline: FxHashMap::default(),
-            spur_to_builtin: FxHashMap::default(),
-            builtin_to_spur: FxHashMap::default(),
+            owner,
+            dynamic_by_lower: HashMap::new(),
+            dynamic_lower: Vec::new(),
+            dynamic_display: Vec::new(),
+            movie_claimed_dynamic: Vec::new(),
+            builtin_by_lower,
+            builtin_display,
+            builtin_lower,
+            builtin_display_baseline,
+            movie_claimed_builtins: HashMap::new(),
         }
     }
 
-    pub fn intern(&mut self, string: &str) -> Spur {
-        // Fast path: no allocation when the text is already lowercase, which
-        // every `Symbol::from_str("someliteral")` in the codebase is — and there
-        // are hundreds, many on hot paths (per-hit prop-list keys in
-        // modelsUnderRay, parent-chain walks, per-frame property names).
-        // `to_lowercase()` allocates a String unconditionally, so those all paid
-        // for a heap allocation to produce an identical string.
-        //
-        // Restricted to pure ASCII: a non-ASCII byte can still be uppercase in
-        // Unicode (`É`), and `to_lowercase()` is Unicode-aware, so only an
-        // all-ASCII string with no ASCII uppercase is guaranteed to lowercase to
-        // itself.
-        if string.is_ascii() && !string.bytes().any(|b| b.is_ascii_uppercase()) {
-            if let Some(spur) = self.interner.get(string) {
-                return spur;
+    pub fn owner(&self) -> SymbolOwner { self.owner.key }
+
+    pub(crate) fn owns(&self, symbol: &Symbol) -> bool {
+        symbol.owner_identity().map_or(true, |owner| Rc::ptr_eq(owner, &self.owner))
+    }
+
+    pub fn intern(&mut self, string: &str) -> Symbol {
+        let folded = string.to_lowercase();
+        if let Some(builtin) = self.builtin_by_lower.get(&folded).copied() {
+            return Symbol::builtin(builtin);
+        }
+        if let Some(id) = self.dynamic_by_lower.get(&folded).copied() {
+            return Symbol::dynamic(self.owner.clone(), id);
+        }
+        let id = self.dynamic_lower.len() as u32;
+        self.dynamic_by_lower.insert(folded.clone(), id);
+        self.dynamic_lower.push(folded);
+        self.dynamic_display.push(string.to_owned());
+        self.movie_claimed_dynamic.push(false);
+        Symbol::dynamic(self.owner.clone(), id)
+    }
+
+    /// Intern and claim the first display spelling from a movie name table.
+    pub fn intern_authoritative(&mut self, string: &str) -> Symbol {
+        let folded = string.to_lowercase();
+        if let Some(builtin) = self.builtin_by_lower.get(&folded).copied() {
+            let entry = self.movie_claimed_builtins.entry(builtin).or_insert(false);
+            if !*entry {
+                self.builtin_display.insert(builtin, string.to_owned());
+                *entry = true;
             }
-            let spur = self.interner.get_or_intern(string);
-            if !self.original_strings.contains_key(&spur) {
-                self.original_strings.insert(spur, string.to_owned());
+            return Symbol::builtin(builtin);
+        }
+        let symbol = self.intern(string);
+        let id = symbol.dynamic_id().expect("intern returned dynamic symbol");
+        if !self.movie_claimed_dynamic[id as usize] {
+            self.dynamic_display[id as usize] = string.to_owned();
+            self.movie_claimed_dynamic[id as usize] = true;
+        }
+        symbol
+    }
+
+    pub fn display<'a>(&'a self, symbol: &Symbol) -> Result<&'a str, ForeignSymbol> {
+        match symbol.builtin_variant() {
+            Some(builtin) => self.builtin_display.get(&builtin).map(String::as_str).ok_or(ForeignSymbol),
+            None => {
+                let id = symbol.dynamic_id().ok_or(ForeignSymbol)? as usize;
+                if !self.owns(symbol) { return Err(ForeignSymbol); }
+                self.dynamic_display.get(id).map(String::as_str).ok_or(ForeignSymbol)
             }
-            return spur;
         }
-        let lower_string = string.to_lowercase();
-        let spur = self.interner.get_or_intern(&lower_string);
-        if !self.original_strings.contains_key(&spur) {
-            self.original_strings.insert(spur, string.to_owned());
-        }
-        spur
     }
 
-    /// Intern and CLAIM the display spelling, overwriting any already recorded.
-    ///
-    /// Only for names read from a cast's own name table (LNAM). Director keeps
-    /// one global display spelling per symbol, claimed by the FIRST writer, and
-    /// a string probe matches a symbol key by comparing against that spelling —
-    /// measured in the Message window:
-    ///
-    ///   [#nodeName:"test"]                       -- claims "nodeName"
-    ///   [#nodename:"test"].getaProp("nodeName")  -- "test"   (matches display)
-    ///   [#nodeName:"test"].getaProp("nodename")  -- <Void>   (misses)
-    ///
-    /// Note the key's own spelling is irrelevant; the global entry governs.
-    ///
-    /// In Shockwave the first writer is the movie, because there is no builtin
-    /// spelling table seeded ahead of it. We intern ~900 builtins in
-    /// `init_builtin_symbols()` at startup, so a movie symbol colliding with one
-    /// inherits the BUILTIN's casing: Habbo v31's `#nodename` reported as
-    /// "nodeName" (the XML DOM property), and the catalogue's
-    /// `tdata.getaProp("nodename")` missed — "Malformed node data nodeName".
-    ///
-    /// Interning the cast's names authoritatively restores Shockwave's ordering:
-    /// the movie's own spelling wins over a builtin it never referenced.
-    pub fn intern_authoritative(&mut self, string: &str) -> Spur {
-        let lower_string = string.to_lowercase();
-        let spur = self.interner.get_or_intern(&lower_string);
-        // Override a BUILTIN's spelling, but only once: the first movie name to
-        // claim a spur keeps it. A movie that spells the same name two ways
-        // (`#nodeName` in one script, `#nodename` in another) therefore keeps the
-        // first, matching Director; overwriting unconditionally would hand it to
-        // whichever entry sat later in the name table.
-        if !self.movie_claimed_display.contains(&spur) {
-            self.original_strings.insert(spur, string.to_owned());
-            self.movie_claimed_display.insert(spur);
+    pub fn lower<'a>(&'a self, symbol: &Symbol) -> Result<&'a str, ForeignSymbol> {
+        match symbol.builtin_variant() {
+            Some(builtin) => self.builtin_lower.get(&builtin).map(String::as_str).ok_or(ForeignSymbol),
+            None => {
+                let id = symbol.dynamic_id().ok_or(ForeignSymbol)? as usize;
+                if !self.owns(symbol) { return Err(ForeignSymbol); }
+                self.dynamic_lower.get(id).map(String::as_str).ok_or(ForeignSymbol)
+            }
         }
-        spur
     }
 
-    /// Record the current display spellings as the builtin baseline. Called
-    /// once, right after `init_builtin_symbols()`.
-    pub fn snapshot_builtin_display(&mut self) {
-        self.builtin_display_baseline = self.original_strings.clone();
-    }
-
-    /// Drop every movie display claim and restore the builtin baseline.
-    ///
-    /// Director resets its symbol table per movie; ours is a process-global,
-    /// monotonic interner, so without this the FIRST movie loaded would claim
-    /// spellings for every movie after it. That makes behaviour depend on load
-    /// order — a real hazard for the e2e suite, which runs ~48 movies in one
-    /// process, and for any session that navigates between movies.
-    ///
-    /// Only display spellings are reset. Spurs stay valid, so `Symbol` values
-    /// held across the movie change keep their identity.
     pub fn reset_movie_display_claims(&mut self) {
-        self.movie_claimed_display.clear();
-        for (spur, spelling) in &self.builtin_display_baseline {
-            self.original_strings.insert(*spur, spelling.clone());
-        }
-    }
-
-    /// The INTERNED (lowercased) spelling. `intern` lowercases before
-    /// interning, so this is the case-normalised form and the only safe thing
-    /// to `match` string literals against — `get_original_string` returns
-    /// whichever casing was seen FIRST, which depends on load order.
-    pub fn get_lower_string(&self, spur: &Spur) -> &str {
-        self.interner.resolve(spur)
-    }
-
-    pub fn get_original_string(&self, spur: &Spur) -> &str {
-        self.original_strings.get(spur).expect("Original string not found").as_str()
+        self.movie_claimed_dynamic.fill(false);
+        self.movie_claimed_builtins.clear();
+        self.builtin_display.clone_from(&self.builtin_display_baseline);
     }
 }
 
-static SYMBOL_TABLE_INIT: std::sync::Once = std::sync::Once::new();
 
-pub fn init_symbol_table() {
-    // Idempotent: the interner is global and monotonic — it never needs
-    // resetting between players/movies, so guard the one-time setup with a
-    // `Once`. This makes the function safe to call repeatedly (e.g. on every
-    // `init_player`) and from unit tests that exercise symbol-interning code
-    // paths (the Lingo parser interns chunk-type symbols) without standing up
-    // a full player. The `Once` also makes init safe under the parallel test
-    // runner, which shares the `static mut SYMBOL_TABLE` across threads.
-    SYMBOL_TABLE_INIT.call_once(|| {
-        unsafe {
-            SYMBOL_TABLE = Some(SymbolTable::new());
-        }
-        crate::player::symbols::builtin::init_builtin_symbols();
-        unsafe {
-            if let Some(t) = SYMBOL_TABLE.as_mut() {
-                t.snapshot_builtin_display();
-            }
-        }
-    });
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// Clear per-movie display-spelling claims. Call when a movie loads, so casts
-/// start from the builtin baseline rather than the previous movie's claims.
-pub fn reset_movie_symbol_display() {
-    init_symbol_table();
-    unsafe {
-        if let Some(t) = SYMBOL_TABLE.as_mut() {
-            t.reset_movie_display_claims();
-        }
+    #[test]
+    fn builtin_alias_keeps_stable_ids_and_first_display() {
+        let mut table = SymbolTable::with_owner(SymbolOwner { session: 7, generation: 1 });
+        let short = table.intern("editShortCutsEnabled");
+        let canonical = table.intern("EDITSHORTCUTSENABLED");
+        assert_eq!(short, canonical);
+        assert_eq!(short.into_builtin(), Some(BuiltInSymbol::EditShortcutsEnabled));
+        assert_eq!(table.display(&short), Ok("editShortCutsEnabled"));
+    }
+
+    #[test]
+    fn authoritative_claim_is_first_writer_and_reset_restores_baseline() {
+        let mut table = SymbolTable::new();
+        let dynamic = table.intern_authoritative("MiXeDName");
+        table.intern_authoritative("mixedname");
+        assert_eq!(table.display(&dynamic), Ok("MiXeDName"));
+        table.reset_movie_display_claims();
+        assert_eq!(table.display(&dynamic), Ok("MiXeDName"));
+        let builtin = table.intern_authoritative("NODENAME");
+        table.intern_authoritative("nodeName");
+        assert_eq!(table.display(&builtin), Ok("NODENAME"));
+        table.reset_movie_display_claims();
+        assert_eq!(table.display(&builtin), Ok("nodeName"));
+    }
+
+    #[test]
+    fn equal_numeric_owner_keys_do_not_cross_validate() {
+        let key = SymbolOwner { session: 11, generation: 3 };
+        let mut first = SymbolTable::with_owner(key);
+        let mut second = SymbolTable::with_owner(key);
+        let a = first.intern("firstOnly");
+        let b = second.intern("firstOnly");
+        assert_ne!(a, b);
+        assert!(second.display(&a).is_err());
+        assert!(first.display(&b).is_err());
+    }
+
+    #[test]
+    fn interleaved_tables_keep_independent_ids_and_text() {
+        let mut first = SymbolTable::new();
+        let mut second = SymbolTable::new();
+        let a = first.intern("one");
+        let b = second.intern("two");
+        let a2 = first.intern("ONE");
+        assert_eq!(a, a2);
+        assert_eq!(first.display(&a), Ok("one"));
+        assert_eq!(second.display(&b), Ok("two"));
+        assert!(first.display(&b).is_err());
+    }
+
+    #[test]
+    fn parallel_tables_are_independent_without_global_state() {
+        let first = std::thread::spawn(|| {
+            let mut table = SymbolTable::with_owner(SymbolOwner { session: 1, generation: 0 });
+            let symbol = table.intern_authoritative("First");
+            table.display(&symbol).unwrap().to_owned()
+        });
+        let second = std::thread::spawn(|| {
+            let mut table = SymbolTable::with_owner(SymbolOwner { session: 2, generation: 0 });
+            let symbol = table.intern_authoritative("Second");
+            table.display(&symbol).unwrap().to_owned()
+        });
+        assert_eq!(first.join().unwrap(), "First");
+        assert_eq!(second.join().unwrap(), "Second");
     }
 }
 
-pub fn get_symbol_spur(string: &str) -> Spur {
-    init_symbol_table();
-    unsafe {
-        SYMBOL_TABLE
-            .as_mut()
-            .expect("Symbol table not initialized")
-            .intern(string)
+#[cfg(test)]
+mod hash_tests {
+    use super::*;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn foreign_symbols_have_stable_hashes_but_are_not_equal() {
+        let mut a = SymbolTable::new();
+        let mut b = SymbolTable::new();
+        let first = a.intern("same");
+        let second = b.intern("same");
+        let mut ha = DefaultHasher::new(); first.hash(&mut ha);
+        let mut hb = DefaultHasher::new(); second.hash(&mut hb);
+        assert_eq!(ha.finish(), hb.finish());
+        assert_ne!(first, second);
+        assert!(a.lower(&second).is_err());
+        assert!(b.lower(&first).is_err());
     }
-}
 
-/// `get_symbol_spur`, but the caller CLAIMS the display spelling. See
-/// `SymbolTable::intern_authoritative` — use only for a cast's own name table.
-pub fn get_symbol_spur_authoritative(string: &str) -> Spur {
-    init_symbol_table();
-    unsafe {
-        SYMBOL_TABLE
-            .as_mut()
-            .expect("Symbol table not initialized")
-            .intern_authoritative(string)
+    #[test]
+    fn parallel_owner_work_overlaps_without_shared_state() {
+        let barrier = Arc::new(Barrier::new(2));
+        let left_barrier = barrier.clone();
+        let left = std::thread::spawn(move || {
+            let mut table = SymbolTable::with_owner(SymbolOwner { session: 101, generation: 0 });
+            let symbol = table.intern_authoritative("Left");
+            left_barrier.wait();
+            table.display(&symbol).unwrap().to_owned()
+        });
+        let right_barrier = barrier;
+        let right = std::thread::spawn(move || {
+            let mut table = SymbolTable::with_owner(SymbolOwner { session: 202, generation: 0 });
+            let symbol = table.intern_authoritative("Right");
+            right_barrier.wait();
+            table.display(&symbol).unwrap().to_owned()
+        });
+        assert_eq!(left.join().unwrap(), "Left");
+        assert_eq!(right.join().unwrap(), "Right");
     }
-}
-
-pub fn get_spur_string_owned(spur: Spur) -> String {
-    unsafe {
-        SYMBOL_TABLE
-            .as_ref()
-            .expect("Symbol table not initialized")
-            .get_original_string(&spur)
-            .to_owned()
-    }
-}
-
-pub fn get_spur_string(spur: Spur) -> &'static str {
-    unsafe {
-        SYMBOL_TABLE
-            .as_ref()
-            .expect("Symbol table not initialized")
-            .get_original_string(&spur)
-    }
-}
-
-pub fn spur(string: &str) -> Spur {
-    get_symbol_spur(string)
-}
-
-pub struct BuiltinKeywords {
-    
 }

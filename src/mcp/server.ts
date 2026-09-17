@@ -6,6 +6,7 @@ import { mcpTools, McpToolName } from './tools';
 // Import vm-rust WASM module functions
 // These will be available after WASM initialization
 type WasmModule = typeof import('vm-rust');
+type BrowserPlayerHandle = InstanceType<WasmModule['BrowserPlayerHandle']>;
 
 const MCP_DEFAULT_PORT = 9847;
 const MCP_PORT_KEY = 'mcp:port';
@@ -31,7 +32,7 @@ interface McpResponse {
 
 // MCP Server implementation
 export class McpServer {
-  private wasm: WasmModule | null = null;
+  private handle: BrowserPlayerHandle | null = null;
   private ws: WebSocket | null = null;
   private requestHandler: ((_event: any, data: { requestId: string; request: McpRequest }) => void) | null = null;
   private serverInfo = {
@@ -39,8 +40,8 @@ export class McpServer {
     version: '1.0.0',
   };
 
-  setWasm(wasm: WasmModule) {
-    this.wasm = wasm;
+  setHandle(handle: BrowserPlayerHandle) {
+    this.handle = handle;
   }
 
   async start(): Promise<void> {
@@ -133,7 +134,7 @@ export class McpServer {
     const toolName = params.name as McpToolName;
     const args = params.arguments || {};
 
-    if (!this.wasm) {
+    if (!this.handle) {
       return {
         jsonrpc: '2.0',
         id: request.id,
@@ -171,34 +172,34 @@ export class McpServer {
   }
 
   private async callTool(name: McpToolName, args: Record<string, unknown>): Promise<string> {
-    if (!this.wasm) {
-      throw new Error('WASM module not initialized');
+    if (!this.handle) {
+      throw new Error('VM player handle not initialized');
     }
 
     switch (name) {
       // Script tools
       case 'list_scripts':
-        return this.wasm.mcp_list_scripts(
+        return this.handle.mcp_list_scripts(
           args.cast_lib !== undefined ? (args.cast_lib as number) : -1,
           args.limit !== undefined ? (args.limit as number) : -1,
           args.offset !== undefined ? (args.offset as number) : -1
         );
 
       case 'get_script':
-        return this.wasm.mcp_get_script(
+        return this.handle.mcp_get_script(
           args.cast_lib as number,
           args.cast_member as number
         );
 
       case 'disassemble_handler':
-        return this.wasm.mcp_disassemble_handler(
+        return this.handle.mcp_disassemble_handler(
           args.cast_lib as number,
           args.cast_member as number,
           args.handler_name as string
         );
 
       case 'decompile_handler':
-        return this.wasm.mcp_decompile_handler(
+        return this.handle.mcp_decompile_handler(
           args.cast_lib as number,
           args.cast_member as number,
           args.handler_name as string
@@ -206,76 +207,76 @@ export class McpServer {
 
       // Execution tools
       case 'get_console_output':
-        return this.wasm.mcp_get_console_output(
+        return this.handle.mcp_get_console_output(
           args.last_n_lines as number
         );
 
       case 'get_call_stack':
-        return this.wasm.mcp_get_call_stack(
+        return this.handle.mcp_get_call_stack(
           args.depth !== undefined ? (args.depth as number) : -1,
           args.include_locals === true
         );
 
       case 'get_context':
-        return this.wasm.mcp_get_context();
+        return this.handle.mcp_get_context();
 
       case 'get_execution_state':
-        return this.wasm.mcp_get_execution_state();
+        return this.handle.mcp_get_execution_state();
 
       case 'eval_lingo':
         // Await the result of evaluating the Lingo code
-        return await this.wasm.mcp_eval_lingo(args.code as string);
+        return await this.handle.mcp_eval_lingo(args.code as string);
 
       case 'pause':
-        this.wasm.stop();
+        this.handle.stop();
         return JSON.stringify({ status: 'paused' });
 
       case 'resume':
-        this.wasm.resume_breakpoint();
+        this.handle.resume_breakpoint();
         return JSON.stringify({ status: 'resumed' });
 
       case 'step_over':
-        this.wasm.step_over();
+        this.handle.step_over();
         return JSON.stringify({ status: 'stepped over' });
 
       case 'step_into':
-        this.wasm.step_into();
+        this.handle.step_into();
         return JSON.stringify({ status: 'stepped into' });
 
       case 'step_out':
-        this.wasm.step_out();
+        this.handle.step_out();
         return JSON.stringify({ status: 'stepped out' });
 
       // Variable tools
       case 'get_globals':
-        return this.wasm.mcp_get_globals();
+        return this.handle.mcp_get_globals();
 
       case 'get_locals':
-        return this.wasm.mcp_get_locals(
+        return this.handle.mcp_get_locals(
           args.scope_index !== undefined ? (args.scope_index as number) : -1
         );
 
       case 'inspect_datum':
-        return this.wasm.mcp_inspect_datum(args.datum_id as number);
+        return this.handle.mcp_inspect_datum(args.datum_id as number);
 
       // Cast tools
       case 'list_cast_libs':
-        return this.wasm.mcp_list_cast_libs();
+        return this.handle.mcp_list_cast_libs();
 
       case 'list_cast_members':
-        return this.wasm.mcp_list_cast_members(
+        return this.handle.mcp_list_cast_members(
           args.cast_lib !== undefined ? (args.cast_lib as number) : -1
         );
 
       case 'inspect_cast_member':
-        return this.wasm.mcp_inspect_cast_member(
+        return this.handle.mcp_inspect_cast_member(
           args.cast_lib as number,
           args.cast_member as number
         );
 
       // Breakpoint tools
       case 'set_breakpoint':
-        this.wasm.add_breakpoint(
+        this.handle.add_breakpoint(
           args.script_name as string,
           args.handler_name as string,
           args.bytecode_index as number
@@ -283,7 +284,7 @@ export class McpServer {
         return JSON.stringify({ status: 'breakpoint set' });
 
       case 'remove_breakpoint':
-        this.wasm.remove_breakpoint(
+        this.handle.remove_breakpoint(
           args.script_name as string,
           args.handler_name as string,
           args.bytecode_index as number
@@ -291,7 +292,7 @@ export class McpServer {
         return JSON.stringify({ status: 'breakpoint removed' });
 
       case 'list_breakpoints':
-        return this.wasm.mcp_list_breakpoints();
+        return this.handle.mcp_list_breakpoints();
 
       default:
         throw new Error(`Unknown tool: ${name}`);
@@ -320,9 +321,9 @@ export function getMcpServer(): McpServer {
   return mcpServerInstance;
 }
 
-export function initMcpServer(wasm: WasmModule): McpServer {
+export function initMcpServer(handle: BrowserPlayerHandle, wasm?: WasmModule): McpServer {
   const server = getMcpServer();
-  server.setWasm(wasm);
+  server.setHandle(handle);
   return server;
 }
 

@@ -1,4 +1,5 @@
 use log::warn;
+use std::collections::HashSet;
 
 use crate::director::lingo::datum::Datum;
 use crate::director::lingo::datum;
@@ -6,18 +7,67 @@ use crate::player::bitmap::manager::INVALID_BITMAP_REF;
 use super::{
     allocator::{DatumAllocator, DatumAllocatorTrait},
     handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers,
-    DatumRef, ScriptError,
+    symbols::symbol_table::SymbolTable,
+    DatumRef, ScriptError, ScriptErrorCode,
 };
 
 #[inline]
-fn seq_equals(left_seq: &[DatumRef], right_seq: &[DatumRef], allocator: &DatumAllocator) -> Result<bool, ScriptError> {
+fn invalid_reference(datum_ref: &DatumRef) -> ScriptError {
+    ScriptError::new_code(
+        ScriptErrorCode::InvalidReference,
+        format!("invalid datum reference {datum_ref}"),
+    )
+}
+
+fn symbol_text<'a>(
+    symbol: &crate::player::symbols::symbol::Symbol,
+    symbols: &'a SymbolTable,
+) -> Result<&'a str, ScriptError> {
+    symbols
+        .display(symbol)
+        .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign.into())
+}
+
+#[inline]
+pub(crate) fn validate_direct_symbol_fields(datum: &Datum, symbols: &SymbolTable) -> Result<(), ScriptError> {
+    match datum {
+        Datum::Symbol(symbol) => { symbol_text(symbol, symbols)?; }
+        Datum::Shockwave3dObjectRef(object) => { symbol_text(&object.name, symbols)?; }
+        Datum::HavokObjectRef(object) => { symbol_text(&object.name, symbols)?; }
+        Datum::PhysXObjectRef(object) => { symbol_text(&object.name, symbols)?; }
+        _ => {}
+    }
+    Ok(())
+}
+
+#[inline]
+fn validate_comparison_operands(left: &Datum, right: &Datum, symbols: &SymbolTable) -> Result<(), ScriptError> {
+    validate_direct_symbol_fields(left, symbols)?;
+    validate_direct_symbol_fields(right, symbols)
+}
+
+#[inline]
+fn checked_datum<'a>(
+    allocator: &'a DatumAllocator,
+    datum_ref: &DatumRef,
+) -> Result<&'a Datum, ScriptError> {
+    match datum_ref {
+        DatumRef::Void => Ok(&Datum::Void),
+        _ => allocator
+            .try_get_datum(datum_ref)
+            .ok_or_else(|| invalid_reference(datum_ref)),
+    }
+}
+
+#[inline]
+fn seq_equals(left_seq: &[DatumRef], right_seq: &[DatumRef], allocator: &DatumAllocator, symbols: &SymbolTable) -> Result<bool, ScriptError> {
     if left_seq.len() != right_seq.len() {
         return Ok(false);
     }
     for (left_item, right_item) in left_seq.iter().zip(right_seq.iter()) {
-        let left_item = allocator.get_datum(left_item);
-        let right_item = allocator.get_datum(right_item);
-        if !datum_equals(left_item, right_item, allocator)? {
+        let left_item = checked_datum(allocator, left_item)?;
+        let right_item = checked_datum(allocator, right_item)?;
+        if !datum_equals(left_item, right_item, allocator, symbols)? {
             return Ok(false);
         }
     }
@@ -28,14 +78,16 @@ pub fn datum_equals(
     left: &Datum,
     right: &Datum,
     allocator: &DatumAllocator,
+    symbols: &SymbolTable,
 ) -> Result<bool, ScriptError> {
+    validate_comparison_operands(left, right, symbols)?;
     use Datum::*;
     match (left, right) {
         (Int(i), other) | (other, Int(i)) => Ok(match other {
             Int(other_i) => *i == *other_i,
             Float(f) => (*i as f64) == *f, // TODO: is this correct? Flutter compares ints instead
             String(s) => s.parse::<i32>().ok() == Some(*i), // Handle string-to-int comparison (e.g., "2" should match key 2)
-            sc @ StringChunk(..) => sc.string_value()?.parse::<i32>().ok() == Some(*i),
+            sc @ StringChunk(..) => sc.string_value(symbols)?.parse::<i32>().ok() == Some(*i),
             Void => *i == 0,
             _ => false,
         }),
@@ -48,9 +100,9 @@ pub fn datum_equals(
 
         // String equality: case-insensitive (like Director `=` operator)
         (s @ (String(_) | StringChunk(..)), other) | (other, s @ (String(_) | StringChunk(..))) => Ok({
-            let sstr = s.string_value_cow().expect("cannot fail");
+            let sstr = s.string_value_cow(symbols)?;
             match other {
-                String(_) | StringChunk(..) => sstr.eq_ignore_ascii_case(&other.string_value_cow().expect("cannot fail")), // Case-insensitive comparison for String and StringChunk
+                String(_) | StringChunk(..) => sstr.eq_ignore_ascii_case(other.string_value_cow(symbols)?.as_ref()), // Case-insensitive comparison for String and StringChunk
                 _ => false,
             }
         }),
@@ -86,16 +138,16 @@ pub fn datum_equals(
         (List(_, l, _), other) | (other, List(_, l, _)) => Ok({
             let l_slice: Vec<_> = l.iter().cloned().collect();
             match other {
-                List(_, r, _) => { let r_slice: Vec<_> = r.iter().cloned().collect(); seq_equals(&l_slice, &r_slice, allocator)? },
+                List(_, r, _) => { let r_slice: Vec<_> = r.iter().cloned().collect(); seq_equals(&l_slice, &r_slice, allocator, symbols)? },
                 Point(vals, flags) => {
                     // Director treats 2-element lists and points interchangeably
                     if l_slice.len() != 2 { false }
                     else {
-                        let lx = allocator.get_datum(&l_slice[0]);
-                        let ly = allocator.get_datum(&l_slice[1]);
+                        let lx = checked_datum(allocator, &l_slice[0])?;
+                        let ly = checked_datum(allocator, &l_slice[1])?;
                         let px = Datum::inline_component_to_datum(vals[0], Datum::inline_is_float(*flags, 0));
                         let py = Datum::inline_component_to_datum(vals[1], Datum::inline_is_float(*flags, 1));
-                        datum_equals(lx, &px, allocator)? && datum_equals(ly, &py, allocator)?
+                        datum_equals(lx, &px, allocator, symbols)? && datum_equals(ly, &py, allocator, symbols)?
                     }
                 }
                 Rect(vals, flags) => {
@@ -104,9 +156,9 @@ pub fn datum_equals(
                     else {
                         let mut eq = true;
                         for i in 0..4 {
-                            let li = allocator.get_datum(&l_slice[i]);
+                            let li = checked_datum(allocator, &l_slice[i])?;
                             let ri = Datum::inline_component_to_datum(vals[i], Datum::inline_is_float(*flags, i));
-                            if !datum_equals(li, &ri, allocator)? { eq = false; break; }
+                            if !datum_equals(li, &ri, allocator, symbols)? { eq = false; break; }
                         }
                         eq
                     }
@@ -125,24 +177,27 @@ pub fn datum_equals(
                 return Ok(false);
             }
             for (pair_a, pair_b) in pairs_a.iter().zip(pairs_b.iter()) {
-                let key_a = allocator.get_datum(&pair_a.0);
-                let key_b = allocator.get_datum(&pair_b.0);
-                if !datum_equals(key_a, key_b, allocator)? {
+                let key_a = checked_datum(allocator, &pair_a.0)?;
+                let key_b = checked_datum(allocator, &pair_b.0)?;
+                if !datum_equals(key_a, key_b, allocator, symbols)? {
                     return Ok(false);
                 }
-                let val_a = allocator.get_datum(&pair_a.1);
-                let val_b = allocator.get_datum(&pair_b.1);
-                if !datum_equals(val_a, val_b, allocator)? {
+                let val_a = checked_datum(allocator, &pair_a.1)?;
+                let val_b = checked_datum(allocator, &pair_b.1)?;
+                if !datum_equals(val_a, val_b, allocator, symbols)? {
                     return Ok(false);
                 }
             }
             Ok(true)
         }
 
-        (Symbol(s), o) | (o, Symbol(s)) => Ok(match o {
-            Symbol(other) => s == other,
+        (Symbol(s), o) | (o, Symbol(s)) => {
+            symbol_text(s, symbols)?;
+            Ok(match o {
+            Symbol(other) => { symbol_text(other, symbols)?; s == other }
             _ => false
-        }),
+            })
+        },
 
         (CastLib(a), o) | (o, CastLib(a)) => Ok(match o {
             CastLib(b) => a == b,
@@ -183,7 +238,7 @@ pub fn datum_equals(
                 for i in 0..4 {
                     let ai = Datum::inline_component_to_datum(a_vals[i], Datum::inline_is_float(*a_flags, i));
                     let bi = Datum::inline_component_to_datum(b_vals[i], Datum::inline_is_float(*b_flags, i));
-                    if !datum_equals(&ai, &bi, allocator)? { eq = false; break; }
+                    if !datum_equals(&ai, &bi, allocator, symbols)? { eq = false; break; }
                 }
                 eq
             }
@@ -196,16 +251,16 @@ pub fn datum_equals(
                 let ay = Datum::inline_component_to_datum(a_vals[1], Datum::inline_is_float(*a_flags, 1));
                 let bx = Datum::inline_component_to_datum(b_vals[0], Datum::inline_is_float(*b_flags, 0));
                 let by = Datum::inline_component_to_datum(b_vals[1], Datum::inline_is_float(*b_flags, 1));
-                datum_equals(&ax, &bx, allocator)? && datum_equals(&ay, &by, allocator)?
+                datum_equals(&ax, &bx, allocator, symbols)? && datum_equals(&ay, &by, allocator, symbols)?
             }
             List(_, list, _) if list.len() == 2 => {
                 // Director treats 2-element lists and points interchangeably
                 let ax = Datum::inline_component_to_datum(a_vals[0], Datum::inline_is_float(*a_flags, 0));
                 let ay = Datum::inline_component_to_datum(a_vals[1], Datum::inline_is_float(*a_flags, 1));
                 let list_slice: Vec<_> = list.iter().cloned().collect();
-                let lx = allocator.get_datum(&list_slice[0]);
-                let ly = allocator.get_datum(&list_slice[1]);
-                datum_equals(&ax, lx, allocator)? && datum_equals(&ay, ly, allocator)?
+                let lx = checked_datum(allocator, &list_slice[0])?;
+                let ly = checked_datum(allocator, &list_slice[1])?;
+                datum_equals(&ax, lx, allocator, symbols)? && datum_equals(&ay, ly, allocator, symbols)?
             }
             _ => false
         }),
@@ -329,9 +384,9 @@ pub fn datum_equals(
         // Same treatment for Havok object refs — LEGO Supersonic's
         // collision callbacks rely on this equality.
         (HavokObjectRef(a), o) | (o, HavokObjectRef(a)) => Ok(match o {
-            HavokObjectRef(b) => a.cast_lib == b.cast_lib
+            HavokObjectRef(b) => { symbol_text(&a.name, symbols)?; symbol_text(&b.name, symbols)?; a.cast_lib == b.cast_lib
                 && a.cast_member == b.cast_member
-                && a.name == b.name,
+                && a.name == b.name },
             _ => false
         }),
 
@@ -341,10 +396,10 @@ pub fn datum_equals(
         // returns false and `collisionData.modelA = s.model("ft")` — the heart
         // of every native #collision callback — never matches.
         (Shockwave3dObjectRef(a), o) | (o, Shockwave3dObjectRef(a)) => Ok(match o {
-            Shockwave3dObjectRef(b) => a.cast_lib == b.cast_lib
+            Shockwave3dObjectRef(b) => { symbol_text(&a.name, symbols)?; symbol_text(&b.name, symbols)?; a.cast_lib == b.cast_lib
                 && a.cast_member == b.cast_member
                 && a.object_type == b.object_type
-                && a.name.eq_ignore_ascii_case(&b.name.as_str()),
+                && symbol_text(&a.name, symbols)?.eq_ignore_ascii_case(symbol_text(&b.name, symbols)? ) },
             _ => false
         }),
 
@@ -381,19 +436,21 @@ pub fn datum_equals_member(
     left: &Datum,
     right: &Datum,
     allocator: &DatumAllocator,
+    symbols: &SymbolTable,
 ) -> Result<bool, ScriptError> {
+    validate_comparison_operands(left, right, symbols)?;
     use Datum::*;
     let symbol_string_match = match (left, right) {
         (Symbol(sym), other @ (String(_) | StringChunk(..)))
         | (other @ (String(_) | StringChunk(..)), Symbol(sym)) => {
-            Some(sym.as_str().eq_ignore_ascii_case(&other.string_value_cow()?.as_ref()))
+            Some(symbol_text(sym, symbols)?.eq_ignore_ascii_case(other.string_value_cow(symbols)?.as_ref()))
         }
         _ => None,
     };
     if let Some(matched) = symbol_string_match {
         return Ok(matched);
     }
-    datum_equals(left, right, allocator)
+    datum_equals(left, right, allocator, symbols)
 }
 
 #[allow(dead_code)]
@@ -426,27 +483,28 @@ fn string_number_ordering(text: &str, number: f64, number_text: &str) -> std::cm
         .cmp(&number_text.to_ascii_lowercase())
 }
 
-pub fn datum_greater_than(left: &Datum, right: &Datum, allocator: &DatumAllocator) -> Result<bool, ScriptError> {
+pub fn datum_greater_than(left: &Datum, right: &Datum, allocator: &DatumAllocator, symbols: &SymbolTable) -> Result<bool, ScriptError> {
+    validate_comparison_operands(left, right, symbols)?;
     // See `datum_less_than`: a string chunk compares by its resolved text, and
     // a sprite reference compares by its sprite (channel) number.
     if let Datum::StringChunk(_, _, s) = left {
-        return datum_greater_than(&Datum::String(s.clone()), right, allocator);
+        return datum_greater_than(&Datum::String(s.clone()), right, allocator, symbols);
     }
     if let Datum::StringChunk(_, _, s) = right {
-        return datum_greater_than(left, &Datum::String(s.clone()), allocator);
+        return datum_greater_than(left, &Datum::String(s.clone()), allocator, symbols);
     }
     if let Datum::SpriteRef(n) = left {
-        return datum_greater_than(&Datum::Int(*n as i32), right, allocator);
+        return datum_greater_than(&Datum::Int(*n as i32), right, allocator, symbols);
     }
     if let Datum::SpriteRef(n) = right {
-        return datum_greater_than(left, &Datum::Int(*n as i32), allocator);
+        return datum_greater_than(left, &Datum::Int(*n as i32), allocator, symbols);
     }
     // A symbol compares as its string name (see `datum_less_than`).
     if let Datum::Symbol(s) = left {
-        return datum_greater_than(&Datum::String(s.clone().to_string()), right, allocator);
+        return datum_greater_than(&Datum::String(symbol_text(s, symbols)?.to_owned()), right, allocator, symbols);
     }
     if let Datum::Symbol(s) = right {
-        return datum_greater_than(left, &Datum::String(s.clone().to_string()), allocator);
+        return datum_greater_than(left, &Datum::String(symbol_text(s, symbols)?.to_owned()), allocator, symbols);
     }
     match (left, right) {
         // Int comparisons
@@ -515,9 +573,9 @@ pub fn datum_greater_than(left: &Datum, right: &Datum, allocator: &DatumAllocato
                 return Ok(false);
             }
             for (l, r) in left_items.iter().zip(right_items.iter()) {
-                let ld = allocator.get_datum(l);
-                let rd = allocator.get_datum(r);
-                if !datum_greater_than(ld, rd, allocator)? {
+                let ld = checked_datum(allocator, l)?;
+                let rd = checked_datum(allocator, r)?;
+                if !datum_greater_than(ld, rd, allocator, symbols)? {
                     return Ok(false);
                 }
             }
@@ -560,25 +618,26 @@ fn str_lt_ci(a: &str, b: &str) -> bool {
         .is_lt()
 }
 
-pub fn datum_less_than(left: &Datum, right: &Datum, allocator: &DatumAllocator) -> Result<bool, ScriptError> {
+pub fn datum_less_than(left: &Datum, right: &Datum, allocator: &DatumAllocator, symbols: &SymbolTable) -> Result<bool, ScriptError> {
+    validate_comparison_operands(left, right, symbols)?;
     // A string chunk (`char/word/item/line N of x`) evaluates to a plain
     // string — compare by its resolved text. Without this, `char 1 of x < "m"`
     // (and any chunk poll in a per-frame loop) falls through to the catch-all,
     // returning a wrong result AND warning every frame.
     if let Datum::StringChunk(_, _, s) = left {
-        return datum_less_than(&Datum::String(s.clone()), right, allocator);
+        return datum_less_than(&Datum::String(s.clone()), right, allocator, symbols);
     }
     if let Datum::StringChunk(_, _, s) = right {
-        return datum_less_than(left, &Datum::String(s.clone()), allocator);
+        return datum_less_than(left, &Datum::String(s.clone()), allocator, symbols);
     }
     // A sprite reference compares by its sprite (channel) number, so a movie
     // that sorts/compares `sprite(a) < sprite(b)` works instead of hitting the
     // catch-all (wrong result + per-frame warn).
     if let Datum::SpriteRef(n) = left {
-        return datum_less_than(&Datum::Int(*n as i32), right, allocator);
+        return datum_less_than(&Datum::Int(*n as i32), right, allocator, symbols);
     }
     if let Datum::SpriteRef(n) = right {
-        return datum_less_than(left, &Datum::Int(*n as i32), allocator);
+        return datum_less_than(left, &Datum::Int(*n as i32), allocator, symbols);
     }
     // Symbol/string orderings are the hot case: `PropListUtils::get_key_index`
     // runs one of these per binary-search probe (and per entry on its linear
@@ -592,20 +651,20 @@ pub fn datum_less_than(left: &Datum, right: &Datum, allocator: &DatumAllocator) 
     // were dead code because the conversion always fired first.
     match (left, right) {
         (Datum::Symbol(l), Datum::Symbol(r)) => {
-            return Ok(str_lt_ci(l.as_str(), r.as_str()))
+            return Ok(str_lt_ci(symbol_text(l, symbols)?, symbol_text(r, symbols)?))
         }
-        (Datum::Symbol(l), Datum::String(r)) => return Ok(str_lt_ci(l.as_str(), r)),
-        (Datum::String(l), Datum::Symbol(r)) => return Ok(str_lt_ci(l, r.as_str())),
+        (Datum::Symbol(l), Datum::String(r)) => return Ok(str_lt_ci(symbol_text(l, symbols)?, r)),
+        (Datum::String(l), Datum::Symbol(r)) => return Ok(str_lt_ci(l, symbol_text(r, symbols)?)),
         _ => {}
     }
     // A symbol compares as its string name (Director treats `#foo` like "foo" in
     // ordered comparisons), so route symbols through the string logic below. This
     // covers int-vs-symbol and the other mixed pairs without dedicated arms.
     if let Datum::Symbol(s) = left {
-        return datum_less_than(&Datum::String(s.clone().to_string()), right, allocator);
+        return datum_less_than(&Datum::String(symbol_text(s, symbols)?.to_owned()), right, allocator, symbols);
     }
     if let Datum::Symbol(s) = right {
-        return datum_less_than(left, &Datum::String(s.clone().to_string()), allocator);
+        return datum_less_than(left, &Datum::String(symbol_text(s, symbols)?.to_owned()), allocator, symbols);
     }
     match (left, right) {
         // Int comparisons
@@ -676,9 +735,9 @@ pub fn datum_less_than(left: &Datum, right: &Datum, allocator: &DatumAllocator) 
         // This is essential for sorted lists used as priority queues (e.g. A* pathfinding).
         (Datum::PropList(left_pairs, ..), Datum::PropList(right_pairs, ..)) => {
             if let (Some((_, left_val)), Some((_, right_val))) = (left_pairs.front(), right_pairs.front()) {
-                let left_datum = allocator.get_datum(left_val);
-                let right_datum = allocator.get_datum(right_val);
-                datum_less_than(left_datum, right_datum, allocator)
+                let left_datum = checked_datum(allocator, left_val)?;
+                let right_datum = checked_datum(allocator, right_val)?;
+                datum_less_than(left_datum, right_datum, allocator, symbols)
             } else {
                 Ok(false)
             }
@@ -694,9 +753,9 @@ pub fn datum_less_than(left: &Datum, right: &Datum, allocator: &DatumAllocator) 
                 return Ok(false);
             }
             for (l, r) in left_items.iter().zip(right_items.iter()) {
-                let ld = allocator.get_datum(l);
-                let rd = allocator.get_datum(r);
-                if !datum_less_than(ld, rd, allocator)? {
+                let ld = checked_datum(allocator, l)?;
+                let rd = checked_datum(allocator, r)?;
+                if !datum_less_than(ld, rd, allocator, symbols)? {
                     return Ok(false);
                 }
             }
@@ -720,7 +779,12 @@ pub fn datum_less_than(left: &Datum, right: &Datum, allocator: &DatumAllocator) 
     }
 }
 
-pub fn datum_is_zero(datum: &Datum, datums: &DatumAllocator) -> Result<bool, ScriptError> {
+pub fn datum_is_zero(
+    datum: &Datum,
+    datums: &DatumAllocator,
+    symbols: &SymbolTable,
+) -> Result<bool, ScriptError> {
+    validate_direct_symbol_fields(datum, symbols)?;
     Ok(match datum {
         Datum::Int(value) => *value == 0,
         Datum::Float(value) => *value == 0.0,
@@ -743,15 +807,20 @@ pub fn datum_is_zero(datum: &Datum, datums: &DatumAllocator) -> Result<bool, Scr
 pub fn sort_datums(
     datums: &Vec<DatumRef>,
     allocator: &DatumAllocator,
+    symbols: &SymbolTable,
 ) -> Result<Vec<DatumRef>, ScriptError> {
+    let mut visited = HashSet::new();
+    for datum_ref in datums {
+        validate_reachable_symbols(datum_ref, allocator, symbols, &mut visited)?;
+    }
     let mut sorted_list = datums.clone();
     sorted_list.sort_by(|a, b| {
         let left = allocator.get_datum(a);
         let right = allocator.get_datum(b);
 
-        if datum_equals(left, right, allocator).unwrap() {
+        if datum_equals(left, right, allocator, symbols).unwrap() {
             return std::cmp::Ordering::Equal;
-        } else if datum_less_than(left, right, allocator).unwrap() {
+        } else if datum_less_than(left, right, allocator, symbols).unwrap() {
             std::cmp::Ordering::Less
         } else {
             std::cmp::Ordering::Greater
@@ -760,10 +829,373 @@ pub fn sort_datums(
     Ok(sorted_list)
 }
 
+/// Validate only symbol-bearing values reachable by a sort comparison.
+///
+/// Sorting still uses the existing stable `sort_by` comparator. This O(reachable
+/// graph) preflight is deliberately separate so a foreign symbol produces an
+/// error before the comparator runs, rather than being converted into a
+/// fabricated `Ordering`. A visited set makes cyclic list/property-list data
+/// terminate; unrelated script-instance graphs remain opaque as before.
+pub(crate) fn validate_reachable_symbols(
+    datum_ref: &DatumRef,
+    allocator: &DatumAllocator,
+    symbols: &SymbolTable,
+    visited: &mut HashSet<usize>,
+) -> Result<(), ScriptError> {
+    let Some(datum) = (match datum_ref {
+        DatumRef::Void => return Ok(()),
+        _ => allocator.try_get_datum(datum_ref),
+    }) else {
+        return Err(invalid_reference(datum_ref));
+    };
+    if !visited.insert(datum_ref.unwrap()) {
+        return Ok(());
+    }
+    match datum {
+        Datum::Symbol(symbol) => {
+            symbol_text(symbol, symbols)?;
+        }
+        Datum::Shockwave3dObjectRef(object) => {
+            symbol_text(&object.name, symbols)?;
+        }
+        Datum::HavokObjectRef(object) => {
+            symbol_text(&object.name, symbols)?;
+        }
+        Datum::PhysXObjectRef(object) => {
+            symbol_text(&object.name, symbols)?;
+        }
+        Datum::List(_, items, _) => {
+            for item in items {
+                validate_reachable_symbols(item, allocator, symbols, visited)?;
+            }
+        }
+        Datum::PropList(entries, _) => {
+            for (key, value) in entries {
+                validate_reachable_symbols(key, allocator, symbols, visited)?;
+                validate_reachable_symbols(value, allocator, symbols, visited)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn datum_to_f64(datum: &Datum) -> Result<f64, ScriptError> {
     match datum {
         Datum::Int(i) => Ok(*i as f64),
         Datum::Float(f) => Ok(*f),
         _ => datum.float_value()
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use crate::director::lingo::datum::{
+        DatumType, HavokObjectRef, Shockwave3dObjectRef,
+    };
+    use crate::player::ownership::OwnerToken;
+    use crate::player::symbols::{builtin::BuiltInSymbol, symbol_table::SymbolTable};
+    use async_std::channel;
+    use std::collections::VecDeque;
+
+    fn test_player() -> crate::player::DirPlayer {
+        let (tx, _rx) = channel::unbounded();
+        crate::player::DirPlayer::new_with_owner(tx, OwnerToken::transitional())
+    }
+
+    #[test]
+    fn foreign_symbols_are_rejected_by_equality_and_ordering() {
+        let allocator = DatumAllocator::default();
+        let mut local = SymbolTable::new();
+        let mut foreign_table = SymbolTable::new();
+        let foreign = foreign_table.intern_authoritative("ForeignCompare");
+        let local_symbol = local.intern_authoritative("ForeignCompare");
+
+        assert!(datum_equals(
+            &Datum::Symbol(foreign.clone()),
+            &Datum::Symbol(local_symbol.clone()),
+            &allocator,
+            &local,
+        ).is_err());
+        assert!(datum_equals(
+            &Datum::Symbol(foreign.clone()),
+            &Datum::Int(0),
+            &allocator,
+            &local,
+        ).is_err());
+        assert!(datum_less_than(
+            &Datum::Symbol(foreign.clone()),
+            &Datum::String("z".to_string()),
+            &allocator,
+            &local,
+        ).is_err());
+        assert!(datum_equals_member(
+            &Datum::Symbol(foreign),
+            &Datum::String("ForeignCompare".to_string()),
+            &allocator,
+            &local,
+        ).is_err());
+        assert!(datum_is_zero(&Datum::Symbol(local_symbol), &allocator, &local).unwrap());
+        assert!(datum_is_zero(&Datum::Symbol(foreign_table.intern("foreignZero")), &allocator, &local).is_err());
+    }
+
+    #[test]
+    fn foreign_3d_names_are_rejected() {
+        let allocator = DatumAllocator::default();
+        let local = SymbolTable::new();
+        let mut foreign_table = SymbolTable::new();
+        let foreign_name = foreign_table.intern("foreignModel");
+        let left = Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
+            cast_lib: 1,
+            cast_member: 2,
+            object_type: BuiltInSymbol::Model,
+            name: foreign_name.clone(),
+        });
+        let right = Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
+            cast_lib: 1,
+            cast_member: 2,
+            object_type: BuiltInSymbol::Model,
+            name: foreign_name,
+        });
+        assert!(datum_equals(&left, &right, &allocator, &local).is_err());
+
+        let havok = Datum::HavokObjectRef(HavokObjectRef {
+            cast_lib: 1,
+            cast_member: 2,
+            object_type: BuiltInSymbol::RigidBody,
+            name: foreign_table.intern("foreignBody"),
+        });
+        assert!(datum_equals(&havok, &havok, &allocator, &local).is_err());
+    }
+
+    #[test]
+    fn nested_comparisons_check_owned_references_and_preserve_void() {
+        let mut player = test_player();
+        let mut foreign_player = test_player();
+        let symbols = SymbolTable::new();
+        let local_value = player.alloc_datum(Datum::Int(1));
+        let local_two = player.alloc_datum(Datum::Int(2));
+        let foreign_value = foreign_player.alloc_datum(Datum::Int(1));
+        let foreign_later_equal = foreign_player.alloc_datum(Datum::Int(2));
+        let foreign_later_order = foreign_player.alloc_datum(Datum::Int(2));
+        let valid_list = player.alloc_datum(Datum::List(
+            DatumType::List,
+            VecDeque::from([local_value.clone()]),
+            false,
+        ));
+        let foreign_child_list = player.alloc_datum(Datum::List(
+            DatumType::List,
+            VecDeque::from([foreign_value]),
+            false,
+        ));
+        let early_equal_mismatch = player.alloc_datum(Datum::List(
+            DatumType::List,
+            VecDeque::from([local_value.clone(), foreign_later_equal]),
+            false,
+        ));
+        let equal_mismatch_target = player.alloc_datum(Datum::List(
+            DatumType::List,
+            VecDeque::from([local_two.clone(), local_value.clone()]),
+            false,
+        ));
+        let early_order_mismatch = player.alloc_datum(Datum::List(
+            DatumType::List,
+            VecDeque::from([local_two.clone(), foreign_later_order]),
+            false,
+        ));
+        let order_mismatch_target = player.alloc_datum(Datum::List(
+            DatumType::List,
+            VecDeque::from([local_value.clone(), local_two.clone()]),
+            false,
+        ));
+
+        assert!(datum_equals(
+            player.get_datum(&foreign_child_list),
+            player.get_datum(&valid_list),
+            &player.allocator,
+            &symbols,
+        ).is_err());
+        assert_eq!(datum_equals(
+            player.get_datum(&early_equal_mismatch),
+            player.get_datum(&equal_mismatch_target),
+            &player.allocator,
+            &symbols,
+        ).unwrap(), false);
+        assert_eq!(datum_less_than(
+            player.get_datum(&early_order_mismatch),
+            player.get_datum(&order_mismatch_target),
+            &player.allocator,
+            &symbols,
+        ).unwrap(), false);
+        assert!(datum_greater_than(
+            player.get_datum(&foreign_child_list),
+            player.get_datum(&valid_list),
+            &player.allocator,
+            &symbols,
+        ).is_err());
+        assert!(datum_less_than(
+            player.get_datum(&foreign_child_list),
+            player.get_datum(&valid_list),
+            &player.allocator,
+            &symbols,
+        ).is_err());
+
+        let void_list = player.alloc_datum(Datum::List(
+            DatumType::List,
+            VecDeque::from([DatumRef::Void]),
+            false,
+        ));
+        let int_list = player.alloc_datum(Datum::List(
+            DatumType::List,
+            VecDeque::from([local_value]),
+            false,
+        ));
+        assert!(datum_equals(
+            player.get_datum(&void_list),
+            player.get_datum(&void_list),
+            &player.allocator,
+            &symbols,
+        ).unwrap());
+        assert!(datum_less_than(
+            player.get_datum(&void_list),
+            player.get_datum(&int_list),
+            &player.allocator,
+            &symbols,
+        ).unwrap());
+    }
+
+    #[test]
+    fn prop_list_comparison_checks_keys_and_values_but_short_circuits() {
+        let mut player = test_player();
+        let mut foreign_player = test_player();
+        let symbols = SymbolTable::new();
+        let key = player.alloc_datum(Datum::Int(1));
+        let other_key = player.alloc_datum(Datum::Int(2));
+        let value = player.alloc_datum(Datum::Int(3));
+        let other_value = player.alloc_datum(Datum::Int(4));
+        let foreign_key = foreign_player.alloc_datum(Datum::Int(1));
+        let foreign_value = foreign_player.alloc_datum(Datum::Int(5));
+        let foreign_later_key = foreign_player.alloc_datum(Datum::Int(6));
+        let foreign_later_value = foreign_player.alloc_datum(Datum::Int(7));
+        let later_foreign_key = player.alloc_datum(Datum::Int(8));
+        let later_foreign_value = player.alloc_datum(Datum::Int(9));
+
+        let foreign_key_list = player.alloc_datum(Datum::PropList(
+            VecDeque::from([(foreign_key, value.clone())]),
+            false,
+        ));
+        let valid_key_list = player.alloc_datum(Datum::PropList(
+            VecDeque::from([(key.clone(), other_value.clone())]),
+            false,
+        ));
+        assert!(datum_equals(
+            player.get_datum(&foreign_key_list),
+            player.get_datum(&valid_key_list),
+            &player.allocator,
+            &symbols,
+        ).is_err());
+
+        let foreign_value_list = player.alloc_datum(Datum::PropList(
+            VecDeque::from([(key.clone(), foreign_value)]),
+            false,
+        ));
+        let valid_value_list = player.alloc_datum(Datum::PropList(
+            VecDeque::from([(key.clone(), value.clone())]),
+            false,
+        ));
+        assert!(datum_equals(
+            player.get_datum(&foreign_value_list),
+            player.get_datum(&valid_value_list),
+            &player.allocator,
+            &symbols,
+        ).is_err());
+        assert!(datum_less_than(
+            player.get_datum(&foreign_value_list),
+            player.get_datum(&valid_value_list),
+            &player.allocator,
+            &symbols,
+        ).is_err());
+
+        let first_mismatch = player.alloc_datum(Datum::PropList(
+            VecDeque::from([
+                (key, value),
+                (foreign_later_key, foreign_later_value),
+            ]),
+            false,
+        ));
+        let later_foreign = player.alloc_datum(Datum::PropList(
+            VecDeque::from([
+                (other_key, other_value),
+                (later_foreign_key, later_foreign_value),
+            ]),
+            false,
+        ));
+        assert_eq!(datum_equals(
+            player.get_datum(&first_mismatch),
+            player.get_datum(&later_foreign),
+            &player.allocator,
+            &symbols,
+        ).unwrap(), false);
+    }
+
+    #[test]
+    fn sort_preflights_foreign_symbols_and_preserves_valid_stability() {
+        let mut player = test_player();
+        let symbols = SymbolTable::new();
+        let first_equal = player.alloc_datum(Datum::String("a".to_string()));
+        let second_equal = player.alloc_datum(Datum::String("A".to_string()));
+        let greater = player.alloc_datum(Datum::String("b".to_string()));
+        let sorted = sort_datums(
+            &vec![greater, first_equal.clone(), second_equal.clone()],
+            &player.allocator,
+            &symbols,
+        ).unwrap();
+        let values = sorted.iter()
+            .map(|reference| player.get_datum(reference).string_value(&symbols).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(values, vec!["a", "A", "b"]);
+        assert_eq!(sorted[0], first_equal);
+        assert_eq!(sorted[1], second_equal);
+
+        let mut foreign_table = SymbolTable::new();
+        let foreign = foreign_table.intern("foreignSort");
+        let foreign_ref = player.alloc_datum(Datum::Symbol(foreign));
+        assert!(sort_datums(&vec![foreign_ref], &player.allocator, &symbols).is_err());
+
+        let mut nested_names = SymbolTable::new();
+        let nested_name = nested_names.intern("foreignNestedModel");
+        let nested_object = player.alloc_datum(Datum::Shockwave3dObjectRef(
+            Shockwave3dObjectRef {
+                cast_lib: 1,
+                cast_member: 2,
+                object_type: BuiltInSymbol::Model,
+                name: nested_name,
+            },
+        ));
+        let nested_list = player.alloc_datum(Datum::List(
+            DatumType::List,
+            VecDeque::from([nested_object]),
+            false,
+        ));
+        assert!(sort_datums(&vec![nested_list], &player.allocator, &symbols).is_err());
+    }
+
+    #[test]
+    fn sort_symbol_preflight_terminates_on_cyclic_singleton_list() {
+        let mut player = test_player();
+        let symbols = SymbolTable::new();
+        let cycle = player.alloc_datum(Datum::List(
+            DatumType::List,
+            VecDeque::new(),
+            false,
+        ));
+        *player.get_datum_mut(&cycle) = Datum::List(
+            DatumType::List,
+            VecDeque::from([cycle.clone()]),
+            false,
+        );
+        assert!(sort_datums(&vec![cycle.clone()], &player.allocator, &symbols).is_ok());
+        *player.get_datum_mut(&cycle) = Datum::List(DatumType::List, VecDeque::new(), false);
     }
 }

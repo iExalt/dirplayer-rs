@@ -2,7 +2,8 @@ import { useState } from 'react'
 import { faPlay, faStop, faRotateBack, faStopwatch, faCircleDot } from '@fortawesome/free-solid-svg-icons'
 import IconButton from '../IconButton'
 import styles from './styles.module.css'
-import { play, stop, reset, start_profiling_recording, stop_profiling_recording, export_profiling_speedscope } from 'vm-rust'
+import { start_profiling_recording, stop_profiling_recording, export_profiling_speedscope } from 'vm-rust'
+import { useVMHandle, useVMState } from '../VMProvider'
 import { isElectron } from '../../utils/electron'
 import { isMcpEnabled, setMcpEnabled, getMcpPort, setMcpPort, getMcpUrl } from '../../mcp'
 import ThemeToggle from '../ThemeToggle'
@@ -101,10 +102,12 @@ function McpToggle() {
 }
 
 export default function PlaybackControls() {
+  const handle = useVMHandle();
+  const { resetPlayer } = useVMState();
   return <div className={styles.container}>
-    <IconButton icon={faPlay} onClick={() => { play() }} />
-    <IconButton icon={faStop} onClick={() => { stop() }} />
-    <IconButton icon={faRotateBack} onClick={() => { reset() }} />
+    <IconButton icon={faPlay} onClick={() => { handle.play() }} />
+    <IconButton icon={faStop} onClick={() => { handle.stop() }} />
+    <IconButton icon={faRotateBack} onClick={() => { resetPlayer?.() }} />
     <ProfileToggle />
     <div className={styles.spacer} />
     {isElectron() && <McpToggle />}

@@ -1,7 +1,7 @@
 import { JsBridgeChunk } from "dirplayer-js-api";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAppSelector } from "../../store/hooks";
-import { get_cast_chunk_list, get_movie_top_level_chunks, get_chunk_bytes, get_parsed_chunk } from "vm-rust";
+import { useVMHandle } from "../../components/VMProvider";
 import { Layout, Model, TabNode } from "flexlayout-react";
 import PropertyTable from "../../components/PropertyTable";
 import { downloadBlob } from "../../utils/download";
@@ -252,6 +252,7 @@ function ChunkTreePanel({
 // --- Main Component ---
 
 export default function MovieChunksView() {
+  const handle = useVMHandle();
   const [filterText, setFilterText] = useState("");
   const [selectedSource, setSelectedSource] = useState<string>(MOVIE_FILE_VALUE);
   const [chunks, setChunks] = useState<Partial<Record<number, JsBridgeChunk>>>({});
@@ -269,12 +270,12 @@ export default function MovieChunksView() {
 
     try {
       if (selectedSource === MOVIE_FILE_VALUE) {
-        const result = get_movie_top_level_chunks();
+        const result = handle.get_movie_top_level_chunks();
         setChunks(result || {});
       } else {
         const castNumber = Number(selectedSource);
         if (castNumber > 0) {
-          const result = get_cast_chunk_list(castNumber);
+          const result = handle.get_cast_chunk_list(castNumber);
           setChunks(result || {});
         } else {
           setChunks({});
@@ -287,14 +288,14 @@ export default function MovieChunksView() {
     // Clear selection when source changes
     setSelectedChunkId(null);
     setParsedData(null);
-  }, [selectedSource, isMovieLoaded]);
+  }, [handle, selectedSource, isMovieLoaded]);
 
   // The cast number to use for WASM calls (0 = main movie file)
   const castNumber = selectedSource === MOVIE_FILE_VALUE ? 0 : Number(selectedSource);
 
   const handleSave = useCallback((chunkId: number, fourcc: string) => {
     try {
-      const bytes = get_chunk_bytes(castNumber, chunkId);
+      const bytes = handle.get_chunk_bytes(castNumber, chunkId);
       if (bytes) {
         downloadBlob(bytes, `${fourcc.trim()}_${chunkId}.bin`);
       } else {
@@ -303,18 +304,18 @@ export default function MovieChunksView() {
     } catch (e) {
       console.error("Failed to save chunk", chunkId, e);
     }
-  }, [castNumber]);
+  }, [castNumber, handle]);
 
   const handleSelect = useCallback((chunkId: number) => {
     setSelectedChunkId(chunkId);
     try {
-      const data = get_parsed_chunk(castNumber, chunkId);
+      const data = handle.get_parsed_chunk(castNumber, chunkId);
       setParsedData(data as Record<string, unknown>);
     } catch (e) {
       console.error("Failed to parse chunk", chunkId, e);
       setParsedData({ error: String(e) });
     }
-  }, [castNumber]);
+  }, [castNumber, handle]);
 
   // Build parent-child map and find root chunks
   const { childrenMap, rootIds } = useMemo(() => {

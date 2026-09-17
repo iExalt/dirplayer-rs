@@ -5,7 +5,10 @@ use std::fmt::Formatter;
 use itertools::Itertools;
 use log::{debug, warn};
 
-use crate::{CastMemberRef, player::symbols::{builtin::BuiltInSymbol, symbol::Symbol}};
+use crate::{
+    CastMemberRef,
+    player::symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable},
+};
 
 use super::{
     bitmap::{
@@ -1229,7 +1232,7 @@ impl Shockwave3dMember {
                 .iter()
                 .find(|m| m.tracks.len() == 1 && m.tracks[0].bone_name == model_name)
                 .or_else(|| scene.motions.iter()
-                    .find(|m| m.tracks.len() == 1 && in_subtree(m.tracks[0].bone_name)))
+                    .find(|m| m.tracks.len() == 1 && in_subtree(m.tracks[0].bone_name.clone())))
                 // Otherwise fall back to a motion named after the model.
                 .or_else(|| scene.motions.iter().find(|m| m.name == model_name))
                 .map(|m| m.name.clone())
@@ -4497,6 +4500,7 @@ impl CastMember {
         chunk: &CastMemberChunk,
         bitmap_manager: &mut BitmapManager,
         cast_lib: u32,
+        symbols: &mut SymbolTable,
     ) -> Option<CastMember>
     {
         for opt_child in &member_def.children {
@@ -4634,7 +4638,7 @@ impl CastMember {
                 );
                 let w3d_data = xm.raw_data.clone();
                 let parsed_scene = if !w3d_data.is_empty() {
-                    match crate::director::chunks::w3d::parse_w3d(&w3d_data) {
+                    match crate::director::chunks::w3d::parse_w3d(&w3d_data, symbols) {
                         Ok(mut scene) => {
                             debug!("W3D parsed: {} materials, {} nodes, {} meshes",
                                 scene.materials.len(), scene.nodes.len(), scene.clod_meshes.len());
@@ -5434,6 +5438,7 @@ impl CastMember {
         dir_version: u16,
         palette_id_offset: i16,
         font_table: &HashMap<u16, String>,
+        symbols: &mut SymbolTable,
     ) -> CastMember {
         let chunk = &member_def.chunk;
 
@@ -5731,7 +5736,7 @@ impl CastMember {
                     }
                 }
                 // Also scan XMedia children
-                if let Some(cm) = Self::scan_children_for_ole(member_def, number, chunk, bitmap_manager, cast_lib) {
+                if let Some(cm) = Self::scan_children_for_ole(member_def, number, chunk, bitmap_manager, cast_lib, symbols) {
                     return cm;
                 }
                 // Fallback: use first child bytes if available. Hoist the
@@ -5839,7 +5844,7 @@ impl CastMember {
                         );
                     }
                     let parsed_scene = if !w3d_data.is_empty() {
-                        match crate::director::chunks::w3d::parse_w3d(&w3d_data) {
+                        match crate::director::chunks::w3d::parse_w3d(&w3d_data, symbols) {
                             Ok(scene) => {
                                 debug!("W3D parsed: {} materials, {} nodes, {} meshes, {} motions",
                                     scene.materials.len(), scene.nodes.len(), scene.clod_meshes.len(), scene.motions.len());
@@ -5935,7 +5940,7 @@ impl CastMember {
                 }
 
                 // Try all XMedia children for SWF or fonts
-                if let Some(cm) = Self::scan_children_for_ole(member_def, number, chunk, bitmap_manager, cast_lib) {
+                if let Some(cm) = Self::scan_children_for_ole(member_def, number, chunk, bitmap_manager, cast_lib, symbols) {
                     return cm;
                 }
 

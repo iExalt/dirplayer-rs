@@ -1,6 +1,6 @@
 use crate::{
     director::lingo::datum::Datum,
-    player::{symbols::symbol::Symbol, DatumRef, DirPlayer, ScriptError},
+    player::{symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable}, DatumRef, DirPlayer, ScriptError},
 };
 
 pub struct IntDatumHandlers {}
@@ -8,14 +8,29 @@ pub struct IntDatumHandlers {}
 impl IntDatumHandlers {
     pub fn get_prop(
         player: &mut DirPlayer,
+        symbols: &SymbolTable,
         datum_ref: &DatumRef,
         prop: Symbol,
     ) -> Result<DatumRef, ScriptError> {
-        let int_value = player.get_datum(datum_ref).int_value()?;
+        let prop_name = symbols
+            .display(&prop)
+            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+        let prop_lower = symbols
+            .lower(&prop)
+            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+        let datum = match datum_ref {
+            DatumRef::Void => &Datum::Void,
+            _ => player
+                .allocator
+                .try_get_datum(datum_ref)
+                .ok_or_else(|| ScriptError::new(format!("invalid datum reference {datum_ref}")))?,
+        };
+        crate::player::compare::validate_direct_symbol_fields(datum, symbols)?;
+        let int_value = datum.int_value()?;
 
-        match prop.as_lower_str() {
+        match prop_lower {
             "abs" => Ok(player.alloc_datum(Datum::Int(int_value.abs()))),
-            "ilk" => Ok(player.alloc_datum(Datum::Symbol(Symbol::from_str("integer")))),
+            "ilk" => Ok(player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Integer)))),
             "integer" => Ok(datum_ref.clone()),
             "float" => Ok(player.alloc_datum(Datum::Float(int_value as f64))),
             "number" => Ok(datum_ref.clone()),
@@ -46,7 +61,7 @@ impl IntDatumHandlers {
             "exp" => Ok(player.alloc_datum(Datum::Float((int_value as f64).exp()))),
             _ => Err(ScriptError::new(format!(
                 "Cannot get int property {}",
-                prop
+                prop_name
             ))),
         }
     }

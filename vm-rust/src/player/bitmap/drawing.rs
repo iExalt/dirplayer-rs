@@ -8,7 +8,7 @@ use crate::{
         lingo::datum::Datum,
     },
     player::{
-        Score, Sprite, bitmap::bitmap::{PaletteRef, BuiltInPalette, get_system_default_palette}, font::{BitmapFont, bitmap_font_copy_char}, geometry::IntRect, reserve_player_mut, sprite::{ColorRef, is_skew_flip}, symbols::builtin::BuiltInSymbol
+        Score, Sprite, ScriptError, bitmap::bitmap::{PaletteRef, BuiltInPalette, get_system_default_palette}, font::{BitmapFont, bitmap_font_copy_char}, geometry::IntRect, sprite::{ColorRef, is_skew_flip}, symbols::{builtin::BuiltInSymbol, symbol_table::SymbolTable}
     },
 };
 
@@ -1756,6 +1756,54 @@ impl Bitmap {
         }
     }
 
+    /// Copy pixels after resolving symbol-valued ink names through the
+    /// caller's owning symbol table. The low-level compositor continues to
+    /// accept integer ink values so existing renderer callers remain narrow.
+    pub(crate) fn copy_pixels_with_symbols(
+        &mut self,
+        palettes: &PaletteMap,
+        src: &Bitmap,
+        dst_rect: IntRect,
+        src_rect: IntRect,
+        param_list: &HashMap<String, Datum>,
+        score: Option<&Score>,
+        symbols: &SymbolTable,
+    ) -> Result<(), ScriptError> {
+        let mut resolved = param_list.clone();
+        if let Some(Datum::Symbol(symbol)) = resolved.get("ink") {
+            let name = symbols
+                .lower(symbol)
+                .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+            let ink = match name {
+                "copy" => 0,
+                "transparent" => 1,
+                "reverse" => 2,
+                "ghost" => 3,
+                "notcopy" => 4,
+                "nottransparent" => 5,
+                "notreverse" => 6,
+                "notghost" => 7,
+                "matte" => 8,
+                "mask" => 9,
+                "blend" => 32,
+                "addpin" => 33,
+                "add" => 34,
+                "subtractpin" => 35,
+                "backgroundtransparent" | "bgtransparent" => 36,
+                "lightest" => 37,
+                "subtract" => 38,
+                "darkest" => 39,
+                _ => 0,
+            };
+            resolved.insert("ink".to_owned(), Datum::Int(ink));
+        }
+        self.copy_pixels(palettes, src, dst_rect, src_rect, &resolved, score);
+        Ok(())
+    }
+
+    /// Numerical-only compositor core. Lingo symbol inks are resolved by
+    /// `copy_pixels_with_symbols` before entering this pixel algorithm;
+    /// renderer and manager callers pass integer inks or no ink parameter.
     pub fn copy_pixels(
         &mut self,
         palettes: &PaletteMap,
@@ -1769,35 +1817,10 @@ impl Bitmap {
             .get("blend")
             .map(|x| x.int_value().unwrap())
             .unwrap_or(100);
-        let ink = param_list.get("ink");
-        let mut ink = if let Some(ink) = ink {
-            match ink {
-                Datum::Symbol(s) => match s.as_lower_str() {
-                    "copy" => 0,
-                    "transparent" => 1,
-                    "reverse" => 2,
-                    "ghost" => 3,
-                    "notcopy" => 4,
-                    "nottransparent" => 5,
-                    "notreverse" => 6,
-                    "notghost" => 7,
-                    "matte" => 8,
-                    "mask" => 9,
-                    "blend" => 32,
-                    "addpin" => 33,
-                    "add" => 34,
-                    "subtractpin" => 35,
-                    "backgroundtransparent" | "bgtransparent" => 36,
-                    "lightest" => 37,
-                    "subtract" => 38,
-                    "darkest" => 39,
-                    _ => ink.int_value().unwrap_or(0) as u32,
-                },
-                _ => ink.int_value().unwrap_or(0) as u32,
-            }
-        } else {
-            0
-        };
+        let mut ink = param_list
+            .get("ink")
+            .map(|ink| ink.int_value().unwrap_or(0) as u32)
+            .unwrap_or(0);
         // blendLevel (0-255) overrides blend (0-100) when present — used by
         // copyPixels with [#ink: #blend, #blendLevel: N]
         if let Some(blend_level) = param_list.get("blendLevel") {

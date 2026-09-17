@@ -1,0 +1,10 @@
+{"version":1,"request_id":0,"kind":"capabilities","value":{"runtime":"fixture","runtime_version":"wire-only","operations":["state_inspection","state_mutation","invocation","virtual_input","controlled_time","rgba_capture","pcm_capture"]}}
+{"version":1,"request_id":1,"kind":"started","value":{"session":{"id":7,"generation":1}}}
+{"version":1,"request_id":2,"kind":"observation","value":null}
+{"version":1,"request_id":3,"kind":"observation","value":{"name":"example","count":2,"active":true}}
+{"version":1,"request_id":4,"kind":"acknowledged"}
+{"version":1,"request_id":5,"kind":"invoked","value":["returned",1,false]}
+{"version":1,"request_id":6,"kind":"captured","value":{"kind":"rgba","value":{"timestamp_us":0,"width":1,"height":1,"pixels":[255,0,128,255]}}}
+{"version":1,"request_id":7,"kind":"captured","value":{"kind":"pcm","value":{"timestamp_us":0,"sample_rate":48000,"channels":2,"samples":[[0.0,-0.5],[1.0,0.25]]}}}
+{"version":1,"request_id":8,"kind":"reset","value":{"session":{"id":7,"generation":2}}}
+{"version":1,"request_id":9,"kind":"acknowledged","value":null}

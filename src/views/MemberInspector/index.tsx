@@ -3,9 +3,9 @@ import { ICastMemberRef } from "dirplayer-js-api";
 import PreviewCanvas from "../../components/PreviewCanvas";
 import ScriptMemberPreview from "../../components/ScriptMemberPreview";
 import { useAppSelector, useMemberSnapshot } from "../../store/hooks";
+import { useVMHandle } from "../../components/VMProvider";
 import { ICastMemberIdentifier, ISoundMemberSnapshot, memberRefEqualsSafe } from "../../vm";
 import styles from "./styles.module.css";
-import { player_print_member_bitmap_hex, player_play_member_sound, player_print_member_sound_hex } from 'vm-rust'
 import FilmLoopInspector from "../FilmLoopInspector";
 import { useTheme } from "../../utils/theme";
 
@@ -46,6 +46,7 @@ function SoundMemberPreview({
   memberId: ICastMemberIdentifier;
   snapshot: ISoundMemberSnapshot;
 }) {
+  const handle = useVMHandle();
   const durationSec = snapshot.duration ? (snapshot.duration / 1000).toFixed(2) : "?";
   return (
     <div className={styles.detail}>
@@ -61,7 +62,7 @@ function SoundMemberPreview({
         <button
           className={styles.actionButton}
           onClick={() =>
-            player_play_member_sound(memberId.castNumber, memberId.memberNumber)
+            void handle.play_member_sound(memberId.castNumber, memberId.memberNumber)
           }
         >
           ▶ Play
@@ -69,7 +70,7 @@ function SoundMemberPreview({
         <button
           className={styles.actionButton}
           onClick={() =>
-            player_print_member_sound_hex(memberId.castNumber, memberId.memberNumber)
+            handle.print_member_sound_hex(memberId.castNumber, memberId.memberNumber)
           }
         >
           Print raw bytes
@@ -102,7 +103,8 @@ function FontPreview() {
 }
 
 export default function MemberInspector({ memberId }: IMemberInspectorProps) {
-  const memberSnapshot = useMemberSnapshot(memberId);
+  const handle = useVMHandle();
+  const memberSnapshot = useMemberSnapshot(memberId, handle);
   // The script viewer ships its own VS Code-style light and dark palettes;
   // point it at whichever one the app is currently in.
   const { resolved: theme } = useTheme();
@@ -156,7 +158,7 @@ export default function MemberInspector({ memberId }: IMemberInspectorProps) {
             <div className={styles.actions}>
               <button
                 className={styles.actionButton}
-                onClick={() => player_print_member_bitmap_hex(memberId.castNumber, memberId.memberNumber)}
+                onClick={() => void handle.print_member_bitmap_hex(memberId.castNumber, memberId.memberNumber)}
               >
                 Print hex
               </button>

@@ -3,10 +3,10 @@ use itertools::Itertools;
 use crate::{
     director::lingo::datum::{Datum, StringChunkExpr, StringChunkSource, StringChunkType},
     player::{
-        DatumRef, DirPlayer, ScriptError, cast_lib::CastMemberRef, cast_member::CastMemberType, handlers::datum_handlers::{
+        DatumRef, DirPlayer, ScriptError, cast_lib::CastMemberRef, cast_member::CastMemberType, compare::validate_direct_symbol_fields, handlers::datum_handlers::{
             cast_member::font::{HtmlStyle, StyledSpan},
             string::string_get_words,
-        }, reserve_player_mut, sprite::ColorRef, symbols::{builtin::BuiltInSymbol, symbol::Symbol}
+        }, session::ExecutionContext, sprite::ColorRef, symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable}
     },
 };
 
@@ -45,13 +45,14 @@ pub(crate) fn char_range_to_byte_range(s: &str, char_start: usize, char_end: usi
 impl StringChunkUtils {
     pub fn delete(
         player: &mut DirPlayer,
+        symbols: &SymbolTable,
         original_str_src: &StringChunkSource,
         chunk_expr: &StringChunkExpr,
     ) -> Result<(), ScriptError> {
         let new_string = {
             let original_str = match original_str_src {
                 StringChunkSource::Datum(original_str_ref) => {
-                    player.get_datum(original_str_ref).string_value()?
+                    checked_datum(player, symbols, original_str_ref)?.string_value(symbols)?
                 }
                 StringChunkSource::Member(member_ref) => player
                     .movie
@@ -66,12 +67,13 @@ impl StringChunkUtils {
             };
             Self::string_by_deleting_chunk(&original_str, &chunk_expr)
         }?;
-        Self::set_value(player, original_str_src, chunk_expr, new_string)?;
+        Self::set_value(player, symbols, original_str_src, chunk_expr, new_string)?;
         Ok(())
     }
 
     pub fn set_contents(
         player: &mut DirPlayer,
+        symbols: &SymbolTable,
         original_str_src: &StringChunkSource,
         chunk_expr: &StringChunkExpr,
         new_string: String,
@@ -79,7 +81,7 @@ impl StringChunkUtils {
         let new_string = {
             let original_str = match original_str_src {
                 StringChunkSource::Datum(original_str_ref) => {
-                    player.get_datum(original_str_ref).string_value()?
+                    checked_datum(player, symbols, original_str_ref)?.string_value(symbols)?
                 }
                 StringChunkSource::Member(member_ref) => player
                     .movie
@@ -94,18 +96,20 @@ impl StringChunkUtils {
             };
             Self::string_by_putting_into_chunk(&original_str, &chunk_expr, &new_string)
         }?;
-        Self::set_value(player, original_str_src, chunk_expr, new_string)?;
+        Self::set_value(player, symbols, original_str_src, chunk_expr, new_string)?;
         Ok(())
     }
 
     pub fn set_value(
         player: &mut DirPlayer,
+        symbols: &SymbolTable,
         original_str_src: &StringChunkSource,
         chunk_expr: &StringChunkExpr,
         new_string: String,
     ) -> Result<(), ScriptError> {
         match original_str_src {
             StringChunkSource::Datum(original_str_ref) => {
+                checked_datum(player, symbols, original_str_ref)?;
                 // The datum might be a StringChunk (e.g. when trim() receives t.line[ln] as argument).
                 // In Director, strings are value types, so mutating a StringChunk-backed variable
                 // should "materialize" it into a plain String. Replace the datum entirely.
@@ -550,50 +554,37 @@ impl StringChunkUtils {
 }
 
 impl StringChunkHandlers {
-    pub fn count(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let value = player.get_datum(datum).string_value()?;
-            let operand = player.get_datum(&args[0]).symbol_value()?;
-            let delimiter = player.movie.item_delimiter;
-            let count = StringChunkUtils::resolve_chunk_count(
-                &value,
-                StringChunkType::from(operand),
-                delimiter,
-            )?;
-            Ok(player.alloc_datum(Datum::Int(count as i32)))
-        })
+    pub fn count(player: &mut DirPlayer, symbols: &mut SymbolTable, datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let value = checked_datum(player, symbols, datum)?.string_value(symbols)?;
+        let operand = checked_datum(player, symbols, &args[0])?.symbol_value(symbols)?;
+        let delimiter = player.movie.item_delimiter;
+        let count = StringChunkUtils::resolve_chunk_count(&value, StringChunkType::from_symbol(&operand, symbols)?, delimiter)?;
+        Ok(player.alloc_datum(Datum::Int(count as i32)))
     }
 
-    pub fn get_prop(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        Self::get_prop_inner(datum, args, false)
+    pub fn get_prop(player: &mut DirPlayer, symbols: &mut SymbolTable, datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        Self::get_prop_inner(player, symbols, datum, args, false)
     }
 
-    pub fn get_prop_ref(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        Self::get_prop_inner(datum, args, true)
+    pub fn get_prop_ref(player: &mut DirPlayer, symbols: &mut SymbolTable, datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        Self::get_prop_inner(player, symbols, datum, args, true)
     }
 
-    fn get_prop_inner(datum: &DatumRef, args: &Vec<DatumRef>, as_ref: bool) -> Result<DatumRef, ScriptError> {
+    fn get_prop_inner(player: &mut DirPlayer, symbols: &mut SymbolTable, datum: &DatumRef, args: &Vec<DatumRef>, as_ref: bool) -> Result<DatumRef, ScriptError> {
         let datum = datum.clone();
-        reserve_player_mut(|player| {
-            let datum_val = player.get_datum(&datum);
-            let parent_str = datum_val.string_value()?;
-            let prop_name = player.get_datum(&args[0]).symbol_value()?;
-            let start = player.get_datum(&args[1]).int_value()?;
-            let end = if args.len() > 2 {
-                player.get_datum(&args[2]).int_value()?
-            } else {
-                start
-            };
-            let chunk_expr = StringChunkExpr {
-                chunk_type: StringChunkType::from(prop_name),
-                start,
-                end,
-                item_delimiter: player.movie.item_delimiter,
-            };
-
-            let str_value =
-                StringChunkUtils::resolve_chunk_expr_string(&parent_str, &chunk_expr)?;
-            if as_ref {
+        let datum_val = checked_datum(player, symbols, &datum)?;
+        let parent_str = datum_val.string_value(symbols)?;
+        let prop_name = checked_datum(player, symbols, &args[0])?.symbol_value(symbols)?;
+        let start = checked_datum(player, symbols, &args[1])?.int_value()?;
+        let end = if args.len() > 2 { checked_datum(player, symbols, &args[2])?.int_value()? } else { start };
+        let chunk_expr = StringChunkExpr {
+            chunk_type: StringChunkType::from_symbol(&prop_name, symbols)?,
+            start,
+            end,
+            item_delimiter: player.movie.item_delimiter,
+        };
+        let str_value = StringChunkUtils::resolve_chunk_expr_string(&parent_str, &chunk_expr)?;
+        if as_ref {
                 // Nested chunks must chain via `StringChunkSource::Datum` so the
                 // outer operation (e.g. `.line[n]`) is preserved. Using the outer
                 // chunk's own source flattens the chain, losing context —
@@ -606,10 +597,9 @@ impl StringChunkHandlers {
                     chunk_expr,
                     str_value,
                 )))
-            } else {
-                Ok(player.alloc_datum(Datum::String(str_value)))
-            }
-        })
+        } else {
+            Ok(player.alloc_datum(Datum::String(str_value)))
+        }
     }
 
     /// Resolve the character range (start inclusive, end exclusive) that
@@ -644,8 +634,9 @@ impl StringChunkHandlers {
     /// member's full text and uses character indices (not bytes).
     pub fn walk_chunk_to_member_range(
         player: &DirPlayer,
+        symbols: &SymbolTable,
         datum_ref: &DatumRef,
-    ) -> Option<(CastMemberRef, usize, usize)> {
+    ) -> Result<Option<(CastMemberRef, usize, usize)>, ScriptError> {
         // Collect the chunk chain outermost-last by walking the source chain
         // inward: the datum itself holds the innermost expr, its source holds
         // the next, and so on until we hit a Member.
@@ -653,7 +644,7 @@ impl StringChunkHandlers {
         let mut current_ref = datum_ref.clone();
         let member_ref;
         loop {
-            let datum = player.get_datum(&current_ref);
+            let datum = checked_datum(player, symbols, &current_ref)?;
             match datum {
                 Datum::StringChunk(source, expr, _) => {
                     chain.push(expr.clone());
@@ -667,15 +658,17 @@ impl StringChunkHandlers {
                         }
                     }
                 }
-                _ => return None,
+                _ => return Ok(None),
             }
         }
 
-        let member = player.movie.cast_manager.find_member_by_ref(&member_ref)?;
+        let Some(member) = player.movie.cast_manager.find_member_by_ref(&member_ref) else {
+            return Ok(None);
+        };
         let text = match &member.member_type {
             CastMemberType::Text(t) => t.text.clone(),
             CastMemberType::Field(f) => f.text.clone(),
-            _ => return None,
+            _ => return Ok(None),
         };
 
         // Apply chunks outermost → innermost to narrow the range inside the
@@ -692,7 +685,7 @@ impl StringChunkHandlers {
             range_end = range_start + e;
             range_start += s;
         }
-        Some((member_ref, range_start, range_end))
+        Ok(Some((member_ref, range_start, range_end)))
     }
 
     /// Split `html_styled_spans` at the boundaries [start, end) and apply
@@ -771,11 +764,18 @@ impl StringChunkHandlers {
 
     pub fn set_prop(
         player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
         datum_ref: &DatumRef,
         prop: Symbol,
         value_ref: &DatumRef,
     ) -> Result<(), ScriptError> {
-        match prop.as_lower_str() {
+        let prop_display = symbols
+            .display(&prop)
+            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+        let prop_lower = symbols
+            .lower(&prop)
+            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+        match prop_lower {
             // All per-run style props target ONLY the chunk's character range
             // (via apply_styled_span_range). fontSize previously set the whole
             // member + every span, so `member.line[2].fontSize = 18` blew the
@@ -783,13 +783,13 @@ impl StringChunkHandlers {
             // its body to 14 then only line 2 (the "> Story" header) to 18, but
             // the whole body rendered at 18.
             "font" | "fontstyle" | "color" | "hyperlink" | "fontsize" => {
-                return Self::set_chunk_style_prop(player, datum_ref, prop, value_ref);
+                return Self::set_chunk_style_prop(player, symbols, datum_ref, prop, value_ref);
             }
             "charspacing" => {
                 // Update the source member's char_spacing
                 // Walk the source chain to find the originating member
-                let new_val = player.get_datum(value_ref).int_value()?;
-                let datum = player.get_datum(datum_ref).clone();
+                let new_val = checked_datum(player, symbols, value_ref)?.int_value()?;
+                let datum = checked_datum(player, symbols, datum_ref)?.clone();
                 if let Datum::StringChunk(source, _, _) = datum {
                     let mut current_source = source;
                     loop {
@@ -806,7 +806,7 @@ impl StringChunkHandlers {
                                 break;
                             }
                             StringChunkSource::Datum(ref source_datum_ref) => {
-                                let source_datum = player.get_datum(source_datum_ref).clone();
+                                let source_datum = checked_datum(player, symbols, source_datum_ref)?.clone();
                                 if let Datum::StringChunk(inner_source, _, _) = source_datum {
                                     current_source = inner_source;
                                 } else {
@@ -819,7 +819,8 @@ impl StringChunkHandlers {
             }
             _ => {
                 return Err(ScriptError::new(format!(
-                    "Cannot set property {prop} for string chunk datum"
+                    "Cannot set property {} for string chunk datum",
+                    prop_display
                 )))
             }
         }
@@ -833,13 +834,14 @@ impl StringChunkHandlers {
     /// would change (or worse, nothing would happen).
     fn set_chunk_style_prop(
         player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
         datum_ref: &DatumRef,
         prop: Symbol,
         value_ref: &DatumRef,
     ) -> Result<(), ScriptError> {
         // Resolve the chunk range up-front (read-only borrows) before taking
         // the mutable borrow on the target member.
-        let resolved = Self::walk_chunk_to_member_range(player, datum_ref);
+        let resolved = Self::walk_chunk_to_member_range(player, symbols, datum_ref)?;
         let Some((member_ref, start, end)) = resolved else { return Ok(()); };
         if start >= end {
             return Ok(());
@@ -855,23 +857,26 @@ impl StringChunkHandlers {
             /// stored on `HtmlStyle.hyperlink`. Setting empty string clears.
             Hyperlink(String),
         }
-        let value_datum = player.get_datum(value_ref).clone();
-        let change = match prop.as_lower_str() {
-            "font" => StyleChange::Font(value_datum.string_value()?),
+        let value_datum = checked_datum(player, symbols, value_ref)?.clone();
+        let prop_lower = symbols
+            .lower(&prop)
+            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+        let change = match prop_lower {
+            "font" => StyleChange::Font(value_datum.string_value(symbols)?),
             "fontsize" => StyleChange::FontSize(value_datum.int_value()?),
-            "hyperlink" => StyleChange::Hyperlink(value_datum.string_value().unwrap_or_default()),
+            "hyperlink" => StyleChange::Hyperlink(value_datum.string_value(symbols).unwrap_or_default()),
             "fontstyle" => {
                 // Director accepts either a single symbol (#bold) or a list
                 // of symbols ([#bold, #underline]). #plain resets the style.
                 let mut bold = false;
                 let mut italic = false;
                 let mut underline = false;
-                let symbols: Vec<Symbol> = match &value_datum {
+                let style_symbols: Vec<Symbol> = match &value_datum {
                     Datum::Symbol(s) => vec![s.clone()],
                     Datum::List(_, items, _) => {
                         let mut out = Vec::new();
                         for item_ref in items.iter() {
-                            if let Datum::Symbol(s) = player.get_datum(item_ref) {
+                            if let Datum::Symbol(s) = checked_datum(player, symbols, item_ref)? {
                                 out.push(s.clone());
                             }
                         }
@@ -879,7 +884,7 @@ impl StringChunkHandlers {
                     }
                     _ => Vec::new(),
                 };
-                for s in symbols.iter() {
+                for s in style_symbols.iter() {
                     match s.into_builtin() {
                         Some(BuiltInSymbol::Bold) => bold = true,
                         Some(BuiltInSymbol::Italic) => italic = true,
@@ -994,12 +999,10 @@ impl StringChunkHandlers {
         Ok(())
     }
 
-    fn delete(datum: &DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let (original_str_ref, chunk_expr, ..) = player.get_datum(datum).to_string_chunk()?;
-            StringChunkUtils::delete(player, &original_str_ref.clone(), &chunk_expr.clone())?;
-            Ok(DatumRef::Void)
-        })
+    fn delete(player: &mut DirPlayer, symbols: &SymbolTable, datum: &DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let (original_str_ref, chunk_expr, ..) = checked_datum(player, symbols, datum)?.to_string_chunk()?;
+        StringChunkUtils::delete(player, symbols, &original_str_ref.clone(), &chunk_expr.clone())?;
+        Ok(DatumRef::Void)
     }
 
     /// `put expression before chunkExpression` — Director 11.5 Scripting
@@ -1013,54 +1016,52 @@ impl StringChunkHandlers {
     /// surrounding text and the chunk itself both survive — the same splice
     /// `setContents` performs, just with the original chunk text preserved.
     /// AreaZero's `[M] String Evaluator` builds its substitutions this way.
-    fn set_contents_before(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        Self::set_contents_relative(datum, args, true)
+    fn set_contents_before(player: &mut DirPlayer, symbols: &SymbolTable, datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        Self::set_contents_relative(player, symbols, datum, args, true)
     }
 
     /// `put expression after chunkExpression` — the mirror of `put...before`
     /// (same dictionary section, `put...after`): insert after the chunk,
     /// leaving the container's other contents intact.
-    fn set_contents_after(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        Self::set_contents_relative(datum, args, false)
+    fn set_contents_after(player: &mut DirPlayer, symbols: &SymbolTable, datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        Self::set_contents_relative(player, symbols, datum, args, false)
     }
 
     fn set_contents_relative(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
         datum: &DatumRef,
         args: &Vec<DatumRef>,
         before: bool,
     ) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let (original_str_ref, chunk_expr, ..) = player.get_datum(datum).to_string_chunk()?;
+        let (original_str_ref, chunk_expr, ..) = checked_datum(player, symbols, datum)?.to_string_chunk()?;
             // The chunk's CURRENT text — `StringChunk::string_value` resolves it.
-            let existing = player.get_datum(datum).string_value()?;
-            let insert = player.get_datum(&args[0]).string_value()?;
+            let existing = checked_datum(player, symbols, datum)?.string_value(symbols)?;
+            let insert = checked_datum(player, symbols, &args[0])?.string_value(symbols)?;
             let new_str = if before {
                 format!("{}{}", insert, existing)
             } else {
                 format!("{}{}", existing, insert)
             };
             StringChunkUtils::set_contents(
-                player,
+                player, symbols,
                 &original_str_ref.clone(),
                 &chunk_expr.clone(),
                 new_str,
             )?;
-            Ok(DatumRef::Void)
-        })
+        Ok(DatumRef::Void)
     }
 
-    fn set_contents(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let (original_str_ref, chunk_expr, ..) = player.get_datum(datum).to_string_chunk()?;
-            let new_str = player.get_datum(&args[0]).string_value()?;
+    fn set_contents(player: &mut DirPlayer, symbols: &SymbolTable, datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let (original_str_ref, chunk_expr, ..) = checked_datum(player, symbols, datum)?.to_string_chunk()?;
+            let new_str = checked_datum(player, symbols, &args[0])?.string_value(symbols)?;
             StringChunkUtils::set_contents(
-                player,
+                player, symbols,
                 &original_str_ref.clone(),
                 &chunk_expr.clone(),
                 new_str,
             )?;
             Ok(DatumRef::Void)
-        })
     }
 
     /// `hilite fieldChunkExpression` / `chunk.hilite()` — Director command
@@ -1069,10 +1070,9 @@ impl StringChunkHandlers {
     /// sel_start / sel_end so the renderer can paint the selection band.
     /// Director 11.5 Scripting Dictionary p.411: "highlights (selects) in
     /// the field sprite the specified chunk".
-    fn hilite(datum: &DatumRef, _args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    fn hilite(player: &mut DirPlayer, _symbols: &SymbolTable, datum: &DatumRef, _args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
             if let Some((member_ref, start, end)) =
-                StringChunkHandlers::walk_chunk_to_member_range(player, datum)
+                StringChunkHandlers::walk_chunk_to_member_range(player, _symbols, datum)?
             {
                 if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                     match &mut member.member_type {
@@ -1088,17 +1088,21 @@ impl StringChunkHandlers {
                     }
                 }
             }
-            Ok(DatumRef::Void)
-        })
+        Ok(DatumRef::Void)
     }
 
     pub fn call(
+        runtime: &mut ExecutionContext<'_>,
         datum: &DatumRef,
         handler_name: Symbol,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
+        let (player, symbols) = (&mut *runtime.player, &mut *runtime.symbols);
+        let handler_display = symbols
+            .display(&handler_name)
+            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
         match handler_name.into_builtin() {
-            Some(BuiltInSymbol::Count) => Self::count(datum, args),
+            Some(BuiltInSymbol::Count) => Self::count(player, symbols, datum, args),
             // Chunk-typed nested access (`member.line[o].char[1..x]`) is
             // ALWAYS routed through get_prop_ref so the returned datum is
             // a StringChunk — chained property reads like
@@ -1108,27 +1112,25 @@ impl StringChunkHandlers {
             // `.font` access then errors with "Invalid string built-in
             // property font" (Fugue No.4 Cues#AdvanceScroll trips this).
             Some(BuiltInSymbol::GetProp) => {
-                let prop_name = reserve_player_mut(|player| {
-                    Ok::<String, ScriptError>(
-                        player.get_datum(&args[0]).string_value().unwrap_or_default()
-                    )
-                })?;
+                let prop_name = checked_datum(player, symbols, &args[0])?
+                    .string_value(symbols)
+                    .unwrap_or_default();
                 let is_chunk_typed = matches!(
                     prop_name.to_ascii_lowercase().as_str(),
                     "char" | "chars" | "word" | "words" | "line" | "lines" | "item" | "items"
                 );
                 if is_chunk_typed {
-                    Self::get_prop_ref(datum, args)
+                    Self::get_prop_ref(player, symbols, datum, args)
                 } else {
-                    Self::get_prop(datum, args)
+                    Self::get_prop(player, symbols, datum, args)
                 }
             }
-            Some(BuiltInSymbol::GetPropRef) => Self::get_prop_ref(datum, args),
-            Some(BuiltInSymbol::Delete) => Self::delete(datum, args),
-            Some(BuiltInSymbol::SetContents) => Self::set_contents(datum, args),
-            Some(BuiltInSymbol::SetContentsBefore) => Self::set_contents_before(datum, args),
-            Some(BuiltInSymbol::SetContentsAfter) => Self::set_contents_after(datum, args),
-            Some(BuiltInSymbol::Hilite) => Self::hilite(datum, args),
+            Some(BuiltInSymbol::GetPropRef) => Self::get_prop_ref(player, symbols, datum, args),
+            Some(BuiltInSymbol::Delete) => Self::delete(player, symbols, datum, args),
+            Some(BuiltInSymbol::SetContents) => Self::set_contents(player, symbols, datum, args),
+            Some(BuiltInSymbol::SetContentsBefore) => Self::set_contents_before(player, symbols, datum, args),
+            Some(BuiltInSymbol::SetContentsAfter) => Self::set_contents_after(player, symbols, datum, args),
+            Some(BuiltInSymbol::Hilite) => Self::hilite(player, symbols, datum, args),
             // `chunk[N]` — index access. Director treats this as the Nth
             // character of the chunk's text (1-based). Movies that wrap a
             // field lookup in `value(...)` and then `[1]` to grab the
@@ -1141,21 +1143,39 @@ impl StringChunkHandlers {
                 }
                 let idx_ref = args[0].clone();
                 let datum = datum.clone();
-                reserve_player_mut(|player| {
-                    let s = player.get_datum(&datum).string_value()?;
-                    let idx = player.get_datum(&idx_ref).int_value()?;
-                    if idx < 1 {
-                        return Ok(player.alloc_datum(Datum::String(String::new())));
-                    }
-                    let ch = s.chars().nth((idx - 1) as usize).map(|c| c.to_string());
-                    Ok(player.alloc_datum(Datum::String(ch.unwrap_or_default())))
-                })
+                let s = checked_datum(player, symbols, &datum)?.string_value(symbols)?;
+                let idx = checked_datum(player, symbols, &idx_ref)?.int_value()?;
+                if idx < 1 {
+                    return Ok(player.alloc_datum(Datum::String(String::new())));
+                }
+                let ch = s.chars().nth((idx - 1) as usize).map(|c| c.to_string());
+                Ok(player.alloc_datum(Datum::String(ch.unwrap_or_default())))
             }
             _ => Err(ScriptError::new(format!(
-                "No handler {handler_name} for string chunk datum"
+                "No handler {} for string chunk datum",
+                handler_display
             ))),
         }
     }
+}
+
+fn checked_datum<'a>(
+    player: &'a DirPlayer,
+    symbols: &SymbolTable,
+    datum_ref: &DatumRef,
+) -> Result<&'a Datum, ScriptError> {
+    let datum = match datum_ref {
+        DatumRef::Void => &Datum::Void,
+        _ => player
+            .allocator
+            .try_get_datum(datum_ref)
+            .ok_or_else(|| ScriptError::new_code(
+                crate::player::ScriptErrorCode::InvalidReference,
+                format!("invalid datum reference {datum_ref}"),
+            ))?,
+    };
+    validate_direct_symbol_fields(datum, symbols)?;
+    Ok(datum)
 }
 
 /// Convert a 1-based inclusive VM index range into the character-index range

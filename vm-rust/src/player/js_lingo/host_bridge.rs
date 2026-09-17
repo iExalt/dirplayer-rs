@@ -16,11 +16,17 @@
 
 use std::any::Any;
 
-use super::value::{JsError, JsValue};
+use super::value::{DirectorRefKind, JsError, JsValue};
 
 /// One callable from JS into Director. The bridge stays trait-shaped so a
 /// stub can drive tests without dragging in the entire player crate.
 pub trait JsHostBridge: Any {
+    /// Read a live Director proxy through this bridge's owning player.
+    fn director_ref_get_property(&mut self, kind: &DirectorRefKind, name: &str) -> JsValue;
+
+    /// Write a live Director proxy through this bridge's owning player.
+    fn director_ref_set_property(&mut self, kind: &DirectorRefKind, name: &str, value: JsValue) -> Result<(), JsError>;
+
     /// `trace(...)` — Director's debug log. Multiple args are joined with
     /// spaces (the Lingo convention).
     fn trace(&mut self, args: &[JsValue]);
@@ -60,6 +66,13 @@ pub trait JsHostBridge: Any {
 /// player context is attached. `trace` lines go to `log::info!`.
 pub struct StubBridge;
 impl JsHostBridge for StubBridge {
+    fn director_ref_get_property(&mut self, _kind: &DirectorRefKind, _name: &str) -> JsValue {
+        JsValue::Undefined
+    }
+    fn director_ref_set_property(&mut self, _kind: &DirectorRefKind, _name: &str, _value: JsValue) -> Result<(), JsError> {
+        Err(JsError::new("no Director player attached to this bridge"))
+    }
+
     fn trace(&mut self, args: &[JsValue]) {
         let s = args.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(" ");
         log::info!("[js-trace] {}", s);
@@ -79,6 +92,13 @@ pub struct RecordingBridge {
 }
 
 impl JsHostBridge for RecordingBridge {
+    fn director_ref_get_property(&mut self, _kind: &DirectorRefKind, _name: &str) -> JsValue {
+        JsValue::Undefined
+    }
+    fn director_ref_set_property(&mut self, _kind: &DirectorRefKind, _name: &str, _value: JsValue) -> Result<(), JsError> {
+        Err(JsError::new("no Director player attached to this bridge"))
+    }
+
     fn trace(&mut self, args: &[JsValue]) {
         self.traces.push(args.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(" "));
     }

@@ -5,57 +5,62 @@ use crate::{
     director::lingo::datum::{Datum, DatumType, StringChunkExpr, StringChunkSource, StringChunkType, datum_bool},
     player::{
         ColorRef, DatumRef, DirPlayer, ScriptError, bitmap::{bitmap::{Bitmap, BuiltInPalette, PaletteRef}, drawing::CopyPixelsParams}, cast_lib::CastMemberRef, cast_member::Media, font::{get_text_index_at_pos, measure_text, measure_text_wrapped, DrawTextParams}, handlers::datum_handlers::{
-            cast_member_ref::borrow_member_mut, string::{string_get_lines, string_get_words}, string_chunk::StringChunkUtils
-        }, symbols::symbol::Symbol
+            cast_member_ref::{borrow_member_mut_with_player, checked_get_datum}, string::{string_get_lines, string_get_words}, string_chunk::StringChunkUtils
+        }, symbols::{symbol::Symbol, symbol_table::SymbolTable}
     },
 };
 
 pub struct FieldMemberHandlers {}
 
+fn builtin_symbol(symbol: &Symbol, symbols: &SymbolTable) -> Result<crate::player::symbols::builtin::BuiltInSymbol, ScriptError> {
+    Ok(symbol.into_builtin_or_error(symbols)?)
+}
+
 impl FieldMemberHandlers {
     pub fn call(
         player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
         datum: &DatumRef,
         handler_name: &str,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
         match handler_name {
             "count" => {
-                let member_ref = player.get_datum(datum).to_member_ref()?;
+                let member_ref = checked_get_datum(player, datum, symbols)?.to_member_ref()?;
                 let member = player
                     .movie
                     .cast_manager
                     .find_member_by_ref(&member_ref)
                     .unwrap();
                 let field = member.member_type.as_field().unwrap();
-                let count_of = player.get_datum(&args[0]).symbol_value()?;
+                let count_of = checked_get_datum(player, &args[0], symbols)?.symbol_value(symbols)?;
                 if args.len() != 1 {
                     return Err(ScriptError::new("count requires 1 argument".to_string()));
                 }
                 let delimiter = player.movie.item_delimiter;
                 let count = StringChunkUtils::resolve_chunk_count(
                     &field.text,
-                    StringChunkType::from(count_of),
+                    StringChunkType::from_symbol(&count_of, symbols)?,
                     delimiter,
                 )?;
                 Ok(player.alloc_datum(Datum::Int(count as i32)))
             }
             "getPropRef" => {
-                let member_ref = player.get_datum(datum).to_member_ref()?;
+                let member_ref = checked_get_datum(player, datum, symbols)?.to_member_ref()?;
                 let member = player
                     .movie
                     .cast_manager
                     .find_member_by_ref(&member_ref)
                     .unwrap();
                 let field = member.member_type.as_field().unwrap();
-                let prop_name = player.get_datum(&args[0]).symbol_value()?;
-                let start = player.get_datum(&args[1]).int_value()?;
+                let prop_name = checked_get_datum(player, &args[0], symbols)?.symbol_value(symbols)?;
+                let start = checked_get_datum(player, &args[1], symbols)?.int_value()?;
                 let end = if args.len() > 2 {
-                    player.get_datum(&args[2]).int_value()?
+                    checked_get_datum(player, &args[2], symbols)?.int_value()?
                 } else {
                     start
                 };
-                let chunk_type = StringChunkType::from(prop_name);
+                let chunk_type = StringChunkType::from_symbol(&prop_name, symbols)?;
                 let chunk_expr = StringChunkExpr {
                     chunk_type,
                     start,
@@ -76,12 +81,11 @@ impl FieldMemberHandlers {
                         "{handler_name} requires 1 argument"
                     )));
                 }
-                let new_contents = player
-                    .get_datum(&args[0])
-                    .string_value()?
+                let new_contents = checked_get_datum(player, &args[0], symbols)?
+                    .string_value(symbols)?
                     .trim_end_matches('\0')
                     .to_string();
-                let member_ref = player.get_datum(datum).to_member_ref()?;
+                let member_ref = checked_get_datum(player, datum, symbols)?.to_member_ref()?;
                 let member = player
                     .movie
                     .cast_manager
@@ -116,10 +120,10 @@ impl FieldMemberHandlers {
                 // terminates and the movie hard-stucks. Without word-wrap,
                 // a paged narrative member only has \r\n line breaks so the
                 // visible page boundary is determined purely by wrapping.
-                let (pt_vals, _flags) = player.get_datum(&args[0]).to_point_inline()?;
+                let (pt_vals, _flags) = checked_get_datum(player, &args[0], symbols)?.to_point_inline()?;
                 let x = pt_vals[0] as i32;
                 let y = pt_vals[1] as i32;
-                let member_ref = player.get_datum(datum).to_member_ref()?;
+                let member_ref = checked_get_datum(player, datum, symbols)?.to_member_ref()?;
                 let member = player
                     .movie
                     .cast_manager
@@ -194,20 +198,20 @@ impl FieldMemberHandlers {
             // text.rs so field and text members (and the global builtin forms)
             // behave identically.
             "scrollByLine" => {
-                let amount = player.get_datum(&args[0]).to_float()?;
-                let member_ref = player.get_datum(datum).to_member_ref()?;
+                let amount = checked_get_datum(player, &args[0], symbols)?.to_float()?;
+                let member_ref = checked_get_datum(player, datum, symbols)?.to_member_ref()?;
                 super::text::scroll_member_by_lines(player, &member_ref, amount);
                 Ok(DatumRef::Void)
             }
             "scrollByPage" => {
-                let amount = player.get_datum(&args[0]).to_float()?;
-                let member_ref = player.get_datum(datum).to_member_ref()?;
+                let amount = checked_get_datum(player, &args[0], symbols)?.to_float()?;
+                let member_ref = checked_get_datum(player, datum, symbols)?.to_member_ref()?;
                 super::text::scroll_member_by_pages(player, &member_ref, amount);
                 Ok(DatumRef::Void)
             }
             // Director 11.5 Scripting Dictionary p.443 / p.449.
             "linePosToLocV" | "locVToLinePos" => {
-                let member_ref = player.get_datum(datum).to_member_ref()?;
+                let member_ref = checked_get_datum(player, datum, symbols)?.to_member_ref()?;
                 let member = player
                     .movie
                     .cast_manager
@@ -215,7 +219,7 @@ impl FieldMemberHandlers {
                     .unwrap();
                 let field = member.member_type.as_field().unwrap();
                 let step = super::text::line_step_px(field.fixed_line_space, field.font_size).max(1);
-                let arg = player.get_datum(&args[0]).int_value()?;
+                let arg = checked_get_datum(player, &args[0], symbols)?.int_value()?;
                 if handler_name == "linePosToLocV" {
                     let line_num = arg.max(1);
                     // Baseline anchor — see text.rs linePosToLocV comment.
@@ -239,6 +243,7 @@ impl FieldMemberHandlers {
 
     pub fn get_prop(
         player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
         cast_member_ref: &CastMemberRef,
         prop: &str,
     ) -> Result<Datum, ScriptError> {
@@ -616,23 +621,30 @@ impl FieldMemberHandlers {
     }
 
     pub fn set_prop(
+        player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
         member_ref: &CastMemberRef,
         prop: &str,
         value: Datum,
     ) -> Result<(), ScriptError> {
+        crate::player::compare::validate_direct_symbol_fields(&value, symbols)?;
         match prop {
-            "text" => borrow_member_mut(
+            "text" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.string_value(),
-                |cast_member, value| {
+                |player, symbols| value.string_value(symbols),
+                |cast_member, value, symbols| {
                     let field = cast_member.member_type.as_field_mut().unwrap();
                     field.set_text_preserving_caret(value?.trim_end_matches('\0').to_string());
                     Ok(())
                 },
             ),
-            "rect" => borrow_member_mut(
+            "rect" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |_player| -> Result<(i32, i32, i32, i32), ScriptError> {
+                |_player, symbols| -> Result<(i32, i32, i32, i32), ScriptError> {
                     let (vals, _flags) = value.to_rect_inline()?;
 
                     let x1 = vals[0] as i32;
@@ -642,7 +654,7 @@ impl FieldMemberHandlers {
 
                     Ok((x1, y1, x2, y2))
                 },
-                |cast_member, rect_values: Result<(i32, i32, i32, i32), ScriptError>| {
+                |cast_member, rect_values: Result<(i32, i32, i32, i32), ScriptError>, symbols| {
                     let (x1, y1, x2, y2) = rect_values?;
                     let field_data = cast_member.member_type.as_field_mut().unwrap();
                     let w = (x2 - x1).max(0) as u16;
@@ -673,26 +685,34 @@ impl FieldMemberHandlers {
                     Ok(())
                 }
             ),
-            "alignment" => borrow_member_mut(
+            "alignment" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.string_value(),
-                |cast_member, value| {
-                    cast_member.member_type.as_field_mut().unwrap().alignment = Symbol::from_str(&value?).into_builtin_or_error()?;
+                |player, symbols| value.string_value(symbols),
+                |cast_member, value, symbols| {
+                    let value = value?;
+                    cast_member.member_type.as_field_mut().unwrap().alignment =
+                        symbols.intern(&value).into_builtin_or_error(symbols)?;
                     Ok(())
                 },
             ),
-            "wordWrap" => borrow_member_mut(
+            "wordWrap" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.bool_value(),
-                |cast_member, value| {
+                |player, symbols| value.bool_value(),
+                |cast_member, value, symbols| {
                     cast_member.member_type.as_field_mut().unwrap().word_wrap = value?;
                     Ok(())
                 },
             ),
-            "width" => borrow_member_mut(
+            "width" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.int_value(),
-                |cast_member, value| {
+                |player, symbols| value.int_value(),
+                |cast_member, value, symbols| {
                     let w = value? as u16;
                     let field = cast_member.member_type.as_field_mut().unwrap();
                     field.width = w;
@@ -702,10 +722,12 @@ impl FieldMemberHandlers {
                     Ok(())
                 },
             ),
-            "height" => borrow_member_mut(
+            "height" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.int_value(),
-                |cast_member, value| {
+                |player, symbols| value.int_value(),
+                |cast_member, value, symbols| {
                     let h = value? as u16;
                     let field = cast_member.member_type.as_field_mut().unwrap();
                     // Field BOX height. Do NOT touch `fixed_line_space` —
@@ -718,18 +740,22 @@ impl FieldMemberHandlers {
                     Ok(())
                 },
             ),
-            "font" => borrow_member_mut(
+            "font" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.string_value(),
-                |cast_member, value| {
+                |player, symbols| value.string_value(symbols),
+                |cast_member, value, symbols| {
                     cast_member.member_type.as_field_mut().unwrap().font = value?;
                     Ok(())
                 },
             ),
-            "fontSize" => borrow_member_mut(
+            "fontSize" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.int_value(),
-                |cast_member, value| {
+                |player, symbols| value.int_value(),
+                |cast_member, value, symbols| {
                     let font_size = value? as u16;
                     let field = cast_member.member_type.as_field_mut().unwrap();
                     field.font_size = font_size;
@@ -742,12 +768,14 @@ impl FieldMemberHandlers {
             // runs) and the `the textStyle of` getter agrees. The client
             // (issue-188) movie's `markLine` clears all line highlights via
             // `set the textStyle of field fieldname to "plain"`.
-            "fontStyle" | "textStyle" => borrow_member_mut(
+            "fontStyle" | "textStyle" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.string_value(),
-                |cast_member, value| {
+                |player, symbols| value.string_value(symbols),
+                |cast_member, value, symbols| {
                     use crate::player::cast_member::text_style_string_to_byte;
-                    let s = value?;
+                    let s: String = value?;
                     let style_byte = text_style_string_to_byte(&s);
                     let field = cast_member.member_type.as_field_mut().unwrap();
                     field.font_style = s;
@@ -756,10 +784,12 @@ impl FieldMemberHandlers {
                     Ok(())
                 },
             ),
-            "fixedLineSpace" | "lineHeight" => borrow_member_mut(
+            "fixedLineSpace" | "lineHeight" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.int_value(),
-                |cast_member, value| {
+                |player, symbols| value.int_value(),
+                |cast_member, value, symbols| {
                     cast_member
                         .member_type
                         .as_field_mut()
@@ -768,82 +798,104 @@ impl FieldMemberHandlers {
                     Ok(())
                 },
             ),
-            "topSpacing" => borrow_member_mut(
+            "topSpacing" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.int_value(),
-                |cast_member, value| {
+                |player, symbols| value.int_value(),
+                |cast_member, value, symbols| {
                     cast_member.member_type.as_field_mut().unwrap().top_spacing = value? as i16;
                     Ok(())
                 },
             ),
-            "boxType" => borrow_member_mut(
+            "boxType" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.string_value(),
-                |cast_member, value| {
-                    cast_member.member_type.as_field_mut().unwrap().box_type = Symbol::from_str(&value?).into_builtin_or_error()?;
+                |player, symbols| value.string_value(symbols),
+                |cast_member, value, symbols| {
+                    let value = value?;
+                    cast_member.member_type.as_field_mut().unwrap().box_type =
+                        symbols.intern(&value).into_builtin_or_error(symbols)?;
                     Ok(())
                 },
             ),
-            "antialias" => borrow_member_mut(
+            "antialias" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.bool_value(),
-                |cast_member, value| {
+                |player, symbols| value.bool_value(),
+                |cast_member, value, symbols| {
                     cast_member.member_type.as_field_mut().unwrap().anti_alias = value?;
                     Ok(())
                 },
             ),
-            "autoTab" => borrow_member_mut(
+            "autoTab" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.bool_value(),
-                |cast_member, value| {
+                |player, symbols| value.bool_value(),
+                |cast_member, value, symbols| {
                     cast_member.member_type.as_field_mut().unwrap().auto_tab = value?;
                     Ok(())
                 },
             ),
-            "editable" => borrow_member_mut(
+            "editable" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.bool_value(),
-                |cast_member, value| {
+                |player, symbols| value.bool_value(),
+                |cast_member, value, symbols| {
                     cast_member.member_type.as_field_mut().unwrap().editable = value?;
                     Ok(())
                 },
             ),
-            "border" => borrow_member_mut(
+            "border" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.int_value(),
-                |cast_member, value| {
+                |player, symbols| value.int_value(),
+                |cast_member, value, symbols| {
                     cast_member.member_type.as_field_mut().unwrap().border = value? as u16;
                     Ok(())
                 },
             ),
-            "margin" => borrow_member_mut(
+            "margin" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.int_value(),
-                |cast_member, value| {
+                |player, symbols| value.int_value(),
+                |cast_member, value, symbols| {
                     cast_member.member_type.as_field_mut().unwrap().margin = value? as u16;
                     Ok(())
                 },
             ),
-            "boxDropShadow" => borrow_member_mut(
+            "boxDropShadow" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.int_value(),
-                |cast_member, value| {
+                |player, symbols| value.int_value(),
+                |cast_member, value, symbols| {
                     cast_member.member_type.as_field_mut().unwrap().box_drop_shadow = value? as u16;
                     Ok(())
                 },
             ),
-            "dropShadow" => borrow_member_mut(
+            "dropShadow" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.int_value(),
-                |cast_member, value| {
+                |player, symbols| value.int_value(),
+                |cast_member, value, symbols| {
                     cast_member.member_type.as_field_mut().unwrap().drop_shadow = value? as u16;
                     Ok(())
                 },
             ),
-            "scrollTop" => borrow_member_mut(
+            "scrollTop" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.int_value(),
-                |cast_member, value| {
+                |player, symbols| value.int_value(),
+                |cast_member, value, symbols| {
                     // Clamp negative values to 0 — `scrollTop` is a non-
                     // negative pixel offset (Director 11.5 Scripting
                     // Dictionary p.1158). Without the clamp, the bounceUp
@@ -857,36 +909,44 @@ impl FieldMemberHandlers {
                     Ok(())
                 },
             ),
-            "hilite" => borrow_member_mut(
+            "hilite" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.bool_value(),
-                |cast_member, value| {
+                |player, symbols| value.bool_value(),
+                |cast_member, value, symbols| {
                     cast_member.member_type.as_field_mut().unwrap().hilite = value?;
                     Ok(())
                 },
             ),
-            "foreColor" => borrow_member_mut(
+            "foreColor" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.int_value(),
-                |cast_member, value| {
+                |player, symbols| value.int_value(),
+                |cast_member, value, symbols| {
                     let v = value? as u8;
                     cast_member.member_type.as_field_mut().unwrap().fore_color = Some(ColorRef::PaletteIndex(v));
                     Ok(())
                 },
             ),
-            "backColor" => borrow_member_mut(
+            "backColor" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.int_value(),
-                |cast_member, value| {
+                |player, symbols| value.int_value(),
+                |cast_member, value, symbols| {
                     let v = value? as u8;
                     cast_member.member_type.as_field_mut().unwrap().back_color = Some(ColorRef::PaletteIndex(v));
                     Ok(())
                 },
             ),
-            "media" => borrow_member_mut(
+            "media" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |player| value.media_value(),
-                |cast_member, value| {
+                |player, symbols| value.media_value(),
+                |cast_member, value, symbols| {
                     let field = cast_member.member_type.as_field_mut().unwrap();
                     match value? {
                         Media::Field(new_field) => field.clone_from(&new_field),
@@ -895,26 +955,32 @@ impl FieldMemberHandlers {
                     Ok(())
                 },
             ),
-            "selStart" => borrow_member_mut(
+            "selStart" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |_player| value.int_value(),
-                |cast_member, value| {
+                |_player, symbols| value.int_value(),
+                |cast_member, value, symbols| {
                     cast_member.member_type.as_field_mut().unwrap().sel_start = value?;
                     Ok(())
                 },
             ),
-            "selEnd" => borrow_member_mut(
+            "selEnd" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |_player| value.int_value(),
-                |cast_member, value| {
+                |_player, symbols| value.int_value(),
+                |cast_member, value, symbols| {
                     cast_member.member_type.as_field_mut().unwrap().sel_end = value?;
                     Ok(())
                 },
             ),
-            "selectedText" => borrow_member_mut(
+            "selectedText" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |_player| value.string_value(),
-                |cast_member, value| {
+                |_player, symbols| value.string_value(symbols),
+                |cast_member, value, symbols| {
                     let s = value?;
                     let field = cast_member.member_type.as_field_mut().unwrap();
                     let len = field.text.len() as i32;
@@ -928,35 +994,43 @@ impl FieldMemberHandlers {
                     Ok(())
                 },
             ),
-            "kerning" => borrow_member_mut(
+            "kerning" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |_player| value.bool_value(),
-                |cast_member, value| {
+                |_player, symbols| value.bool_value(),
+                |cast_member, value, symbols| {
                     cast_member.member_type.as_field_mut().unwrap().kerning = value?;
                     Ok(())
                 },
             ),
-            "kerningThreshold" => borrow_member_mut(
+            "kerningThreshold" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |_player| value.int_value(),
-                |cast_member, value| {
+                |_player, symbols| value.int_value(),
+                |cast_member, value, symbols| {
                     cast_member.member_type.as_field_mut().unwrap().kerning_threshold = value? as u16;
                     Ok(())
                 },
             ),
-            "useHypertextStyles" => borrow_member_mut(
+            "useHypertextStyles" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |_player| value.bool_value(),
-                |cast_member, value| {
+                |_player, symbols| value.bool_value(),
+                |cast_member, value, symbols| {
                     cast_member.member_type.as_field_mut().unwrap().use_hypertext_styles = value?;
                     Ok(())
                 },
             ),
-            "antiAliasType" => borrow_member_mut(
+            "antiAliasType" => borrow_member_mut_with_player(
+                player,
+                symbols,
                 member_ref,
-                |_player| value.symbol_value(),
-                |cast_member, value| {
-                    cast_member.member_type.as_field_mut().unwrap().anti_alias_type = value?.into_builtin_or_error()?;
+                |_player, symbols| value.symbol_value(symbols),
+                |cast_member, value, symbols| {
+                    cast_member.member_type.as_field_mut().unwrap().anti_alias_type = builtin_symbol(&value?, symbols)?;
                     Ok(())
                 },
             ),

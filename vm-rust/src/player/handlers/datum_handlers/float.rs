@@ -1,6 +1,6 @@
 use crate::{
     director::lingo::datum::Datum,
-    player::{symbols::symbol::Symbol, DatumRef, DirPlayer, ScriptError},
+    player::{symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable}, DatumRef, DirPlayer, ScriptError},
 };
 
 pub struct FloatDatumHandlers {}
@@ -8,13 +8,28 @@ pub struct FloatDatumHandlers {}
 impl FloatDatumHandlers {
     pub fn get_prop(
         player: &mut DirPlayer,
+        symbols: &SymbolTable,
         datum_ref: &DatumRef,
         prop: Symbol,
     ) -> Result<DatumRef, ScriptError> {
-        let float_value = player.get_datum(datum_ref).float_value()?;
-        match prop.as_lower_str() {
+        let prop_name = symbols
+            .display(&prop)
+            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+        let prop_lower = symbols
+            .lower(&prop)
+            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+        let datum = match datum_ref {
+            DatumRef::Void => &Datum::Void,
+            _ => player
+                .allocator
+                .try_get_datum(datum_ref)
+                .ok_or_else(|| ScriptError::new(format!("invalid datum reference {datum_ref}")))?,
+        };
+        crate::player::compare::validate_direct_symbol_fields(datum, symbols)?;
+        let float_value = datum.float_value()?;
+        match prop_lower {
             "abs" => Ok(player.alloc_datum(Datum::Float(float_value.abs()))),
-            "ilk" => Ok(player.alloc_datum(Datum::Symbol(Symbol::from_str("float")))),
+            "ilk" => Ok(player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Float)))),
             "integer" => Ok(player.alloc_datum(Datum::Int(float_value.round() as i32))),
             "float" => Ok(datum_ref.clone()),
             "char" => {
@@ -47,7 +62,7 @@ impl FloatDatumHandlers {
             "exp" => Ok(player.alloc_datum(Datum::Float(float_value.exp()))),
             _ => Err(ScriptError::new(format!(
                 "Cannot get float property {}",
-                prop
+                prop_name
             ))),
         }
     }

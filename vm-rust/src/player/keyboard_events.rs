@@ -348,13 +348,13 @@ pub(crate) enum CaretAtMode {
 ///
 /// Returns `true` if the sprite was an editable Field/Text member and the
 /// caret state was updated.
-pub(crate) fn set_caret_at_screen(
+pub(crate) fn set_caret_at_screen_for_player(
+    player: &mut DirPlayer,
     sprite_id: i16,
     movie_x: i32,
     movie_y: i32,
     mode: CaretAtMode,
 ) -> bool {
-    let result = super::reserve_player_mut(|player| {
         let Some(sprite) = player.movie.score.get_sprite(sprite_id) else { return false };
         let Some(member_ref) = sprite.member.clone() else { return false };
         let sprite_loc_h = sprite.loc_h;
@@ -573,9 +573,16 @@ pub(crate) fn set_caret_at_screen(
         let new_end = *sel_end_ref;
         player.text_selection_start = new_start.max(0) as u16;
         player.text_selection_end = new_end.max(0) as u16;
-        true
-    });
-    result
+    true
+}
+
+/// Owner-bound wrapper retained for legacy callers.
+pub(crate) fn set_caret_at_screen(
+    sprite_id: i16, movie_x: i32, movie_y: i32, mode: CaretAtMode,
+) -> bool {
+    super::reserve_player_mut(|player| {
+        set_caret_at_screen_for_player(player, sprite_id, movie_x, movie_y, mode)
+    })
 }
 
 /// Insert raw text at the current selection (or replace it). Used by paste and

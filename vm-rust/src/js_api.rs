@@ -17,7 +17,7 @@ use crate::{
     player::{
         allocator::ScriptInstanceAllocatorTrait,
         bitmap::bitmap::PaletteRef,
-        cast_lib::CastMemberRef,
+        cast_lib::{CastMemberRef, PlayerNotificationKind},
         cast_member::{CastMember, CastMemberType, ScriptMember},
         datum_formatting::{format_concrete_datum, format_datum, format_float_with_precision, format_numeric_value},
         datum_ref::{DatumId, DatumRef},
@@ -26,7 +26,10 @@ use crate::{
         score::Score,
         script::ScriptInstanceId,
         script_ref::ScriptInstanceRef,
-        DirPlayer, ScriptError, PLAYER_OPT, sprite::{ColorRef, CursorRef},
+        DirPlayer, ScriptError, PLAYER_OPT, owner_key_string,
+        session::{PlayerId, RuntimeSessionHandle},
+        sprite::{ColorRef, CursorRef},
+        symbols::symbol_table::SymbolTable,
     },
     rendering::RENDERER_LOCK,
 };
@@ -272,10 +275,14 @@ extern "C" {
     pub fn onCastLibNameChanged(cast_number: u32, name: &str);
     pub fn onCastMemberListChanged(cast_number: u32, members: js_sys::Object);
     pub fn onCastMemberChanged(member_ref: JsValue, member: js_sys::Object);
-    pub fn onScoreChanged(snapshot: js_sys::Object);
-    pub fn onChannelChanged(channel: i16, snapshot: js_sys::Object);
-    pub fn onChannelDisplayNameChanged(channel: i16, display_name: &str);
-    pub fn onChannelDisplayNamesChanged(names: js_sys::Object);
+    #[wasm_bindgen(catch)]
+    pub fn onScoreChanged(snapshot: js_sys::Object, owner_key: &str) -> Result<(), JsValue>;
+    #[wasm_bindgen(catch)]
+    pub fn onChannelChanged(channel: i16, snapshot: js_sys::Object, owner_key: &str) -> Result<(), JsValue>;
+    #[wasm_bindgen(catch)]
+    pub fn onChannelDisplayNameChanged(channel: i16, display_name: &str, owner_key: &str) -> Result<(), JsValue>;
+    #[wasm_bindgen(catch)]
+    pub fn onChannelDisplayNamesChanged(names: js_sys::Object, owner_key: &str) -> Result<(), JsValue>;
     pub fn onFrameChanged(frame: u32);
     pub fn onScriptError(data: js_sys::Object);
     pub fn onScopeListChanged(scopes: Vec<js_sys::Object>);
@@ -290,9 +297,9 @@ extern "C" {
     pub fn onDatumSnapshot(datum_id: DatumId, data: js_sys::Object);
     pub fn onScriptInstanceSnapshot(script_ref: ScriptInstanceId, data: js_sys::Object);
     pub fn onExternalEvent(event: &str);
-    pub fn onFlashMemberLoaded(sprite_num: i32, cast_lib: i32, cast_member: i32, swf_data: &[u8], width: u32, height: u32, paused_at_start: bool, asserted_frame: i32);
-    pub fn onFlashMemberUnloaded(sprite_num: i32);
-    pub fn onFlashResetAll();
+    pub fn onFlashMemberLoaded(sprite_num: i32, cast_lib: i32, cast_member: i32, swf_data: &[u8], width: u32, height: u32, paused_at_start: bool, asserted_frame: i32, owner_key: &str);
+    pub fn onFlashMemberUnloaded(sprite_num: i32, owner_key: &str);
+    pub fn onFlashResetAll(owner_key: &str);
     pub fn onStageSizeChanged(width: u32, height: u32, center: bool);
 }
 
@@ -300,12 +307,17 @@ pub struct JsApi {}
 
 #[cfg(target_arch = "wasm32")]
 impl JsApi {
-    pub fn dispatch_datum_snapshot(datum_ref: &DatumRef, player: &DirPlayer) {
-        let snapshot = datum_to_js_bridge(datum_ref, player, 0);
+    pub fn dispatch_datum_snapshot(
+        datum_ref: &DatumRef,
+        symbols: &SymbolTable,
+        player: &DirPlayer,
+    ) {
+        let snapshot = datum_to_js_bridge(datum_ref, symbols, player, 0);
         onDatumSnapshot(datum_ref.unwrap(), snapshot);
     }
     pub fn dispatch_script_instance_snapshot(
         script_ref: Option<ScriptInstanceRef>,
+        symbols: &SymbolTable,
         player: &DirPlayer,
     ) {
         let datum = if script_ref.is_none() {
@@ -313,7 +325,7 @@ impl JsApi {
         } else {
             Datum::ScriptInstanceRef(script_ref.clone().unwrap())
         };
-        let snapshot = concrete_datum_to_js_bridge(&datum, player, 0);
+        let snapshot = concrete_datum_to_js_bridge(&datum, symbols, player, 0);
         onScriptInstanceSnapshot(*script_ref.unwrap(), snapshot);
     }
     pub fn dispatch_schedule_timeout(timeout_name: &str, interval: u32) {
@@ -326,18 +338,18 @@ impl JsApi {
     pub fn dispatch_clear_timeouts() {
         onClearTimeouts();
     }
-    pub fn dispatch_flash_member_loaded(sprite_num: i32, cast_lib: i32, cast_member: i32, swf_data: &[u8], width: u32, height: u32, paused_at_start: bool, asserted_frame: i32) {
-        onFlashMemberLoaded(sprite_num, cast_lib, cast_member, swf_data, width, height, paused_at_start, asserted_frame);
+    pub fn dispatch_flash_member_loaded(sprite_num: i32, cast_lib: i32, cast_member: i32, swf_data: &[u8], width: u32, height: u32, paused_at_start: bool, asserted_frame: i32, owner_key: &str) {
+        onFlashMemberLoaded(sprite_num, cast_lib, cast_member, swf_data, width, height, paused_at_start, asserted_frame, owner_key);
     }
-    pub fn dispatch_flash_member_unloaded(sprite_num: i32) {
-        onFlashMemberUnloaded(sprite_num);
+    pub fn dispatch_flash_member_unloaded(sprite_num: i32, owner_key: &str) {
+        onFlashMemberUnloaded(sprite_num, owner_key);
     }
     /// Tear down every live Flash/Ruffle instance. Called on movie reset so
     /// a previous movie's Ruffle players (their per-frame capture RAF loops
     /// and still-playing SWF audio) don't leak across a movie switch — the
     /// per-sprite unload path only fires for sprites the new frame changed.
-    pub fn dispatch_flash_reset_all() {
-        onFlashResetAll();
+    pub fn dispatch_flash_reset_all(owner_key: &str) {
+        onFlashResetAll(owner_key);
     }
     pub fn dispatch_stage_size_changed(width: u32, height: u32, center: bool) {
         // Only the host player (id 0) owns the frontend stage. A nested `#movie`
@@ -426,7 +438,7 @@ impl JsApi {
 
         // Find the DirectorFile that contains the chunks
         let dir_file = if cast_lib.is_external {
-            player.dir_cache.get(cast_lib.file_name.as_str())
+            player.dir_cache.get(cast_lib.file_name.as_str()).map(|file| file.as_ref())
         } else {
             player.movie.file.as_ref()
         };
@@ -619,7 +631,7 @@ impl JsApi {
         } else {
             let cast_lib = player.movie.cast_manager.get_cast_or_null(cast_number)?;
             if cast_lib.is_external {
-                player.dir_cache.get(cast_lib.file_name.as_str())
+                player.dir_cache.get(cast_lib.file_name.as_str()).map(|file| file.as_ref())
             } else {
                 player.movie.file.as_ref()
             }
@@ -629,7 +641,7 @@ impl JsApi {
         dir_file.chunk_container.cached_chunk_views.get(&chunk_id).cloned()
     }
 
-    fn chunk_to_js(chunk: &Chunk) -> js_sys::Object {
+    fn chunk_to_js(chunk: &Chunk, symbols: &SymbolTable) -> js_sys::Object {
         let map = js_sys::Map::new();
         match chunk {
             Chunk::Cast(c) => {
@@ -779,7 +791,11 @@ impl JsApi {
                             lm.str_set("value", &JsValue::from_str(&ascii_safe(&s)));
                         }
                         Datum::Symbol(s) => {
-                            lm.str_set("value", &JsValue::from_str(&ascii_safe(&s.to_string())));
+                            let value = symbols
+                                .display(s)
+                                .map(ascii_safe)
+                                .unwrap_or_else(|_| "<foreign-symbol>".to_owned());
+                            lm.str_set("value", &JsValue::from_str(&value));
                         }
                         Datum::JavaScript(data) => {
                             lm.str_set("size", &JsValue::from_f64(data.len() as f64));
@@ -914,7 +930,12 @@ impl JsApi {
     }
 
     /// Returns parsed chunk data as a JS object. Re-parses from cached raw bytes on demand.
-    pub fn get_parsed_chunk(player: &DirPlayer, cast_number: u32, chunk_id: u32) -> js_sys::Object {
+    pub fn get_parsed_chunk(
+        player: &DirPlayer,
+        symbols: &SymbolTable,
+        cast_number: u32,
+        chunk_id: u32,
+    ) -> js_sys::Object {
         let error_result = |msg: &str| -> js_sys::Object {
             let map = js_sys::Map::new();
             map.str_set("error", &JsValue::from_str(&ascii_safe(msg)));
@@ -929,7 +950,7 @@ impl JsApi {
                 None => return error_result("Cast not found"),
             };
             if cast_lib.is_external {
-                player.dir_cache.get(cast_lib.file_name.as_str())
+                player.dir_cache.get(cast_lib.file_name.as_str()).map(|file| file.as_ref())
             } else {
                 player.movie.file.as_ref()
             }
@@ -963,7 +984,7 @@ impl JsApi {
         };
 
         match chunks::make_chunk(dir_file.endian, &mut rifx, chunk_info.fourcc, raw_bytes) {
-            Ok(chunk) => Self::chunk_to_js(&chunk),
+            Ok(chunk) => Self::chunk_to_js(&chunk, symbols),
             Err(e) => error_result(&e),
         }
     }
@@ -1030,30 +1051,38 @@ impl JsApi {
         });
     }
 
-    pub fn dispatch_cast_member_changed(member_ref: CastMemberRef) {
-        crate::player::spawn_player_local(async move {
-            // Deferred task — the player may be gone by the time it runs.
-            if unsafe { PLAYER_OPT.is_none() } { return; }
-            let player = unsafe { crate::player::player_ref() };
-            let subscribed_members = &player.subscribed_member_refs;
-            if !subscribed_members.contains(&member_ref) {
+    pub fn dispatch_cast_member_changed(
+        member_ref: CastMemberRef,
+        symbols: &SymbolTable,
+        player: &DirPlayer,
+    ) {
+        let member_map = {
+            if !player.subscribed_member_refs.contains(&member_ref) {
                 return;
             }
-
-            // The cast or slot can vanish between the change firing and this
-            // async task running (e.g. mouseUp on the timeline triggers
-            // sprite reslotting in mid-handler, then the snapshot dispatch
-            // lands after the member is gone). Bail silently instead of
-            // panicking — the next change event will repaint the inspector
-            // correctly.
             let Ok(cast) = player.movie.cast_manager.get_cast(member_ref.cast_lib as u32) else {
                 return;
             };
             let Some(member) = cast.members.get(&(member_ref.cast_member as u32)) else {
                 return;
             };
-            let member_map = Self::get_member_snapshot(member, member_ref.cast_lib as u32, cast.lctx.as_ref(), player);
-
+            Self::get_member_snapshot(
+                member,
+                member_ref.cast_lib as u32,
+                cast.lctx.as_ref(),
+                symbols,
+                player,
+            )
+        };
+        let owner = player.owner.clone();
+        async_std::task::spawn_local(async move {
+            // The snapshot and initial subscription decision are owned by
+            // this notification. The owner token is the only liveness check
+            // needed after the borrow ends; a replacement arena cannot reuse
+            // this notification's capability.
+            if !owner.is_arena_live() {
+                return;
+            }
             onCastMemberChanged(member_ref.to_js().to_js_value(), member_map.to_js_object());
         });
     }
@@ -1100,8 +1129,152 @@ impl JsApi {
             if !player.is_subscribed_to_score { return; }
 
             let snapshot = Self::get_score_snapshot(player, &player.movie.score);
-            onScoreChanged(snapshot.to_js_object());
+            let owner_key = owner_key_string(&player.owner);
+            onScoreChanged(snapshot.to_js_object(), &owner_key);
         });
+    }
+
+    pub fn score_snapshot_for_player(
+        player: &DirPlayer,
+    ) -> Option<(js_sys::Object, String)> {
+        player.is_subscribed_to_score.then(|| {
+            (
+                Self::get_score_snapshot(player, &player.movie.score).to_js_object(),
+                owner_key_string(&player.owner),
+            )
+        })
+    }
+
+    /// Drain owner-tagged player notifications at a host boundary. The
+    /// session is borrowed only to take one event and build its JS payload;
+    /// every callback runs after that borrow has been dropped. Reset or
+    /// replacement during a callback invalidates the remaining batch.
+    pub(crate) fn dispatch_player_notifications(
+        session: RuntimeSessionHandle,
+        player_id: PlayerId,
+    ) -> Result<(), JsValue> {
+        enum PreparedNotification {
+            Score(js_sys::Object, String),
+            Channel(i16, js_sys::Object, String),
+            ChannelName(i16, String, String),
+            ChannelNames(Vec<(i16, String)>, String),
+        }
+
+        let Some((drain_owner, batch)) = session
+            .borrow_mut()
+            .begin_player_notification_drain(player_id)
+        else {
+            return Ok(());
+        };
+        let mut dispatch_error = None;
+        for notification in batch {
+            let prepared = {
+                let mut runtime = session.borrow_mut();
+                if !notification.owner.same_identity(&drain_owner)
+                    || !runtime.player_owner_matches(player_id, &notification.owner)
+                {
+                    None
+                } else {
+                    let owner = notification.owner.clone();
+                    runtime
+                        .with_player(player_id, |context| {
+                            let owner_key = owner_key_string(&context.player.owner);
+                            match notification.kind {
+                                PlayerNotificationKind::ScoreChanged =>
+                                    Self::score_snapshot_for_player(context.player)
+                                        .map(|(snapshot, _)| PreparedNotification::Score(snapshot, owner_key)),
+                                PlayerNotificationKind::ChannelChanged(channel) => Some(
+                                    PreparedNotification::Channel(
+                                        channel,
+                                        Self::channel_snapshot_for_player(context.player, channel).0,
+                                        owner_key,
+                                    ),
+                                ),
+                                PlayerNotificationKind::ChannelNameChanged(channel) =>
+                                    Self::channel_name_snapshot_for_player(context.player, channel)
+                                        .map(|(name, _)| PreparedNotification::ChannelName(channel, name, owner_key)),
+                                PlayerNotificationKind::CastMemberNameChanged(slot) => Some(
+                                    PreparedNotification::ChannelNames(
+                                        Self::channel_name_snapshots_for_member_slot(context.player, slot),
+                                        owner_key,
+                                    ),
+                                ),
+                            }
+                        })
+                        .flatten()
+                        .map(|payload| (owner, payload))
+                }
+            };
+
+            let Some((owner, payload)) = prepared else {
+                continue;
+            };
+            if !session.borrow().player_owner_matches(player_id, &owner) {
+                continue;
+            }
+            let result = match payload {
+                PreparedNotification::Score(snapshot, owner_key) => {
+                    Self::dispatch_score_snapshot(snapshot, &owner_key)
+                }
+                PreparedNotification::Channel(channel, snapshot, owner_key) => {
+                    Self::dispatch_channel_snapshot(channel, snapshot, &owner_key)
+                }
+                PreparedNotification::ChannelName(channel, name, owner_key) => {
+                    Self::dispatch_channel_name_snapshot(channel, &name, &owner_key)
+                }
+                PreparedNotification::ChannelNames(names, owner_key) => {
+                    for (channel, name) in names {
+                        if !session.borrow().player_owner_matches(player_id, &owner) {
+                            break;
+                        }
+                        if let Err(error) = Self::dispatch_channel_name_snapshot(
+                            channel,
+                            &name,
+                            &owner_key,
+                        ) {
+                            log::error!("owner channel-name callback failed: {:?}", error);
+                            dispatch_error = Some(error);
+                            break;
+                        }
+                    }
+                    Ok(())
+                }
+            };
+            if dispatch_error.is_some() {
+                break;
+            }
+            if let Err(error) = result {
+                log::error!("owner notification callback failed: {:?}", error);
+                dispatch_error = Some(error);
+                break;
+            }
+        }
+        session
+            .borrow_mut()
+            .finish_player_notification_drain(player_id, &drain_owner);
+        dispatch_error.map_or(Ok(()), Err)
+    }
+
+    pub fn dispatch_score_snapshot(snapshot: js_sys::Object, owner_key: &str) -> Result<(), JsValue> {
+        onScoreChanged(snapshot, owner_key)
+    }
+
+    pub fn channel_snapshot_for_player(
+        player: &DirPlayer,
+        channel: i16,
+    ) -> (js_sys::Object, String) {
+        (
+            Self::get_channel_snapshot(player, &channel).to_js_object(),
+            owner_key_string(&player.owner),
+        )
+    }
+
+    pub fn dispatch_channel_snapshot(
+        channel: i16,
+        snapshot: js_sys::Object,
+        owner_key: &str,
+    ) -> Result<(), JsValue> {
+        onChannelChanged(channel, snapshot, owner_key)
     }
 
     pub fn dispatch_channel_changed(channel: i16) {
@@ -1125,7 +1298,8 @@ impl JsApi {
             if unsafe { PLAYER_OPT.is_none() } { return; }
             let player = unsafe { crate::player::player_ref() };
                 let snapshot = Self::get_channel_snapshot(player, &channel);
-                onChannelChanged(channel, snapshot.to_js_object());
+                let owner_key = owner_key_string(&player.owner);
+                onChannelChanged(channel, snapshot.to_js_object(), &owner_key);
             });
         }
     }
@@ -1151,11 +1325,15 @@ impl JsApi {
         Self::dispatch_debug_content(map.to_js_object());
     }
 
-    pub fn dispatch_debug_datum(datum_ref: &DatumRef, player: &DirPlayer) {
+    pub fn dispatch_debug_datum(
+        datum_ref: &DatumRef,
+        symbols: &SymbolTable,
+        player: &DirPlayer,
+    ) {
         let map = js_sys::Map::new();
         map.str_set("type", &safe_js_string("datum"));
         map.str_set("datumRef", &JsValue::from_f64(datum_ref.unwrap() as f64));
-        let snapshot = datum_to_js_bridge(datum_ref, player, 0);
+        let snapshot = datum_to_js_bridge(datum_ref, symbols, player, 0);
         map.str_set("snapshot", &snapshot);
         Self::dispatch_debug_content(map.to_js_object());
     }
@@ -1179,6 +1357,7 @@ impl JsApi {
         member: &CastMember,
         cast_lib: u32,
         lctx: Option<&ScriptContext>,
+        symbols: &SymbolTable,
         player: &DirPlayer,
     ) -> js_sys::Map {
         let member_map = js_sys::Map::new();
@@ -1240,7 +1419,14 @@ impl JsApi {
 
                 member_map.str_set(
                     "script",
-                    &Self::get_script_snapshot(&script_data, &script, &lctx, capital_x, dir_version).to_js_object(),
+                    &Self::get_script_snapshot(
+                        &script_data,
+                        &script,
+                        &lctx,
+                        capital_x,
+                        dir_version,
+                        symbols,
+                    ).to_js_object(),
                 );
             }
             CastMemberType::Bitmap(bitmap_data) => {
@@ -1562,6 +1748,13 @@ impl JsApi {
     /// main thread for over two seconds when the Channels or Timeline panel was
     /// first opened. Named channels only; the empty ones carry no information.
     pub fn dispatch_all_channel_names(player: &DirPlayer) {
+        let (names, owner_key) = Self::channel_names_snapshot_for_player(player);
+        Self::dispatch_channel_names_snapshot(names, &owner_key);
+    }
+
+    pub fn channel_names_snapshot_for_player(
+        player: &DirPlayer,
+    ) -> (js_sys::Object, String) {
         let names = js_sys::Map::new();
         for channel in &player.movie.score.channels {
             let number = channel.number as i16;
@@ -1570,7 +1763,72 @@ impl JsApi {
                 names.set(&JsValue::from(number), &JsValue::from(display_name));
             }
         }
-        onChannelDisplayNamesChanged(names.to_js_object());
+        let owner_key = owner_key_string(&player.owner);
+        (names.to_js_object(), owner_key)
+    }
+
+    pub fn dispatch_channel_names_snapshot(
+        names: js_sys::Object,
+        owner_key: &str,
+    ) -> Result<(), JsValue> {
+        onChannelDisplayNamesChanged(names, owner_key)
+    }
+
+    pub fn dispatch_channel_name_snapshot(
+        channel: i16,
+        name: &str,
+        owner_key: &str,
+    ) -> Result<(), JsValue> {
+        onChannelDisplayNameChanged(channel, name, owner_key)
+    }
+
+    /// Extract owned channel-name payloads affected by one cast slot. The
+    /// session dispatches these only after releasing its player borrow.
+    pub fn channel_name_snapshots_for_member_slot(
+        player: &DirPlayer,
+        slot_number: u32,
+    ) -> Vec<(i16, String)> {
+        if !player.is_subscribed_to_channel_names {
+            return Vec::new();
+        }
+        player
+            .movie
+            .score
+            .channels
+            .iter()
+            .filter_map(|channel| {
+                let matches = channel.sprite.member.as_ref().map(|member| {
+                    CastMemberRefHandlers::get_cast_slot_number(
+                        member.cast_lib as u32,
+                        member.cast_member as u32,
+                    )
+                }) == Some(slot_number);
+                if !matches {
+                    return None;
+                }
+                Some((
+                    channel.number as i16,
+                    Self::get_channel_display_name(&(channel.number as i16), player)
+                        .unwrap_or_default(),
+                ))
+            })
+            .collect()
+    }
+
+    pub fn channel_name_snapshot_for_player(
+        player: &DirPlayer,
+        channel: i16,
+    ) -> Option<(String, String)> {
+        if !player.is_subscribed_to_channel_names {
+            return None;
+        }
+        if channel < 0 || channel as usize >= player.movie.score.channels.len() {
+            return None;
+        }
+        Some((
+            Self::get_channel_display_name(&channel, player).unwrap_or_default(),
+            owner_key_string(&player.owner),
+        ))
     }
 
     pub fn dispatch_channel_name_changed(channel: i16) {
@@ -1582,13 +1840,14 @@ impl JsApi {
             if player.is_subscribed_to_channel_names {
                 let display_name =
                     Self::get_channel_display_name(&channel, player).unwrap_or("".to_owned());
-                onChannelDisplayNameChanged(channel, &display_name);
+                let owner_key = owner_key_string(&player.owner);
+                onChannelDisplayNameChanged(channel, &display_name, &owner_key);
             }
         });
     }
 
     fn get_channel_display_name(channel: &i16, player: &DirPlayer) -> Option<String> {
-        let channel = player.movie.score.get_channel(*channel);
+        let channel = player.movie.score.channels.get(*channel as usize)?;
         let member_ref = &channel.sprite.member.as_ref();
         if member_ref.is_none() || !member_ref.unwrap().is_valid() {
             return None;
@@ -1613,8 +1872,14 @@ impl JsApi {
     }
 
     pub fn get_channel_snapshot(player: &DirPlayer, channel_num: &i16) -> js_sys::Map {
-        let channel = player.movie.score.get_channel(*channel_num);
         let result = js_sys::Map::new();
+        let Some(channel) = (*channel_num >= 0)
+            .then(|| player.movie.score.channels.get(*channel_num as usize))
+            .flatten()
+        else {
+            debug!("get_channel_snapshot: channel {} is outside the loaded score", channel_num);
+            return result;
+        };
 
         let member_ref = &channel.sprite.member.as_ref();
         if member_ref.is_none() || !member_ref.unwrap().is_valid() {
@@ -1804,6 +2069,7 @@ impl JsApi {
         lctx: &ScriptContext,
         capital_x: bool,
         dir_version: u16,
+        symbols: &SymbolTable,
     ) -> js_sys::Map {
         let member_map = js_sys::Map::new();
         member_map.str_set("name", &member.name.to_js_value());
@@ -1874,7 +2140,23 @@ impl JsApi {
             handler_map.str_set("bytecode", &bytecode_array);
 
             // Decompile handler to Lingo source
-            let decompiled = decompiler::decompile_handler(handler, chunk, lctx, dir_version, multiplier);
+            let decompiled = match decompiler::decompile_handler(
+                handler,
+                chunk,
+                lctx,
+                dir_version,
+                multiplier,
+                symbols,
+            ) {
+                Ok(decompiled) => decompiled,
+                Err(error) => {
+                    handler_map.str_set("error", &safe_js_string(&error.message));
+                    handler_map.str_set("lingo", &js_sys::Array::new());
+                    handler_map.str_set("bytecodeToLine", &js_sys::Object::new());
+                    handlers_array.push(&handler_map.to_js_object());
+                    continue;
+                }
+            };
 
             // Add lingo lines
             let lingo_array = js_sys::Array::new();
@@ -1921,34 +2203,61 @@ impl JsApi {
         return member_map;
     }
 
-    pub fn dispatch_scope_list(player: &DirPlayer) {
+    pub fn dispatch_scope_list(player: &mut DirPlayer) {
+        let scope_indices: Vec<usize> = player
+            .scopes
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| player.scope_count > *i as u32)
+            .map(|(index, _)| index)
+            .collect();
         onScopeListChanged(
-            player
-                .scopes
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| player.scope_count > *i as u32)
-                .map(|(_, scope)| {
+            scope_indices.into_iter().map(|index| {
+                    let (script_ref, handler_name_id, bytecode_index, local_refs, stack_refs, args) = {
+                        let (scopes, allocator, bitmap_manager) = (
+                            &mut player.scopes,
+                            &mut player.allocator,
+                            &mut player.bitmap_manager,
+                        );
+                        let scope = &mut scopes[index];
+                        let local_refs = scope
+                            .locals
+                            .iter()
+                            .cloned()
+                            .map(|value| value.into_ref_with(allocator, bitmap_manager))
+                            .collect::<Vec<_>>();
+                        let stack_refs = scope
+                            .stack
+                            .snapshot_refs_with(allocator, bitmap_manager);
+                        (
+                            scope.script_ref.clone(),
+                            scope.handler_name_id,
+                            scope.bytecode_index,
+                            local_refs,
+                            stack_refs,
+                            scope.args.clone(),
+                        )
+                    };
                     let cast_lib = player
                         .movie
                         .cast_manager
-                        .get_cast(scope.script_ref.cast_lib as u32)
+                        .get_cast(script_ref.cast_lib as u32)
                         .unwrap();
                     let handler_name = cast_lib
                         .lctx
                         .as_ref()
                         .unwrap()
                         .names
-                        .get(scope.handler_name_id as usize)
+                        .get(handler_name_id as usize)
                         .unwrap();
                     let names = &cast_lib.lctx.as_ref().unwrap().names;
                     let scope = JsBridgeScope {
-                        script_member_ref: scope.script_ref.to_js(),
+                        script_member_ref: script_ref.to_js(),
                         script_member_name: Self::lookup_member_name(
                             player,
-                            [scope.script_ref.cast_lib as u16, scope.script_ref.cast_member as u16],
+                            [script_ref.cast_lib as u16, script_ref.cast_member as u16],
                         ),
-                        bytecode_index: scope.bytecode_index as u32,
+                        bytecode_index: bytecode_index as u32,
                         handler_name: handler_name.to_owned(),
                         // Locals are slot-indexed, so recover the name via
                         // the handler's local table: slot -> name id -> name.
@@ -1956,12 +2265,11 @@ impl JsApi {
                             let local_name_ids = player
                                 .movie
                                 .cast_manager
-                                .get_script_by_ref(&scope.script_ref)
-                                .and_then(|s| s.get_own_handler_by_local_name_id(scope.handler_name_id)
+                                .get_script_by_ref(&script_ref)
+                                .and_then(|s| s.get_own_handler_by_local_name_id(handler_name_id)
                                     .map(|h| h.local_name_ids.clone()))
                                 .unwrap_or_default();
-                            scope
-                                .locals
+                            local_refs
                                 .iter()
                                 .enumerate()
                                 .map(|(slot, v)| {
@@ -1969,19 +2277,19 @@ impl JsApi {
                                         .get(slot)
                                         .and_then(|nid| names.get(*nid as usize).cloned())
                                         .unwrap_or_else(|| format!("local_{}", slot));
-                                    (name, v.clone().into_ref())
+                                    (name, v.clone())
                                 })
                                 .collect()
                         },
-                        stack: scope.stack.iter().cloned().collect(),
-                        args: scope.args.clone(),
+                        stack: stack_refs,
+                        args,
                         // Same slot -> name id -> name walk the locals use.
                         arg_names: {
                             let arg_name_ids = player
                                 .movie
                                 .cast_manager
-                                .get_script_by_ref(&scope.script_ref)
-                                .and_then(|s| s.get_own_handler_by_local_name_id(scope.handler_name_id)
+                                .get_script_by_ref(&script_ref)
+                                .and_then(|s| s.get_own_handler_by_local_name_id(handler_name_id)
                                     .map(|h| h.argument_name_ids.clone()))
                                 .unwrap_or_default();
                             arg_name_ids
@@ -1997,17 +2305,21 @@ impl JsApi {
         );
     }
 
-    pub fn dispatch_global_list(player: &DirPlayer) {
+    pub fn dispatch_global_list(symbols: &SymbolTable, player: &DirPlayer) {
         let globals = js_sys::Map::new();
         for (k, v) in player.globals.iter() {
-            globals.set(&safe_js_string(&k.to_string()), &v.unwrap().to_js_value());
+            let Ok(key) = symbols.display(k) else {
+                log::warn!("skipping foreign global symbol during JS snapshot");
+                continue;
+            };
+            globals.set(&safe_js_string(&ascii_safe(key)), &v.unwrap().to_js_value());
         }
         onGlobalListChanged(globals.to_js_object());
     }
 
-    pub fn dispatch_debug_update(player: &DirPlayer) {
+    pub fn dispatch_debug_update(symbols: &SymbolTable, player: &mut DirPlayer) {
         Self::dispatch_scope_list(player);
-        Self::dispatch_global_list(player);
+        Self::dispatch_global_list(symbols, player);
     }
 
     pub fn dispatch_script_error(player: &DirPlayer, err: &ScriptError) {
@@ -2092,36 +2404,69 @@ impl JsApi {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl JsApi {
-    pub fn dispatch_datum_snapshot(_: &DatumRef, _: &DirPlayer) {}
-    pub fn dispatch_script_instance_snapshot(_: Option<ScriptInstanceRef>, _: &DirPlayer) {}
+    pub(crate) fn dispatch_player_notifications(
+        session: RuntimeSessionHandle,
+        player_id: PlayerId,
+    ) -> Result<(), JsValue> {
+        let Some((drain_owner, batch)) = session
+            .borrow_mut()
+            .begin_player_notification_drain(player_id)
+        else {
+            return Ok(());
+        };
+        for notification in batch {
+            // Native hosts have no JS sink. Still consume only the captured
+            // generation so queues remain bounded and stale events cannot be
+            // mistaken for notifications for a replacement player.
+            let _ = notification.owner.same_identity(&drain_owner)
+                && session
+                    .borrow()
+                    .player_owner_matches(player_id, &notification.owner);
+        }
+        session
+            .borrow_mut()
+            .finish_player_notification_drain(player_id, &drain_owner);
+        Ok(())
+    }
+    pub fn dispatch_datum_snapshot(_: &DatumRef, _: &SymbolTable, _: &DirPlayer) {}
+    pub fn dispatch_script_instance_snapshot(_: Option<ScriptInstanceRef>, _: &SymbolTable, _: &DirPlayer) {}
     pub fn dispatch_schedule_timeout(_: &str, _: u32) {}
     pub fn dispatch_clear_timeout(_: &str) {}
     #[allow(dead_code)]
     pub fn dispatch_clear_timeouts() {}
     pub fn dispatch_movie_loaded(_: &DirectorFile) {}
     pub fn dispatch_movie_load_failed(_: &str, _: &str) {}
-    pub fn dispatch_flash_member_loaded(_: i32, _: i32, _: i32, _: &[u8], _: u32, _: u32, _: bool, _: i32) {}
-    pub fn dispatch_flash_member_unloaded(_: i32) {}
-    pub fn dispatch_flash_reset_all() {}
+    pub fn dispatch_flash_member_loaded(_: i32, _: i32, _: i32, _: &[u8], _: u32, _: u32, _: bool, _: i32, _: &str) {}
+    pub fn dispatch_flash_member_unloaded(_: i32, _: &str) {}
+    pub fn dispatch_flash_reset_all(_: &str) {}
     pub fn dispatch_stage_size_changed(_: u32, _: u32, _: bool) {}
     pub fn dispatch_cast_name_changed(_: u32) {}
     pub fn dispatch_cast_list_changed() {}
     pub fn dispatch_cast_member_list_changed(_: u32) {}
-    pub fn dispatch_cast_member_changed(_: CastMemberRef) {}
+    pub fn dispatch_cast_member_changed(_: CastMemberRef, _: &SymbolTable, _: &DirPlayer) {}
     pub fn on_cast_member_name_changed(_: u32) {}
     pub fn on_sprite_member_changed(_: i16) {}
     pub fn dispatch_score_changed() {}
+    pub fn score_snapshot_for_player(_: &DirPlayer) -> Option<(js_sys::Object, String)> { None }
+    pub fn dispatch_score_snapshot(_: js_sys::Object, _: &str) -> Result<(), JsValue> { Ok(()) }
     pub fn dispatch_channel_changed(_: i16) {}
+    pub fn channel_snapshot_for_player(_: &DirPlayer, _: i16) -> (js_sys::Object, String) { (js_sys::Object::new(), String::new()) }
+    pub fn dispatch_channel_snapshot(_: i16, _: js_sys::Object, _: &str) -> Result<(), JsValue> { Ok(()) }
     pub fn dispatch_frame_changed(_: u32) {}
     pub fn dispatch_debug_message(_: &str) {}
     pub fn dispatch_debug_content(_: js_sys::Object) {}
     pub fn dispatch_debug_bitmap(_: u32, _: u32, _: &[u8]) {}
-    pub fn dispatch_debug_datum(_: &DatumRef, _: &DirPlayer) {}
+    pub fn dispatch_debug_datum(_: &DatumRef, _: &SymbolTable, _: &DirPlayer) {}
     pub fn dispatch_channel_name_changed(_: i16) {}
+    pub fn channel_name_snapshots_for_member_slot(_: &DirPlayer, _: u32) -> Vec<(i16, String)> { vec![] }
+    pub fn channel_name_snapshot_for_player(_: &DirPlayer, _: i16) -> Option<(String, String)> { None }
     pub fn dispatch_all_channel_names(_: &DirPlayer) {}
-    pub fn dispatch_scope_list(_: &DirPlayer) {}
-    pub fn dispatch_global_list(_: &DirPlayer) {}
-    pub fn dispatch_debug_update(_: &DirPlayer) {}
+    pub fn channel_names_snapshot_for_player(_: &DirPlayer) -> (js_sys::Object, String) { (js_sys::Object::new(), String::new()) }
+    pub fn dispatch_channel_names_snapshot(_: js_sys::Object, _: &str) -> Result<(), JsValue> { Ok(()) }
+    pub fn dispatch_channel_name_snapshot(_: i16, _: &str, _: &str) -> Result<(), JsValue> { Ok(()) }
+    pub fn dispatch_scope_list(_: &mut DirPlayer) {}
+    pub fn dispatch_global_list(_: &SymbolTable, _: &DirPlayer) {}
+    pub fn dispatch_debug_update(_: &SymbolTable, _: &mut DirPlayer) {}
     pub fn dispatch_script_error(_: &DirPlayer, _: &ScriptError) {}
     pub fn dispatch_breakpoint_list_changed() {}
     pub fn get_breakpoint_list(_: &DirPlayer) -> Vec<js_sys::Object> { vec![] }
@@ -2130,13 +2475,13 @@ impl JsApi {
     pub fn get_cast_chunk_list_for(_: &DirPlayer, _: u32) -> js_sys::Object { unimplemented!() }
     pub fn get_movie_top_level_chunks(_: &DirPlayer) -> js_sys::Object { unimplemented!() }
     pub fn get_chunk_bytes(_: &DirPlayer, _: u32, _: u32) -> Option<Vec<u8>> { unimplemented!() }
-    pub fn get_parsed_chunk(_: &DirPlayer, _: u32, _: u32) -> js_sys::Object { unimplemented!() }
+    pub fn get_parsed_chunk(_: &DirPlayer, _: &SymbolTable, _: u32, _: u32) -> js_sys::Object { unimplemented!() }
     pub fn get_mini_member_snapshot(_: &CastMember) -> js_sys::Map { unimplemented!() }
-    pub fn get_member_snapshot(_: &CastMember, _: u32, _: Option<&ScriptContext>, _: &DirPlayer) -> js_sys::Map { unimplemented!() }
+    pub fn get_member_snapshot(_: &CastMember, _: u32, _: Option<&ScriptContext>, _: &SymbolTable, _: &DirPlayer) -> js_sys::Map { unimplemented!() }
     pub fn get_score_snapshot(_: &DirPlayer, _: &Score) -> js_sys::Map { unimplemented!() }
     pub fn get_channel_snapshot(_: &DirPlayer, _: &i16) -> js_sys::Map { unimplemented!() }
     fn get_channel_display_name(_: &i16, _: &DirPlayer) -> Option<String> { unimplemented!() }
-    pub fn get_script_snapshot(_: &ScriptMember, _: &ScriptChunk, _: &ScriptContext, _: bool, _: u16) -> js_sys::Map { unimplemented!() }
+    pub fn get_script_snapshot(_: &ScriptMember, _: &ScriptChunk, _: &ScriptContext, _: bool, _: u16, _: &SymbolTable) -> js_sys::Map { unimplemented!() }
     fn collect_cast_descendants(_: u32, _: &HashMap<u32, Vec<u32>>) -> std::collections::HashSet<u32> { unimplemented!() }
     fn build_children_map(_: &DirectorFile) -> HashMap<u32, Vec<u32>> { unimplemented!() }
 }
@@ -2161,19 +2506,20 @@ impl JsUtils for js_sys::Map {
     }
 }
 
-fn datum_to_js_bridge(datum_ref: &DatumRef, player: &DirPlayer, depth: u8) -> JsBridgeDatum {
+fn datum_to_js_bridge(datum_ref: &DatumRef, symbols: &SymbolTable, player: &DirPlayer, depth: u8) -> JsBridgeDatum {
     let datum = player.get_datum(datum_ref);
-    concrete_datum_to_js_bridge(datum, player, depth)
+    concrete_datum_to_js_bridge(datum, symbols, player, depth)
 }
 
-fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> JsBridgeDatum {
+fn concrete_datum_to_js_bridge(datum: &Datum, symbols: &SymbolTable, player: &DirPlayer, depth: u8) -> JsBridgeDatum {
     if depth > 20 {
         let map = js_sys::Map::new();
         map.str_set("debugDescription", &safe_js_string("TOO DEEP"));
         return map.to_js_object();
     }
     let map = js_sys::Map::new();
-    let formatted_value = format_concrete_datum(datum, player);
+    let formatted_value = format_concrete_datum(datum, symbols, player)
+        .unwrap_or_else(|error| format!("<invalid datum: {}>", error.message));
     map.str_set(
         "debugDescription",
         &ascii_safe(&formatted_value).to_js_value(),
@@ -2189,7 +2535,7 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
         }
         Datum::Symbol(val) => {
             map.str_set("type", &safe_js_string("symbol"));
-            map.str_set("value", &safe_js_string(&val.to_string()));
+            map.str_set("value", &safe_js_string(symbols.display(val).unwrap_or("<foreign-symbol>")));
         }
         Datum::List(_, item_refs, _) => {
             map.str_set("type", &safe_js_string("list"));
@@ -2224,7 +2570,8 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
             map.str_set("type", &safe_js_string("propList"));
             let props_map = js_sys::Map::new();
             for (k, v) in properties.iter() {
-                let key_str = format_datum(k, player);
+                let key_str = format_datum(k, symbols, player)
+                    .unwrap_or_else(|error| format!("<invalid datum: {}>", error.message));
                 props_map.set(&safe_js_string(&key_str), &v.unwrap().to_js_value());
             }
             map.str_set("properties", &props_map.to_js_object());
@@ -2249,7 +2596,7 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
 
             let props_map = js_sys::Map::new();
             for (k, v) in instance.properties.iter() {
-                props_map.set(&safe_js_string(&k.to_string()), &v.unwrap().to_js_value());
+                props_map.set(&safe_js_string(symbols.display(k).unwrap_or("<foreign-symbol>")), &v.unwrap().to_js_value());
             }
             map.str_set("properties", &props_map.to_js_object());
         }
@@ -2266,10 +2613,10 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
             let y2 = Datum::inline_component_to_datum(vals[3], Datum::inline_is_float(*flags, 3));
 
             map.str_set("type", &safe_js_string("Rect"));
-            map.str_set("left", &concrete_datum_to_js_bridge(&x1, player, depth + 1));
-            map.str_set("top", &concrete_datum_to_js_bridge(&y1, player, depth + 1));
-            map.str_set("right", &concrete_datum_to_js_bridge(&x2, player, depth + 1));
-            map.str_set("bottom", &concrete_datum_to_js_bridge(&y2, player, depth + 1));
+            map.str_set("left", &concrete_datum_to_js_bridge(&x1, symbols, player, depth + 1));
+            map.str_set("top", &concrete_datum_to_js_bridge(&y1, symbols, player, depth + 1));
+            map.str_set("right", &concrete_datum_to_js_bridge(&x2, symbols, player, depth + 1));
+            map.str_set("bottom", &concrete_datum_to_js_bridge(&y2, symbols, player, depth + 1));
             map.str_set("value", &safe_js_string(&format!(
                 "rect({}, {}, {}, {})",
                 if Datum::inline_is_float(*flags, 0) { format!("{:.4}", vals[0]) } else { format!("{}", vals[0] as i32) },
@@ -2283,8 +2630,8 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
             let y = Datum::inline_component_to_datum(vals[1], Datum::inline_is_float(*flags, 1));
 
             map.str_set("type", &safe_js_string("Point"));
-            map.str_set("x", &concrete_datum_to_js_bridge(&x, player, depth + 1));
-            map.str_set("y", &concrete_datum_to_js_bridge(&y, player, depth + 1));
+            map.str_set("x", &concrete_datum_to_js_bridge(&x, symbols, player, depth + 1));
+            map.str_set("y", &concrete_datum_to_js_bridge(&y, symbols, player, depth + 1));
             map.str_set("value", &safe_js_string(&format!(
                 "point({}, {})",
                 if Datum::inline_is_float(*flags, 0) { format!("{:.4}", vals[0]) } else { format!("{}", vals[0] as i32) },
@@ -2408,18 +2755,30 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
         }
         Datum::Shockwave3dObjectRef(s3d_ref) => {
             map.str_set("type", &safe_js_string("shockwave3dObject"));
-            map.str_set("value", &safe_js_string(&format!("{}(\"{}\")", s3d_ref.object_type, s3d_ref.name)));
+            map.str_set("value", &safe_js_string(&format!(
+                "{}(\"{}\")",
+                s3d_ref.object_type.as_str(),
+                symbols.display(&s3d_ref.name).unwrap_or("<foreign-symbol>"),
+            )));
         }
         Datum::Transform3d(_) => {
             map.str_set("type", &safe_js_string("transform"));
         }
         Datum::HavokObjectRef(hk_ref) => {
             map.str_set("type", &safe_js_string("havokObject"));
-            map.str_set("value", &safe_js_string(&format!("{}(\"{}\")", hk_ref.object_type, hk_ref.name)));
+            map.str_set("value", &safe_js_string(&format!(
+                "{}(\"{}\")",
+                hk_ref.object_type.as_str(),
+                symbols.display(&hk_ref.name).unwrap_or("<foreign-symbol>"),
+            )));
         }
         Datum::PhysXObjectRef(px_ref) => {
             map.str_set("type", &safe_js_string("physxObject"));
-            map.str_set("value", &safe_js_string(&format!("{}(\"{}\")", px_ref.object_type, px_ref.name)));
+            map.str_set("value", &safe_js_string(&format!(
+                "{}(\"{}\")",
+                px_ref.object_type.as_str(),
+                symbols.display(&px_ref.name).unwrap_or("<foreign-symbol>"),
+            )));
         }
         Datum::VectorVertexRef(member_ref, index) => {
             map.str_set("type", &safe_js_string("vectorVertexRef"));
@@ -2429,6 +2788,17 @@ fn concrete_datum_to_js_bridge(datum: &Datum, player: &DirPlayer, depth: u8) -> 
         }
     }
     return map.to_js_object();
+}
+
+/// Serialize a datum while the caller holds the owning session context.
+/// Dynamic symbols are deliberately resolved through that context's table;
+/// callers must not substitute a process-global or freshly-created table.
+pub(crate) fn datum_to_js_bridge_with_symbols(
+    datum_ref: &DatumRef,
+    symbols: &SymbolTable,
+    player: &DirPlayer,
+) -> JsBridgeDatum {
+    datum_to_js_bridge(datum_ref, symbols, player, 0)
 }
 
 pub trait ToJsValue {

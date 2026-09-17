@@ -4,20 +4,9 @@ import { useAppDispatch, useAppSelector } from "../../store/hooks";
 import { selectGlobals, selectScopes, scopeListChanged } from "../../store/vmSlice";
 import styles from "./styles.module.css";
 import IconButton, { ReactIconButton } from "../../components/IconButton";
+import { useVMHandle } from "../../components/VMProvider";
 import { faWarning } from "@fortawesome/free-solid-svg-icons";
 import { downloadBlob } from "../../utils/download";
-import {
-  resume_breakpoint,
-  request_datum,
-  request_script_instance_snapshot,
-  trigger_alert_hook,
-  step_into,
-  step_over,
-  step_out,
-  step_over_line,
-  step_into_line,
-  set_eval_scope_index,
-} from "vm-rust";
 import ListView from "../../components/ListView";
 import { onMemberSelected, selectScriptViewMode } from "../../store/uiSlice";
 import { DatumRef, IScriptMemberSnapshot, ScriptInstanceId } from "../../vm";
@@ -39,6 +28,7 @@ type DatumAccessRef =
     };
 
 function DatumRow({ label, datumRef }: { label?: string; datumRef: DatumAccessRef }) {
+  const handle = useVMHandle();
   const [isExpanded, setIsExpanded] = useState(false);
   const datum = useAppSelector((state) => {
     switch (datumRef.type) {
@@ -57,14 +47,14 @@ function DatumRow({ label, datumRef }: { label?: string; datumRef: DatumAccessRe
     if (!datumLoaded && datumRef) {
       switch (datumRef.type) {
         case "scriptInstance":
-          request_script_instance_snapshot(datumRef.instanceId);
+          void handle.request_script_instance_snapshot(datumRef.instanceId);
           break;
         case "datum":
-          request_datum(datumRef.datumRef);
+          void handle.request_datum(datumRef.datumRef);
           break;
       }
     }
-  }, [datumLoaded, datumRef]);
+  }, [datumLoaded, datumRef, handle]);
 
   if (datumRef && !datum) {
     return (
@@ -188,6 +178,7 @@ function DatumList({ items, labels }: { items: DatumRef[]; labels?: string[] }) 
 }
 
 function DebugControls() {
+  const handle = useVMHandle();
   const dispatch = useAppDispatch();
   const scopes = useAppSelector((state) => selectScopes(state.vm));
   const castSnapshots = useAppSelector((state) => state.vm.castSnapshots);
@@ -199,14 +190,14 @@ function DebugControls() {
 
     // In assembly mode, use instruction-level step over
     if (viewMode === 'assembly') {
-      step_over();
+      void handle.step_over();
       return;
     }
 
     // In lingo mode, find the bytecode indices for the current line and skip them
     const currentScope = scopes[scopes.length - 1];
     if (!currentScope) {
-      step_over();
+      void handle.step_over();
       return;
     }
 
@@ -216,7 +207,7 @@ function DebugControls() {
     const memberSnapshot = memberRecord?.snapshot as IScriptMemberSnapshot | undefined;
 
     if (!memberSnapshot || memberSnapshot.type !== 'script') {
-      step_over();
+      void handle.step_over();
       return;
     }
 
@@ -225,26 +216,26 @@ function DebugControls() {
     );
 
     if (!handler?.lingo || !handler.bytecodeToLine) {
-      step_over();
+      void handle.step_over();
       return;
     }
 
     // Find which lingo line the current bytecode is on
     const currentLineIndex = handler.bytecodeToLine[currentScope.bytecode_index];
     if (currentLineIndex === undefined) {
-      step_over();
+      void handle.step_over();
       return;
     }
 
     // Get all bytecode indices for this line
     const currentLine = handler.lingo[currentLineIndex];
     if (!currentLine) {
-      step_over();
+      void handle.step_over();
       return;
     }
 
     // Call step_over_line with the bytecode indices to skip (as Uint32Array for WASM)
-    step_over_line(new Uint32Array(currentLine.bytecodeIndices));
+    void handle.step_over_line(new Uint32Array(currentLine.bytecodeIndices));
   };
 
   const handleStepInto = () => {
@@ -252,14 +243,14 @@ function DebugControls() {
 
     // In assembly mode, use instruction-level step into
     if (viewMode === 'assembly') {
-      step_into();
+      void handle.step_into();
       return;
     }
 
     // In lingo mode, find the bytecode indices for the current line and skip them
     const currentScope = scopes[scopes.length - 1];
     if (!currentScope) {
-      step_into();
+      void handle.step_into();
       return;
     }
 
@@ -269,7 +260,7 @@ function DebugControls() {
     const memberSnapshot = memberRecord?.snapshot as IScriptMemberSnapshot | undefined;
 
     if (!memberSnapshot || memberSnapshot.type !== 'script') {
-      step_into();
+      void handle.step_into();
       return;
     }
 
@@ -278,26 +269,26 @@ function DebugControls() {
     );
 
     if (!handler?.lingo || !handler.bytecodeToLine) {
-      step_into();
+      void handle.step_into();
       return;
     }
 
     // Find which lingo line the current bytecode is on
     const currentLineIndex = handler.bytecodeToLine[currentScope.bytecode_index];
     if (currentLineIndex === undefined) {
-      step_into();
+      void handle.step_into();
       return;
     }
 
     // Get all bytecode indices for this line
     const currentLine = handler.lingo[currentLineIndex];
     if (!currentLine) {
-      step_into();
+      void handle.step_into();
       return;
     }
 
     // Call step_into_line with the bytecode indices to skip (as Uint32Array for WASM)
-    step_into_line(new Uint32Array(currentLine.bytecodeIndices));
+    void handle.step_into_line(new Uint32Array(currentLine.bytecodeIndices));
   };
 
   return (
@@ -309,7 +300,7 @@ function DebugControls() {
         onClick={() => {
           // Clear the scope list when resuming to avoid showing stale stack trace
           dispatch(scopeListChanged([]));
-          resume_breakpoint();
+          void handle.resume_breakpoint();
         }}
       />
       <ReactIconButton
@@ -339,14 +330,14 @@ function DebugControls() {
         onClick={() => {
           // Clear the scope list when resuming to avoid showing stale stack trace
           dispatch(scopeListChanged([]));
-          step_out();
+          void handle.step_out();
         }}
       />
       <IconButton
         icon={faWarning}
         title="Trigger Alert Hook"
         onClick={() => {
-          trigger_alert_hook();
+          void handle.trigger_alert_hook();
         }}
       />
     </div>
@@ -354,12 +345,13 @@ function DebugControls() {
 }
 
 function Scopes({ selectedScopeIndex, setSelectedScopeIndex }: { selectedScopeIndex?: number, setSelectedScopeIndex: (i: number) => void }) {
+  const handle = useVMHandle();
   const scopes = useAppSelector((state) => selectScopes(state.vm));
   const dispatch = useAppDispatch();
 
   const onSelectScope = (index: number) => {
     setSelectedScopeIndex(index);
-    set_eval_scope_index(index);
+    void handle.set_eval_scope_index(index);
     const scope = scopes[index];
     dispatch(onMemberSelected(scope.script_member_ref));
   };

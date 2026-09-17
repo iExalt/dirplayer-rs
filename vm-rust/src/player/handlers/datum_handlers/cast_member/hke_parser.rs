@@ -11,7 +11,7 @@
 
 use log::debug;
 
-use crate::player::symbols::symbol::Symbol;
+use crate::player::symbols::{symbol::Symbol, symbol_table::SymbolTable};
 
 pub struct HkeCollisionMesh {
     pub name: Symbol,
@@ -189,7 +189,7 @@ const SUBSPACE_TOLERANCE_TOKEN: [u8; 4] = [0x35, 0x1B, 0xA6, 0x00];
 const DRAG_LINEAR_TOKEN: [u8; 4] = [0xC7, 0x74, 0x33, 0x06];
 const DRAG_ANGULAR_TOKEN: [u8; 4] = [0x57, 0x5C, 0x21, 0x02];
 
-pub fn parse_hke(data: &[u8]) -> HkeWorld {
+pub fn parse_hke(data: &[u8], symbols: &mut SymbolTable) -> HkeWorld {
     let mut world = HkeWorld {
         world_name: String::new(),
         world_scale: 0.0254,
@@ -221,7 +221,7 @@ pub fn parse_hke(data: &[u8]) -> HkeWorld {
             None => break,
         };
 
-        if let Some((mesh, end_pos)) = parse_mesh_entry(data, marker_pos) {
+        if let Some((mesh, end_pos)) = parse_mesh_entry(data, marker_pos, symbols) {
             world.meshes.push(mesh);
             tail_start = end_pos;
             search_pos = end_pos;
@@ -231,7 +231,7 @@ pub fn parse_hke(data: &[u8]) -> HkeWorld {
     }
 
     // Parse tail section (rigid bodies, primitives, actions)
-    parse_tail(data, tail_start, &mut world);
+    parse_tail(data, tail_start, &mut world, symbols);
 
     // Parse cable / point-to-point constraints (the hanging lamp).
     parse_cables(data, &mut world);
@@ -239,7 +239,7 @@ pub fn parse_hke(data: &[u8]) -> HkeWorld {
     // Log results
     let movable: Vec<&str> = world.bodies.iter()
         .filter(|b| b.total_mass > 0.0)
-        .map(|b| b.name.as_str())
+        .filter_map(|b| symbols.display(&b.name).ok())
         .collect();
     debug!(
         "HKE parsed: {} meshes, {} bodies ({} movable: {:?}), worldScale={}",
@@ -249,7 +249,7 @@ pub fn parse_hke(data: &[u8]) -> HkeWorld {
     world
 }
 
-fn parse_mesh_entry(data: &[u8], marker_pos: usize) -> Option<(HkeCollisionMesh, usize)> {
+fn parse_mesh_entry(data: &[u8], marker_pos: usize, symbols: &mut SymbolTable) -> Option<(HkeCollisionMesh, usize)> {
     let mut pos = marker_pos + ENTRY_MARKER.len();
 
     if pos + 2 > data.len() { return None; }
@@ -302,12 +302,12 @@ fn parse_mesh_entry(data: &[u8], marker_pos: usize) -> Option<(HkeCollisionMesh,
         pos += ENTRY_SEPARATOR.len();
     }
 
-    Some((HkeCollisionMesh { name: Symbol::from_str(&name), entry_type, vertices, triangles }, pos))
+    Some((HkeCollisionMesh { name: symbols.intern(&name), entry_type, vertices, triangles }, pos))
 }
 
 /// Parse the tail section after all collision meshes.
 /// Contains subspace, rigid body, primitive, and action records.
-fn parse_tail(data: &[u8], start: usize, world: &mut HkeWorld) {
+fn parse_tail(data: &[u8], start: usize, world: &mut HkeWorld, symbols: &mut SymbolTable) {
     let mut pos = start;
 
     while pos < data.len() {
@@ -335,19 +335,19 @@ fn parse_tail(data: &[u8], start: usize, world: &mut HkeWorld) {
 
         // Full rigid body marker (16 bytes)
         if match_bytes(data, pos, &RIGID_BODY_MARKER) {
-            parse_rigid_body(data, &mut pos, RIGID_BODY_MARKER.len(), world);
+            parse_rigid_body(data, &mut pos, RIGID_BODY_MARKER.len(), world, symbols);
             continue;
         }
 
         // Short rigid body marker (12 bytes) — must NOT be preceded by separator prefix
         if match_short_rb_marker(data, pos) {
-            parse_rigid_body(data, &mut pos, SHORT_RIGID_BODY_MARKER.len(), world);
+            parse_rigid_body(data, &mut pos, SHORT_RIGID_BODY_MARKER.len(), world, symbols);
             continue;
         }
 
         // Tiny rigid body marker (4 bytes)
         if match_tiny_rb_marker(data, pos) {
-            parse_rigid_body(data, &mut pos, TINY_RIGID_BODY_MARKER.len(), world);
+            parse_rigid_body(data, &mut pos, TINY_RIGID_BODY_MARKER.len(), world, symbols);
             continue;
         }
 
@@ -422,7 +422,7 @@ fn parse_cables(data: &[u8], world: &mut HkeWorld) {
     }
 }
 
-fn parse_rigid_body(data: &[u8], pos: &mut usize, marker_len: usize, world: &mut HkeWorld) {
+fn parse_rigid_body(data: &[u8], pos: &mut usize, marker_len: usize, world: &mut HkeWorld, symbols: &mut SymbolTable) {
     *pos += marker_len;
     let name = read_null_string(data, pos);
 
@@ -431,7 +431,7 @@ fn parse_rigid_body(data: &[u8], pos: &mut usize, marker_len: usize, world: &mut
     let payload = &data[*pos..body_end];
 
     let mut body = HkeBodyProps {
-        name: Symbol::from_str(&name),
+        name: symbols.intern(&name),
         total_mass: 0.0,
         restitution: try_read_f32_after_token(payload, &RESTITUTION_TOKEN),
         static_friction: try_read_f32_after_token(payload, &STATIC_FRICTION_TOKEN),

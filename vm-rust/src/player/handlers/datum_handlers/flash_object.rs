@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use crate::{
     director::lingo::datum::{Datum, FlashObjectRef},
     player::{
-        DatumRef, ScriptError, handlers::datum_handlers::date::DateObject, reserve_player_mut, symbols::{builtin::BuiltInSymbol, symbol::Symbol}
+        DatumRef, DirPlayer, ScriptError, handlers::datum_handlers::date::DateObject, reserve_player_mut, symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable}
     }
 };
 use wasm_bindgen::prelude::*;
@@ -87,6 +87,71 @@ thread_local! {
 
 pub struct FlashObjectDatumHandlers {}
 
+/// Owned host request for a Flash property write.  The bridge call happens
+/// after the session releases its player borrow; the owner token is checked by
+/// that session boundary before execution.
+#[derive(Clone, Debug)]
+pub struct FlashSetPropertyRequest {
+    pub(crate) owner: crate::player::ownership::OwnerToken,
+    pub(crate) sprite_num: i32,
+    pub(crate) path: String,
+    pub(crate) value: String,
+}
+
+pub fn prepare_set_prop(
+    player: &DirPlayer,
+    symbols: &SymbolTable,
+    datum: &DatumRef,
+    prop_name: Symbol,
+    value: &Datum,
+) -> Result<FlashSetPropertyRequest, ScriptError> {
+    let flash_ref = player
+        .get_datum(datum)
+        .as_flash_object()
+        .cloned()
+        .ok_or_else(|| ScriptError::new("Not a Flash object".to_string()))?;
+    let prop_name = symbols
+        .display(&prop_name)
+        .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
+        .to_owned();
+    let sprite_num = flash_ref.bound_sprite().or_else(|| {
+        player.movie.score.channels.iter().find_map(|channel| {
+            channel.sprite.member.as_ref().and_then(|member_ref| {
+                (member_ref.cast_lib == flash_ref.cast_lib
+                    && member_ref.cast_member == flash_ref.cast_member)
+                    .then_some(channel.number as i32)
+            })
+        })
+    }).ok_or_else(|| ScriptError::new(format!(
+        "No sprite for Flash member {}:{}", flash_ref.cast_lib, flash_ref.cast_member
+    )))?;
+    let value = match value {
+        Datum::Int(i) => i.to_string(),
+        Datum::Float(f) => f.to_string(),
+        Datum::String(s) => s.clone(),
+        Datum::Void => "null".to_string(),
+        _ => "null".to_string(),
+    };
+    Ok(FlashSetPropertyRequest {
+        owner: player.owner.clone(),
+        sprite_num,
+        path: format!("{}.{}", flash_ref.path, prop_name),
+        value,
+    })
+}
+
+pub fn apply_set_prop(request: FlashSetPropertyRequest) -> Result<(), ScriptError> {
+    match ruffle_set_variable_global(request.sprite_num, &request.path, &request.value) {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            warn!("Failed to set Flash property {}: {:?}", request.path, e);
+            Err(ScriptError::new(format!(
+                "Failed to set Flash property {}", request.path
+            )))
+        }
+    }
+}
+
 impl FlashObjectDatumHandlers {
     pub fn get_prop(obj_ref: &DatumRef, prop_name: &str) -> Result<DatumRef, ScriptError> {
         reserve_player_mut(|player| {
@@ -133,10 +198,15 @@ impl FlashObjectDatumHandlers {
     }
 
     pub fn call(
+        symbols: &mut SymbolTable,
         datum: &DatumRef,
         handler_name: Symbol,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
+        let handler_name_text = symbols
+            .display(&handler_name)
+            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
+            .to_owned();
         reserve_player_mut(|player| {
             let flash_ref = {
                 let datum_value = player.get_datum(datum);
@@ -155,10 +225,10 @@ impl FlashObjectDatumHandlers {
             // `LocalConnection.send(name, method, ...)` (local_connection_send)
             // can route to the setCallback handler bound to this LC.
             if flash_ref.path.contains("__dpObj_LocalConnection") {
-                if handler_name == "connect" {
+                if handler_name_text.eq_ignore_ascii_case("connect") {
                     let name = args
                         .get(0)
-                        .map(|a| player.get_datum(a).string_value().unwrap_or_default())
+                        .map(|a| player.get_datum(a).string_value(symbols).unwrap_or_default())
                         .unwrap_or_default();
                     if !name.is_empty() {
                         player
@@ -168,7 +238,7 @@ impl FlashObjectDatumHandlers {
                     // AS LocalConnection.connect() returns true on success.
                     return Ok(player.alloc_datum(Datum::Int(1)));
                 }
-                if handler_name == "close" {
+                if handler_name_text.eq_ignore_ascii_case("close") {
                     player
                         .flash_lc_connections
                         .retain(|_, v| v != &flash_ref.path);
@@ -176,12 +246,12 @@ impl FlashObjectDatumHandlers {
                 }
             }
 
-            let method_path = format!("{}.{}", flash_ref.path, handler_name);
+            let method_path = format!("{}.{}", flash_ref.path, handler_name_text);
 
             // Convert Lingo arguments to a JSON array string for the bridge
             let mut js_args_parts = Vec::new();
             for arg_ref in args {
-                let js_str = convert_lingo_datum_to_json_ref(player, arg_ref);
+                let js_str = convert_lingo_datum_to_json_ref(player, symbols, arg_ref)?;
                 js_args_parts.push(js_str);
             }
             let args_str = format!("[{}]", js_args_parts.join(","));
@@ -210,55 +280,17 @@ impl FlashObjectDatumHandlers {
         })
     }
 
-    pub fn set_prop(
-        datum: &DatumRef,
-        prop_name: Symbol,
-        value: &Datum,
-    ) -> Result<(), ScriptError> {
-        reserve_player_mut(|player| {
-            let flash_ref = {
-                let datum_value = player.get_datum(datum);
-                if let Some(flash_ref) = datum_value.as_flash_object() {
-                    flash_ref.clone()
-                } else {
-                    return Err(ScriptError::new("Not a Flash object".to_string()));
-                }
-            };
-
-            let prop_path = format!("{}.{}", flash_ref.path, prop_name);
-            let value_str = match value {
-                Datum::Int(i) => i.to_string(),
-                Datum::Float(f) => f.to_string(),
-                Datum::String(s) => s.clone(),
-                Datum::Void => "null".to_string(),
-                _ => "null".to_string(),
-            };
-
-            let sprite_num = match resolve_flash_sprite(&flash_ref) {
-                Some(n) => n,
-                None => return Err(ScriptError::new(format!("No sprite for Flash member {}:{}", flash_ref.cast_lib, flash_ref.cast_member))),
-            };
-            match ruffle_set_variable_global(sprite_num, &prop_path, &value_str) {
-                Ok(_) => Ok(()),
-                Err(e) => {
-                    warn!("Failed to set Flash property {}: {:?}", prop_path, e);
-                    Err(ScriptError::new(format!("Failed to set Flash property {}.{}", flash_ref.path, prop_name)))
-                }
-            }
-        })
-    }
-
 }
 
-fn convert_lingo_datum_to_json_ref(player: &crate::player::DirPlayer, datum_ref: &DatumRef) -> String {
+fn convert_lingo_datum_to_json_ref(player: &crate::player::DirPlayer, symbols: &SymbolTable, datum_ref: &DatumRef) -> Result<String, ScriptError> {
     let datum = player.get_datum(datum_ref);
-    convert_lingo_datum_to_json_inner(player, datum)
+    convert_lingo_datum_to_json_inner(player, symbols, datum)
 }
 
-fn convert_lingo_datum_to_json_inner(player: &crate::player::DirPlayer, datum: &Datum) -> String {
+fn convert_lingo_datum_to_json_inner(player: &crate::player::DirPlayer, symbols: &SymbolTable, datum: &Datum) -> Result<String, ScriptError> {
     match datum {
-        Datum::Int(i) => i.to_string(),
-        Datum::Float(f) => f.to_string(),
+        Datum::Int(i) => Ok(i.to_string()),
+        Datum::Float(f) => Ok(f.to_string()),
         Datum::String(s) => {
             // JSON-escape the string
             let escaped = s.replace('\\', "\\\\")
@@ -266,9 +298,9 @@ fn convert_lingo_datum_to_json_inner(player: &crate::player::DirPlayer, datum: &
                 .replace('\n', "\\n")
                 .replace('\r', "\\r")
                 .replace('\t', "\\t");
-            format!("\"{}\"", escaped)
+            Ok(format!("\"{}\"", escaped))
         },
-        Datum::Symbol(s) => format!("\"#{}\"", s),
+        Datum::Symbol(s) => Ok(format!("\"#{}\"", symbols.display(s).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?)),
         // Match Adobe's Flash Asset Xtra: Lingo Void crosses into AS as the
         // numeric value 0, not null. CS's outgoing AV packets need this:
         //   - dance/stand send `(VOID, VOID, VOID, VOID, "dnc")` and the
@@ -281,17 +313,17 @@ fn convert_lingo_datum_to_json_inner(player: &crate::player::DirPlayer, datum: &
         //     so we don't pollute the packet with `act="0"`.
         //   - position args have an extra `!= 0` gate that filters 0 out, so
         //     x/y/z stay omitted when no movement happened.
-        Datum::Void => "0".to_string(),
+        Datum::Void => Ok("0".to_string()),
         Datum::FlashObjectRef(flash_ref) => {
-            format!("\"__ruffle_path:{}\"", flash_ref.path)
+            Ok(format!("\"__ruffle_path:{}\"", flash_ref.path))
         },
         Datum::List(_, items, _) => {
-            let parts: Vec<String> = items.iter()
-                .map(|item_ref| convert_lingo_datum_to_json_ref(player, item_ref))
+            let parts: Result<Vec<String>, ScriptError> = items.iter()
+                .map(|item_ref| convert_lingo_datum_to_json_ref(player, symbols, item_ref))
                 .collect();
-            format!("[{}]", parts.join(","))
+            Ok(format!("[{}]", parts?.join(",")))
         },
-        _ => "null".to_string(),
+        _ => Ok("null".to_string()),
     }
 }
 

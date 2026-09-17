@@ -1,0 +1,4902 @@
+{
+  "schema_version": 1,
+  "source_revision": "297da4a410495a1116e2c1b93ee57f9f1b5c8d79",
+  "source_path": "vm-rust/src/player/symbols/builtin.rs",
+  "source_sha256": "e617fe74c6a2ec8de63460bdf2ed6e1cd1e61fc7f6ccef69c6892eb750bab218",
+  "enum_repr": "u16",
+  "entry_count": 975,
+  "alias_groups": [
+    {
+      "normalized_spelling": "editshortcutsenabled",
+      "discriminants": [
+        53,
+        66
+      ],
+      "variants": [
+        "EditShortCutsEnabled",
+        "EditShortcutsEnabled"
+      ],
+      "spellings": [
+        "editShortCutsEnabled",
+        "editShortcutsEnabled"
+      ]
+    }
+  ],
+  "entries": [
+    {
+      "discriminant": 0,
+      "variant": "Forget",
+      "spelling": "forget"
+    },
+    {
+      "discriminant": 1,
+      "variant": "SetAt",
+      "spelling": "setAt"
+    },
+    {
+      "discriminant": 2,
+      "variant": "New",
+      "spelling": "new"
+    },
+    {
+      "discriminant": 3,
+      "variant": "True",
+      "spelling": "true"
+    },
+    {
+      "discriminant": 4,
+      "variant": "False",
+      "spelling": "false"
+    },
+    {
+      "discriminant": 5,
+      "variant": "Item",
+      "spelling": "item"
+    },
+    {
+      "discriminant": 6,
+      "variant": "Word",
+      "spelling": "word"
+    },
+    {
+      "discriminant": 7,
+      "variant": "Char",
+      "spelling": "char"
+    },
+    {
+      "discriminant": 8,
+      "variant": "Line",
+      "spelling": "line"
+    },
+    {
+      "discriminant": 9,
+      "variant": "NumberOfChars",
+      "spelling": "number of chars"
+    },
+    {
+      "discriminant": 10,
+      "variant": "NumberOfCharacters",
+      "spelling": "number of characters"
+    },
+    {
+      "discriminant": 11,
+      "variant": "NumberOfLines",
+      "spelling": "number of lines"
+    },
+    {
+      "discriminant": 12,
+      "variant": "NumberOfItems",
+      "spelling": "number of items"
+    },
+    {
+      "discriminant": 13,
+      "variant": "NumberOfWords",
+      "spelling": "number of words"
+    },
+    {
+      "discriminant": 14,
+      "variant": "Ancestor",
+      "spelling": "ancestor"
+    },
+    {
+      "discriminant": 15,
+      "variant": "Destroy",
+      "spelling": "destroy"
+    },
+    {
+      "discriminant": 16,
+      "variant": "Target",
+      "spelling": "target"
+    },
+    {
+      "discriminant": 17,
+      "variant": "FileName",
+      "spelling": "fileName"
+    },
+    {
+      "discriminant": 18,
+      "variant": "Length",
+      "spelling": "length"
+    },
+    {
+      "discriminant": 19,
+      "variant": "Ilk",
+      "spelling": "ilk"
+    },
+    {
+      "discriminant": 20,
+      "variant": "String",
+      "spelling": "string"
+    },
+    {
+      "discriminant": 21,
+      "variant": "Value",
+      "spelling": "value"
+    },
+    {
+      "discriminant": 22,
+      "variant": "CharToNum",
+      "spelling": "charToNum"
+    },
+    {
+      "discriminant": 23,
+      "variant": "CharSpacing",
+      "spelling": "charSpacing"
+    },
+    {
+      "discriminant": 24,
+      "variant": "Marker",
+      "spelling": "marker"
+    },
+    {
+      "discriminant": 25,
+      "variant": "MouseDown",
+      "spelling": "mouseDown"
+    },
+    {
+      "discriminant": 26,
+      "variant": "MouseUp",
+      "spelling": "mouseUp"
+    },
+    {
+      "discriminant": 27,
+      "variant": "KeyDown",
+      "spelling": "keyDown"
+    },
+    {
+      "discriminant": 28,
+      "variant": "KeyUp",
+      "spelling": "keyUp"
+    },
+    {
+      "discriminant": 29,
+      "variant": "TimeMS",
+      "spelling": "timeMS"
+    },
+    {
+      "discriminant": 30,
+      "variant": "StreamStatus",
+      "spelling": "streamStatus"
+    },
+    {
+      "discriminant": 31,
+      "variant": "Instance",
+      "spelling": "instance"
+    },
+    {
+      "discriminant": 32,
+      "variant": "Name",
+      "spelling": "name"
+    },
+    {
+      "discriminant": 33,
+      "variant": "PreloadMode",
+      "spelling": "preloadMode"
+    },
+    {
+      "discriminant": 34,
+      "variant": "Number",
+      "spelling": "number"
+    },
+    {
+      "discriminant": 35,
+      "variant": "ObjectA",
+      "spelling": "objectA"
+    },
+    {
+      "discriminant": 36,
+      "variant": "ObjectB",
+      "spelling": "objectB"
+    },
+    {
+      "discriminant": 37,
+      "variant": "ContactPoints",
+      "spelling": "contactPoints"
+    },
+    {
+      "discriminant": 38,
+      "variant": "ContactNormals",
+      "spelling": "contactNormals"
+    },
+    {
+      "discriminant": 39,
+      "variant": "EndSprite",
+      "spelling": "endSprite"
+    },
+    {
+      "discriminant": 40,
+      "variant": "PrepareMovie",
+      "spelling": "prepareMovie"
+    },
+    {
+      "discriminant": 41,
+      "variant": "StartMovie",
+      "spelling": "startMovie"
+    },
+    {
+      "discriminant": 42,
+      "variant": "StopMovie",
+      "spelling": "stopMovie"
+    },
+    {
+      "discriminant": 43,
+      "variant": "PrepareFrame",
+      "spelling": "prepareFrame"
+    },
+    {
+      "discriminant": 44,
+      "variant": "ExitFrame",
+      "spelling": "exitFrame"
+    },
+    {
+      "discriminant": 45,
+      "variant": "SelStart",
+      "spelling": "selStart"
+    },
+    {
+      "discriminant": 46,
+      "variant": "SelEnd",
+      "spelling": "selEnd"
+    },
+    {
+      "discriminant": 47,
+      "variant": "ClipBoard",
+      "spelling": "clipBoard"
+    },
+    {
+      "discriminant": 48,
+      "variant": "FloatPrecision",
+      "spelling": "floatPrecision"
+    },
+    {
+      "discriminant": 49,
+      "variant": "CenterStage",
+      "spelling": "centerStage"
+    },
+    {
+      "discriminant": 50,
+      "variant": "ExitLock",
+      "spelling": "exitLock"
+    },
+    {
+      "discriminant": 51,
+      "variant": "ItemDelimiter",
+      "spelling": "itemDelimiter"
+    },
+    {
+      "discriminant": 52,
+      "variant": "DebugPlaybackEnabled",
+      "spelling": "debugPlaybackEnabled"
+    },
+    {
+      "discriminant": 53,
+      "variant": "EditShortCutsEnabled",
+      "spelling": "editShortCutsEnabled"
+    },
+    {
+      "discriminant": 54,
+      "variant": "AlertHook",
+      "spelling": "alertHook"
+    },
+    {
+      "discriminant": 55,
+      "variant": "TraceScript",
+      "spelling": "traceScript"
+    },
+    {
+      "discriminant": 56,
+      "variant": "LastFrame",
+      "spelling": "lastFrame"
+    },
+    {
+      "discriminant": 57,
+      "variant": "Trace",
+      "spelling": "trace"
+    },
+    {
+      "discriminant": 58,
+      "variant": "FrontWindow",
+      "spelling": "frontWindow"
+    },
+    {
+      "discriminant": 59,
+      "variant": "WindowList",
+      "spelling": "windowList"
+    },
+    {
+      "discriminant": 60,
+      "variant": "FreeBytes",
+      "spelling": "freeBytes"
+    },
+    {
+      "discriminant": 61,
+      "variant": "FreeBlock",
+      "spelling": "freeBlock"
+    },
+    {
+      "discriminant": 62,
+      "variant": "EmulateMultibuttonMouse",
+      "spelling": "emulateMultibuttonMouse"
+    },
+    {
+      "discriminant": 63,
+      "variant": "EnableFlashLingo",
+      "spelling": "enableFlashLingo"
+    },
+    {
+      "discriminant": 64,
+      "variant": "PreLoadEventAbort",
+      "spelling": "preLoadEventAbort"
+    },
+    {
+      "discriminant": 65,
+      "variant": "MachineType",
+      "spelling": "machineType"
+    },
+    {
+      "discriminant": 66,
+      "variant": "EditShortcutsEnabled",
+      "spelling": "editShortcutsEnabled"
+    },
+    {
+      "discriminant": 67,
+      "variant": "Collision",
+      "spelling": "collision"
+    },
+    {
+      "discriminant": 68,
+      "variant": "ColorRange",
+      "spelling": "colorRange"
+    },
+    {
+      "discriminant": 69,
+      "variant": "SizeRange",
+      "spelling": "sizeRange"
+    },
+    {
+      "discriminant": 70,
+      "variant": "BlendRange",
+      "spelling": "blendRange"
+    },
+    {
+      "discriminant": 71,
+      "variant": "Period",
+      "spelling": "period"
+    },
+    {
+      "discriminant": 72,
+      "variant": "NetAbort",
+      "spelling": "netAbort"
+    },
+    {
+      "discriminant": 73,
+      "variant": "PreLoadCast",
+      "spelling": "preLoadCast"
+    },
+    {
+      "discriminant": 74,
+      "variant": "UnLoadCast",
+      "spelling": "unLoadCast"
+    },
+    {
+      "discriminant": 75,
+      "variant": "PreLoadMovie",
+      "spelling": "preLoadMovie"
+    },
+    {
+      "discriminant": 76,
+      "variant": "UnLoad",
+      "spelling": "unLoad"
+    },
+    {
+      "discriminant": 77,
+      "variant": "Cast",
+      "spelling": "cast"
+    },
+    {
+      "discriminant": 78,
+      "variant": "RandomVector",
+      "spelling": "randomVector"
+    },
+    {
+      "discriminant": 79,
+      "variant": "Continue",
+      "spelling": "continue"
+    },
+    {
+      "discriminant": 80,
+      "variant": "Hold",
+      "spelling": "hold"
+    },
+    {
+      "discriminant": 81,
+      "variant": "Inflate",
+      "spelling": "inflate"
+    },
+    {
+      "discriminant": 82,
+      "variant": "MapFn",
+      "spelling": "map"
+    },
+    {
+      "discriminant": 83,
+      "variant": "NetStatus",
+      "spelling": "netStatus"
+    },
+    {
+      "discriminant": 84,
+      "variant": "PointToChar",
+      "spelling": "pointToChar"
+    },
+    {
+      "discriminant": 85,
+      "variant": "ScrollByLine",
+      "spelling": "scrollByLine"
+    },
+    {
+      "discriminant": 86,
+      "variant": "ScrollByPage",
+      "spelling": "scrollByPage"
+    },
+    {
+      "discriminant": 87,
+      "variant": "LocVToLinePos",
+      "spelling": "locVToLinePos"
+    },
+    {
+      "discriminant": 88,
+      "variant": "LinePosToLocV",
+      "spelling": "linePosToLocV"
+    },
+    {
+      "discriminant": 89,
+      "variant": "LocToCharPos",
+      "spelling": "locToCharPos"
+    },
+    {
+      "discriminant": 90,
+      "variant": "Globals",
+      "spelling": "globals"
+    },
+    {
+      "discriminant": 91,
+      "variant": "MouseLine",
+      "spelling": "mouseLine"
+    },
+    {
+      "discriminant": 92,
+      "variant": "TraceLogFile",
+      "spelling": "traceLogFile"
+    },
+    {
+      "discriminant": 93,
+      "variant": "UpdateLock",
+      "spelling": "updateLock"
+    },
+    {
+      "discriminant": 94,
+      "variant": "MouseDownScript",
+      "spelling": "mouseDownScript"
+    },
+    {
+      "discriminant": 95,
+      "variant": "MouseUpScript",
+      "spelling": "mouseUpScript"
+    },
+    {
+      "discriminant": 96,
+      "variant": "KeyDownScript",
+      "spelling": "keyDownScript"
+    },
+    {
+      "discriminant": 97,
+      "variant": "KeyUpScript",
+      "spelling": "keyUpScript"
+    },
+    {
+      "discriminant": 98,
+      "variant": "TimeoutScript",
+      "spelling": "timeoutScript"
+    },
+    {
+      "discriminant": 99,
+      "variant": "AllowCustomCaching",
+      "spelling": "allowCustomCaching"
+    },
+    {
+      "discriminant": 100,
+      "variant": "PuppetTempo",
+      "spelling": "puppetTempo"
+    },
+    {
+      "discriminant": 101,
+      "variant": "UseFastQuads",
+      "spelling": "useFastQuads"
+    },
+    {
+      "discriminant": 102,
+      "variant": "RomanLingo",
+      "spelling": "romanLingo"
+    },
+    {
+      "discriminant": 103,
+      "variant": "AllowSaveLocal",
+      "spelling": "allowSaveLocal"
+    },
+    {
+      "discriminant": 104,
+      "variant": "CpuHogTicks",
+      "spelling": "cpuHogTicks"
+    },
+    {
+      "discriminant": 105,
+      "variant": "StageColor",
+      "spelling": "stageColor"
+    },
+    {
+      "discriminant": 106,
+      "variant": "TimeoutLength",
+      "spelling": "timeoutLength"
+    },
+    {
+      "discriminant": 107,
+      "variant": "TimeoutKeyDown",
+      "spelling": "timeoutKeyDown"
+    },
+    {
+      "discriminant": 108,
+      "variant": "TimeoutMouse",
+      "spelling": "timeoutMouse"
+    },
+    {
+      "discriminant": 109,
+      "variant": "TimeoutPlay",
+      "spelling": "timeoutPlay"
+    },
+    {
+      "discriminant": 110,
+      "variant": "TimeoutLapsed",
+      "spelling": "timeoutLapsed"
+    },
+    {
+      "discriminant": 111,
+      "variant": "SoundEnabled",
+      "spelling": "soundEnabled"
+    },
+    {
+      "discriminant": 112,
+      "variant": "SoundLevel",
+      "spelling": "soundLevel"
+    },
+    {
+      "discriminant": 113,
+      "variant": "BeepOn",
+      "spelling": "beepOn"
+    },
+    {
+      "discriminant": 114,
+      "variant": "FixStageSize",
+      "spelling": "fixStageSize"
+    },
+    {
+      "discriminant": 115,
+      "variant": "RandomSeed",
+      "spelling": "randomSeed"
+    },
+    {
+      "discriminant": 116,
+      "variant": "SoundDevice",
+      "spelling": "soundDevice"
+    },
+    {
+      "discriminant": 117,
+      "variant": "Preferred3dRenderer",
+      "spelling": "preferred3drenderer"
+    },
+    {
+      "discriminant": 118,
+      "variant": "MilesFast",
+      "spelling": "milesfast"
+    },
+    {
+      "discriminant": 119,
+      "variant": "DatumStats",
+      "spelling": "datumStats"
+    },
+    {
+      "discriminant": 120,
+      "variant": "DatumSnapshot",
+      "spelling": "datumSnapshot"
+    },
+    {
+      "discriminant": 121,
+      "variant": "DatumLeakScan",
+      "spelling": "datumLeakScan"
+    },
+    {
+      "discriminant": 122,
+      "variant": "SystemDate",
+      "spelling": "systemDate"
+    },
+    {
+      "discriminant": 123,
+      "variant": "Stage",
+      "spelling": "stage"
+    },
+    {
+      "discriminant": 124,
+      "variant": "Time",
+      "spelling": "time"
+    },
+    {
+      "discriminant": 125,
+      "variant": "MilliSeconds",
+      "spelling": "milliSeconds"
+    },
+    {
+      "discriminant": 126,
+      "variant": "Day",
+      "spelling": "day"
+    },
+    {
+      "discriminant": 127,
+      "variant": "Month",
+      "spelling": "month"
+    },
+    {
+      "discriminant": 128,
+      "variant": "Year",
+      "spelling": "year"
+    },
+    {
+      "discriminant": 129,
+      "variant": "Hour",
+      "spelling": "hour"
+    },
+    {
+      "discriminant": 130,
+      "variant": "Hours",
+      "spelling": "hours"
+    },
+    {
+      "discriminant": 131,
+      "variant": "Minute",
+      "spelling": "minute"
+    },
+    {
+      "discriminant": 132,
+      "variant": "Minutes",
+      "spelling": "minutes"
+    },
+    {
+      "discriminant": 133,
+      "variant": "Second",
+      "spelling": "second"
+    },
+    {
+      "discriminant": 134,
+      "variant": "Seconds",
+      "spelling": "seconds"
+    },
+    {
+      "discriminant": 135,
+      "variant": "WeekDay",
+      "spelling": "weekDay"
+    },
+    {
+      "discriminant": 136,
+      "variant": "KeyboardFocusSprite",
+      "spelling": "keyboardFocusSprite"
+    },
+    {
+      "discriminant": 137,
+      "variant": "Selection",
+      "spelling": "selection"
+    },
+    {
+      "discriminant": 138,
+      "variant": "FrameTempo",
+      "spelling": "frameTempo"
+    },
+    {
+      "discriminant": 139,
+      "variant": "MouseLoc",
+      "spelling": "mouseLoc"
+    },
+    {
+      "discriminant": 140,
+      "variant": "MouseH",
+      "spelling": "mouseH"
+    },
+    {
+      "discriminant": 141,
+      "variant": "MouseV",
+      "spelling": "mouseV"
+    },
+    {
+      "discriminant": 142,
+      "variant": "MouseChar",
+      "spelling": "mouseChar"
+    },
+    {
+      "discriminant": 143,
+      "variant": "MouseMember",
+      "spelling": "mouseMember"
+    },
+    {
+      "discriminant": 144,
+      "variant": "StillDown",
+      "spelling": "stillDown"
+    },
+    {
+      "discriminant": 145,
+      "variant": "Rollover",
+      "spelling": "rollover"
+    },
+    {
+      "discriminant": 146,
+      "variant": "KeyCode",
+      "spelling": "keyCode"
+    },
+    {
+      "discriminant": 147,
+      "variant": "ShiftDown",
+      "spelling": "shiftDown"
+    },
+    {
+      "discriminant": 148,
+      "variant": "OptionDown",
+      "spelling": "optionDown"
+    },
+    {
+      "discriminant": 149,
+      "variant": "CommandDown",
+      "spelling": "commandDown"
+    },
+    {
+      "discriminant": 150,
+      "variant": "ControlDown",
+      "spelling": "controlDown"
+    },
+    {
+      "discriminant": 151,
+      "variant": "AltDown",
+      "spelling": "altDown"
+    },
+    {
+      "discriminant": 152,
+      "variant": "Key",
+      "spelling": "key"
+    },
+    {
+      "discriminant": 153,
+      "variant": "KeyPressed",
+      "spelling": "keyPressed"
+    },
+    {
+      "discriminant": 154,
+      "variant": "DoubleClick",
+      "spelling": "doubleClick"
+    },
+    {
+      "discriminant": 155,
+      "variant": "Ticks",
+      "spelling": "ticks"
+    },
+    {
+      "discriminant": 156,
+      "variant": "FrameLabel",
+      "spelling": "frameLabel"
+    },
+    {
+      "discriminant": 157,
+      "variant": "CurrentSpriteNum",
+      "spelling": "currentSpriteNum"
+    },
+    {
+      "discriminant": 158,
+      "variant": "ClickOne",
+      "spelling": "clickOne"
+    },
+    {
+      "discriminant": 159,
+      "variant": "Environment",
+      "spelling": "environment"
+    },
+    {
+      "discriminant": 160,
+      "variant": "EnvironmentPropList",
+      "spelling": "environmentPropList"
+    },
+    {
+      "discriminant": 161,
+      "variant": "ShockMachine",
+      "spelling": "shockMachine"
+    },
+    {
+      "discriminant": 162,
+      "variant": "ShockMachineVersion",
+      "spelling": "shockMachineVersion"
+    },
+    {
+      "discriminant": 163,
+      "variant": "Platform",
+      "spelling": "platform"
+    },
+    {
+      "discriminant": 164,
+      "variant": "ColorDepth",
+      "spelling": "colorDepth"
+    },
+    {
+      "discriminant": 165,
+      "variant": "InternetConnected",
+      "spelling": "internetConnected"
+    },
+    {
+      "discriminant": 166,
+      "variant": "Online",
+      "spelling": "online"
+    },
+    {
+      "discriminant": 167,
+      "variant": "UILanguage",
+      "spelling": "uiLanguage"
+    },
+    {
+      "discriminant": 168,
+      "variant": "OSLanguage",
+      "spelling": "osLanguage"
+    },
+    {
+      "discriminant": 169,
+      "variant": "ProductBuildVersion",
+      "spelling": "productBuildVersion"
+    },
+    {
+      "discriminant": 170,
+      "variant": "ProductVersion",
+      "spelling": "productVersion"
+    },
+    {
+      "discriminant": 171,
+      "variant": "OSVersion",
+      "spelling": "osVersion"
+    },
+    {
+      "discriminant": 172,
+      "variant": "DirectXVersion",
+      "spelling": "directXVersion"
+    },
+    {
+      "discriminant": 173,
+      "variant": "LicenseType",
+      "spelling": "licenseType"
+    },
+    {
+      "discriminant": 174,
+      "variant": "TrialTime",
+      "spelling": "trialTime"
+    },
+    {
+      "discriminant": 175,
+      "variant": "ClickLoc",
+      "spelling": "clickLoc"
+    },
+    {
+      "discriminant": 176,
+      "variant": "MarkerList",
+      "spelling": "markerList"
+    },
+    {
+      "discriminant": 177,
+      "variant": "TimeoutList",
+      "spelling": "timeoutList"
+    },
+    {
+      "discriminant": 178,
+      "variant": "XtraList",
+      "spelling": "xtraList"
+    },
+    {
+      "discriminant": 179,
+      "variant": "RunMode",
+      "spelling": "runMode"
+    },
+    {
+      "discriminant": 180,
+      "variant": "MovieName",
+      "spelling": "movieName"
+    },
+    {
+      "discriminant": 181,
+      "variant": "StageLeft",
+      "spelling": "stageLeft"
+    },
+    {
+      "discriminant": 182,
+      "variant": "StageTop",
+      "spelling": "stageTop"
+    },
+    {
+      "discriminant": 183,
+      "variant": "StageRight",
+      "spelling": "stageRight"
+    },
+    {
+      "discriminant": 184,
+      "variant": "StageBottom",
+      "spelling": "stageBottom"
+    },
+    {
+      "discriminant": 185,
+      "variant": "Date",
+      "spelling": "date"
+    },
+    {
+      "discriminant": 186,
+      "variant": "LongTime",
+      "spelling": "long time"
+    },
+    {
+      "discriminant": 187,
+      "variant": "LastChannel",
+      "spelling": "lastChannel"
+    },
+    {
+      "discriminant": 188,
+      "variant": "MoviePath",
+      "spelling": "moviePath"
+    },
+    {
+      "discriminant": 189,
+      "variant": "Frame",
+      "spelling": "frame"
+    },
+    {
+      "discriminant": 190,
+      "variant": "Path",
+      "spelling": "path"
+    },
+    {
+      "discriminant": 191,
+      "variant": "Timer",
+      "spelling": "timer"
+    },
+    {
+      "discriminant": 192,
+      "variant": "LastKey",
+      "spelling": "lastKey"
+    },
+    {
+      "discriminant": 193,
+      "variant": "RightMouseDown",
+      "spelling": "rightMouseDown"
+    },
+    {
+      "discriminant": 194,
+      "variant": "RightMouseUp",
+      "spelling": "rightMouseUp"
+    },
+    {
+      "discriminant": 195,
+      "variant": "ActiveWindow",
+      "spelling": "activeWindow"
+    },
+    {
+      "discriminant": 196,
+      "variant": "MaxInteger",
+      "spelling": "maxInteger"
+    },
+    {
+      "discriminant": 197,
+      "variant": "MemorySize",
+      "spelling": "memorySize"
+    },
+    {
+      "discriminant": 198,
+      "variant": "Active3dRenderer",
+      "spelling": "active3dRenderer"
+    },
+    {
+      "discriminant": 199,
+      "variant": "ScriptExecutionStyle",
+      "spelling": "scriptExecutionStyle"
+    },
+    {
+      "discriminant": 200,
+      "variant": "SoundDeviceList",
+      "spelling": "soundDeviceList"
+    },
+    {
+      "discriminant": 201,
+      "variant": "DesktopRectList",
+      "spelling": "desktopRectList"
+    },
+    {
+      "discriminant": 202,
+      "variant": "LabelList",
+      "spelling": "labelList"
+    },
+    {
+      "discriminant": 203,
+      "variant": "ClickOn",
+      "spelling": "clickOn"
+    },
+    {
+      "discriminant": 204,
+      "variant": "ActorList",
+      "spelling": "actorList"
+    },
+    {
+      "discriminant": 205,
+      "variant": "Pi",
+      "spelling": "pi"
+    },
+    {
+      "discriminant": 206,
+      "variant": "Void",
+      "spelling": "void"
+    },
+    {
+      "discriminant": 207,
+      "variant": "Empty",
+      "spelling": "empty"
+    },
+    {
+      "discriminant": 208,
+      "variant": "Return",
+      "spelling": "return"
+    },
+    {
+      "discriminant": 209,
+      "variant": "Enter",
+      "spelling": "enter"
+    },
+    {
+      "discriminant": 210,
+      "variant": "Quote",
+      "spelling": "quote"
+    },
+    {
+      "discriminant": 211,
+      "variant": "Tab",
+      "spelling": "tab"
+    },
+    {
+      "discriminant": 212,
+      "variant": "BackSpace",
+      "spelling": "backSpace"
+    },
+    {
+      "discriminant": 213,
+      "variant": "Timeout",
+      "spelling": "timeout"
+    },
+    {
+      "discriminant": 214,
+      "variant": "BeginSprite",
+      "spelling": "beginSprite"
+    },
+    {
+      "discriminant": 215,
+      "variant": "EnterFrame",
+      "spelling": "enterFrame"
+    },
+    {
+      "discriminant": 216,
+      "variant": "StepFrame",
+      "spelling": "stepFrame"
+    },
+    {
+      "discriminant": 217,
+      "variant": "BPreloadCasts",
+      "spelling": "bPreloadCasts"
+    },
+    {
+      "discriminant": 218,
+      "variant": "EmptyString",
+      "spelling": ""
+    },
+    {
+      "discriminant": 219,
+      "variant": "MouseLeave",
+      "spelling": "mouseLeave"
+    },
+    {
+      "discriminant": 220,
+      "variant": "MouseEnter",
+      "spelling": "mouseEnter"
+    },
+    {
+      "discriminant": 221,
+      "variant": "MouseWithin",
+      "spelling": "mouseWithin"
+    },
+    {
+      "discriminant": 222,
+      "variant": "Script",
+      "spelling": "script"
+    },
+    {
+      "discriminant": 223,
+      "variant": "Class",
+      "spelling": "class"
+    },
+    {
+      "discriminant": 224,
+      "variant": "Count",
+      "spelling": "count"
+    },
+    {
+      "discriminant": 225,
+      "variant": "SpriteNum",
+      "spelling": "spriteNum"
+    },
+    {
+      "discriminant": 226,
+      "variant": "Integerp",
+      "spelling": "integerp"
+    },
+    {
+      "discriminant": 227,
+      "variant": "Floatp",
+      "spelling": "floatp"
+    },
+    {
+      "discriminant": 228,
+      "variant": "Stringp",
+      "spelling": "stringp"
+    },
+    {
+      "discriminant": 229,
+      "variant": "Symbolp",
+      "spelling": "symbolp"
+    },
+    {
+      "discriminant": 230,
+      "variant": "Listp",
+      "spelling": "listp"
+    },
+    {
+      "discriminant": 231,
+      "variant": "Objectp",
+      "spelling": "objectp"
+    },
+    {
+      "discriminant": 232,
+      "variant": "Voidp",
+      "spelling": "voidp"
+    },
+    {
+      "discriminant": 233,
+      "variant": "Rgb",
+      "spelling": "rgb"
+    },
+    {
+      "discriminant": 234,
+      "variant": "PaletteIndex",
+      "spelling": "paletteIndex"
+    },
+    {
+      "discriminant": 235,
+      "variant": "Grayscale",
+      "spelling": "grayscale"
+    },
+    {
+      "discriminant": 236,
+      "variant": "Pastels",
+      "spelling": "pastels"
+    },
+    {
+      "discriminant": 237,
+      "variant": "Vivid",
+      "spelling": "vivid"
+    },
+    {
+      "discriminant": 238,
+      "variant": "Ntsc",
+      "spelling": "ntsc"
+    },
+    {
+      "discriminant": 239,
+      "variant": "Metallic",
+      "spelling": "metallic"
+    },
+    {
+      "discriminant": 240,
+      "variant": "Web216",
+      "spelling": "web216"
+    },
+    {
+      "discriminant": 241,
+      "variant": "Vga",
+      "spelling": "vga"
+    },
+    {
+      "discriminant": 242,
+      "variant": "SystemWinDir4",
+      "spelling": "systemWinDir4"
+    },
+    {
+      "discriminant": 243,
+      "variant": "SystemWin",
+      "spelling": "systemWin"
+    },
+    {
+      "discriminant": 244,
+      "variant": "SystemMac",
+      "spelling": "systemMac"
+    },
+    {
+      "discriminant": 245,
+      "variant": "Rainbow",
+      "spelling": "rainbow"
+    },
+    {
+      "discriminant": 246,
+      "variant": "ParamCount",
+      "spelling": "paramCount"
+    },
+    {
+      "discriminant": 247,
+      "variant": "Result",
+      "spelling": "result"
+    },
+    {
+      "discriminant": 248,
+      "variant": "Child",
+      "spelling": "child"
+    },
+    {
+      "discriminant": 249,
+      "variant": "Children",
+      "spelling": "children"
+    },
+    {
+      "discriminant": 250,
+      "variant": "Attribute",
+      "spelling": "attribute"
+    },
+    {
+      "discriminant": 251,
+      "variant": "CharData",
+      "spelling": "charData"
+    },
+    {
+      "discriminant": 252,
+      "variant": "Text",
+      "spelling": "text"
+    },
+    {
+      "discriminant": 253,
+      "variant": "AttributeName",
+      "spelling": "attributeName"
+    },
+    {
+      "discriminant": 254,
+      "variant": "AttributeValue",
+      "spelling": "attributeValue"
+    },
+    {
+      "discriminant": 255,
+      "variant": "Call",
+      "spelling": "call"
+    },
+    {
+      "discriminant": 256,
+      "variant": "NewObject",
+      "spelling": "newObject"
+    },
+    {
+      "discriminant": 257,
+      "variant": "CallAncestor",
+      "spelling": "callAncestor"
+    },
+    {
+      "discriminant": 258,
+      "variant": "SendSprite",
+      "spelling": "sendSprite"
+    },
+    {
+      "discriminant": 259,
+      "variant": "SendAllSprites",
+      "spelling": "sendAllSprites"
+    },
+    {
+      "discriminant": 260,
+      "variant": "Do",
+      "spelling": "do"
+    },
+    {
+      "discriminant": 261,
+      "variant": "UpdateStage",
+      "spelling": "updateStage"
+    },
+    {
+      "discriminant": 262,
+      "variant": "Go",
+      "spelling": "go"
+    },
+    {
+      "discriminant": 263,
+      "variant": "Nothing",
+      "spelling": "nothing"
+    },
+    {
+      "discriminant": 264,
+      "variant": "ImportFileInto",
+      "spelling": "importFileInto"
+    },
+    {
+      "discriminant": 265,
+      "variant": "FixedLineSpace",
+      "spelling": "fixedLineSpace"
+    },
+    {
+      "discriminant": 266,
+      "variant": "TopSpacing",
+      "spelling": "topSpacing"
+    },
+    {
+      "discriminant": 267,
+      "variant": "BottomSpacing",
+      "spelling": "bottomSpacing"
+    },
+    {
+      "discriminant": 268,
+      "variant": "Font",
+      "spelling": "font"
+    },
+    {
+      "discriminant": 269,
+      "variant": "FontSize",
+      "spelling": "fontSize"
+    },
+    {
+      "discriminant": 270,
+      "variant": "FontStyle",
+      "spelling": "fontStyle"
+    },
+    {
+      "discriminant": 271,
+      "variant": "TextStyle",
+      "spelling": "textStyle"
+    },
+    {
+      "discriminant": 272,
+      "variant": "Color",
+      "spelling": "color"
+    },
+    {
+      "discriminant": 273,
+      "variant": "Hyperlink",
+      "spelling": "hyperlink"
+    },
+    {
+      "discriminant": 274,
+      "variant": "Delete",
+      "spelling": "delete"
+    },
+    {
+      "discriminant": 275,
+      "variant": "SetContents",
+      "spelling": "setContents"
+    },
+    {
+      "discriminant": 276,
+      "variant": "SetContentsBefore",
+      "spelling": "setContentsBefore"
+    },
+    {
+      "discriminant": 277,
+      "variant": "SetContentsAfter",
+      "spelling": "setContentsAfter"
+    },
+    {
+      "discriminant": 278,
+      "variant": "Split",
+      "spelling": "split"
+    },
+    {
+      "discriminant": 279,
+      "variant": "Fill",
+      "spelling": "fill"
+    },
+    {
+      "discriminant": 280,
+      "variant": "Draw",
+      "spelling": "draw"
+    },
+    {
+      "discriminant": 281,
+      "variant": "ExtractAlpha",
+      "spelling": "extractAlpha"
+    },
+    {
+      "discriminant": 282,
+      "variant": "CopyPixels",
+      "spelling": "copyPixels"
+    },
+    {
+      "discriminant": 283,
+      "variant": "ApplyFilter",
+      "spelling": "applyFilter"
+    },
+    {
+      "discriminant": 284,
+      "variant": "Crop",
+      "spelling": "crop"
+    },
+    {
+      "discriminant": 285,
+      "variant": "SetAlpha",
+      "spelling": "setAlpha"
+    },
+    {
+      "discriminant": 286,
+      "variant": "FloodFill",
+      "spelling": "floodFill"
+    },
+    {
+      "discriminant": 287,
+      "variant": "ParseXML",
+      "spelling": "parseXML"
+    },
+    {
+      "discriminant": 288,
+      "variant": "CreateElement",
+      "spelling": "createElement"
+    },
+    {
+      "discriminant": 289,
+      "variant": "AppendChild",
+      "spelling": "appendChild"
+    },
+    {
+      "discriminant": 290,
+      "variant": "PlayFile",
+      "spelling": "playFile"
+    },
+    {
+      "discriminant": 291,
+      "variant": "PlayNext",
+      "spelling": "playNext"
+    },
+    {
+      "discriminant": 292,
+      "variant": "Queue",
+      "spelling": "queue"
+    },
+    {
+      "discriminant": 293,
+      "variant": "BreakLoop",
+      "spelling": "breakLoop"
+    },
+    {
+      "discriminant": 294,
+      "variant": "FadeIn",
+      "spelling": "fadeIn"
+    },
+    {
+      "discriminant": 295,
+      "variant": "FadeOut",
+      "spelling": "fadeOut"
+    },
+    {
+      "discriminant": 296,
+      "variant": "FadeTo",
+      "spelling": "fadeTo"
+    },
+    {
+      "discriminant": 297,
+      "variant": "SetPlaylist",
+      "spelling": "setPlaylist"
+    },
+    {
+      "discriminant": 298,
+      "variant": "GetPlaylist",
+      "spelling": "getPlaylist"
+    },
+    {
+      "discriminant": 299,
+      "variant": "IsBusy",
+      "spelling": "isBusy"
+    },
+    {
+      "discriminant": 300,
+      "variant": "BgColor",
+      "spelling": "bgColor"
+    },
+    {
+      "discriminant": 301,
+      "variant": "Alignment",
+      "spelling": "alignment"
+    },
+    {
+      "discriminant": 302,
+      "variant": "PropList",
+      "spelling": "propList"
+    },
+    {
+      "discriminant": 303,
+      "variant": "ToString",
+      "spelling": "toString"
+    },
+    {
+      "discriminant": 304,
+      "variant": "ButtonStyle",
+      "spelling": "buttonStyle"
+    },
+    {
+      "discriminant": 305,
+      "variant": "CheckBoxAccess",
+      "spelling": "checkBoxAccess"
+    },
+    {
+      "discriminant": 306,
+      "variant": "CheckBoxType",
+      "spelling": "checkBoxType"
+    },
+    {
+      "discriminant": 307,
+      "variant": "ColorQD",
+      "spelling": "colorQD"
+    },
+    {
+      "discriminant": 308,
+      "variant": "FullColorPermit",
+      "spelling": "fullColorPermit"
+    },
+    {
+      "discriminant": 309,
+      "variant": "ImageDirect",
+      "spelling": "imageDirect"
+    },
+    {
+      "discriminant": 310,
+      "variant": "LastClick",
+      "spelling": "lastClick"
+    },
+    {
+      "discriminant": 311,
+      "variant": "LastEvent",
+      "spelling": "lastEvent"
+    },
+    {
+      "discriminant": 312,
+      "variant": "LastRoll",
+      "spelling": "lastRoll"
+    },
+    {
+      "discriminant": 313,
+      "variant": "MultiSound",
+      "spelling": "multiSound"
+    },
+    {
+      "discriminant": 314,
+      "variant": "PauseState",
+      "spelling": "pauseState"
+    },
+    {
+      "discriminant": 315,
+      "variant": "QuickTimePresent",
+      "spelling": "quickTimePresent"
+    },
+    {
+      "discriminant": 316,
+      "variant": "SwitchColorDepth",
+      "spelling": "switchColorDepth"
+    },
+    {
+      "discriminant": 317,
+      "variant": "PreLoadRAM",
+      "spelling": "preLoadRAM"
+    },
+    {
+      "discriminant": 318,
+      "variant": "VideoForWindowsPresent",
+      "spelling": "videoForWindowsPresent"
+    },
+    {
+      "discriminant": 319,
+      "variant": "NetPresent",
+      "spelling": "netPresent"
+    },
+    {
+      "discriminant": 320,
+      "variant": "SafePlayer",
+      "spelling": "safePlayer"
+    },
+    {
+      "discriminant": 321,
+      "variant": "SoundKeepDevice",
+      "spelling": "soundKeepDevice"
+    },
+    {
+      "discriminant": 322,
+      "variant": "SoundMixMedia",
+      "spelling": "soundMixMedia"
+    },
+    {
+      "discriminant": 323,
+      "variant": "PerFrameHook",
+      "spelling": "perFrameHook"
+    },
+    {
+      "discriminant": 324,
+      "variant": "NumberOfCastMembers",
+      "spelling": "number of castMembers"
+    },
+    {
+      "discriminant": 325,
+      "variant": "NumberOfMenus",
+      "spelling": "number of menus"
+    },
+    {
+      "discriminant": 326,
+      "variant": "NumberOfCastLibs",
+      "spelling": "number of castLibs"
+    },
+    {
+      "discriminant": 327,
+      "variant": "NumberOfXtras",
+      "spelling": "number of xtras"
+    },
+    {
+      "discriminant": 328,
+      "variant": "ShortTime",
+      "spelling": "short time"
+    },
+    {
+      "discriminant": 329,
+      "variant": "AbbrTime",
+      "spelling": "abbr time"
+    },
+    {
+      "discriminant": 330,
+      "variant": "ShortDate",
+      "spelling": "short date"
+    },
+    {
+      "discriminant": 331,
+      "variant": "AbbrDate",
+      "spelling": "abbr date"
+    },
+    {
+      "discriminant": 332,
+      "variant": "LongDate",
+      "spelling": "long date"
+    },
+    {
+      "discriminant": 333,
+      "variant": "UnknownSoundProp",
+      "spelling": "UNKNOWN_SOUND_PROP"
+    },
+    {
+      "discriminant": 334,
+      "variant": "Type",
+      "spelling": "type"
+    },
+    {
+      "discriminant": 335,
+      "variant": "BackColor",
+      "spelling": "backColor"
+    },
+    {
+      "discriminant": 336,
+      "variant": "Bottom",
+      "spelling": "bottom"
+    },
+    {
+      "discriminant": 337,
+      "variant": "CastNum",
+      "spelling": "castNum"
+    },
+    {
+      "discriminant": 338,
+      "variant": "Constraint",
+      "spelling": "constraint"
+    },
+    {
+      "discriminant": 339,
+      "variant": "Cursor",
+      "spelling": "cursor"
+    },
+    {
+      "discriminant": 340,
+      "variant": "ForeColor",
+      "spelling": "foreColor"
+    },
+    {
+      "discriminant": 341,
+      "variant": "Height",
+      "spelling": "height"
+    },
+    {
+      "discriminant": 342,
+      "variant": "Immediate",
+      "spelling": "immediate"
+    },
+    {
+      "discriminant": 343,
+      "variant": "Ink",
+      "spelling": "ink"
+    },
+    {
+      "discriminant": 344,
+      "variant": "Left",
+      "spelling": "left"
+    },
+    {
+      "discriminant": 345,
+      "variant": "LineSize",
+      "spelling": "lineSize"
+    },
+    {
+      "discriminant": 346,
+      "variant": "LocH",
+      "spelling": "locH"
+    },
+    {
+      "discriminant": 347,
+      "variant": "LocV",
+      "spelling": "locV"
+    },
+    {
+      "discriminant": 348,
+      "variant": "MovieRate",
+      "spelling": "movieRate"
+    },
+    {
+      "discriminant": 349,
+      "variant": "MovieTime",
+      "spelling": "movieTime"
+    },
+    {
+      "discriminant": 350,
+      "variant": "Pattern",
+      "spelling": "pattern"
+    },
+    {
+      "discriminant": 351,
+      "variant": "Puppet",
+      "spelling": "puppet"
+    },
+    {
+      "discriminant": 352,
+      "variant": "Right",
+      "spelling": "right"
+    },
+    {
+      "discriminant": 353,
+      "variant": "StartTime",
+      "spelling": "startTime"
+    },
+    {
+      "discriminant": 354,
+      "variant": "StopTime",
+      "spelling": "stopTime"
+    },
+    {
+      "discriminant": 355,
+      "variant": "Stretch",
+      "spelling": "stretch"
+    },
+    {
+      "discriminant": 356,
+      "variant": "Top",
+      "spelling": "top"
+    },
+    {
+      "discriminant": 357,
+      "variant": "Trails",
+      "spelling": "trails"
+    },
+    {
+      "discriminant": 358,
+      "variant": "Visible",
+      "spelling": "visible"
+    },
+    {
+      "discriminant": 359,
+      "variant": "Volume",
+      "spelling": "volume"
+    },
+    {
+      "discriminant": 360,
+      "variant": "Width",
+      "spelling": "width"
+    },
+    {
+      "discriminant": 361,
+      "variant": "Blend",
+      "spelling": "blend"
+    },
+    {
+      "discriminant": 362,
+      "variant": "ScriptNum",
+      "spelling": "scriptNum"
+    },
+    {
+      "discriminant": 363,
+      "variant": "MoveableSprite",
+      "spelling": "moveableSprite"
+    },
+    {
+      "discriminant": 364,
+      "variant": "EditableText",
+      "spelling": "editableText"
+    },
+    {
+      "discriminant": 365,
+      "variant": "ScoreColor",
+      "spelling": "scoreColor"
+    },
+    {
+      "discriminant": 366,
+      "variant": "Loc",
+      "spelling": "loc"
+    },
+    {
+      "discriminant": 367,
+      "variant": "Rect",
+      "spelling": "rect"
+    },
+    {
+      "discriminant": 368,
+      "variant": "MemberNum",
+      "spelling": "memberNum"
+    },
+    {
+      "discriminant": 369,
+      "variant": "CastLibNum",
+      "spelling": "castLibNum"
+    },
+    {
+      "discriminant": 370,
+      "variant": "Member",
+      "spelling": "member"
+    },
+    {
+      "discriminant": 371,
+      "variant": "ScriptInstanceList",
+      "spelling": "scriptInstanceList"
+    },
+    {
+      "discriminant": 372,
+      "variant": "CurrentTime",
+      "spelling": "currentTime"
+    },
+    {
+      "discriminant": 373,
+      "variant": "MostRecentCuePoint",
+      "spelling": "mostRecentCuePoint"
+    },
+    {
+      "discriminant": 374,
+      "variant": "Tweened",
+      "spelling": "tweened"
+    },
+    {
+      "discriminant": 375,
+      "variant": "Picture",
+      "spelling": "picture"
+    },
+    {
+      "discriminant": 376,
+      "variant": "Hilite",
+      "spelling": "hilite"
+    },
+    {
+      "discriminant": 377,
+      "variant": "Size",
+      "spelling": "size"
+    },
+    {
+      "discriminant": 378,
+      "variant": "Pan",
+      "spelling": "pan"
+    },
+    {
+      "discriminant": 379,
+      "variant": "LoopCount",
+      "spelling": "loopCount"
+    },
+    {
+      "discriminant": 380,
+      "variant": "EndTime",
+      "spelling": "endTime"
+    },
+    {
+      "discriminant": 381,
+      "variant": "LoopStartTime",
+      "spelling": "loopStartTime"
+    },
+    {
+      "discriminant": 382,
+      "variant": "LoopEndTime",
+      "spelling": "loopEndTime"
+    },
+    {
+      "discriminant": 383,
+      "variant": "IgnoreWhite",
+      "spelling": "ignoreWhite"
+    },
+    {
+      "discriminant": 384,
+      "variant": "FirstChild",
+      "spelling": "firstChild"
+    },
+    {
+      "discriminant": 385,
+      "variant": "LastChild",
+      "spelling": "lastChild"
+    },
+    {
+      "discriminant": 386,
+      "variant": "ChildNodes",
+      "spelling": "childNodes"
+    },
+    {
+      "discriminant": 387,
+      "variant": "NodeName",
+      "spelling": "nodeName"
+    },
+    {
+      "discriminant": 388,
+      "variant": "NodeValue",
+      "spelling": "nodeValue"
+    },
+    {
+      "discriminant": 389,
+      "variant": "Attributes",
+      "spelling": "attributes"
+    },
+    {
+      "discriminant": 390,
+      "variant": "CastLib",
+      "spelling": "castLib"
+    },
+    {
+      "discriminant": 391,
+      "variant": "FindEmpty",
+      "spelling": "findEmpty"
+    },
+    {
+      "discriminant": 392,
+      "variant": "PreloadNetThing",
+      "spelling": "preloadNetThing"
+    },
+    {
+      "discriminant": 393,
+      "variant": "NetDone",
+      "spelling": "netDone"
+    },
+    {
+      "discriminant": 394,
+      "variant": "MoveToFront",
+      "spelling": "moveToFront"
+    },
+    {
+      "discriminant": 395,
+      "variant": "PreloadMember",
+      "spelling": "preloadMember"
+    },
+    {
+      "discriminant": 396,
+      "variant": "PreloadBuffer",
+      "spelling": "preloadBuffer"
+    },
+    {
+      "discriminant": 397,
+      "variant": "UnloadMember",
+      "spelling": "unloadMember"
+    },
+    {
+      "discriminant": 398,
+      "variant": "Beep",
+      "spelling": "beep"
+    },
+    {
+      "discriminant": 399,
+      "variant": "FlushInputEvents",
+      "spelling": "flushInputEvents"
+    },
+    {
+      "discriminant": 400,
+      "variant": "Offset",
+      "spelling": "offset"
+    },
+    {
+      "discriminant": 401,
+      "variant": "Param",
+      "spelling": "param"
+    },
+    {
+      "discriminant": 402,
+      "variant": "CreateMask",
+      "spelling": "createMask"
+    },
+    {
+      "discriminant": 403,
+      "variant": "CreateMatte",
+      "spelling": "createMatte"
+    },
+    {
+      "discriminant": 404,
+      "variant": "GetAt",
+      "spelling": "getAt"
+    },
+    {
+      "discriminant": 405,
+      "variant": "GetLast",
+      "spelling": "getLast"
+    },
+    {
+      "discriminant": 406,
+      "variant": "GetPos",
+      "spelling": "getPos"
+    },
+    {
+      "discriminant": 407,
+      "variant": "Space",
+      "spelling": "space"
+    },
+    {
+      "discriminant": 408,
+      "variant": "Integer",
+      "spelling": "integer"
+    },
+    {
+      "discriminant": 409,
+      "variant": "NumToChar",
+      "spelling": "numToChar"
+    },
+    {
+      "discriminant": 410,
+      "variant": "Float",
+      "spelling": "float"
+    },
+    {
+      "discriminant": 411,
+      "variant": "Put",
+      "spelling": "put"
+    },
+    {
+      "discriminant": 412,
+      "variant": "Inspect",
+      "spelling": "inspect"
+    },
+    {
+      "discriminant": 413,
+      "variant": "Random",
+      "spelling": "random"
+    },
+    {
+      "discriminant": 414,
+      "variant": "BitAnd",
+      "spelling": "bitAnd"
+    },
+    {
+      "discriminant": 415,
+      "variant": "BitOr",
+      "spelling": "bitOr"
+    },
+    {
+      "discriminant": 416,
+      "variant": "BitNot",
+      "spelling": "bitNot"
+    },
+    {
+      "discriminant": 417,
+      "variant": "Symbol",
+      "spelling": "symbol"
+    },
+    {
+      "discriminant": 418,
+      "variant": "PuppetSprite",
+      "spelling": "puppetSprite"
+    },
+    {
+      "discriminant": 419,
+      "variant": "ClearGlobals",
+      "spelling": "clearGlobals"
+    },
+    {
+      "discriminant": 420,
+      "variant": "Sprite",
+      "spelling": "sprite"
+    },
+    {
+      "discriminant": 421,
+      "variant": "Point",
+      "spelling": "point"
+    },
+    {
+      "discriminant": 422,
+      "variant": "ConstrainH",
+      "spelling": "constrainH"
+    },
+    {
+      "discriminant": 423,
+      "variant": "ConstrainV",
+      "spelling": "constrainV"
+    },
+    {
+      "discriminant": 424,
+      "variant": "Stop",
+      "spelling": "stop"
+    },
+    {
+      "discriminant": 425,
+      "variant": "Rewind",
+      "spelling": "rewind"
+    },
+    {
+      "discriminant": 426,
+      "variant": "Pause",
+      "spelling": "pause"
+    },
+    {
+      "discriminant": 427,
+      "variant": "ExternalParamCount",
+      "spelling": "externalParamCount"
+    },
+    {
+      "discriminant": 428,
+      "variant": "ExternalParamName",
+      "spelling": "externalParamName"
+    },
+    {
+      "discriminant": 429,
+      "variant": "ExternalParamValue",
+      "spelling": "externalParamValue"
+    },
+    {
+      "discriminant": 430,
+      "variant": "GetNextText",
+      "spelling": "getNextText"
+    },
+    {
+      "discriminant": 431,
+      "variant": "GetStreamStatus",
+      "spelling": "getStreamStatus"
+    },
+    {
+      "discriminant": 432,
+      "variant": "NetError",
+      "spelling": "netError"
+    },
+    {
+      "discriminant": 433,
+      "variant": "NetTextResult",
+      "spelling": "netTextResult"
+    },
+    {
+      "discriminant": 434,
+      "variant": "PostNetText",
+      "spelling": "postNetText"
+    },
+    {
+      "discriminant": 435,
+      "variant": "List",
+      "spelling": "list"
+    },
+    {
+      "discriminant": 436,
+      "variant": "Image",
+      "spelling": "image"
+    },
+    {
+      "discriminant": 437,
+      "variant": "Filter",
+      "spelling": "filter"
+    },
+    {
+      "discriminant": 438,
+      "variant": "NewMatrix",
+      "spelling": "newMatrix"
+    },
+    {
+      "discriminant": 439,
+      "variant": "ConstraintDesc",
+      "spelling": "constraintDesc"
+    },
+    {
+      "discriminant": 440,
+      "variant": "GetPixel",
+      "spelling": "getPixel"
+    },
+    {
+      "discriminant": 441,
+      "variant": "SetPixel",
+      "spelling": "setPixel"
+    },
+    {
+      "discriminant": 442,
+      "variant": "Chars",
+      "spelling": "chars"
+    },
+    {
+      "discriminant": 443,
+      "variant": "Abs",
+      "spelling": "abs"
+    },
+    {
+      "discriminant": 444,
+      "variant": "Xtra",
+      "spelling": "xtra"
+    },
+    {
+      "discriminant": 445,
+      "variant": "StopEvent",
+      "spelling": "stopEvent"
+    },
+    {
+      "discriminant": 446,
+      "variant": "GetPref",
+      "spelling": "getPref"
+    },
+    {
+      "discriminant": 447,
+      "variant": "SetPref",
+      "spelling": "setPref"
+    },
+    {
+      "discriminant": 448,
+      "variant": "UrlEncode",
+      "spelling": "urlEncode"
+    },
+    {
+      "discriminant": 449,
+      "variant": "GoToNetPage",
+      "spelling": "goToNetPage"
+    },
+    {
+      "discriminant": 450,
+      "variant": "GoToNetMovie",
+      "spelling": "goToNetMovie"
+    },
+    {
+      "discriminant": 451,
+      "variant": "Pass",
+      "spelling": "pass"
+    },
+    {
+      "discriminant": 452,
+      "variant": "Union",
+      "spelling": "union"
+    },
+    {
+      "discriminant": 453,
+      "variant": "BitXor",
+      "spelling": "bitXor"
+    },
+    {
+      "discriminant": 454,
+      "variant": "Power",
+      "spelling": "power"
+    },
+    {
+      "discriminant": 455,
+      "variant": "Add",
+      "spelling": "add"
+    },
+    {
+      "discriminant": 456,
+      "variant": "Abort",
+      "spelling": "abort"
+    },
+    {
+      "discriminant": 457,
+      "variant": "GetRendererServices",
+      "spelling": "getRendererServices"
+    },
+    {
+      "discriminant": 458,
+      "variant": "GetVariable",
+      "spelling": "getVariable"
+    },
+    {
+      "discriminant": 459,
+      "variant": "SetVariable",
+      "spelling": "setVariable"
+    },
+    {
+      "discriminant": 460,
+      "variant": "GoToFrame",
+      "spelling": "goToFrame"
+    },
+    {
+      "discriminant": 461,
+      "variant": "CallFrame",
+      "spelling": "callFrame"
+    },
+    {
+      "discriminant": 462,
+      "variant": "GetFlashProperty",
+      "spelling": "getFlashProperty"
+    },
+    {
+      "discriminant": 463,
+      "variant": "SetFlashProperty",
+      "spelling": "setFlashProperty"
+    },
+    {
+      "discriminant": 464,
+      "variant": "HitTest",
+      "spelling": "hitTest"
+    },
+    {
+      "discriminant": 465,
+      "variant": "TellTarget",
+      "spelling": "tellTarget"
+    },
+    {
+      "discriminant": 466,
+      "variant": "GetaProp",
+      "spelling": "getaProp"
+    },
+    {
+      "discriminant": 467,
+      "variant": "Inside",
+      "spelling": "inside"
+    },
+    {
+      "discriminant": 468,
+      "variant": "AddProp",
+      "spelling": "addProp"
+    },
+    {
+      "discriminant": 469,
+      "variant": "DeleteProp",
+      "spelling": "deleteProp"
+    },
+    {
+      "discriminant": 470,
+      "variant": "Append",
+      "spelling": "append"
+    },
+    {
+      "discriminant": 471,
+      "variant": "DeleteAt",
+      "spelling": "deleteAt"
+    },
+    {
+      "discriminant": 472,
+      "variant": "DeleteOne",
+      "spelling": "deleteOne"
+    },
+    {
+      "discriminant": 473,
+      "variant": "DeleteAll",
+      "spelling": "deleteAll"
+    },
+    {
+      "discriminant": 474,
+      "variant": "GetOne",
+      "spelling": "getOne"
+    },
+    {
+      "discriminant": 475,
+      "variant": "FindPos",
+      "spelling": "findPos"
+    },
+    {
+      "discriminant": 476,
+      "variant": "SetProp",
+      "spelling": "setProp"
+    },
+    {
+      "discriminant": 477,
+      "variant": "SetaProp",
+      "spelling": "setaProp"
+    },
+    {
+      "discriminant": 478,
+      "variant": "AddAt",
+      "spelling": "addAt"
+    },
+    {
+      "discriminant": 479,
+      "variant": "GetNodes",
+      "spelling": "getNodes"
+    },
+    {
+      "discriminant": 480,
+      "variant": "Duplicate",
+      "spelling": "duplicate"
+    },
+    {
+      "discriminant": 481,
+      "variant": "Erase",
+      "spelling": "erase"
+    },
+    {
+      "discriminant": 482,
+      "variant": "Move",
+      "spelling": "move"
+    },
+    {
+      "discriminant": 483,
+      "variant": "GetProp",
+      "spelling": "getProp"
+    },
+    {
+      "discriminant": 484,
+      "variant": "Min",
+      "spelling": "min"
+    },
+    {
+      "discriminant": 485,
+      "variant": "Max",
+      "spelling": "max"
+    },
+    {
+      "discriminant": 486,
+      "variant": "Sort",
+      "spelling": "sort"
+    },
+    {
+      "discriminant": 487,
+      "variant": "Introspect",
+      "spelling": "introspect"
+    },
+    {
+      "discriminant": 488,
+      "variant": "GetPropAt",
+      "spelling": "getPropAt"
+    },
+    {
+      "discriminant": 489,
+      "variant": "PuppetSound",
+      "spelling": "puppetSound"
+    },
+    {
+      "discriminant": 490,
+      "variant": "Sin",
+      "spelling": "sin"
+    },
+    {
+      "discriminant": 491,
+      "variant": "Cos",
+      "spelling": "cos"
+    },
+    {
+      "discriminant": 492,
+      "variant": "Sqrt",
+      "spelling": "sqrt"
+    },
+    {
+      "discriminant": 493,
+      "variant": "Tan",
+      "spelling": "tan"
+    },
+    {
+      "discriminant": 494,
+      "variant": "Atan",
+      "spelling": "atan"
+    },
+    {
+      "discriminant": 495,
+      "variant": "Sound",
+      "spelling": "sound"
+    },
+    {
+      "discriminant": 496,
+      "variant": "Vector",
+      "spelling": "vector"
+    },
+    {
+      "discriminant": 497,
+      "variant": "Transform",
+      "spelling": "transform"
+    },
+    {
+      "discriminant": 498,
+      "variant": "ShowGlobals",
+      "spelling": "showGlobals"
+    },
+    {
+      "discriminant": 499,
+      "variant": "TellStreamStatus",
+      "spelling": "tellStreamStatus"
+    },
+    {
+      "discriminant": 500,
+      "variant": "Label",
+      "spelling": "label"
+    },
+    {
+      "discriminant": 501,
+      "variant": "Alert",
+      "spelling": "alert"
+    },
+    {
+      "discriminant": 502,
+      "variant": "SoundBusy",
+      "spelling": "soundBusy"
+    },
+    {
+      "discriminant": 503,
+      "variant": "StopSound",
+      "spelling": "stopSound"
+    },
+    {
+      "discriminant": 504,
+      "variant": "Delay",
+      "spelling": "delay"
+    },
+    {
+      "discriminant": 505,
+      "variant": "Halt",
+      "spelling": "halt"
+    },
+    {
+      "discriminant": 506,
+      "variant": "StartTimer",
+      "spelling": "startTimer"
+    },
+    {
+      "discriminant": 507,
+      "variant": "ExternalEvent",
+      "spelling": "externalEvent"
+    },
+    {
+      "discriminant": 508,
+      "variant": "DontPassEvent",
+      "spelling": "dontPassEvent"
+    },
+    {
+      "discriminant": 509,
+      "variant": "FrameReady",
+      "spelling": "frameReady"
+    },
+    {
+      "discriminant": 510,
+      "variant": "Play",
+      "spelling": "play"
+    },
+    {
+      "discriminant": 511,
+      "variant": "SpriteBox",
+      "spelling": "spriteBox"
+    },
+    {
+      "discriminant": 512,
+      "variant": "PuppetTransition",
+      "spelling": "puppetTransition"
+    },
+    {
+      "discriminant": 513,
+      "variant": "Preload",
+      "spelling": "preload"
+    },
+    {
+      "discriminant": 514,
+      "variant": "CharPosToLoc",
+      "spelling": "charPosToLoc"
+    },
+    {
+      "discriminant": 515,
+      "variant": "Bold",
+      "spelling": "bold"
+    },
+    {
+      "discriminant": 516,
+      "variant": "Italic",
+      "spelling": "italic"
+    },
+    {
+      "discriminant": 517,
+      "variant": "Underline",
+      "spelling": "underline"
+    },
+    {
+      "discriminant": 518,
+      "variant": "GetTime",
+      "spelling": "getTime"
+    },
+    {
+      "discriminant": 519,
+      "variant": "SetTime",
+      "spelling": "setTime"
+    },
+    {
+      "discriminant": 520,
+      "variant": "GetFullYear",
+      "spelling": "getFullYear"
+    },
+    {
+      "discriminant": 521,
+      "variant": "GetYear",
+      "spelling": "getYear"
+    },
+    {
+      "discriminant": 522,
+      "variant": "GetMonth",
+      "spelling": "getMonth"
+    },
+    {
+      "discriminant": 523,
+      "variant": "GetDate",
+      "spelling": "getDate"
+    },
+    {
+      "discriminant": 524,
+      "variant": "GetHours",
+      "spelling": "getHours"
+    },
+    {
+      "discriminant": 525,
+      "variant": "GetMinutes",
+      "spelling": "getMinutes"
+    },
+    {
+      "discriminant": 526,
+      "variant": "GetSeconds",
+      "spelling": "getSeconds"
+    },
+    {
+      "discriminant": 527,
+      "variant": "SetFullYear",
+      "spelling": "setFullYear"
+    },
+    {
+      "discriminant": 528,
+      "variant": "SetYear",
+      "spelling": "setYear"
+    },
+    {
+      "discriminant": 529,
+      "variant": "SetMonth",
+      "spelling": "setMonth"
+    },
+    {
+      "discriminant": 530,
+      "variant": "SetDate",
+      "spelling": "setDate"
+    },
+    {
+      "discriminant": 531,
+      "variant": "SetHours",
+      "spelling": "setHours"
+    },
+    {
+      "discriminant": 532,
+      "variant": "SetMinutes",
+      "spelling": "setMinutes"
+    },
+    {
+      "discriminant": 533,
+      "variant": "SetSeconds",
+      "spelling": "setSeconds"
+    },
+    {
+      "discriminant": 534,
+      "variant": "Palette",
+      "spelling": "palette"
+    },
+    {
+      "discriminant": 535,
+      "variant": "Player",
+      "spelling": "player"
+    },
+    {
+      "discriminant": 536,
+      "variant": "Movie",
+      "spelling": "movie"
+    },
+    {
+      "discriminant": 537,
+      "variant": "Mouse",
+      "spelling": "mouse"
+    },
+    {
+      "discriminant": 538,
+      "variant": "Xml",
+      "spelling": "xml"
+    },
+    {
+      "discriminant": 539,
+      "variant": "Math",
+      "spelling": "math"
+    },
+    {
+      "discriminant": 540,
+      "variant": "FilterType",
+      "spelling": "filterType"
+    },
+    {
+      "discriminant": 541,
+      "variant": "LinearList",
+      "spelling": "linearList"
+    },
+    {
+      "discriminant": 542,
+      "variant": "Duration",
+      "spelling": "duration"
+    },
+    {
+      "discriminant": 543,
+      "variant": "LoopsRemaining",
+      "spelling": "loopsRemaining"
+    },
+    {
+      "discriminant": 544,
+      "variant": "ElapsedTime",
+      "spelling": "elapsedTime"
+    },
+    {
+      "discriminant": 545,
+      "variant": "SampleRate",
+      "spelling": "sampleRate"
+    },
+    {
+      "discriminant": 546,
+      "variant": "SampleCount",
+      "spelling": "sampleCount"
+    },
+    {
+      "discriminant": 547,
+      "variant": "ChannelCount",
+      "spelling": "channelCount"
+    },
+    {
+      "discriminant": 548,
+      "variant": "CuePointTimes",
+      "spelling": "cuePointTimes"
+    },
+    {
+      "discriminant": 549,
+      "variant": "CuePointNames",
+      "spelling": "cuePointNames"
+    },
+    {
+      "discriminant": 550,
+      "variant": "Status",
+      "spelling": "status"
+    },
+    {
+      "discriminant": 551,
+      "variant": "SpriteNumber",
+      "spelling": "spriteNumber"
+    },
+    {
+      "discriminant": 552,
+      "variant": "Skew",
+      "spelling": "skew"
+    },
+    {
+      "discriminant": 553,
+      "variant": "LocZ",
+      "spelling": "locZ"
+    },
+    {
+      "discriminant": 554,
+      "variant": "Camera",
+      "spelling": "camera"
+    },
+    {
+      "discriminant": 555,
+      "variant": "CameraCount",
+      "spelling": "cameraCount"
+    },
+    {
+      "discriminant": 556,
+      "variant": "FlipH",
+      "spelling": "flipH"
+    },
+    {
+      "discriminant": 557,
+      "variant": "FlipV",
+      "spelling": "flipV"
+    },
+    {
+      "discriminant": 558,
+      "variant": "Rotation",
+      "spelling": "rotation"
+    },
+    {
+      "discriminant": 559,
+      "variant": "Visibility",
+      "spelling": "visibility"
+    },
+    {
+      "discriminant": 560,
+      "variant": "Moveable",
+      "spelling": "moveable"
+    },
+    {
+      "discriminant": 561,
+      "variant": "StartFrame",
+      "spelling": "startFrame"
+    },
+    {
+      "discriminant": 562,
+      "variant": "EndFrame",
+      "spelling": "endFrame"
+    },
+    {
+      "discriminant": 563,
+      "variant": "Playing",
+      "spelling": "playing"
+    },
+    {
+      "discriminant": 564,
+      "variant": "FrameCount",
+      "spelling": "frameCount"
+    },
+    {
+      "discriminant": 565,
+      "variant": "CurrentFrame",
+      "spelling": "currentFrame"
+    },
+    {
+      "discriminant": 566,
+      "variant": "ActionsEnabled",
+      "spelling": "actionsEnabled"
+    },
+    {
+      "discriminant": 567,
+      "variant": "ButtonsEnabled",
+      "spelling": "buttonsEnabled"
+    },
+    {
+      "discriminant": 568,
+      "variant": "Quality",
+      "spelling": "quality"
+    },
+    {
+      "discriminant": 569,
+      "variant": "ScaleMode",
+      "spelling": "scaleMode"
+    },
+    {
+      "discriminant": 570,
+      "variant": "PlayBackMode",
+      "spelling": "playBackMode"
+    },
+    {
+      "discriminant": 571,
+      "variant": "CenterRegPoint",
+      "spelling": "centerRegPoint"
+    },
+    {
+      "discriminant": 572,
+      "variant": "DefaultRectMode",
+      "spelling": "defaultRectMode"
+    },
+    {
+      "discriminant": 573,
+      "variant": "EventPassMode",
+      "spelling": "eventPassMode"
+    },
+    {
+      "discriminant": 574,
+      "variant": "ClickMode",
+      "spelling": "clickMode"
+    },
+    {
+      "discriminant": 575,
+      "variant": "FixedRate",
+      "spelling": "fixedRate"
+    },
+    {
+      "discriminant": 576,
+      "variant": "StreamMode",
+      "spelling": "streamMode"
+    },
+    {
+      "discriminant": 577,
+      "variant": "BroadcastProps",
+      "spelling": "broadcastProps"
+    },
+    {
+      "discriminant": 578,
+      "variant": "Linked",
+      "spelling": "linked"
+    },
+    {
+      "discriminant": 579,
+      "variant": "PosterFrame",
+      "spelling": "posterFrame"
+    },
+    {
+      "discriminant": 580,
+      "variant": "MouseOverButton",
+      "spelling": "mouseOverButton"
+    },
+    {
+      "discriminant": 581,
+      "variant": "ViewScale",
+      "spelling": "viewScale"
+    },
+    {
+      "discriminant": 582,
+      "variant": "OriginMode",
+      "spelling": "originMode"
+    },
+    {
+      "discriminant": 583,
+      "variant": "OriginH",
+      "spelling": "originH"
+    },
+    {
+      "discriminant": 584,
+      "variant": "OriginV",
+      "spelling": "originV"
+    },
+    {
+      "discriminant": 585,
+      "variant": "ViewH",
+      "spelling": "viewH"
+    },
+    {
+      "discriminant": 586,
+      "variant": "ViewV",
+      "spelling": "viewV"
+    },
+    {
+      "discriminant": 587,
+      "variant": "FlashRect",
+      "spelling": "flashRect"
+    },
+    {
+      "discriminant": 588,
+      "variant": "DefaultRect",
+      "spelling": "defaultRect"
+    },
+    {
+      "discriminant": 589,
+      "variant": "OriginPoint",
+      "spelling": "originPoint"
+    },
+    {
+      "discriminant": 590,
+      "variant": "ViewPoint",
+      "spelling": "viewPoint"
+    },
+    {
+      "discriminant": 591,
+      "variant": "BytesStreamed",
+      "spelling": "bytesStreamed"
+    },
+    {
+      "discriminant": 592,
+      "variant": "BufferSize",
+      "spelling": "bufferSize"
+    },
+    {
+      "discriminant": 593,
+      "variant": "Scale",
+      "spelling": "scale"
+    },
+    {
+      "discriminant": 594,
+      "variant": "Editable",
+      "spelling": "editable"
+    },
+    {
+      "discriminant": 595,
+      "variant": "ScriptList",
+      "spelling": "scriptList"
+    },
+    {
+      "discriminant": 596,
+      "variant": "StreamSize",
+      "spelling": "streamSize"
+    },
+    {
+      "discriminant": 597,
+      "variant": "ImageEnabled",
+      "spelling": "imageEnabled"
+    },
+    {
+      "discriminant": 598,
+      "variant": "Static",
+      "spelling": "static"
+    },
+    {
+      "discriminant": 599,
+      "variant": "Quad",
+      "spelling": "quad"
+    },
+    {
+      "discriminant": 600,
+      "variant": "MouseUpOutSide",
+      "spelling": "mouseUpOutSide"
+    },
+    {
+      "discriminant": 601,
+      "variant": "GetPropertyDescriptionList",
+      "spelling": "getPropertyDescriptionList"
+    },
+    {
+      "discriminant": 602,
+      "variant": "Default",
+      "spelling": "default"
+    },
+    {
+      "discriminant": 603,
+      "variant": "ASquares",
+      "spelling": "aSquares"
+    },
+    {
+      "discriminant": 604,
+      "variant": "MeshDeformTexLayer",
+      "spelling": "meshDeformTexLayer"
+    },
+    {
+      "discriminant": 605,
+      "variant": "TextureCoordinateList",
+      "spelling": "textureCoordinateList"
+    },
+    {
+      "discriminant": 606,
+      "variant": "Items",
+      "spelling": "items"
+    },
+    {
+      "discriminant": 607,
+      "variant": "Data",
+      "spelling": "data"
+    },
+    {
+      "discriminant": 608,
+      "variant": "_Player",
+      "spelling": "_player"
+    },
+    {
+      "discriminant": 609,
+      "variant": "_Movie",
+      "spelling": "_movie"
+    },
+    {
+      "discriminant": 610,
+      "variant": "_Mouse",
+      "spelling": "_mouse"
+    },
+    {
+      "discriminant": 611,
+      "variant": "_System",
+      "spelling": "_system"
+    },
+    {
+      "discriminant": 612,
+      "variant": "_Sound",
+      "spelling": "_sound"
+    },
+    {
+      "discriminant": 613,
+      "variant": "_Key",
+      "spelling": "_key"
+    },
+    {
+      "discriminant": 614,
+      "variant": "Unknown",
+      "spelling": "unknown"
+    },
+    {
+      "discriminant": 615,
+      "variant": "Position",
+      "spelling": "position"
+    },
+    {
+      "discriminant": 616,
+      "variant": "AxisAngle",
+      "spelling": "axisAngle"
+    },
+    {
+      "discriminant": 617,
+      "variant": "Identity",
+      "spelling": "identity"
+    },
+    {
+      "discriminant": 618,
+      "variant": "Translate",
+      "spelling": "translate"
+    },
+    {
+      "discriminant": 619,
+      "variant": "PreTranslate",
+      "spelling": "preTranslate"
+    },
+    {
+      "discriminant": 620,
+      "variant": "Rotate",
+      "spelling": "rotate"
+    },
+    {
+      "discriminant": 621,
+      "variant": "PreRotate",
+      "spelling": "preRotate"
+    },
+    {
+      "discriminant": 622,
+      "variant": "PreScale",
+      "spelling": "preScale"
+    },
+    {
+      "discriminant": 623,
+      "variant": "Inverse",
+      "spelling": "inverse"
+    },
+    {
+      "discriminant": 624,
+      "variant": "Multiply",
+      "spelling": "multiply"
+    },
+    {
+      "discriminant": 625,
+      "variant": "Interpolate",
+      "spelling": "interpolate"
+    },
+    {
+      "discriminant": 626,
+      "variant": "InterpolateTo",
+      "spelling": "interpolateTo"
+    },
+    {
+      "discriminant": 627,
+      "variant": "GetPropRef",
+      "spelling": "getPropRef"
+    },
+    {
+      "discriminant": 628,
+      "variant": "DrawRect",
+      "spelling": "drawRect"
+    },
+    {
+      "discriminant": 629,
+      "variant": "SourceRect",
+      "spelling": "sourceRect"
+    },
+    {
+      "discriminant": 630,
+      "variant": "Title",
+      "spelling": "title"
+    },
+    {
+      "discriminant": 631,
+      "variant": "Media",
+      "spelling": "media"
+    },
+    {
+      "discriminant": 632,
+      "variant": "PaletteRef",
+      "spelling": "paletteRef"
+    },
+    {
+      "discriminant": 633,
+      "variant": "Depth",
+      "spelling": "depth"
+    },
+    {
+      "discriminant": 634,
+      "variant": "UseAlpha",
+      "spelling": "useAlpha"
+    },
+    {
+      "discriminant": 635,
+      "variant": "TrimWhiteSpace",
+      "spelling": "trimWhiteSpace"
+    },
+    {
+      "discriminant": 636,
+      "variant": "ButtonType",
+      "spelling": "buttonType"
+    },
+    {
+      "discriminant": 637,
+      "variant": "WordWrap",
+      "spelling": "wordWrap"
+    },
+    {
+      "discriminant": 638,
+      "variant": "Border",
+      "spelling": "border"
+    },
+    {
+      "discriminant": 639,
+      "variant": "PushButton",
+      "spelling": "pushButton"
+    },
+    {
+      "discriminant": 640,
+      "variant": "CheckBox",
+      "spelling": "checkBox"
+    },
+    {
+      "discriminant": 641,
+      "variant": "RadioButton",
+      "spelling": "radioButton"
+    },
+    {
+      "discriminant": 642,
+      "variant": "Adjust",
+      "spelling": "adjust"
+    },
+    {
+      "discriminant": 643,
+      "variant": "Scroll",
+      "spelling": "scroll"
+    },
+    {
+      "discriminant": 644,
+      "variant": "Fixed",
+      "spelling": "fixed"
+    },
+    {
+      "discriminant": 645,
+      "variant": "None",
+      "spelling": "none"
+    },
+    {
+      "discriminant": 646,
+      "variant": "Miter",
+      "spelling": "miter"
+    },
+    {
+      "discriminant": 647,
+      "variant": "Round",
+      "spelling": "round"
+    },
+    {
+      "discriminant": 648,
+      "variant": "Front",
+      "spelling": "front"
+    },
+    {
+      "discriminant": 649,
+      "variant": "Tunnel",
+      "spelling": "tunnel"
+    },
+    {
+      "discriminant": 650,
+      "variant": "Back",
+      "spelling": "back"
+    },
+    {
+      "discriminant": 651,
+      "variant": "TopLeft",
+      "spelling": "topLeft"
+    },
+    {
+      "discriminant": 652,
+      "variant": "TopCenter",
+      "spelling": "topCenter"
+    },
+    {
+      "discriminant": 653,
+      "variant": "TopRight",
+      "spelling": "topRight"
+    },
+    {
+      "discriminant": 654,
+      "variant": "MiddleLeft",
+      "spelling": "middleLeft"
+    },
+    {
+      "discriminant": 655,
+      "variant": "MiddleCenter",
+      "spelling": "middleCenter"
+    },
+    {
+      "discriminant": 656,
+      "variant": "MiddleRight",
+      "spelling": "middleRight"
+    },
+    {
+      "discriminant": 657,
+      "variant": "BottomLeft",
+      "spelling": "bottomLeft"
+    },
+    {
+      "discriminant": 658,
+      "variant": "BottomCenter",
+      "spelling": "bottomCenter"
+    },
+    {
+      "discriminant": 659,
+      "variant": "BottomRight",
+      "spelling": "bottomRight"
+    },
+    {
+      "discriminant": 660,
+      "variant": "Normal",
+      "spelling": "normal"
+    },
+    {
+      "discriminant": 661,
+      "variant": "CopyInk",
+      "spelling": "copyInk"
+    },
+    {
+      "discriminant": 662,
+      "variant": "OtherInk",
+      "spelling": "otherInk"
+    },
+    {
+      "discriminant": 663,
+      "variant": "BoxType",
+      "spelling": "boxType"
+    },
+    {
+      "discriminant": 664,
+      "variant": "Antialias",
+      "spelling": "antialias"
+    },
+    {
+      "discriminant": 665,
+      "variant": "Plain",
+      "spelling": "plain"
+    },
+    {
+      "discriminant": 666,
+      "variant": "PreviewText",
+      "spelling": "previewText"
+    },
+    {
+      "discriminant": 667,
+      "variant": "PreviewHtml",
+      "spelling": "previewHtml"
+    },
+    {
+      "discriminant": 668,
+      "variant": "Energy",
+      "spelling": "energy"
+    },
+    {
+      "discriminant": 669,
+      "variant": "Equal",
+      "spelling": "equal"
+    },
+    {
+      "discriminant": 670,
+      "variant": "Automatic",
+      "spelling": "automatic"
+    },
+    {
+      "discriminant": 671,
+      "variant": "IsInitialized",
+      "spelling": "isInitialized"
+    },
+    {
+      "discriminant": 672,
+      "variant": "Gravity",
+      "spelling": "gravity"
+    },
+    {
+      "discriminant": 673,
+      "variant": "Friction",
+      "spelling": "friction"
+    },
+    {
+      "discriminant": 674,
+      "variant": "Restitution",
+      "spelling": "restitution"
+    },
+    {
+      "discriminant": 675,
+      "variant": "LinearDamping",
+      "spelling": "linearDamping"
+    },
+    {
+      "discriminant": 676,
+      "variant": "AngularDamping",
+      "spelling": "angularDamping"
+    },
+    {
+      "discriminant": 677,
+      "variant": "ContactTolerance",
+      "spelling": "contactTolerance"
+    },
+    {
+      "discriminant": 678,
+      "variant": "SleepThreshold",
+      "spelling": "sleepThreshold"
+    },
+    {
+      "discriminant": 679,
+      "variant": "SleepMode",
+      "spelling": "sleepMode"
+    },
+    {
+      "discriminant": 680,
+      "variant": "ScalingFactor",
+      "spelling": "scalingFactor"
+    },
+    {
+      "discriminant": 681,
+      "variant": "TimeStep",
+      "spelling": "timeStep"
+    },
+    {
+      "discriminant": 682,
+      "variant": "TimeStepMode",
+      "spelling": "timeStepMode"
+    },
+    {
+      "discriminant": 683,
+      "variant": "SubSteps",
+      "spelling": "subSteps"
+    },
+    {
+      "discriminant": 684,
+      "variant": "SimulationTime",
+      "spelling": "simulationTime"
+    },
+    {
+      "discriminant": 685,
+      "variant": "LinearVelocity",
+      "spelling": "linearVelocity"
+    },
+    {
+      "discriminant": 686,
+      "variant": "Init",
+      "spelling": "init"
+    },
+    {
+      "discriminant": 687,
+      "variant": "Initialize",
+      "spelling": "initialize"
+    },
+    {
+      "discriminant": 688,
+      "variant": "PauseSimulation",
+      "spelling": "pauseSimulation"
+    },
+    {
+      "discriminant": 689,
+      "variant": "ResumeSimulation",
+      "spelling": "resumeSimulation"
+    },
+    {
+      "discriminant": 690,
+      "variant": "Simulate",
+      "spelling": "simulate"
+    },
+    {
+      "discriminant": 691,
+      "variant": "GetSimulationTime",
+      "spelling": "getSimulationTime"
+    },
+    {
+      "discriminant": 692,
+      "variant": "CreateRigidBody",
+      "spelling": "createRigidBody"
+    },
+    {
+      "discriminant": 693,
+      "variant": "CreateRigidBodyFromProxy",
+      "spelling": "createRigidBodyFromProxy"
+    },
+    {
+      "discriminant": 694,
+      "variant": "DeleteRigidBody",
+      "spelling": "deleteRigidBody"
+    },
+    {
+      "discriminant": 695,
+      "variant": "GetRigidBody",
+      "spelling": "getRigidBody"
+    },
+    {
+      "discriminant": 696,
+      "variant": "GetRigidBodies",
+      "spelling": "getRigidBodies"
+    },
+    {
+      "discriminant": 697,
+      "variant": "GetSleepingBodies",
+      "spelling": "getSleepingBodies"
+    },
+    {
+      "discriminant": 698,
+      "variant": "GetSleepingRigidBodies",
+      "spelling": "getSleepingRigidBodies"
+    },
+    {
+      "discriminant": 699,
+      "variant": "CreateProxyTemplate",
+      "spelling": "createProxyTemplate"
+    },
+    {
+      "discriminant": 700,
+      "variant": "AddProxyTemplate",
+      "spelling": "addProxyTemplate"
+    },
+    {
+      "discriminant": 701,
+      "variant": "LoadProxyTemplate",
+      "spelling": "loadProxyTemplate"
+    },
+    {
+      "discriminant": 702,
+      "variant": "CreateSpring",
+      "spelling": "createSpring"
+    },
+    {
+      "discriminant": 703,
+      "variant": "CreateLinearJoint",
+      "spelling": "createLinearJoint"
+    },
+    {
+      "discriminant": 704,
+      "variant": "CreateAngularJoint",
+      "spelling": "createAngularJoint"
+    },
+    {
+      "discriminant": 705,
+      "variant": "CreateD6Joint",
+      "spelling": "createD6Joint"
+    },
+    {
+      "discriminant": 706,
+      "variant": "DeleteSpring",
+      "spelling": "deleteSpring"
+    },
+    {
+      "discriminant": 707,
+      "variant": "DeleteConstraint",
+      "spelling": "deleteConstraint"
+    },
+    {
+      "discriminant": 708,
+      "variant": "DeleteRigidBodyConstraints",
+      "spelling": "deleteRigidBodyConstraints"
+    },
+    {
+      "discriminant": 709,
+      "variant": "GetSpring",
+      "spelling": "getSpring"
+    },
+    {
+      "discriminant": 710,
+      "variant": "GetConstraint",
+      "spelling": "getConstraint"
+    },
+    {
+      "discriminant": 711,
+      "variant": "GetAllSprings",
+      "spelling": "getAllSprings"
+    },
+    {
+      "discriminant": 712,
+      "variant": "GetAllConstraints",
+      "spelling": "getAllConstraints"
+    },
+    {
+      "discriminant": 713,
+      "variant": "CreateCloth",
+      "spelling": "createCloth"
+    },
+    {
+      "discriminant": 714,
+      "variant": "DeleteCloth",
+      "spelling": "deleteCloth"
+    },
+    {
+      "discriminant": 715,
+      "variant": "GetCloth",
+      "spelling": "getCloth"
+    },
+    {
+      "discriminant": 716,
+      "variant": "GetCloths",
+      "spelling": "getCloths"
+    },
+    {
+      "discriminant": 717,
+      "variant": "CreateClothResource",
+      "spelling": "createClothResource"
+    },
+    {
+      "discriminant": 718,
+      "variant": "CreateController",
+      "spelling": "createController"
+    },
+    {
+      "discriminant": 719,
+      "variant": "DeleteController",
+      "spelling": "deleteController"
+    },
+    {
+      "discriminant": 720,
+      "variant": "GetController",
+      "spelling": "getController"
+    },
+    {
+      "discriminant": 721,
+      "variant": "GetControllers",
+      "spelling": "getControllers"
+    },
+    {
+      "discriminant": 722,
+      "variant": "CreateTerrainDesc",
+      "spelling": "createTerrainDesc"
+    },
+    {
+      "discriminant": 723,
+      "variant": "CreateTerrain",
+      "spelling": "createTerrain"
+    },
+    {
+      "discriminant": 724,
+      "variant": "DeleteTerrain",
+      "spelling": "deleteTerrain"
+    },
+    {
+      "discriminant": 725,
+      "variant": "GetTerrain",
+      "spelling": "getTerrain"
+    },
+    {
+      "discriminant": 726,
+      "variant": "GetTerrains",
+      "spelling": "getTerrains"
+    },
+    {
+      "discriminant": 727,
+      "variant": "EnableCollision",
+      "spelling": "enableCollision"
+    },
+    {
+      "discriminant": 728,
+      "variant": "DisableCollision",
+      "spelling": "disableCollision"
+    },
+    {
+      "discriminant": 729,
+      "variant": "EnableCollisionCallback",
+      "spelling": "enableCollisionCallback"
+    },
+    {
+      "discriminant": 730,
+      "variant": "DisableCollisionCallback",
+      "spelling": "disableCollisionCallback"
+    },
+    {
+      "discriminant": 731,
+      "variant": "GetCollisionCallback",
+      "spelling": "getCollisionCallback"
+    },
+    {
+      "discriminant": 732,
+      "variant": "GetCollisionDisabledPairs",
+      "spelling": "getCollisionDisabledPairs"
+    },
+    {
+      "discriminant": 733,
+      "variant": "GetCollisionCallbackDisabledPairs",
+      "spelling": "getCollisionCallbackDisabledPairs"
+    },
+    {
+      "discriminant": 734,
+      "variant": "RegisterCollisionCallback",
+      "spelling": "registerCollisionCallback"
+    },
+    {
+      "discriminant": 735,
+      "variant": "RegisterForCollisions",
+      "spelling": "registerForCollisions"
+    },
+    {
+      "discriminant": 736,
+      "variant": "RemoveCollisionCallback",
+      "spelling": "removeCollisionCallback"
+    },
+    {
+      "discriminant": 737,
+      "variant": "RemoveCallback",
+      "spelling": "removeCallback"
+    },
+    {
+      "discriminant": 738,
+      "variant": "NotifyCollisions",
+      "spelling": "notifyCollisions"
+    },
+    {
+      "discriminant": 739,
+      "variant": "EnableCollisionGroupFlag",
+      "spelling": "enableCollisionGroupFlag"
+    },
+    {
+      "discriminant": 740,
+      "variant": "GetRayCastClosestShape",
+      "spelling": "getRayCastClosestShape"
+    },
+    {
+      "discriminant": 741,
+      "variant": "RayCastClosest",
+      "spelling": "rayCastClosest"
+    },
+    {
+      "discriminant": 742,
+      "variant": "GetRayCastAllShapes",
+      "spelling": "getRayCastAllShapes"
+    },
+    {
+      "discriminant": 743,
+      "variant": "RayCastAll",
+      "spelling": "rayCastAll"
+    },
+    {
+      "discriminant": 744,
+      "variant": "GetBoundingBox",
+      "spelling": "getBoundingBox"
+    },
+    {
+      "discriminant": 745,
+      "variant": "GetBoundingSphere",
+      "spelling": "getBoundingSphere"
+    },
+    {
+      "discriminant": 746,
+      "variant": "Terrain",
+      "spelling": "terrain"
+    },
+    {
+      "discriminant": 747,
+      "variant": "ElevationMatrix",
+      "spelling": "elevationMatrix"
+    },
+    {
+      "discriminant": 748,
+      "variant": "RigidBody",
+      "spelling": "rigidBody"
+    },
+    {
+      "discriminant": 749,
+      "variant": "Spring",
+      "spelling": "spring"
+    },
+    {
+      "discriminant": 750,
+      "variant": "LinearJoint",
+      "spelling": "linearJoint"
+    },
+    {
+      "discriminant": 751,
+      "variant": "AngularJoint",
+      "spelling": "angularJoint"
+    },
+    {
+      "discriminant": 752,
+      "variant": "D6Joint",
+      "spelling": "d6Joint"
+    },
+    {
+      "discriminant": 753,
+      "variant": "BodyA",
+      "spelling": "bodyA"
+    },
+    {
+      "discriminant": 754,
+      "variant": "BodyB",
+      "spelling": "bodyB"
+    },
+    {
+      "discriminant": 755,
+      "variant": "PointA",
+      "spelling": "pointA"
+    },
+    {
+      "discriminant": 756,
+      "variant": "PointB",
+      "spelling": "pointB"
+    },
+    {
+      "discriminant": 757,
+      "variant": "RigidBodyA",
+      "spelling": "rigidBodyA"
+    },
+    {
+      "discriminant": 758,
+      "variant": "RigidBodyB",
+      "spelling": "rigidBodyB"
+    },
+    {
+      "discriminant": 759,
+      "variant": "Pca",
+      "spelling": "pca"
+    },
+    {
+      "discriminant": 760,
+      "variant": "Pcb",
+      "spelling": "pcb"
+    },
+    {
+      "discriminant": 761,
+      "variant": "Stiffness",
+      "spelling": "stiffness"
+    },
+    {
+      "discriminant": 762,
+      "variant": "Damping",
+      "spelling": "damping"
+    },
+    {
+      "discriminant": 763,
+      "variant": "Poca",
+      "spelling": "poca"
+    },
+    {
+      "discriminant": 764,
+      "variant": "Pocb",
+      "spelling": "pocb"
+    },
+    {
+      "discriminant": 765,
+      "variant": "Words",
+      "spelling": "words"
+    },
+    {
+      "discriminant": 766,
+      "variant": "Lines",
+      "spelling": "lines"
+    },
+    {
+      "discriminant": 767,
+      "variant": "AdjustColorFilter",
+      "spelling": "adjustColorFilter"
+    },
+    {
+      "discriminant": 768,
+      "variant": "GlowFilter",
+      "spelling": "glowFilter"
+    },
+    {
+      "discriminant": 769,
+      "variant": "DropShadowFilter",
+      "spelling": "dropShadowFilter"
+    },
+    {
+      "discriminant": 770,
+      "variant": "Brightness",
+      "spelling": "brightness"
+    },
+    {
+      "discriminant": 771,
+      "variant": "Contrast",
+      "spelling": "contrast"
+    },
+    {
+      "discriminant": 772,
+      "variant": "Hue",
+      "spelling": "hue"
+    },
+    {
+      "discriminant": 773,
+      "variant": "Saturation",
+      "spelling": "saturation"
+    },
+    {
+      "discriminant": 774,
+      "variant": "ShapeType",
+      "spelling": "shapeType"
+    },
+    {
+      "discriminant": 775,
+      "variant": "Radius",
+      "spelling": "radius"
+    },
+    {
+      "discriminant": 776,
+      "variant": "LineWidth",
+      "spelling": "lineWidth"
+    },
+    {
+      "discriminant": 777,
+      "variant": "StrokeWidth",
+      "spelling": "strokeWidth"
+    },
+    {
+      "discriminant": 778,
+      "variant": "AutoAlias",
+      "spelling": "AutoAlias"
+    },
+    {
+      "discriminant": 779,
+      "variant": "Center",
+      "spelling": "center"
+    },
+    {
+      "discriminant": 780,
+      "variant": "Linear",
+      "spelling": "linear"
+    },
+    {
+      "discriminant": 781,
+      "variant": "Radial",
+      "spelling": "radial"
+    },
+    {
+      "discriminant": 782,
+      "variant": "ShowAll",
+      "spelling": "showAll"
+    },
+    {
+      "discriminant": 783,
+      "variant": "NoBorder",
+      "spelling": "noBorder"
+    },
+    {
+      "discriminant": 784,
+      "variant": "ExactFit",
+      "spelling": "exactFit"
+    },
+    {
+      "discriminant": 785,
+      "variant": "AutoSize",
+      "spelling": "autoSize"
+    },
+    {
+      "discriminant": 786,
+      "variant": "NoScale",
+      "spelling": "noScale"
+    },
+    {
+      "discriminant": 787,
+      "variant": "Limit",
+      "spelling": "limit"
+    },
+    {
+      "discriminant": 788,
+      "variant": "Html",
+      "spelling": "html"
+    },
+    {
+      "discriminant": 789,
+      "variant": "SampleSize",
+      "spelling": "sampleSize"
+    },
+    {
+      "discriminant": 790,
+      "variant": "Loop",
+      "spelling": "loop"
+    },
+    {
+      "discriminant": 791,
+      "variant": "VertexList",
+      "spelling": "vertexList"
+    },
+    {
+      "discriminant": 792,
+      "variant": "StrokeColor",
+      "spelling": "strokeColor"
+    },
+    {
+      "discriminant": 793,
+      "variant": "Closed",
+      "spelling": "closed"
+    },
+    {
+      "discriminant": 794,
+      "variant": "FillMode",
+      "spelling": "fillMode"
+    },
+    {
+      "discriminant": 795,
+      "variant": "FillColor",
+      "spelling": "fillColor"
+    },
+    {
+      "discriminant": 796,
+      "variant": "BackgroundColor",
+      "spelling": "backgroundColor"
+    },
+    {
+      "discriminant": 797,
+      "variant": "EndColor",
+      "spelling": "endColor"
+    },
+    {
+      "discriminant": 798,
+      "variant": "GradientType",
+      "spelling": "gradientType"
+    },
+    {
+      "discriminant": 799,
+      "variant": "FillScale",
+      "spelling": "fillScale"
+    },
+    {
+      "discriminant": 800,
+      "variant": "FillDirection",
+      "spelling": "fillDirection"
+    },
+    {
+      "discriminant": 801,
+      "variant": "FillOffset",
+      "spelling": "fillOffset"
+    },
+    {
+      "discriminant": 802,
+      "variant": "FillCycles",
+      "spelling": "fillCycles"
+    },
+    {
+      "discriminant": 803,
+      "variant": "RegPointVertex",
+      "spelling": "regPointVertex"
+    },
+    {
+      "discriminant": 804,
+      "variant": "DirectToStage",
+      "spelling": "directToStage"
+    },
+    {
+      "discriminant": 805,
+      "variant": "Solid",
+      "spelling": "solid"
+    },
+    {
+      "discriminant": 806,
+      "variant": "Gradient",
+      "spelling": "gradient"
+    },
+    {
+      "discriminant": 807,
+      "variant": "RegPoint",
+      "spelling": "regPoint"
+    },
+    {
+      "discriminant": 808,
+      "variant": "Vertex",
+      "spelling": "vertex"
+    },
+    {
+      "discriminant": 809,
+      "variant": "Handle1",
+      "spelling": "handle1"
+    },
+    {
+      "discriminant": 810,
+      "variant": "Handle2",
+      "spelling": "handle2"
+    },
+    {
+      "discriminant": 811,
+      "variant": "Model",
+      "spelling": "model"
+    },
+    {
+      "discriminant": 812,
+      "variant": "ModelCount",
+      "spelling": "modelCount"
+    },
+    {
+      "discriminant": 813,
+      "variant": "ModelResource",
+      "spelling": "modelResource"
+    },
+    {
+      "discriminant": 814,
+      "variant": "ModelResourceCount",
+      "spelling": "modelResourceCount"
+    },
+    {
+      "discriminant": 815,
+      "variant": "Shader",
+      "spelling": "shader"
+    },
+    {
+      "discriminant": 816,
+      "variant": "ShaderCount",
+      "spelling": "shaderCount"
+    },
+    {
+      "discriminant": 817,
+      "variant": "Texture",
+      "spelling": "texture"
+    },
+    {
+      "discriminant": 818,
+      "variant": "TextureCount",
+      "spelling": "textureCount"
+    },
+    {
+      "discriminant": 819,
+      "variant": "Light",
+      "spelling": "light"
+    },
+    {
+      "discriminant": 820,
+      "variant": "LightCount",
+      "spelling": "lightCount"
+    },
+    {
+      "discriminant": 821,
+      "variant": "Group",
+      "spelling": "group"
+    },
+    {
+      "discriminant": 822,
+      "variant": "GroupCount",
+      "spelling": "groupCount"
+    },
+    {
+      "discriminant": 823,
+      "variant": "Motion",
+      "spelling": "motion"
+    },
+    {
+      "discriminant": 824,
+      "variant": "MotionCount",
+      "spelling": "motionCount"
+    },
+    {
+      "discriminant": 825,
+      "variant": "State",
+      "spelling": "state"
+    },
+    {
+      "discriminant": 826,
+      "variant": "PercentStreamed",
+      "spelling": "percentStreamed"
+    },
+    {
+      "discriminant": 827,
+      "variant": "AnimationEnabled",
+      "spelling": "animationEnabled"
+    },
+    {
+      "discriminant": 828,
+      "variant": "AmbientColor",
+      "spelling": "ambientColor"
+    },
+    {
+      "discriminant": 829,
+      "variant": "Renderer",
+      "spelling": "renderer"
+    },
+    {
+      "discriminant": 830,
+      "variant": "RendererDeviceList",
+      "spelling": "rendererDeviceList"
+    },
+    {
+      "discriminant": 831,
+      "variant": "ColorBufferDepth",
+      "spelling": "colorBufferDepth"
+    },
+    {
+      "discriminant": 832,
+      "variant": "DepthBufferDepth",
+      "spelling": "depthBufferDepth"
+    },
+    {
+      "discriminant": 833,
+      "variant": "AntiAliasingEnabled",
+      "spelling": "antiAliasingEnabled"
+    },
+    {
+      "discriminant": 834,
+      "variant": "Smoothness",
+      "spelling": "smoothness"
+    },
+    {
+      "discriminant": 835,
+      "variant": "TunnelDepth",
+      "spelling": "tunnelDepth"
+    },
+    {
+      "discriminant": 836,
+      "variant": "BevelDepth",
+      "spelling": "bevelDepth"
+    },
+    {
+      "discriminant": 837,
+      "variant": "BevelType",
+      "spelling": "bevelType"
+    },
+    {
+      "discriminant": 838,
+      "variant": "DisplayFaces",
+      "spelling": "displayFaces"
+    },
+    {
+      "discriminant": 839,
+      "variant": "DisplayMode",
+      "spelling": "displayMode"
+    },
+    {
+      "discriminant": 840,
+      "variant": "DiffuseColor",
+      "spelling": "diffuseColor"
+    },
+    {
+      "discriminant": 841,
+      "variant": "DirectionalPreset",
+      "spelling": "directionalPreset"
+    },
+    {
+      "discriminant": 842,
+      "variant": "DisplayFace",
+      "spelling": "displayFace"
+    },
+    {
+      "discriminant": 843,
+      "variant": "OpenGL",
+      "spelling": "openGL"
+    },
+    {
+      "discriminant": 844,
+      "variant": "Mode3d",
+      "spelling": "mode3d"
+    },
+    {
+      "discriminant": 845,
+      "variant": "ResetWorld",
+      "spelling": "resetWorld"
+    },
+    {
+      "discriminant": 846,
+      "variant": "RevertToWorldDefaults",
+      "spelling": "revertToWorldDefaults"
+    },
+    {
+      "discriminant": 847,
+      "variant": "NewTexture",
+      "spelling": "newTexture"
+    },
+    {
+      "discriminant": 848,
+      "variant": "NewShader",
+      "spelling": "newShader"
+    },
+    {
+      "discriminant": 849,
+      "variant": "NewModel",
+      "spelling": "newModel"
+    },
+    {
+      "discriminant": 850,
+      "variant": "NewModelResource",
+      "spelling": "newModelResource"
+    },
+    {
+      "discriminant": 851,
+      "variant": "NewLight",
+      "spelling": "newLight"
+    },
+    {
+      "discriminant": 852,
+      "variant": "NewCamera",
+      "spelling": "newCamera"
+    },
+    {
+      "discriminant": 853,
+      "variant": "NewGroup",
+      "spelling": "newGroup"
+    },
+    {
+      "discriminant": 854,
+      "variant": "NewMotion",
+      "spelling": "newMotion"
+    },
+    {
+      "discriminant": 855,
+      "variant": "NewMesh",
+      "spelling": "newMesh"
+    },
+    {
+      "discriminant": 856,
+      "variant": "DeleteTexture",
+      "spelling": "deleteTexture"
+    },
+    {
+      "discriminant": 857,
+      "variant": "DeleteShader",
+      "spelling": "deleteShader"
+    },
+    {
+      "discriminant": 858,
+      "variant": "DeleteModel",
+      "spelling": "deleteModel"
+    },
+    {
+      "discriminant": 859,
+      "variant": "DeleteModelResource",
+      "spelling": "deleteModelResource"
+    },
+    {
+      "discriminant": 860,
+      "variant": "DeleteLight",
+      "spelling": "deleteLight"
+    },
+    {
+      "discriminant": 861,
+      "variant": "DeleteCamera",
+      "spelling": "deleteCamera"
+    },
+    {
+      "discriminant": 862,
+      "variant": "DeleteGroup",
+      "spelling": "deleteGroup"
+    },
+    {
+      "discriminant": 863,
+      "variant": "DeleteMotion",
+      "spelling": "deleteMotion"
+    },
+    {
+      "discriminant": 864,
+      "variant": "CloneModelFromCastmember",
+      "spelling": "cloneModelFromCastmember"
+    },
+    {
+      "discriminant": 865,
+      "variant": "CloneMotionFromCastmember",
+      "spelling": "cloneMotionFromCastmember"
+    },
+    {
+      "discriminant": 866,
+      "variant": "CloneDeep",
+      "spelling": "cloneDeep"
+    },
+    {
+      "discriminant": 867,
+      "variant": "LoadFile",
+      "spelling": "loadFile"
+    },
+    {
+      "discriminant": 868,
+      "variant": "Extrude3d",
+      "spelling": "extrude3d"
+    },
+    {
+      "discriminant": 869,
+      "variant": "RegisterForEvent",
+      "spelling": "registerForEvent"
+    },
+    {
+      "discriminant": 870,
+      "variant": "RegisterScript",
+      "spelling": "registerScript"
+    },
+    {
+      "discriminant": 871,
+      "variant": "UnregisterAllEvents",
+      "spelling": "unregisterAllEvents"
+    },
+    {
+      "discriminant": 872,
+      "variant": "ModelsUnderRay",
+      "spelling": "modelsUnderRay"
+    },
+    {
+      "discriminant": 873,
+      "variant": "ModelsUnderLoc",
+      "spelling": "modelsUnderLoc"
+    },
+    {
+      "discriminant": 874,
+      "variant": "ModelUnderLoc",
+      "spelling": "modelUnderLoc"
+    },
+    {
+      "discriminant": 875,
+      "variant": "Distance",
+      "spelling": "distance"
+    },
+    {
+      "discriminant": 876,
+      "variant": "IsectPosition",
+      "spelling": "isectPosition"
+    },
+    {
+      "discriminant": 877,
+      "variant": "IsectNormal",
+      "spelling": "isectNormal"
+    },
+    {
+      "discriminant": 878,
+      "variant": "MeshID",
+      "spelling": "meshID"
+    },
+    {
+      "discriminant": 879,
+      "variant": "FaceID",
+      "spelling": "faceID"
+    },
+    {
+      "discriminant": 880,
+      "variant": "Vertices",
+      "spelling": "vertices"
+    },
+    {
+      "discriminant": 881,
+      "variant": "UvCoord",
+      "spelling": "uvCoord"
+    },
+    {
+      "discriminant": 882,
+      "variant": "U",
+      "spelling": "u"
+    },
+    {
+      "discriminant": 883,
+      "variant": "V",
+      "spelling": "v"
+    },
+    {
+      "discriminant": 884,
+      "variant": "Handler",
+      "spelling": "handler"
+    },
+    {
+      "discriminant": 885,
+      "variant": "Handlers",
+      "spelling": "handlers"
+    },
+    {
+      "discriminant": 886,
+      "variant": "Idle",
+      "spelling": "idle"
+    },
+    {
+      "discriminant": 887,
+      "variant": "Activate",
+      "spelling": "activate"
+    },
+    {
+      "discriminant": 888,
+      "variant": "Deactivate",
+      "spelling": "deactivate"
+    },
+    {
+      "discriminant": 889,
+      "variant": "StandOn",
+      "spelling": "standOn"
+    },
+    {
+      "discriminant": 890,
+      "variant": "UserID",
+      "spelling": "userID"
+    },
+    {
+      "discriminant": 891,
+      "variant": "Password",
+      "spelling": "password"
+    },
+    {
+      "discriminant": 892,
+      "variant": "Movieid",
+      "spelling": "movieid"
+    },
+    {
+      "discriminant": 893,
+      "variant": "X",
+      "spelling": "x"
+    },
+    {
+      "discriminant": 894,
+      "variant": "Y",
+      "spelling": "y"
+    },
+    {
+      "discriminant": 895,
+      "variant": "Z",
+      "spelling": "z"
+    },
+    {
+      "discriminant": 896,
+      "variant": "Magnitude",
+      "spelling": "magnitude"
+    },
+    {
+      "discriminant": 897,
+      "variant": "GetGatewayConnection",
+      "spelling": "getGatewayConnection"
+    },
+    {
+      "discriminant": 898,
+      "variant": "NewMember",
+      "spelling": "newMember"
+    },
+    {
+      "discriminant": 899,
+      "variant": "Push",
+      "spelling": "push"
+    },
+    {
+      "discriminant": 900,
+      "variant": "FindPosNear",
+      "spelling": "findPosNear"
+    },
+    {
+      "discriminant": 901,
+      "variant": "GetTypeOf",
+      "spelling": "getTypeOf"
+    },
+    {
+      "discriminant": 902,
+      "variant": "SetVal",
+      "spelling": "setVal"
+    },
+    {
+      "discriminant": 903,
+      "variant": "GetVal",
+      "spelling": "getVal"
+    },
+    {
+      "discriminant": 904,
+      "variant": "Join",
+      "spelling": "join"
+    },
+    {
+      "discriminant": 905,
+      "variant": "Justify",
+      "spelling": "justify"
+    },
+    {
+      "discriminant": 906,
+      "variant": "RawNew",
+      "spelling": "rawNew"
+    },
+    {
+      "discriminant": 907,
+      "variant": "Step",
+      "spelling": "step"
+    },
+    {
+      "discriminant": 908,
+      "variant": "All",
+      "spelling": "all"
+    },
+    {
+      "discriminant": 909,
+      "variant": "World",
+      "spelling": "world"
+    },
+    {
+      "discriminant": 910,
+      "variant": "MainA",
+      "spelling": "MainA"
+    },
+    {
+      "discriminant": 911,
+      "variant": "DefaultView",
+      "spelling": "DefaultView"
+    },
+    {
+      "discriminant": 912,
+      "variant": "DefaultDirectional",
+      "spelling": "DefaultDirectional"
+    },
+    {
+      "discriminant": 913,
+      "variant": "DefaultAmbient",
+      "spelling": "DefaultAmbient"
+    },
+    {
+      "discriminant": 914,
+      "variant": "TextMaterial",
+      "spelling": "TextMaterial"
+    },
+    {
+      "discriminant": 915,
+      "variant": "DefaultShader",
+      "spelling": "DefaultShader"
+    },
+    {
+      "discriminant": 916,
+      "variant": "_Angle_World",
+      "spelling": "<world>"
+    },
+    {
+      "discriminant": 917,
+      "variant": "Ground",
+      "spelling": "ground"
+    },
+    {
+      "discriminant": 918,
+      "variant": "LinearDashpot",
+      "spelling": "linearDashpot"
+    },
+    {
+      "discriminant": 919,
+      "variant": "AngularDashpot",
+      "spelling": "angularDashpot"
+    },
+    {
+      "discriminant": 920,
+      "variant": "Corrector",
+      "spelling": "corrector"
+    },
+    {
+      "discriminant": 921,
+      "variant": "AudioContextLatency",
+      "spelling": "audioContextLatency"
+    },
+    {
+      "discriminant": 922,
+      "variant": "AudioContext",
+      "spelling": "audioContext"
+    },
+    {
+      "discriminant": 923,
+      "variant": "Comments",
+      "spelling": "comments"
+    },
+    {
+      "discriminant": 924,
+      "variant": "ScriptText",
+      "spelling": "scriptText"
+    },
+    {
+      "discriminant": 925,
+      "variant": "ScriptType",
+      "spelling": "scriptType"
+    },
+    {
+      "discriminant": 926,
+      "variant": "Filled",
+      "spelling": "filled"
+    },
+    {
+      "discriminant": 927,
+      "variant": "SoundChannel",
+      "spelling": "soundChannel"
+    },
+    {
+      "discriminant": 928,
+      "variant": "Url",
+      "spelling": "url"
+    },
+    {
+      "discriminant": 929,
+      "variant": "PercentPlayed",
+      "spelling": "percentPlayed"
+    },
+    {
+      "discriminant": 930,
+      "variant": "PausedAtStart",
+      "spelling": "pausedAtStart"
+    },
+    {
+      "discriminant": 931,
+      "variant": "GetNetText",
+      "spelling": "getNetText"
+    },
+    {
+      "discriminant": 932,
+      "variant": "Intersect",
+      "spelling": "intersect"
+    },
+    {
+      "discriminant": 933,
+      "variant": "Loaded",
+      "spelling": "loaded"
+    },
+    {
+      "discriminant": 934,
+      "variant": "MediaReady",
+      "spelling": "mediaReady"
+    },
+    {
+      "discriminant": 935,
+      "variant": "NumBuffersToPreload",
+      "spelling": "numBuffersToPreload"
+    },
+    {
+      "discriminant": 936,
+      "variant": "NumberOfMembers",
+      "spelling": "number of members"
+    },
+    {
+      "discriminant": 937,
+      "variant": "PlaybackQuality",
+      "spelling": "playbackQuality"
+    },
+    {
+      "discriminant": 938,
+      "variant": "PreloadTime",
+      "spelling": "preloadTime"
+    },
+    {
+      "discriminant": 939,
+      "variant": "Range",
+      "spelling": "range"
+    },
+    {
+      "discriminant": 940,
+      "variant": "Ref",
+      "spelling": "ref"
+    },
+    {
+      "discriminant": 941,
+      "variant": "XAxis",
+      "spelling": "xAxis"
+    },
+    {
+      "discriminant": 942,
+      "variant": "YAxis",
+      "spelling": "yAxis"
+    },
+    {
+      "discriminant": 943,
+      "variant": "ZAxis",
+      "spelling": "zAxis"
+    },
+    {
+      "discriminant": 944,
+      "variant": "DistanceTo",
+      "spelling": "distanceTo"
+    },
+    {
+      "discriminant": 945,
+      "variant": "GetNormalized",
+      "spelling": "getNormalized"
+    },
+    {
+      "discriminant": 946,
+      "variant": "Normalize",
+      "spelling": "normalize"
+    },
+    {
+      "discriminant": 947,
+      "variant": "CrossProduct",
+      "spelling": "crossProduct"
+    },
+    {
+      "discriminant": 948,
+      "variant": "Cross",
+      "spelling": "cross"
+    },
+    {
+      "discriminant": 949,
+      "variant": "DotProduct",
+      "spelling": "dotProduct"
+    },
+    {
+      "discriminant": 950,
+      "variant": "Dot",
+      "spelling": "dot"
+    },
+    {
+      "discriminant": 951,
+      "variant": "AngleBetween",
+      "spelling": "angleBetween"
+    },
+    {
+      "discriminant": 952,
+      "variant": "Ceil",
+      "spelling": "ceil"
+    },
+    {
+      "discriminant": 953,
+      "variant": "Floor",
+      "spelling": "floor"
+    },
+    {
+      "discriminant": 954,
+      "variant": "Asin",
+      "spelling": "asin"
+    },
+    {
+      "discriminant": 955,
+      "variant": "Acos",
+      "spelling": "acos"
+    },
+    {
+      "discriminant": 956,
+      "variant": "Atan2",
+      "spelling": "atan2"
+    },
+    {
+      "discriminant": 957,
+      "variant": "Exp",
+      "spelling": "exp"
+    },
+    {
+      "discriminant": 958,
+      "variant": "Log",
+      "spelling": "log"
+    },
+    {
+      "discriminant": 959,
+      "variant": "Pow",
+      "spelling": "pow"
+    },
+    {
+      "discriminant": 960,
+      "variant": "BonesPlayer",
+      "spelling": "bonesPlayer"
+    },
+    {
+      "discriminant": 961,
+      "variant": "KeyframePlayer",
+      "spelling": "keyframePlayer"
+    },
+    {
+      "discriminant": 962,
+      "variant": "Fog",
+      "spelling": "fog"
+    },
+    {
+      "discriminant": 963,
+      "variant": "ColorBuffer",
+      "spelling": "colorBuffer"
+    },
+    {
+      "discriminant": 964,
+      "variant": "MeshDeform",
+      "spelling": "meshDeform"
+    },
+    {
+      "discriminant": 965,
+      "variant": "Overlay",
+      "spelling": "overlay"
+    },
+    {
+      "discriminant": 966,
+      "variant": "Backdrop",
+      "spelling": "backdrop"
+    },
+    {
+      "discriminant": 967,
+      "variant": "Emitter",
+      "spelling": "emitter"
+    },
+    {
+      "discriminant": 968,
+      "variant": "Bone",
+      "spelling": "bone"
+    },
+    {
+      "discriminant": 969,
+      "variant": "MeshDeformMesh",
+      "spelling": "meshDeformMesh"
+    },
+    {
+      "discriminant": 970,
+      "variant": "Sds",
+      "spelling": "sds"
+    },
+    {
+      "discriminant": 971,
+      "variant": "Lod",
+      "spelling": "lod"
+    },
+    {
+      "discriminant": 972,
+      "variant": "Synchronized",
+      "spelling": "synchronized"
+    },
+    {
+      "discriminant": 973,
+      "variant": "Exponential",
+      "spelling": "exponential"
+    },
+    {
+      "discriminant": 974,
+      "variant": "Exponential2",
+      "spelling": "exponential2"
+    }
+  ]
+}

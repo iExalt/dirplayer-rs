@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 
 use crate::{
     director::lingo::datum::{Datum, DatumType},
-    player::{DatumRef, DirPlayer, ScriptError, symbols::{builtin::BuiltInSymbol, symbol::Symbol}},
+    player::{DatumRef, DirPlayer, ScriptError, symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable}},
 };
 
 use std::sync::Arc;
@@ -54,29 +54,78 @@ pub struct SoundSegment {
     pub member_ref: DatumRef,
     pub loop_count: i32,
     pub loops_remaining: i32,
+    pub playback_rate: f32,
+    pub member_name: String,
     // Note: The Lingo VM likely handles converting the Score's "#beat" value
     // into the sequence of members, so we only need to track the current member and its loop info.
 }
 
 pub struct SoundChannelDatumHandlers {}
 
+
 impl SoundChannelDatumHandlers {
+    fn prepare_playback(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        channel_datum: &DatumRef,
+        member_ref: &DatumRef,
+    ) -> Result<(), ScriptError> {
+        let datum = player.get_datum(member_ref);
+        let rate = SoundChannel::entry_playback_rate(player, symbols, datum)?;
+        let name_datum = Self::get_proplist_prop(
+            player,
+            symbols,
+            datum,
+            Symbol::builtin(BuiltInSymbol::Member),
+        )?;
+        let name = match name_datum.as_ref() {
+            Some(value) => value.string_value(symbols)?,
+            None => datum.string_value(symbols).unwrap_or_default(),
+        };
+        let channel = Self::get_sound_channel_mut(player, channel_datum)?;
+        let mut channel = channel.borrow_mut();
+        channel.playback_rate = rate;
+        channel.playback_member_name = name;
+        Ok(())
+    }
+
     pub fn get_proplist_prop(
         player: &DirPlayer,
+        symbols: &SymbolTable,
         prop_list: &Datum,
         key_name: Symbol,
-    ) -> Option<Datum> {
+    ) -> Result<Option<Datum>, ScriptError> {
+        let key_name_text = symbols
+            .display(&key_name)
+            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+        Self::get_proplist_prop_text(player, symbols, prop_list, key_name_text)
+    }
+
+    fn get_proplist_prop_text(
+        player: &DirPlayer,
+        symbols: &SymbolTable,
+        prop_list: &Datum,
+        key_name_text: &str,
+    ) -> Result<Option<Datum>, ScriptError> {
         if let Datum::PropList(props, _) = prop_list {
             for (key_ref, value_ref) in props {
                 let key = player.get_datum(key_ref);
-                if let Ok(sym) = key.symbol_value() {
-                    if sym == key_name {
-                        return Some(player.get_datum(value_ref).clone());
+                let matches = match key {
+                    Datum::Symbol(sym) => symbols
+                        .display(sym)
+                        .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
+                        .eq_ignore_ascii_case(key_name_text),
+                    Datum::String(text) => {
+                        text.eq_ignore_ascii_case(key_name_text)
                     }
+                    _ => false,
+                };
+                if matches {
+                    return Ok(Some(player.get_datum(value_ref).clone()));
                 }
             }
         }
-        None
+        Ok(None)
     }
 
     pub fn play_segment_for_member(
@@ -140,6 +189,7 @@ impl SoundChannelDatumHandlers {
 
     pub fn call(
         player: &mut DirPlayer,
+        symbols: &SymbolTable,
         datum: &DatumRef,
         handler_name: Symbol,
         args: &Vec<DatumRef>,
@@ -151,6 +201,7 @@ impl SoundChannelDatumHandlers {
                     Self::handle_play(player, datum)?;
                 } else {
                     // play(member) - play a specific member directly
+                    Self::prepare_playback(player, symbols, datum, &args[0])?;
                     Self::handle_play_member(player, datum, &args[0])?;
                 }
                 Ok(datum.clone())
@@ -161,6 +212,7 @@ impl SoundChannelDatumHandlers {
                         "playFile requires a member argument".to_string(),
                     ));
                 }
+                Self::prepare_playback(player, symbols, datum, &args[0])?;
                 Self::handle_play_file(player, datum, &args[0], 1)?;
                 Ok(datum.clone())
             }
@@ -186,7 +238,7 @@ impl SoundChannelDatumHandlers {
                         "queue requires a member argument".to_string(),
                     ));
                 }
-                Self::handle_queue(player, datum, &args[0])?;
+                Self::handle_queue(player, symbols, datum, &args[0])?;
                 Ok(datum.clone())
             }
             Some(BuiltInSymbol::BreakLoop) => {
@@ -241,7 +293,7 @@ impl SoundChannelDatumHandlers {
                         "setPlayList requires a list argument".to_string(),
                     ));
                 }
-                Self::handle_set_playlist(player, datum, &args[0])?;
+                Self::handle_set_playlist(player, symbols, datum, &args[0])?;
                 Ok(datum.clone())
             }
             Some(BuiltInSymbol::GetPlaylist) => Self::handle_get_playlist(player, datum),
@@ -249,22 +301,39 @@ impl SoundChannelDatumHandlers {
                 let is_busy = Self::handle_is_busy(player, datum)?;
                 Ok(player.alloc_datum(Datum::Int(if is_busy { 1 } else { 0 })))
             }
-            _ => Err(ScriptError::new(format!(
-                "No handler {handler_name} for sound channel"
-            ))),
+            _ => {
+                let handler_text = symbols
+                    .display(&handler_name)
+                    .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
+                    .to_owned();
+                Err(ScriptError::new(format!(
+                    "No handler {handler_text} for sound channel"
+                )))
+            }
         }
     }
 
     pub fn get_prop(
         player: &DirPlayer,
+        symbols: &SymbolTable,
         datum: &DatumRef,
         prop: Symbol,
     ) -> Result<Datum, ScriptError> {
+        match datum {
+            DatumRef::Void => &Datum::Void,
+            _ => player
+                .allocator
+                .try_get_datum(datum)
+                .ok_or_else(|| ScriptError::new(format!("invalid datum reference {datum}")))?,
+        };
         // Get the Rc<RefCell<SoundChannel>>
         let channel_rc = Self::get_sound_channel(player, datum)?;
 
         // Borrow the inner SoundChannel
         let channel = channel_rc.borrow();
+        let prop_name = symbols
+            .display(&prop)
+            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
 
         match prop.into_builtin() {
             Some(BuiltInSymbol::Volume) => Ok(Datum::Float(channel.volume as f64)),
@@ -283,7 +352,17 @@ impl SoundChannelDatumHandlers {
             Some(BuiltInSymbol::Status) => Ok(Datum::Int(channel.status.clone() as i32)),
             Some(BuiltInSymbol::Member) => {
                 match &channel.member {
-                    Some(member_ref) => Ok(player.get_datum(member_ref).clone()),
+                    Some(member_ref) => {
+                        let member = match member_ref {
+                            DatumRef::Void => &Datum::Void,
+                            _ => player
+                                .allocator
+                                .try_get_datum(member_ref)
+                                .ok_or_else(|| ScriptError::new(format!("invalid datum reference {member_ref}")))?,
+                        };
+                        crate::player::compare::validate_direct_symbol_fields(member, symbols)?;
+                        Ok(member.clone())
+                    }
                     None => Ok(Datum::Void),
                 }
             }
@@ -298,13 +377,14 @@ impl SoundChannelDatumHandlers {
             }
             _ => Err(ScriptError::new(format!(
                 "Cannot get property {} for sound channel",
-                prop
+                prop_name
             ))),
         }
     }
 
     pub fn set_prop(
         player: &mut DirPlayer,
+        symbols: &SymbolTable,
         datum: &DatumRef,
         prop: Symbol,
         value_ref: &DatumRef,
@@ -347,7 +427,7 @@ impl SoundChannelDatumHandlers {
             }
             _ => Err(ScriptError::new(format!(
                 "Cannot set property {} for sound channel",
-                prop
+                symbols.display(&prop).unwrap_or("<foreign symbol>")
             ))),
         }
     }
@@ -524,6 +604,7 @@ impl SoundChannelDatumHandlers {
 
     fn handle_queue(
         player: &mut DirPlayer,
+        symbols: &SymbolTable,
         datum: &DatumRef,
         member: &DatumRef,
     ) -> Result<(), ScriptError> {
@@ -540,8 +621,7 @@ impl SoundChannelDatumHandlers {
             _ => member.clone(),
         };
         let channel = Self::get_sound_channel_mut(player, datum)?;
-        SoundChannel::entry_playback_rate(player, player.get_datum(&entry))?;
-        channel.borrow_mut().queue(entry, player);
+        channel.borrow_mut().queue(entry, player, symbols)?;
         Ok(())
     }
 
@@ -585,6 +665,7 @@ impl SoundChannelDatumHandlers {
 
     fn handle_set_playlist(
         player: &mut DirPlayer,
+        symbols: &SymbolTable,
         datum: &DatumRef,
         list_ref: &DatumRef,
     ) -> Result<DatumRef, ScriptError> {
@@ -628,27 +709,28 @@ impl SoundChannelDatumHandlers {
 
         for (idx, segment_ref) in lingo_list.iter().enumerate() {
             let segment_datum = player.get_datum(segment_ref).clone();
-            SoundChannel::entry_playback_rate(player, &segment_datum)?;
+            SoundChannel::entry_playback_rate(player, symbols, &segment_datum)?;
 
-            if let Datum::PropList(props, _) = segment_datum {
+            if let Datum::PropList(ref props, _) = segment_datum {
+                // This path intentionally keeps the original last-key-wins
+                // behavior for duplicate #member/#loopCount entries.
                 let mut member_value: Option<Datum> = None;
                 let mut loopcount_value: Option<i32> = None;
-
                 for (key_ref, value_ref) in props {
-                    let key = player.get_datum(&key_ref);
-                    if let Ok(sym) = key.symbol_value() {
-                        let value = player.get_datum(&value_ref).clone();
-
-                        match sym.into_builtin() {
-                            Some(BuiltInSymbol::Member) => {
-                                member_value = Some(value.clone());
-                            }
-                            Some(BuiltInSymbol::LoopCount) => {
-                                if let Datum::Int(n) = value {
-                                    loopcount_value = Some(n);
-                                }
-                            }
-                            _ => {}
+                    let key = player.get_datum(key_ref);
+                    let key_text = match key {
+                        Datum::Symbol(sym) => symbols
+                            .display(sym)
+                            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?,
+                        Datum::String(text) => text.as_str(),
+                        _ => continue,
+                    };
+                    let value = player.get_datum(value_ref).clone();
+                    if key_text.eq_ignore_ascii_case("member") {
+                        member_value = Some(value);
+                    } else if key_text.eq_ignore_ascii_case("loopCount") {
+                        if let Datum::Int(n) = value {
+                            loopcount_value = Some(n);
                         }
                     }
                 }
@@ -657,7 +739,7 @@ impl SoundChannelDatumHandlers {
                 // Default loopCount to 1 when not provided (consistent with queue() and set_playlist())
                 let loop_count = loopcount_value.unwrap_or(1);
 
-                match (member_value, loop_count) {
+                match (member_value.as_ref(), loop_count) {
                     // ✅ valid member and positive loopCount
                     (Some(_member_val), loop_count) if loop_count > 0 => {
                         // Store the original proplist ref (not the extracted member datum)
@@ -666,6 +748,12 @@ impl SoundChannelDatumHandlers {
                             member_ref: segment_ref.clone(),
                             loop_count,
                             loops_remaining: loop_count,
+                            playback_rate: SoundChannel::entry_playback_rate(player, symbols, &segment_datum)?,
+                            member_name: member_value
+                                .as_ref()
+                                .map(|value| value.string_value(symbols))
+                                .transpose()?
+                                .unwrap_or_default(),
                         });
                         playlist.push(segment_ref.clone());
                     }
@@ -1188,8 +1276,13 @@ impl SoundChannel {
         Ok(rate)
     }
 
-    fn entry_playback_rate(player: &DirPlayer, datum: &Datum) -> Result<f32, ScriptError> {
-        let shift = Self::get_proplist_prop(player, datum, Symbol::from_str("rateShift"));
+    fn entry_playback_rate(player: &DirPlayer, symbols: &SymbolTable, datum: &Datum) -> Result<f32, ScriptError> {
+        let shift = SoundChannelDatumHandlers::get_proplist_prop_text(
+            player,
+            symbols,
+            datum,
+            "rateShift",
+        )?;
         let semitones = match shift {
             None => 0.0,
             Some(Datum::Int(n)) => n as f64,
@@ -1493,14 +1586,25 @@ impl SoundChannel {
         }
     }
 
-    fn get_proplist_prop(player: &DirPlayer, prop_list: &Datum, key_name: Symbol) -> Option<Datum> {
+    fn get_builtin_proplist_prop(player: &DirPlayer, prop_list: &Datum, key_name: Symbol) -> Option<Datum> {
         if let Datum::PropList(props, _) = prop_list {
+            let key_name_text = match key_name.into_builtin() {
+                Some(BuiltInSymbol::Member) => "member",
+                Some(BuiltInSymbol::LoopCount) => "loopCount",
+                Some(BuiltInSymbol::StartTime) => "startTime",
+                _ => return None,
+            };
             for (key_ref, value_ref) in props {
                 let key = player.get_datum(key_ref);
-                if let Ok(sym) = key.symbol_value() {
-                    if sym == key_name {
-                        return Some(player.get_datum(value_ref).clone());
+                let matches = match key {
+                    Datum::Symbol(sym) => *sym == key_name,
+                    Datum::String(text) => {
+                        text.eq_ignore_ascii_case(key_name_text)
                     }
+                    _ => false,
+                };
+                if matches {
+                    return Some(player.get_datum(value_ref).clone());
                 }
             }
         }
@@ -1593,7 +1697,7 @@ impl SoundChannel {
         // index=None. Falling back to segment 0 keeps playback alive
         // in that race; otherwise we silently bail and `status` stays
         // Playing forever with no actual audio.
-        let (member_ref, channel_num, is_decoding) = {
+        let (member_ref, playback_rate, member_name, channel_num, is_decoding) = {
             let mut ch = channel_rc.borrow_mut();
             if ch.current_segment_index.is_none() && !ch.playlist_segments.is_empty() {
                 ch.current_segment_index = Some(0);
@@ -1609,6 +1713,8 @@ impl SoundChannel {
             };
             (
                 seg.member_ref.clone(),
+                seg.playback_rate,
+                seg.member_name.clone(),
                 ch.channel_num,
                 ch.is_decoding.clone(),
             )
@@ -1626,6 +1732,11 @@ impl SoundChannel {
         // Resolve the sound member and then call play_file which will use the guarded MP3 path if needed
         // We call play_file with Rc to ensure no borrow conflicts
         let rc_clone = channel_rc.clone();
+        {
+            let mut ch = channel_rc.borrow_mut();
+            ch.playback_rate = playback_rate;
+            ch.playback_member_name = member_name;
+        }
         debug!("🚀 About to spawn MP3 decode task (play_current_segment_async)");
         crate::player::spawn_player_local(async move {
             debug!("mp3 task started");
@@ -1728,7 +1839,7 @@ impl SoundChannel {
         Ok(())
     }
 
-    fn resolve_sound_member(player: &DirPlayer, datum: &Datum) -> Option<SoundMember> {
+    fn resolve_sound_member(player: &DirPlayer, datum: &Datum, prepared_name: &str) -> Option<SoundMember> {
         // Case 1: Direct CastMember reference
         if let Datum::CastMember(member_ref) = datum {
             let cast_member = player.movie.cast_manager.find_member_by_ref(member_ref)?;
@@ -1771,7 +1882,13 @@ impl SoundChannel {
         }
 
         // Case 2: String member name lookup
-        if let Ok(member_name) = datum.string_value() {
+        let member_name = match datum {
+            Datum::String(name) => Some(name.clone()),
+            Datum::StringChunk(_, _, name) => Some(name.clone()),
+            _ if !matches!(datum, Datum::PropList(..)) && !prepared_name.is_empty() => Some(prepared_name.to_owned()),
+            _ => None,
+        };
+        if let Some(member_name) = member_name {
             // Find member by name
             if let Some(member_ref) = player.movie.cast_manager.find_member_ref_by_name(&member_name) {
                 let cast_member = player.movie.cast_manager.find_member_by_ref(&member_ref)?;
@@ -1789,7 +1906,7 @@ impl SoundChannel {
         }
 
         // Case 3: PropList with #member property (for playlist items)
-        let member_datum = Self::get_proplist_prop(player, datum, Symbol::builtin(BuiltInSymbol::Member))?;
+        let member_datum = Self::get_builtin_proplist_prop(player, datum, Symbol::builtin(BuiltInSymbol::Member))?;
 
         match member_datum {
             Datum::CastMember(ref member_ref) => {
@@ -1922,27 +2039,20 @@ impl SoundChannel {
 
         // Retrieve datum
         let datum = player.get_datum(&member_ref);
-        let inner_member = Self::get_proplist_prop(player, datum, Symbol::builtin(BuiltInSymbol::Member));
+        let inner_member = Self::get_builtin_proplist_prop(player, datum, Symbol::builtin(BuiltInSymbol::Member));
         let resolved_datum = inner_member.as_ref().unwrap_or(datum);
+        let member_name = self_rc.borrow().playback_member_name.clone();
         let member_name = match resolved_datum {
             Datum::CastMember(r) => player.movie.cast_manager.find_member_by_ref(r).map(|m| m.name.clone()).unwrap_or_default(),
-            _ => resolved_datum.string_value().unwrap_or_default(),
-        };
-        let playback_rate = match Self::entry_playback_rate(player, datum) {
-            Ok(rate) => rate,
-            Err(e) => {
-                self_rc.borrow_mut().status = SoundStatus::Idle;
-                error!("sound channel {}: invalid rateShift: {:?}", channel_num + 1, e);
-                return;
-            }
+            Datum::String(name) | Datum::StringChunk(_, _, name) => name.clone(),
+            _ => member_name,
         };
         {
             let mut ch = self_rc.borrow_mut();
-            ch.playback_rate = playback_rate;
             ch.playback_member_name = member_name.clone();
         }
 
-        if let Some(sound_member) = Self::resolve_sound_member(player, &datum) {
+        if let Some(sound_member) = Self::resolve_sound_member(player, &datum, &member_name) {
             // Update expected sample rate
             {
                 let mut this = self_rc.borrow_mut();
@@ -2277,7 +2387,7 @@ impl SoundChannel {
             error!(
                 "sound channel {}: cannot resolve sound member {} (member type: {}, entry type: {})",
                 channel_num + 1,
-                resolved_datum.string_value().unwrap_or_else(|_| "<unresolved>".into()),
+                member_name.clone(),
                 resolved_datum.type_str(), datum.type_str()
             );
         }
@@ -3637,25 +3747,30 @@ impl SoundChannel {
         }
     }
 
-    pub fn queue(&mut self, datum_ref: DatumRef, player: &DirPlayer) {
+    pub fn queue(&mut self, datum_ref: DatumRef, player: &DirPlayer, symbols: &SymbolTable) -> Result<(), ScriptError> {
         let datum = player.get_datum(&datum_ref);
 
         let props = match datum {
             Datum::PropList(p, _) if !p.is_empty() => p,
             _ => {
                 debug!("⚠️ queue(): called with non-propList or empty list — ignored");
-                return;
+                return Ok(());
             }
         };
 
-        let member_opt = SoundChannel::get_proplist_prop(player, &datum, Symbol::builtin(BuiltInSymbol::Member));
+        let member_opt = SoundChannelDatumHandlers::get_proplist_prop(player, symbols, &datum, Symbol::builtin(BuiltInSymbol::Member))?;
         if member_opt.is_none() {
             warn!("⚠️ queue(): missing #member — ignored");
-            return;
+            return Ok(());
         }
+        let member_name = member_opt
+            .as_ref()
+            .map(|value| value.string_value(symbols))
+            .transpose()?
+            .unwrap_or_default();
 
         let loop_count = if let Some(Datum::Int(count)) =
-            SoundChannel::get_proplist_prop(player, &datum, Symbol::builtin(BuiltInSymbol::LoopCount))
+            SoundChannelDatumHandlers::get_proplist_prop(player, symbols, &datum, Symbol::builtin(BuiltInSymbol::LoopCount))?
         {
             count
         } else {
@@ -3668,7 +3783,7 @@ impl SoundChannel {
         // exactly at the time of cue #cm. Without honouring this, playback
         // restarts at 0ms after every user click, re-firing the whole cue
         // list from the top. Accept Int or Float (Director is lax here).
-        let start_time_ms = match SoundChannel::get_proplist_prop(player, &datum, Symbol::from_str("startTime")) {
+        let start_time_ms = match SoundChannelDatumHandlers::get_proplist_prop(player, symbols, &datum, Symbol::builtin(BuiltInSymbol::StartTime))? {
             Some(Datum::Int(v)) => v as f64,
             Some(Datum::Float(v)) => v,
             _ => 0.0,
@@ -3680,7 +3795,7 @@ impl SoundChannel {
                     "⚠️ queue(): invalid loopCount={} — skipping entry",
                     loop_count
                 );
-            return;
+            return Ok(());
         }
 
         debug!(
@@ -3688,10 +3803,13 @@ impl SoundChannel {
                 self.channel_num, loop_count, self.status
             );
 
+        let playback_rate = SoundChannel::entry_playback_rate(player, symbols, datum)?;
         let segment = SoundSegment {
             member_ref: datum_ref.clone(),
             loop_count,
             loops_remaining: loop_count,
+            playback_rate,
+            member_name,
         };
 
         self.playlist_segments.push(segment);
@@ -3705,28 +3823,29 @@ impl SoundChannel {
 
         // DON'T auto-start or change current_segment_index here
         // That's the job of play() or playNext()
+        Ok(())
     }
 
     pub fn break_loop(&mut self) {
         self.loops_remaining = 0;
     }
 
-    pub fn set_playlist(&mut self, list: Vec<DatumRef>, player: &DirPlayer) {
+    pub fn set_playlist(&mut self, list: Vec<DatumRef>, player: &DirPlayer, symbols: &SymbolTable) -> Result<(), ScriptError> {
         // Clear current state for this channel
         self.playlist_segments.clear();
         self.playlist.clear();
 
         if list.is_empty() {
             debug!("🧹 Cleared playlist for channel {}", self.channel_num);
-            return;
+            return Ok(());
         }
 
         for datum_ref in list {
             let datum = player.get_datum(&datum_ref);
 
-            if let Some(member_datum) = SoundChannel::get_proplist_prop(player, datum, Symbol::builtin(BuiltInSymbol::Member)) {
+            if let Some(member_datum) = SoundChannelDatumHandlers::get_proplist_prop(player, symbols, datum, Symbol::builtin(BuiltInSymbol::Member))? {
                 let loop_count = if let Some(Datum::Int(count)) =
-                    SoundChannel::get_proplist_prop(player, datum, Symbol::builtin(BuiltInSymbol::LoopCount))
+                    SoundChannelDatumHandlers::get_proplist_prop(player, symbols, datum, Symbol::builtin(BuiltInSymbol::LoopCount))?
                 {
                     count
                 } else {
@@ -3737,6 +3856,8 @@ impl SoundChannel {
                     member_ref: datum_ref.clone(),
                     loop_count,
                     loops_remaining: loop_count,
+                    playback_rate: SoundChannel::entry_playback_rate(player, symbols, datum)?,
+                    member_name: member_datum.string_value(symbols)?,
                 });
                 self.playlist.push(datum_ref.clone());
             }
@@ -3747,6 +3868,7 @@ impl SoundChannel {
         if !self.playlist_segments.is_empty() {
             self.current_segment_index = Some(0);
         }
+        Ok(())
     }
 
     pub fn get_playlist(&self) -> Vec<DatumRef> {
@@ -4403,6 +4525,8 @@ impl SoundChannel {
 
                 // note: A new entry can change both the sound and rateShift.
                 {
+                    self.playback_rate = self.playlist_segments[0].playback_rate;
+                    self.playback_member_name = self.playlist_segments[0].member_name.clone();
                     let member_ref = self.playlist_segments[0].member_ref.clone();
                     let channel_num = self.channel_num;
                     crate::player::spawn_player_local(async move {
@@ -4448,6 +4572,8 @@ impl SoundChannel {
             }
             // Clone member_ref before releasing the borrow on segment
             let member_ref = segment.member_ref.clone();
+            self.playback_rate = segment.playback_rate;
+            self.playback_member_name = segment.member_name.clone();
             debug!("🔁 Looping segment {}", index);
 
             // Try gapless replay from cached buffer first
@@ -4479,6 +4605,8 @@ impl SoundChannel {
         if index < self.playlist_segments.len() {
             self.current_segment_index = Some(index);
             self.playlist_segments[index].loops_remaining = self.playlist_segments[index].loop_count;
+            self.playback_rate = self.playlist_segments[index].playback_rate;
+            self.playback_member_name = self.playlist_segments[index].member_name.clone();
             let member_ref = self.playlist_segments[index].member_ref.clone();
 
             debug!("⏭️ Playing next segment at index {}", index);
@@ -4661,7 +4789,7 @@ mod stop_tests {
     #[test]
     fn stop_empties_the_playlist() {
         let mut ch = SoundChannel::new(4, None);
-        ch.playlist_segments.push(SoundSegment { member_ref: DatumRef::Void, loop_count: 1, loops_remaining: 1 });
+        ch.playlist_segments.push(SoundSegment { member_ref: DatumRef::Void, loop_count: 1, loops_remaining: 1, playback_rate: 1.0, member_name: String::new() });
         ch.playlist.push(DatumRef::Void);
         ch.current_segment_index = Some(0);
         ch.stop();

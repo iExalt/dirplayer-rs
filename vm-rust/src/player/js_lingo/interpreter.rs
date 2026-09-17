@@ -12,7 +12,9 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::player::symbols::symbol::Symbol;
+use super::host_bridge::JsHostBridge;
+
+type HostBridge = Rc<RefCell<dyn JsHostBridge>>;
 
 use super::opcodes::JsOp;
 use super::value::{
@@ -702,7 +704,7 @@ impl JsRuntime {
                 let idx = read_u16_operand(operand).map_err(JsError::new)? as usize;
                 let name = atom_string(&frame.atoms, idx)?;
                 let obj = pop(frame)?;
-                let v = get_property(&obj, &name);
+                let v = get_property(&self.bridge, &obj, &name);
                 frame.stack.push(v);
                 Ok(StepOutcome::Continue)
             }
@@ -711,14 +713,14 @@ impl JsRuntime {
                 let name = atom_string(&frame.atoms, idx)?;
                 let value = pop(frame)?;
                 let obj = pop(frame)?;
-                set_property(&obj, &name, value.clone())?;
+                set_property(&self.bridge, &obj, &name, value.clone())?;
                 frame.stack.push(value);
                 Ok(StepOutcome::Continue)
             }
             JsOp::Getelem => {
                 let key = pop(frame)?;
                 let obj = pop(frame)?;
-                let v = get_element(&obj, &key);
+                let v = get_element(&self.bridge, &obj, &key);
                 frame.stack.push(v);
                 Ok(StepOutcome::Continue)
             }
@@ -726,7 +728,7 @@ impl JsRuntime {
                 let value = pop(frame)?;
                 let key = pop(frame)?;
                 let obj = pop(frame)?;
-                set_element(&obj, &key, value.clone())?;
+                set_element(&self.bridge, &obj, &key, value.clone())?;
                 frame.stack.push(value);
                 Ok(StepOutcome::Continue)
             }
@@ -759,14 +761,14 @@ impl JsRuntime {
                 let name = atom_string(&frame.atoms, idx)?;
                 let value = pop(frame)?;
                 let obj = peek(frame)?.clone();
-                set_property(&obj, &name, value)?;
+                set_property(&self.bridge, &obj, &name, value)?;
                 Ok(StepOutcome::Continue)
             }
             JsOp::Initelem => {
                 let value = pop(frame)?;
                 let key = pop(frame)?;
                 let obj = peek(frame)?.clone();
-                set_element(&obj, &key, value)?;
+                set_element(&self.bridge, &obj, &key, value)?;
                 Ok(StepOutcome::Continue)
             }
             JsOp::Endinit => Ok(StepOutcome::Continue),
@@ -843,10 +845,10 @@ impl JsRuntime {
             JsOp::Decarg | JsOp::Argdec   => incdec_slot(frame, operand, -1, /*arg*/ true,  /*post*/ op == JsOp::Argdec),
             JsOp::Incvar | JsOp::Varinc   => incdec_slot(frame, operand, 1,  /*arg*/ false, /*post*/ op == JsOp::Varinc),
             JsOp::Decvar | JsOp::Vardec   => incdec_slot(frame, operand, -1, /*arg*/ false, /*post*/ op == JsOp::Vardec),
-            JsOp::Incprop | JsOp::Propinc => incdec_prop(frame, operand, 1,  /*post*/ op == JsOp::Propinc),
-            JsOp::Decprop | JsOp::Propdec => incdec_prop(frame, operand, -1, /*post*/ op == JsOp::Propdec),
-            JsOp::Incelem | JsOp::Eleminc => incdec_elem(frame, 1,  /*post*/ op == JsOp::Eleminc),
-            JsOp::Decelem | JsOp::Elemdec => incdec_elem(frame, -1, /*post*/ op == JsOp::Elemdec),
+            JsOp::Incprop | JsOp::Propinc => incdec_prop(&self.bridge, frame, operand, 1,  /*post*/ op == JsOp::Propinc),
+            JsOp::Decprop | JsOp::Propdec => incdec_prop(&self.bridge, frame, operand, -1, /*post*/ op == JsOp::Propdec),
+            JsOp::Incelem | JsOp::Eleminc => incdec_elem(&self.bridge, frame, 1,  /*post*/ op == JsOp::Eleminc),
+            JsOp::Decelem | JsOp::Elemdec => incdec_elem(&self.bridge, frame, -1, /*post*/ op == JsOp::Elemdec),
 
             // ===== Misc =====
             JsOp::Typeof => {
@@ -1107,7 +1109,7 @@ impl JsRuntime {
                 let name = atom_string(&frame.atoms, idx)?;
                 let value = pop(frame)?;
                 let obj = peek(frame)?.clone();
-                set_property(&obj, &name, value)?;
+                set_property(&self.bridge, &obj, &name, value)?;
                 Ok(StepOutcome::Continue)
             }
             JsOp::Gosub => {
@@ -1277,7 +1279,7 @@ impl JsRuntime {
                 let target = pop(frame)?;
                 let has_more = forin_advance(frame, -1)?;
                 if let Some(key) = has_more {
-                    set_property(&target, &name, JsValue::String(Rc::new(key)))?;
+                    set_property(&self.bridge, &target, &name, JsValue::String(Rc::new(key)))?;
                     frame.stack.push(JsValue::Bool(true));
                 } else {
                     frame.stack.push(JsValue::Bool(false));
@@ -1306,7 +1308,7 @@ impl JsRuntime {
                 let target = pop(frame)?;
                 let value = pop(frame)?;
                 let key = key_v.to_string();
-                set_property(&target, &key, value)?;
+                set_property(&self.bridge, &target, &key, value)?;
                 Ok(StepOutcome::Continue)
             }
 
@@ -1741,80 +1743,19 @@ fn compare(a: &JsValue, b: &JsValue) -> std::cmp::Ordering {
 
 /// Test-only re-export of get_property (private otherwise).
 #[cfg(test)]
-pub fn get_property_pub(obj: &JsValue, name: &str) -> JsValue { get_property(obj, name) }
-
-/// Bridge from a `JsValue::DirectorRef` property read to Director's own
-/// sprite / cast-member handlers. Returns Undefined on any error so the
-/// JS side sees Lingo's "VOID on missing prop" behaviour rather than
-/// throwing -- matches what `sprite(N).noSuchProp` does in real Director.
-fn director_ref_get_property(kind: &super::value::DirectorRefKind, name: &str) -> JsValue {
-    use super::value::DirectorRefKind;
-    crate::player::reserve_player_mut(|player| {
-        let datum_opt = match kind {
-            DirectorRefKind::Sprite(channel) => {
-                crate::player::score::sprite_get_prop(player, *channel, name.into()).ok()
-            }
-            DirectorRefKind::Member { cast_lib, cast_member } => {
-                let mref = crate::player::cast_lib::CastMemberRef {
-                    cast_lib: *cast_lib,
-                    cast_member: *cast_member,
-                };
-                use crate::player::handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers;
-                CastMemberRefHandlers::get_prop(player, &mref, Symbol::from_str(name)).ok()
-            }
-        };
-        match datum_opt {
-            Some(d) => {
-                let dref = player.alloc_datum(d);
-                super::super::js_lingo_loader::datum_ref_to_js_value(player, &dref)
-            }
-            None => JsValue::Undefined,
-        }
-    })
+pub fn get_property_pub(obj: &JsValue, name: &str) -> JsValue {
+    let bridge: HostBridge = Rc::new(RefCell::new(super::host_bridge::StubBridge));
+    get_property(&bridge, obj, name)
 }
 
-/// Bridge from a `JsValue::DirectorRef` property write to Director's own
-/// sprite / cast-member setters. Errors propagate as JsError so movie code
-/// that assigns an invalid value can `catch` it.
-fn director_ref_set_property(
-    kind: &super::value::DirectorRefKind,
-    name: &str,
-    value: JsValue,
-) -> Result<(), JsError> {
-    use super::value::DirectorRefKind;
-    let datum = crate::player::reserve_player_mut(|player| {
-        let dref = super::super::js_lingo_loader::js_value_to_datum_ref(player, &value);
-        player.get_datum(&dref).clone()
-    });
-    match kind {
-        DirectorRefKind::Sprite(channel) => {
-            crate::player::score::sprite_set_prop(*channel, name.into(), datum)
-                .map_err(|e| JsError::new(format!("sprite({}).{} = ...: {}", channel, name, e.message)))
-        }
-        DirectorRefKind::Member { cast_lib, cast_member } => {
-            let mref = crate::player::cast_lib::CastMemberRef {
-                cast_lib: *cast_lib,
-                cast_member: *cast_member,
-            };
-            use crate::player::handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers;
-            CastMemberRefHandlers::set_prop(&mref, name.into(), datum).map_err(|e| {
-                JsError::new(format!(
-                    "member({} of castLib {}).{} = ...: {}",
-                    cast_member, cast_lib, name, e.message
-                ))
-            })
-        }
-    }
-}
-
-fn get_property(obj: &JsValue, name: &str) -> JsValue {
+fn get_property(bridge: &HostBridge, obj: &JsValue, name: &str) -> JsValue {
     // Live Director refs: route property reads through the same path the
     // Lingo VM uses, so `sprite(3).locH` returns the channel's current
     // x-coordinate (and any prior writes are visible). Falls back to
     // Undefined on errors (out-of-range channel, unknown property, etc.)
     // -- matches Lingo's "VOID on missing prop" behaviour.
     if let JsValue::DirectorRef(kind) = obj {
-        return director_ref_get_property(kind, name);
+        return bridge.borrow_mut().director_ref_get_property(kind, name);
     }
     match obj {
         JsValue::Object(o) => {
@@ -1822,7 +1763,7 @@ fn get_property(obj: &JsValue, name: &str) -> JsValue {
             if let Some(v) = b.get_own(name) { return v.clone(); }
             if let Some(p) = b.proto.clone() {
                 drop(b);
-                return get_property(&JsValue::Object(p), name);
+                return get_property(bridge, &JsValue::Object(p), name);
             }
             JsValue::Undefined
         }
@@ -2102,9 +2043,9 @@ fn loose_equal_pub(a: &JsValue, b: &JsValue) -> bool {
     loose_equal(a, b)
 }
 
-fn set_property(obj: &JsValue, name: &str, value: JsValue) -> Result<(), JsError> {
+fn set_property(bridge: &HostBridge, obj: &JsValue, name: &str, value: JsValue) -> Result<(), JsError> {
     if let JsValue::DirectorRef(kind) = obj {
-        return director_ref_set_property(kind, name, value);
+        return bridge.borrow_mut().director_ref_set_property(kind, name, value);
     }
     match obj {
         JsValue::Object(o) => { o.borrow_mut().set_own(name, value); Ok(()) }
@@ -2134,14 +2075,14 @@ fn set_property(obj: &JsValue, name: &str, value: JsValue) -> Result<(), JsError
     }
 }
 
-fn get_element(obj: &JsValue, key: &JsValue) -> JsValue {
+fn get_element(bridge: &HostBridge, obj: &JsValue, key: &JsValue) -> JsValue {
     let name = key.to_string();
-    get_property(obj, &name)
+    get_property(bridge, obj, &name)
 }
 
-fn set_element(obj: &JsValue, key: &JsValue, value: JsValue) -> Result<(), JsError> {
+fn set_element(bridge: &HostBridge, obj: &JsValue, key: &JsValue, value: JsValue) -> Result<(), JsError> {
     let name = key.to_string();
-    set_property(obj, &name, value)
+    set_property(bridge, obj, &name, value)
 }
 
 fn incdec_name(
@@ -2202,7 +2143,7 @@ fn incdec_slot(
     Ok(StepOutcome::Continue)
 }
 
-fn incdec_prop(
+fn incdec_prop(bridge: &HostBridge,
     frame: &mut JsFrame,
     operand: &[u8],
     delta: i32,
@@ -2211,21 +2152,21 @@ fn incdec_prop(
     let idx = read_u16_operand(operand).map_err(JsError::new)? as usize;
     let name = atom_string(&frame.atoms, idx)?;
     let obj = pop(frame)?;
-    let old = get_property(&obj, &name);
+    let old = get_property(bridge, &obj, &name);
     let old_n = old.to_number();
     let new_v = num_to_value(old_n + delta as f64);
-    set_property(&obj, &name, new_v.clone())?;
+    set_property(bridge, &obj, &name, new_v.clone())?;
     frame.stack.push(if post { num_to_value(old_n) } else { new_v });
     Ok(StepOutcome::Continue)
 }
 
-fn incdec_elem(frame: &mut JsFrame, delta: i32, post: bool) -> Result<StepOutcome, JsError> {
+fn incdec_elem(bridge: &HostBridge, frame: &mut JsFrame, delta: i32, post: bool) -> Result<StepOutcome, JsError> {
     let key = pop(frame)?;
     let obj = pop(frame)?;
-    let old = get_element(&obj, &key);
+    let old = get_element(bridge, &obj, &key);
     let old_n = old.to_number();
     let new_v = num_to_value(old_n + delta as f64);
-    set_element(&obj, &key, new_v.clone())?;
+    set_element(bridge, &obj, &key, new_v.clone())?;
     frame.stack.push(if post { num_to_value(old_n) } else { new_v });
     Ok(StepOutcome::Continue)
 }

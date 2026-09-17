@@ -5,7 +5,7 @@ use std::sync::Arc;
 use num_derive::FromPrimitive;
 
 use crate::player::{
-    DirPlayer, ScriptError, bitmap::{bitmap::PaletteRef, manager::BitmapRef, mask::BitmapMask}, cast_lib::CastMemberRef, cast_member::Media, datum_ref::DatumRef, handlers::types::TypeHandlers, script_ref::ScriptInstanceRef, sprite::{ColorRef, CursorRef}, symbols::{builtin::BuiltInSymbol, symbol::Symbol}
+    DirPlayer, ScriptError, bitmap::{bitmap::PaletteRef, manager::BitmapRef, mask::BitmapMask}, cast_lib::CastMemberRef, cast_member::Media, datum_ref::DatumRef, handlers::types::TypeHandlers, script_ref::ScriptInstanceRef, sprite::{ColorRef, CursorRef}, symbols::{builtin::BuiltInSymbol, symbol::{Symbol, SymbolError}, symbol_table::SymbolTable}
 };
 
 #[allow(dead_code)]
@@ -63,7 +63,7 @@ pub enum DatumType {
     JsObjectRef,
 }
 
-#[derive(Clone, PartialEq, FromPrimitive)]
+#[derive(Clone, PartialEq, Debug, FromPrimitive)]
 pub enum StringChunkType {
     Item,
     Word,
@@ -71,14 +71,18 @@ pub enum StringChunkType {
     Line,
 }
 
-impl From<Symbol> for StringChunkType {
-    fn from(s: Symbol) -> Self {
-        match s.into_builtin_or_error().unwrap() {
-            BuiltInSymbol::Item | BuiltInSymbol::Items => StringChunkType::Item,
-            BuiltInSymbol::Word | BuiltInSymbol::Words => StringChunkType::Word,
-            BuiltInSymbol::Char | BuiltInSymbol::Chars => StringChunkType::Char,
-            BuiltInSymbol::Line | BuiltInSymbol::Lines => StringChunkType::Line,
-            _ => panic!("Invalid string chunk type"),
+impl StringChunkType {
+    /// Resolve a chunk selector through the caller's symbol table.
+    pub fn from_symbol(symbol: &Symbol, table: &SymbolTable) -> Result<Self, ScriptError> {
+        match symbol.into_builtin_or_error(table)? {
+            BuiltInSymbol::Item | BuiltInSymbol::Items => Ok(Self::Item),
+            BuiltInSymbol::Word | BuiltInSymbol::Words => Ok(Self::Word),
+            BuiltInSymbol::Char | BuiltInSymbol::Chars => Ok(Self::Char),
+            BuiltInSymbol::Line | BuiltInSymbol::Lines => Ok(Self::Line),
+            _ => Err(ScriptError::new(format!(
+                "Invalid string chunk type {}",
+                table.display(symbol).map_err(|_| SymbolError::Foreign)?
+            ))),
         }
     }
 }
@@ -427,13 +431,13 @@ impl Datum {
     }
 
     // TODO(zdimension): this should really return a Cow<str> instead of allocating a String
-    pub fn string_value(&self) -> Result<String, ScriptError> {
+    pub fn string_value(&self, symbols: &SymbolTable) -> Result<String, ScriptError> {
         match self {
             Datum::String(s) => Ok(s.clone()),
             Datum::StringChunk(_, _, str_value) => Ok(str_value.to_owned()),
             Datum::Int(n) => Ok(n.to_string()),
             Datum::Float(n) => Ok(n.to_string()),
-            Datum::Symbol(s) => Ok(s.to_string()),
+            Datum::Symbol(s) => Ok(symbols.display(s).map_err(|_| SymbolError::Foreign)?.to_owned()),
             Datum::Vector(v) => Ok(format!("[{},{},{}]", v[0], v[1], v[2])),
             Datum::Rect(r, f) => {
                 let fmt = |i: usize| {
@@ -465,12 +469,12 @@ impl Datum {
     //     }
     // }
 
-    pub fn string_value_cow(&self) -> Result<Cow<'_, str>, ScriptError> {
+    pub fn string_value_cow<'a>(&'a self, symbols: &'a SymbolTable) -> Result<Cow<'a, str>, ScriptError> {
         match self {
             Datum::String(s) => Ok(Cow::Borrowed(s)),
             Datum::StringChunk(_, _, str_value) => Ok(Cow::Borrowed(str_value)),
             Datum::Int(n) => Ok(Cow::Owned(n.to_string())),
-            Datum::Symbol(s) => Ok(Cow::Owned(s.to_string())),
+            Datum::Symbol(s) => Ok(Cow::Owned(symbols.display(s).map_err(|_| SymbolError::Foreign)?.to_owned())),
             Datum::Vector(v) => Ok(Cow::Owned(format!("[{},{},{}]", v[0], v[1], v[2]))),
             Datum::Rect(r, f) => {
                 let fmt = |i: usize| {
@@ -487,10 +491,13 @@ impl Datum {
         }
     }
 
-    pub fn symbol_value(&self) -> Result<Symbol, ScriptError> {
+    pub fn symbol_value(&self, symbols: &mut SymbolTable) -> Result<Symbol, ScriptError> {
         match self {
-            Datum::Symbol(s) => Ok(*s),
-            Datum::String(s) => Ok(Symbol::from_str(s)),
+            Datum::Symbol(s) => {
+                symbols.display(s).map_err(|_| SymbolError::Foreign)?;
+                Ok(s.clone())
+            }
+            Datum::String(s) => Ok(symbols.intern(s)),
             _ => Err(ScriptError::new(format!(
                 "Cannot convert datum type {} to symbol",
                 self.type_str()
@@ -799,12 +806,12 @@ impl Datum {
         }
     }
 
-    pub fn to_string_mut(&mut self) -> Result<&mut String, ScriptError> {
+    pub fn to_string_mut(&mut self, symbols: &SymbolTable) -> Result<&mut String, ScriptError> {
         // Coerce non-string types to String first (Lingo allows chunk ops on any value)
         match self {
             Datum::String(_) => {}
             _ => {
-                let s = self.string_value()?;
+                let s = self.string_value(symbols)?;
                 *self = Datum::String(s);
             }
         }
@@ -1026,4 +1033,71 @@ pub struct TimeoutInstanceData {
     pub target: DatumRef,
     /// For script-based timeouts (like _TIMER_), this holds the script instance.
     pub script_instance: Option<DatumRef>,
+}
+
+#[cfg(test)]
+mod conversion_tests {
+    use super::*;
+
+    #[test]
+    fn string_conversion_uses_authoritative_table_and_rejects_foreign_symbols() {
+        let mut first = SymbolTable::new();
+        let mut second = SymbolTable::new();
+        assert_eq!(first.owner(), second.owner());
+        let local = first.intern_authoritative("MiXeDName");
+        let foreign = second.intern_authoritative("MiXeDName");
+
+        assert_eq!(
+            Datum::Symbol(local.clone()).string_value(&first).unwrap(),
+            "MiXeDName"
+        );
+        assert_eq!(
+            Datum::Symbol(local.clone()).string_value_cow(&first).unwrap(),
+            "MiXeDName"
+        );
+        assert_eq!(
+            Datum::Symbol(local.clone()).string_value(&second).unwrap_err().to_string(),
+            "symbol belongs to a different table"
+        );
+        assert_eq!(
+            Datum::Symbol(local).string_value_cow(&second).unwrap_err().to_string(),
+            "symbol belongs to a different table"
+        );
+        assert_eq!(Datum::String("name".into()).symbol_value(&mut first).unwrap(),
+            first.intern("name"));
+        assert!(Datum::Symbol(foreign).symbol_value(&mut first).is_err());
+    }
+
+    #[test]
+    fn chunk_symbols_preserve_singular_and_plural_aliases() {
+        let mut table = SymbolTable::new();
+        for (spelling, expected) in [
+            ("item", StringChunkType::Item),
+            ("items", StringChunkType::Item),
+            ("word", StringChunkType::Word),
+            ("words", StringChunkType::Word),
+            ("char", StringChunkType::Char),
+            ("chars", StringChunkType::Char),
+            ("line", StringChunkType::Line),
+            ("lines", StringChunkType::Line),
+        ] {
+            assert_eq!(StringChunkType::from_symbol(&table.intern(spelling), &table).unwrap(), expected);
+        }
+        let invalid = table.intern("Movie");
+        assert!(StringChunkType::from_symbol(&invalid, &table).is_err());
+        let mut foreign_table = SymbolTable::new();
+        assert_eq!(StringChunkType::from_symbol(&foreign_table.intern("item"), &table).unwrap(), StringChunkType::Item);
+        let foreign = foreign_table.intern("ForeignChunkSelector");
+        assert_eq!(
+            StringChunkType::from_symbol(&foreign, &table).unwrap_err().to_string(),
+            "symbol belongs to a different table"
+        );
+    }
+
+    #[test]
+    fn string_value_cow_keeps_float_unsupported() {
+        let table = SymbolTable::new();
+        assert!(Datum::Float(1.5).string_value_cow(&table).is_err());
+        assert_eq!(Datum::Int(3).string_value_cow(&table).unwrap(), "3");
+    }
 }

@@ -10,7 +10,7 @@ use crate::{
     director::enums::BitmapInfo,
     player::{
         cast_lib::CastMemberRef, handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers,
-        sprite::ColorRef, symbols::{builtin::BuiltInSymbol, symbol::Symbol},
+        sprite::ColorRef, symbols::{builtin::BuiltInSymbol, symbol::{Symbol, SymbolError}, symbol_table::SymbolTable},
     },
 };
 use num::FromPrimitive;
@@ -86,20 +86,26 @@ pub enum BuiltInPalette {
 }
 
 impl BuiltInPalette {
-    pub fn from_symbol(symbol: Symbol) -> Option<Self> {
-        match symbol.into_builtin_or_error().ok()? {
-            BuiltInSymbol::Grayscale => Some(BuiltInPalette::GrayScale),
-            BuiltInSymbol::Pastels => Some(BuiltInPalette::Pastels),
-            BuiltInSymbol::Vivid => Some(BuiltInPalette::Vivid),
-            BuiltInSymbol::Ntsc => Some(BuiltInPalette::Ntsc),
-            BuiltInSymbol::Metallic => Some(BuiltInPalette::Metallic),
-            BuiltInSymbol::Web216 => Some(BuiltInPalette::Web216),
-            BuiltInSymbol::Vga => Some(BuiltInPalette::Vga),
-            BuiltInSymbol::SystemWinDir4 => Some(BuiltInPalette::SystemWinDir4),
-            BuiltInSymbol::SystemWin => Some(BuiltInPalette::SystemWin),
-            BuiltInSymbol::SystemMac => Some(BuiltInPalette::SystemMac),
-            BuiltInSymbol::Rainbow => Some(BuiltInPalette::Rainbow),
-            _ => None,
+    pub fn from_symbol(symbol: Symbol, symbols: &SymbolTable) -> Result<Option<Self>, SymbolError> {
+        // Validate dynamic names against their owning table, while preserving
+        // the ordinary `None` result for a local non-palette symbol.
+        symbols.display(&symbol).map_err(|_| SymbolError::Foreign)?;
+        let Some(builtin) = symbol.into_builtin() else {
+            return Ok(None);
+        };
+        match builtin {
+            BuiltInSymbol::Grayscale => Ok(Some(BuiltInPalette::GrayScale)),
+            BuiltInSymbol::Pastels => Ok(Some(BuiltInPalette::Pastels)),
+            BuiltInSymbol::Vivid => Ok(Some(BuiltInPalette::Vivid)),
+            BuiltInSymbol::Ntsc => Ok(Some(BuiltInPalette::Ntsc)),
+            BuiltInSymbol::Metallic => Ok(Some(BuiltInPalette::Metallic)),
+            BuiltInSymbol::Web216 => Ok(Some(BuiltInPalette::Web216)),
+            BuiltInSymbol::Vga => Ok(Some(BuiltInPalette::Vga)),
+            BuiltInSymbol::SystemWinDir4 => Ok(Some(BuiltInPalette::SystemWinDir4)),
+            BuiltInSymbol::SystemWin => Ok(Some(BuiltInPalette::SystemWin)),
+            BuiltInSymbol::SystemMac => Ok(Some(BuiltInPalette::SystemMac)),
+            BuiltInSymbol::Rainbow => Ok(Some(BuiltInPalette::Rainbow)),
+            _ => Ok(None),
         }
     }
 

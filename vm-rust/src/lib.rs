@@ -7,12 +7,15 @@ pub mod rendering;
 pub mod rendering_gpu;
 pub mod utils;
 
-use async_std::task::spawn_local;
+use async_std::{channel::{unbounded, Receiver, Sender}, task::spawn_local};
 use log::{debug, warn};
+use manual_future::ManualFuture;
+use std::sync::atomic::{AtomicU64, Ordering};
 use js_api::JsApi;
 use num::ToPrimitive;
 use utils::set_panic_hook;
 use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
 
 #[macro_use]
 extern crate pest_derive;
@@ -24,9 +27,12 @@ use player::{
     cast_member::CastMemberType,
     commands::{player_dispatch, PlayerVMCommand},
     datum_ref::DatumId,
-    eval::eval_lingo_command,
     init_player, reserve_player_mut, reserve_player_ref,
     score::get_sprite_at,
+    ownership::OwnerToken,
+    session::{ExecutionContext, PlayerId, RuntimeSession, RuntimeSessionHandle},
+    symbols::symbol_table::SymbolOwner,
+    PlayerVMExecutionItem,
     PLAYER_OPT,
 };
 
@@ -35,6 +41,1669 @@ use crate::{player::symbols::symbol::Symbol};
 #[wasm_bindgen]
 extern "C" {
     fn alert(s: &str);
+}
+
+static NEXT_BROWSER_SESSION: AtomicU64 = AtomicU64::new(1);
+
+/// Explicit browser-side capability for one player and its session-owned
+/// symbol table. Host code keeps this handle and passes it to stateful entry
+/// points; no entry point discovers a player through the legacy global slots.
+#[wasm_bindgen]
+pub struct BrowserPlayerHandle {
+    session: RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: OwnerToken,
+    command_tx: Sender<PlayerVMExecutionItem>,
+    renderer: rendering::RendererStateHandle,
+    /// Kept only until the owner-bound command loop takes it.  The loop is
+    /// installed by the frontend executor once the explicit command API is
+    /// linked; retaining the receiver here prevents a constructor from
+    /// silently dropping the queue on an incomplete host integration.
+    command_rx: Option<Receiver<PlayerVMExecutionItem>>,
+}
+
+/// Non-owning Flash callback capability for browser test harnesses. It carries
+/// the existing session/player/owner capability but never removes the player
+/// when dropped; the harness controls retirement explicitly.
+#[wasm_bindgen]
+pub struct BrowserFlashCapability {
+    session: RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: OwnerToken,
+    command_tx: Sender<PlayerVMExecutionItem>,
+}
+
+impl BrowserFlashCapability {
+    pub(crate) fn new(
+        session: RuntimeSessionHandle,
+        player_id: PlayerId,
+        owner: OwnerToken,
+        command_tx: Sender<PlayerVMExecutionItem>,
+    ) -> Self {
+        Self { session, player_id, owner, command_tx }
+    }
+
+    fn with_context<R>(
+        &self,
+        mut callback: impl FnOnce(&mut ExecutionContext<'_>) -> Result<R, JsValue>,
+    ) -> Result<R, JsValue> {
+        let mut session = self.session.try_borrow_mut().map_err(|_| {
+            JsValue::from_str("browser flash capability session is already borrowed")
+        })?;
+        let owner = self.owner.clone();
+        session
+            .with_player(self.player_id, |mut context| {
+                if !owner.is_arena_live() || !owner.same_identity(&context.player.owner) {
+                    return Err(JsValue::from_str("browser flash capability is stale"));
+                }
+                callback(&mut context)
+            })
+            .ok_or_else(|| JsValue::from_str("browser flash player is not installed"))
+            .and_then(|result| result)
+    }
+
+    fn enqueue_raw(&self, command: PlayerVMCommand) -> Result<bool, JsValue> {
+        if !self.owner.is_arena_live() {
+            return Err(JsValue::from_str("browser flash capability is stale"));
+        }
+        self.command_tx
+            .try_send(PlayerVMExecutionItem { command, completer: None })
+            .map_err(|_| JsValue::from_str("browser player command loop stopped"))?;
+        Ok(true)
+    }
+}
+
+#[wasm_bindgen]
+impl BrowserFlashCapability {
+    pub fn owner_identity(&self) -> String {
+        let key = self.owner.key();
+        format!("{}:{}:{}", key.session, key.player, key.generation)
+    }
+
+    pub fn update_flash_frame(
+        &self,
+        sprite_num: i32,
+        width: u32,
+        height: u32,
+        rgba_data: &[u8],
+    ) -> Result<(), JsValue> {
+        self.with_context(|context| {
+            update_flash_frame_for_player(context.player, context.symbols, sprite_num, width, height, rgba_data)
+        })
+    }
+
+    pub fn trigger_lingo_callback_on_script(
+        &self,
+        cast_lib: i32,
+        cast_member: i32,
+        handler_name: String,
+        args_json: String,
+        flash_cast_lib: i32,
+        flash_cast_member: i32,
+    ) -> Result<bool, JsValue> {
+        self.enqueue_raw(PlayerVMCommand::TriggerLingoCallbackOnScriptRaw {
+            cast_lib,
+            cast_member,
+            handler_name,
+            args_json,
+            flash_cast_lib,
+            flash_cast_member,
+        })
+    }
+
+    pub fn local_connection_send(
+        &self,
+        connection_name: String,
+        method_name: String,
+        args_json: String,
+    ) -> Result<bool, JsValue> {
+        self.enqueue_raw(PlayerVMCommand::TriggerLocalConnectionCallbackRaw {
+            connection_name,
+            method_name,
+            args_json,
+        })
+    }
+
+    pub fn dispatch_flash_event(
+        &self,
+        cast_lib: i32,
+        cast_member: i32,
+        body: String,
+    ) -> Result<bool, JsValue> {
+        self.enqueue_raw(PlayerVMCommand::DispatchFlashEventRaw { cast_lib, cast_member, body })
+    }
+
+    pub async fn dispatch_flash_lingo(&self, body: String) -> Result<bool, JsValue> {
+        let trimmed = body.trim().to_owned();
+        if trimmed.is_empty() {
+            return Ok(false);
+        }
+        crate::player::eval_lingo_command_owned(
+            self.session.clone(),
+            self.player_id,
+            self.owner.clone(),
+            trimmed,
+        )
+        .await
+        .map(|_| true)
+        .map_err(|error| JsValue::from_str(&error.message))
+    }
+}
+
+impl BrowserPlayerHandle {
+    async fn dispatch_command(&self, command: PlayerVMCommand) -> Result<player::datum_ref::DatumRef, JsValue> {
+        if !self.owner.is_arena_live() {
+            return Err(JsValue::from_str("browser player handle is stale"));
+        }
+        let (future, completer) = ManualFuture::new();
+        self.command_tx
+            .send(PlayerVMExecutionItem { command, completer: Some(completer) })
+            .await
+            .map_err(|_| JsValue::from_str("browser player command loop stopped"))?;
+        future.await.map_err(|error| JsValue::from_str(&error.message))
+    }
+
+    /// Start exactly one loop for the currently captured owner.  The loop
+    /// receives the session and capability explicitly; using the legacy
+    /// process-global command loop here would let a stale browser handle
+    /// reach a replacement player with the same numeric id.
+    fn start_command_loop(&mut self) {
+        let Some(receiver) = self.command_rx.take() else {
+            return;
+        };
+        let session = self.session.clone();
+        let player_id = self.player_id;
+        let owner = self.owner.clone();
+        spawn_local(async move {
+            crate::player::commands::run_command_loop(receiver, session, player_id, owner).await;
+        });
+    }
+
+    fn with_context<R>(
+        &self,
+        callback: impl FnOnce(&mut ExecutionContext<'_>) -> R,
+    ) -> Result<R, JsValue> {
+        let mut session = self.session.try_borrow_mut().map_err(|_| {
+            JsValue::from_str("browser player session is already borrowed")
+        })?;
+        let current_owner = session
+            .with_player(self.player_id, |context| context.player.owner.clone())
+            .ok_or_else(|| JsValue::from_str("browser player is not installed"))?;
+        if !current_owner.same_identity(&self.owner) || !self.owner.is_arena_live() {
+            return Err(JsValue::from_str("browser player handle is stale"));
+        }
+        session
+            .with_player(self.player_id, |mut context| callback(&mut context))
+            .ok_or_else(|| JsValue::from_str("browser player is not installed"))
+    }
+
+    pub(crate) fn session(&self) -> &RuntimeSessionHandle {
+        &self.session
+    }
+
+    pub(crate) fn player_id(&self) -> PlayerId {
+        self.player_id
+    }
+
+    pub(crate) fn owner(&self) -> &OwnerToken {
+        &self.owner
+    }
+}
+
+#[wasm_bindgen]
+impl BrowserPlayerHandle {
+    /// Create a new isolated browser player and capture its exact owner
+    /// capability. A replacement player receives a different owner even when
+    /// it reuses the same numeric id.
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Result<BrowserPlayerHandle, JsValue> {
+        let session_key = NEXT_BROWSER_SESSION.fetch_add(1, Ordering::Relaxed);
+        let session = RuntimeSession::new(SymbolOwner {
+            session: session_key,
+            generation: 1,
+        })
+        .into_handle();
+        let (command_tx, command_rx) = unbounded();
+        let player_id = 1;
+        if !session
+            .borrow_mut()
+            .add_player(player_id, command_tx.clone())
+        {
+            return Err(JsValue::from_str("failed to install browser player"));
+        }
+        let owner = session
+            .borrow_mut()
+            .with_player(player_id, |context| context.player.owner.clone())
+            .ok_or_else(|| JsValue::from_str("failed to capture browser player owner"))?;
+        let renderer = rendering::new_renderer_state();
+        session.borrow_mut().bind_renderer_state(player_id, &renderer);
+        let mut handle = Self {
+            session,
+            player_id,
+            owner,
+            command_tx,
+            renderer,
+            command_rx: Some(command_rx),
+        };
+        handle.start_command_loop();
+        Ok(handle)
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn player_id_value(&self) -> u32 {
+        self.player_id
+    }
+
+    /// Stable owner capability identifier used only to route browser events;
+    /// it is never accepted as authority by the runtime.
+    pub fn owner_identity(&self) -> String {
+        let key = self.owner.key();
+        format!("{}:{}:{}", key.session, key.player, key.generation)
+    }
+
+    /// Transfer the queue receiver to the owner-bound frontend executor.
+    /// This is one-shot for each installed player; callers must start the
+    /// explicit `(session, player_id, owner)` loop before dispatching queued
+    /// commands.  Keeping this transfer explicit prevents an accidental
+    /// fallback to the legacy process-global command loop.
+    pub(crate) fn take_command_receiver(&mut self) -> Option<Receiver<PlayerVMExecutionItem>> {
+        self.command_rx.take()
+    }
+
+    pub fn play(&self) -> Result<(), JsValue> {
+        self.with_context(|context| context.player.play())
+    }
+
+    pub fn stop(&self) -> Result<(), JsValue> {
+        self.with_context(|context| context.player.stop())
+    }
+
+    /// Create and start the renderer owned by this browser player.  Renderer
+    /// state is kept with the handle so another provider cannot replace this
+    /// player's canvas or draw loop.
+    pub fn create_canvas(&self, container: web_sys::HtmlElement) -> Result<(), JsValue> {
+        rendering::player_create_canvas_for_handle(
+            &self.renderer,
+            self.session.clone(),
+            self.player_id,
+            self.owner.clone(),
+            &container,
+        )
+    }
+
+    pub fn set_renderer_backend(&self, backend: String) -> Result<(), JsValue> {
+        rendering::player_set_renderer_backend_for_handle(
+            &self.renderer,
+            &self.session,
+            self.player_id,
+            &self.owner,
+            &backend,
+        )
+    }
+
+    pub fn renderer_backend(&self) -> Result<String, JsValue> {
+        rendering::renderer_backend_for_handle(&self.renderer)
+    }
+
+    pub fn rebind_renderer_owner(&self) -> Result<(), JsValue> {
+        rendering::rebind_renderer_owner(
+            &self.renderer,
+            self.session.clone(),
+            self.player_id,
+            self.owner.clone(),
+        )
+        .map_err(|error| JsValue::from_str(&error.message))
+    }
+
+    pub fn draw_frame(&self) -> Result<bool, JsValue> {
+        rendering::draw_frame_owned(
+            &self.renderer,
+            &self.session,
+            self.player_id,
+            &self.owner,
+        )
+        .map_err(|error| JsValue::from_str(&error.message))
+    }
+
+    pub fn draw_frame_at_end(&self) -> Result<bool, JsValue> {
+        rendering::draw_frame_at_end_owned(
+            &self.renderer,
+            &self.session,
+            self.player_id,
+            &self.owner,
+        )
+        .map_err(|error| JsValue::from_str(&error.message))
+    }
+
+    pub fn set_preview_parent(
+        &self,
+        parent: Option<web_sys::HtmlElement>,
+    ) -> Result<(), JsValue> {
+        rendering::set_preview_parent_for_handle(
+            &self.renderer,
+            &self.session,
+            self.player_id,
+            &self.owner,
+            parent,
+        )
+    }
+
+    pub fn set_preview_member_ref(&self, cast_lib: i32, cast_member: i32) -> Result<(), JsValue> {
+        rendering::set_preview_member_ref_for_handle(
+            &self.renderer,
+            &self.session,
+            self.player_id,
+            &self.owner,
+            CastMemberRef { cast_lib, cast_member },
+        )
+    }
+
+    pub fn set_preview_font_size(&self, size: u16) -> Result<(), JsValue> {
+        rendering::set_preview_font_size_for_handle(
+            &self.renderer,
+            &self.session,
+            self.player_id,
+            &self.owner,
+            size,
+        )
+    }
+
+    pub fn set_debug_selected_channel(&self, channel: i16) -> Result<(), JsValue> {
+        rendering::set_debug_selected_channel_for_handle(
+            &self.renderer,
+            &self.session,
+            self.player_id,
+            &self.owner,
+            channel,
+        )?;
+        self.with_context(|context| {
+            context
+                .player
+                .queue_player_notification(crate::player::cast_lib::PlayerNotificationKind::ChannelChanged(channel));
+        })?;
+        JsApi::dispatch_player_notifications(self.session.clone(), self.player_id)?;
+        Ok(())
+    }
+
+    /// Read back handle-owned debug state for browser isolation checks.
+    pub fn preview_state(&self) -> Result<JsValue, JsValue> {
+        self.with_context(|_| ())?;
+        let (member_ref, font_size, selected_channel) =
+            rendering::preview_state_for_handle(&self.renderer)?;
+        let state = js_sys::Object::new();
+        let member = js_sys::Array::new();
+        if let Some(member_ref) = member_ref {
+            member.push(&JsValue::from_f64(member_ref.cast_lib as f64));
+            member.push(&JsValue::from_f64(member_ref.cast_member as f64));
+        }
+        js_sys::Reflect::set(&state, &JsValue::from_str("member"), &member)?;
+        js_sys::Reflect::set(
+            &state,
+            &JsValue::from_str("fontSize"),
+            &font_size.map(|value| JsValue::from_f64(value as f64)).unwrap_or(JsValue::UNDEFINED),
+        )?;
+        js_sys::Reflect::set(
+            &state,
+            &JsValue::from_str("selectedChannel"),
+            &selected_channel
+                .map(|value| JsValue::from_f64(value as f64))
+                .unwrap_or(JsValue::UNDEFINED),
+        )?;
+        Ok(state.into())
+    }
+
+    pub fn set_pfr_font_enabled(&self, enabled: bool) -> Result<(), JsValue> {
+        self.with_context(|context| {
+            context.player.font_manager.pfr_enabled = enabled;
+            context.player.font_manager.font_cache.clear();
+        })?;
+        Ok(())
+    }
+
+    pub fn pfr_font_enabled(&self) -> Result<bool, JsValue> {
+        self.with_context(|context| context.player.font_manager.pfr_enabled)
+    }
+
+    pub async fn print_member_bitmap_hex(&self, cast_lib: i32, cast_member: i32) -> Result<(), JsValue> {
+        self.dispatch_command(PlayerVMCommand::PrintMemberBitmapHex(CastMemberRef { cast_lib, cast_member }))
+            .await
+            .map(|_| ())
+    }
+
+    pub fn print_member_sound_hex(&self, cast_lib: i32, cast_member: i32) -> Result<(), JsValue> {
+        self.with_context(|context| {
+            print_member_sound_hex_for_player(context.player, cast_lib, cast_member);
+        })
+    }
+
+    pub async fn play_member_sound(&self, cast_lib: i32, cast_member: i32) -> Result<(), JsValue> {
+        self.dispatch_command(PlayerVMCommand::PlayMemberSound(CastMemberRef { cast_lib, cast_member }))
+            .await
+            .map(|_| ())
+    }
+
+    pub fn update_flash_frame(
+        &self,
+        sprite_num: i32,
+        width: u32,
+        height: u32,
+        rgba_data: &[u8],
+    ) -> Result<(), JsValue> {
+        self.with_context(|context| {
+            update_flash_frame_for_player(context.player, context.symbols, sprite_num, width, height, rgba_data)
+        })?
+    }
+
+    pub fn trigger_lingo_callback_on_script(
+        &self,
+        cast_lib: i32,
+        cast_member: i32,
+        handler_name: String,
+        args_json: String,
+        flash_cast_lib: i32,
+        flash_cast_member: i32,
+    ) -> Result<bool, JsValue> {
+        let args_value = js_sys::JSON::parse(&args_json)
+            .map_err(|_| JsValue::from_str("invalid Flash callback JSON"))?;
+        self.with_context(|context| -> Result<bool, JsValue> {
+            if !js_sys::Array::is_array(&args_value) {
+                return Err(JsValue::from_str("Flash callback arguments are not an array"));
+            }
+            let array = js_sys::Array::from(&args_value);
+            let mut args = vec![context.player.alloc_datum(director::lingo::datum::Datum::Void)];
+            for item in array.iter() {
+                args.push(js_value_to_datum_ref_for_context(
+                    &item,
+                    context.player,
+                    context.symbols,
+                    flash_cast_lib,
+                    flash_cast_member,
+                ));
+            }
+            context
+                .player
+                .queue_tx
+                .try_send(PlayerVMExecutionItem {
+                    command: PlayerVMCommand::TriggerLingoCallbackOnScript {
+                        cast_lib,
+                        cast_member,
+                        handler_name: context.symbols.intern(&handler_name),
+                        args,
+                    },
+                    completer: None,
+                })
+                .map_err(|_| JsValue::from_str("browser player command loop stopped"))?;
+            Ok(true)
+        }).and_then(|result| result)
+    }
+
+    pub fn local_connection_send(
+        &self,
+        connection_name: String,
+        method_name: String,
+        args_json: String,
+    ) -> Result<bool, JsValue> {
+        let args_value = js_sys::JSON::parse(&args_json)
+            .map_err(|_| JsValue::from_str("invalid LocalConnection JSON"))?;
+        self.with_context(|context| -> Result<bool, JsValue> {
+            let Some(lc_path) = context.player.flash_lc_connections.get(&connection_name).cloned() else {
+                return Ok(false);
+            };
+            let Some((handler_name, target)) = context
+                .player
+                .flash_lc_callbacks
+                .get(&(lc_path, method_name))
+                .cloned()
+            else {
+                return Ok(false);
+            };
+            if !js_sys::Array::is_array(&args_value) {
+                return Err(JsValue::from_str("LocalConnection arguments are not an array"));
+            }
+            let array = js_sys::Array::from(&args_value);
+            let mut args = vec![context.player.alloc_datum(director::lingo::datum::Datum::Void)];
+            for item in array.iter() {
+                args.push(js_value_to_datum_ref_for_context(
+                    &item,
+                    context.player,
+                    context.symbols,
+                    1,
+                    1,
+                ));
+            }
+            context
+                .player
+                .queue_tx
+                .try_send(PlayerVMExecutionItem {
+                    command: PlayerVMCommand::TriggerLocalConnectionCallback {
+                        target,
+                        handler_name,
+                        args,
+                    },
+                    completer: None,
+                })
+                .map_err(|_| JsValue::from_str("browser player command loop stopped"))?;
+            Ok(true)
+        }).and_then(|result| result)
+    }
+
+    pub fn dispatch_flash_event(
+        &self,
+        cast_lib: i32,
+        cast_member: i32,
+        body: String,
+    ) -> Result<bool, JsValue> {
+        let Some((handler_name, raw_args)) = parse_flash_event_body(&body) else {
+            return Ok(false);
+        };
+        self.with_context(|context| -> Result<bool, JsValue> {
+            use director::lingo::datum::Datum;
+            let args = raw_args
+                .into_iter()
+                .map(|token| {
+                    let datum = if token.len() >= 2 && token.starts_with('"') && token.ends_with('"') {
+                        Datum::String(token[1..token.len() - 1].to_owned())
+                    } else if let Some(symbol) = token.strip_prefix('#') {
+                        Datum::Symbol(context.symbols.intern(symbol))
+                    } else if let Ok(number) = token.parse::<i32>() {
+                        Datum::Int(number)
+                    } else if let Ok(number) = token.parse::<f64>() {
+                        Datum::Float(number)
+                    } else {
+                        Datum::String(token)
+                    };
+                    context.player.alloc_datum(datum)
+                })
+                .collect();
+            context
+                .player
+                .queue_tx
+                .try_send(PlayerVMExecutionItem {
+                    command: PlayerVMCommand::DispatchFlashEvent {
+                        cast_lib,
+                        cast_member,
+                        handler_name: context.symbols.intern(&handler_name),
+                        args,
+                    },
+                    completer: None,
+                })
+                .map_err(|_| JsValue::from_str("browser player command loop stopped"))?;
+            Ok(true)
+        }).and_then(|result| result)
+    }
+
+    pub async fn dispatch_flash_lingo(&self, body: String) -> Result<bool, JsValue> {
+        let trimmed = body.trim().to_owned();
+        if trimmed.is_empty() {
+            return Ok(false);
+        }
+        crate::player::eval_lingo_command_owned(
+            self.session.clone(),
+            self.player_id,
+            self.owner.clone(),
+            trimmed,
+        )
+        .await
+        .map(|_| true)
+        .map_err(|error| JsValue::from_str(&error.message))
+    }
+
+    pub fn reset(&mut self) -> Result<(), JsValue> {
+        // Reset is an ownership boundary, but DirPlayer::reset deliberately
+        // preserves the loaded movie and host configuration while replacing
+        // the allocator epoch.  Validate the captured capability before
+        // changing the queue so a failed/stale reset leaves the live player
+        // untouched.
+        let mut session = self
+            .session
+            .try_borrow_mut()
+            .map_err(|_| JsValue::from_str("browser player session is already borrowed"))?;
+        let current_owner = session
+            .with_player(self.player_id, |context| context.player.owner.clone())
+            .ok_or_else(|| JsValue::from_str("browser player is not installed"))?;
+        if !current_owner.same_identity(&self.owner) || !self.owner.is_arena_live() {
+            return Err(JsValue::from_str("browser player handle is stale"));
+        }
+
+        let (command_tx, command_rx) = unbounded();
+        let owner = session
+            .reset_player_owned(self.player_id, &self.owner)
+            .map_err(|error| JsValue::from_str(&error.message))?;
+        let teardowns = session.take_host_teardowns();
+        let queue_result = session
+            .with_player(self.player_id, |context| {
+                // Install the replacement queue only after the session reset
+                // has validated and retired the captured owner.
+                context.player.queue_tx = command_tx.clone();
+            });
+        if queue_result.is_none() {
+            drop(session);
+            drop(teardowns);
+            return Err(JsValue::from_str("browser player is not installed"));
+        }
+        drop(session);
+        drop(teardowns);
+        // Close the old sender only after reset has succeeded and the player
+        // has received its replacement queue.
+        self.command_tx.close();
+        self.owner = owner;
+        self.command_tx = command_tx;
+        self.command_rx = Some(command_rx);
+        rendering::rebind_renderer_owner(
+            &self.renderer,
+            self.session.clone(),
+            self.player_id,
+            self.owner.clone(),
+        )
+        .map_err(|error| JsValue::from_str(&error.message))?;
+        self.start_command_loop();
+        JsApi::dispatch_player_notifications(self.session.clone(), self.player_id)?;
+        Ok(())
+    }
+
+    /// Set launch parameters on this player without consulting the legacy
+    /// global player slot.  Values are prepared before the short session
+    /// borrow ends, and invalid URLs are reported to the host unchanged.
+    pub fn set_external_params(&self, params: js_sys::Object) -> Result<(), JsValue> {
+        let mut external_params = indexmap::IndexMap::new();
+        for key in js_sys::Object::keys(&params).iter() {
+            let key_str = key
+                .as_string()
+                .ok_or_else(|| JsValue::from_str("external parameter key is not a string"))?;
+            let value = js_sys::Reflect::get(&params, &key)
+                .map_err(|_| JsValue::from_str("failed to read external parameter"))?
+                .as_string()
+                .ok_or_else(|| JsValue::from_str("external parameter value is not a string"))?;
+            external_params.insert(key_str, value);
+        }
+        self.with_context(|context| {
+            context.player.external_params = external_params;
+            crate::player::stage::apply_stage_draw_rect(context.player);
+            let (width, height) = crate::player::stage::stage_canvas_dims(context.player);
+            JsApi::dispatch_stage_size_changed(width, height, context.player.center_stage);
+        })?;
+        Ok(())
+    }
+
+    pub fn set_base_path(&self, path: String) -> Result<(), JsValue> {
+        let url = url::Url::parse(&path)
+            .map_err(|error| JsValue::from_str(&format!("invalid base path URL '{}': {}", path, error)))?;
+        self.with_context(|context| context.player.net_manager.set_base_path(url))
+    }
+
+    pub fn set_startup_do(&self, code: String) -> Result<(), JsValue> {
+        self.with_context(|context| {
+            context.player.startup_do = (!code.is_empty()).then_some(code);
+        })?;
+        Ok(())
+    }
+
+    pub fn set_startup_do_before(&self, code: String) -> Result<(), JsValue> {
+        self.with_context(|context| {
+            context.player.startup_do_before = (!code.is_empty()).then_some(code);
+        })?;
+        Ok(())
+    }
+
+    pub fn set_startup_go(&self, frame: u32) -> Result<(), JsValue> {
+        self.with_context(|context| {
+            context.player.startup_go = (frame != 0).then_some(frame);
+        })
+    }
+
+    pub fn set_movie_path_override(&self, path: String) -> Result<(), JsValue> {
+        self.with_context(|context| {
+            context.player.movie_path_override = (!path.is_empty()).then_some(path);
+        })
+    }
+
+    pub fn set_movie_path_label(&self, path: String) -> Result<(), JsValue> {
+        self.with_context(|context| {
+            context.player.movie_path_label = (!path.is_empty()).then_some(path);
+        })
+    }
+
+    pub fn set_stage_size(&self, width: u32, height: u32) -> Result<(), JsValue> {
+        self.with_context(|context| {
+            context.player.stage_size = (width, height);
+            crate::player::stage::apply_stage_draw_rect(context.player);
+            let (width, height) = crate::player::stage::stage_canvas_dims(context.player);
+            JsApi::dispatch_stage_size_changed(width, height, context.player.center_stage);
+        })
+    }
+
+    /// Read the per-player stage size for owner-isolation checks and browser
+    /// host diagnostics. The value is read through the captured session and
+    /// therefore cannot observe a replacement player with the same id.
+    pub fn stage_size(&self) -> Result<js_sys::Array, JsValue> {
+        self.with_context(|context| {
+            let (width, height) = context.player.stage_size;
+            js_sys::Array::of2(&JsValue::from(width), &JsValue::from(height))
+        })
+    }
+
+    fn input_movie_loc(&self, x: f64, y: f64) -> Result<(i32, i32), JsValue> {
+        self.with_context(|context| {
+            if context.player.wants_pointer_lock {
+                return context.player.mouse_loc;
+            }
+            let (mx, my) = crate::player::stage::canvas_to_movie_coords(context.player, x, y);
+            (mx.to_i32().unwrap_or(0), my.to_i32().unwrap_or(0))
+        })
+    }
+
+    /// Route a left-button/move command to the topmost linked movie after the
+    /// parent has received it.  Pointer lock deliberately keeps input on the
+    /// parent movie, matching the existing host behavior.
+    fn route_nested_pointer(
+        &self,
+        loc: (i32, i32),
+        command: PlayerVMCommand,
+    ) -> Result<(), JsValue> {
+        if self.with_context(|context| context.player.wants_pointer_lock)? {
+            return Ok(());
+        }
+        let Some((member_ref, channel_num)) = crate::player::nested::nested_hit_target_owned(
+            &self.session,
+            self.player_id,
+            &self.owner,
+            loc.0,
+            loc.1,
+        ) else {
+            return Ok(());
+        };
+        crate::player::nested::enqueue_nested_pointer_command_owned(
+            &self.session,
+            self.player_id,
+            &self.owner,
+            member_ref,
+            channel_num,
+            loc.0,
+            loc.1,
+            command,
+        )
+        .map(|_| ())
+        .map_err(|error| JsValue::from_str(&error.message))
+    }
+
+    fn route_nested_key(&self, key: &str, code: u16, is_down: bool) -> Result<(), JsValue> {
+        crate::player::nested::enqueue_nested_key_command_owned(
+            &self.session,
+            self.player_id,
+            &self.owner,
+            key,
+            code,
+            is_down,
+        )
+        .map(|_| ())
+        .map_err(|error| JsValue::from_str(&error.message))
+    }
+
+    pub fn mouse_down(&self, x: f64, y: f64) -> Result<(), JsValue> {
+        let loc = self.input_movie_loc(x, y)?;
+        self.with_context(|context| {
+            context.player.mouse_loc = loc;
+            context.player.movie.mouse_down = true;
+            context.player.queue_tx.try_send(PlayerVMExecutionItem {
+                command: PlayerVMCommand::MouseDown(loc),
+                completer: None,
+            }).map_err(|_| JsValue::from_str("browser player command loop stopped"))
+        })?;
+        self.route_nested_pointer(loc, PlayerVMCommand::MouseDown(loc))?;
+        Ok(())
+    }
+
+    pub fn mouse_up(&self, x: f64, y: f64) -> Result<(), JsValue> {
+        let loc = self.input_movie_loc(x, y)?;
+        self.with_context(|context| {
+            context.player.mouse_loc = loc;
+            context.player.movie.mouse_down = false;
+            context.player.queue_tx.try_send(PlayerVMExecutionItem {
+                command: PlayerVMCommand::MouseUp(loc),
+                completer: None,
+            }).map_err(|_| JsValue::from_str("browser player command loop stopped"))
+        })?;
+        self.route_nested_pointer(loc, PlayerVMCommand::MouseUp(loc))?;
+        Ok(())
+    }
+
+    pub fn right_mouse_down(&self, x: f64, y: f64) -> Result<(), JsValue> {
+        let loc = self.input_movie_loc(x, y)?;
+        self.with_context(|context| {
+            context.player.mouse_loc = loc;
+            context.player.movie.right_mouse_down = true;
+            context.player.queue_tx.try_send(PlayerVMExecutionItem {
+                command: PlayerVMCommand::RightMouseDown(loc),
+                completer: None,
+            }).map_err(|_| JsValue::from_str("browser player command loop stopped"))
+        })?;
+        Ok(())
+    }
+
+    pub fn right_mouse_up(&self, x: f64, y: f64) -> Result<(), JsValue> {
+        let loc = self.input_movie_loc(x, y)?;
+        self.with_context(|context| {
+            context.player.mouse_loc = loc;
+            context.player.movie.right_mouse_down = false;
+            context.player.queue_tx.try_send(PlayerVMExecutionItem {
+                command: PlayerVMCommand::RightMouseUp(loc),
+                completer: None,
+            }).map_err(|_| JsValue::from_str("browser player command loop stopped"))
+        })?;
+        Ok(())
+    }
+
+    pub fn mouse_move(&self, x: f64, y: f64) -> Result<(), JsValue> {
+        let loc = self.input_movie_loc(x, y)?;
+        self.with_context(|context| {
+            context.player.mouse_loc = loc;
+            context.player.queue_tx.try_send(PlayerVMExecutionItem {
+                command: PlayerVMCommand::MouseMove(loc),
+                completer: None,
+            }).map_err(|_| JsValue::from_str("browser player command loop stopped"))
+        })?;
+        self.route_nested_pointer(loc, PlayerVMCommand::MouseMove(loc))?;
+        Ok(())
+    }
+
+    pub fn mouse_move_delta(&self, dx: f64, dy: f64) -> Result<(), JsValue> {
+        let dx = dx.to_i32().unwrap_or(0);
+        let dy = dy.to_i32().unwrap_or(0);
+        self.with_context(|context| {
+            context.player.mouse_loc.0 += dx;
+            context.player.mouse_loc.1 += dy;
+            let loc = context.player.mouse_loc;
+            context.player.queue_tx.try_send(PlayerVMExecutionItem {
+                command: PlayerVMCommand::MouseMove(loc),
+                completer: None,
+            }).map_err(|_| JsValue::from_str("browser player command loop stopped"))
+        })?;
+        let loc = self.with_context(|context| context.player.mouse_loc)?;
+        self.route_nested_pointer(loc, PlayerVMCommand::MouseMove(loc))?;
+        Ok(())
+    }
+
+    pub fn key_down(&self, key: String, code: u16) -> Result<(), JsValue> {
+        self.with_context(|context| {
+            context.player.keyboard_manager.key_down(key.clone(), code);
+            context.player.queue_tx.try_send(PlayerVMExecutionItem {
+                command: PlayerVMCommand::KeyDown(key.clone(), code),
+                completer: None,
+            }).map_err(|_| JsValue::from_str("browser player command loop stopped"))
+        })?;
+        self.route_nested_key(&key, code, true)?;
+        Ok(())
+    }
+
+    pub fn key_up(&self, key: String, code: u16) -> Result<(), JsValue> {
+        self.with_context(|context| {
+            context.player.keyboard_manager.key_up(&key, code);
+            context.player.queue_tx.try_send(PlayerVMExecutionItem {
+                command: PlayerVMCommand::KeyUp(key.clone(), code),
+                completer: None,
+            }).map_err(|_| JsValue::from_str("browser player command loop stopped"))
+        })?;
+        self.route_nested_key(&key, code, false)?;
+        Ok(())
+    }
+
+    pub fn wants_pointer_lock(&self) -> Result<bool, JsValue> {
+        self.with_context(|context| context.player.wants_pointer_lock)
+    }
+
+    pub fn set_picking_mode(&self, enabled: bool) -> Result<(), JsValue> {
+        self.with_context(|context| {
+            context.player.picking_mode = enabled;
+        })
+    }
+
+    pub fn get_sprite_at(&self, x: f64, y: f64) -> Result<i32, JsValue> {
+        self.with_context(|context| {
+            let (mx, my) = crate::player::stage::canvas_to_movie_coords(context.player, x, y);
+            crate::player::score::get_sprite_at(context.player, mx as i32, my as i32, false)
+                .map(|n| n as i32)
+                .unwrap_or(0)
+        })
+    }
+
+    pub fn is_sprite_editable_field(&self, sprite_id: i32) -> Result<bool, JsValue> {
+        self.with_context(|context| {
+            let sprite = context.player.movie.score.get_sprite(sprite_id as i16);
+            let member = sprite
+                .and_then(|sprite| sprite.member.as_ref())
+                .and_then(|member| context.player.movie.cast_manager.find_member_by_ref(member));
+            member.is_some_and(|member| matches!(
+                &member.member_type,
+                CastMemberType::Field(field) if field.editable
+            ) || matches!(
+                &member.member_type,
+                CastMemberType::Text(text) if text.info.as_ref().is_some_and(|info| info.editable)
+            ))
+        })
+    }
+
+    fn focused_member_editable(context: &ExecutionContext<'_>) -> Option<i16> {
+        let sprite_id = context.player.keyboard_focus_sprite;
+        if sprite_id < 0 { return None; }
+        let sprite_id = sprite_id as i16;
+        let member_ref = context.player.movie.score.get_sprite(sprite_id)?.member.as_ref()?;
+        let member = context.player.movie.cast_manager.find_member_by_ref(member_ref)?;
+        let editable = matches!(&member.member_type, CastMemberType::Field(field) if field.editable)
+            || matches!(&member.member_type, CastMemberType::Text(text) if text.info.as_ref().is_some_and(|info| info.editable));
+        editable.then_some(sprite_id)
+    }
+
+    pub fn is_field_focused(&self) -> Result<bool, JsValue> {
+        self.with_context(|context| Self::focused_member_editable(context).is_some())
+    }
+
+    pub fn get_focused_field_selected_text(&self) -> Result<String, JsValue> {
+        self.with_context(|context| {
+            let Some(sprite_id) = Self::focused_member_editable(context) else { return String::new(); };
+            let Some(member_ref) = context.player.movie.score.get_sprite(sprite_id).and_then(|s| s.member.as_ref()) else { return String::new(); };
+            let Some(member) = context.player.movie.cast_manager.find_member_by_ref(member_ref) else { return String::new(); };
+            let (text, start, end) = match &member.member_type {
+                CastMemberType::Field(field) if field.editable => (&field.text, field.sel_start, field.sel_end),
+                CastMemberType::Text(text) if text.info.as_ref().is_some_and(|info| info.editable) => (&text.text, text.sel_start, text.sel_end),
+                _ => return String::new(),
+            };
+            let len = text.len() as i32;
+            // Preserve both endpoints before ordering them. Selection can be
+            // reversed when the user extends backwards from its anchor.
+            let first = start.clamp(0, len);
+            let second = end.clamp(0, len);
+            let mut lo_b = first.min(second) as usize;
+            let mut hi_b = first.max(second) as usize;
+            while lo_b < text.len() && !text.is_char_boundary(lo_b) { lo_b += 1; }
+            while hi_b < text.len() && !text.is_char_boundary(hi_b) { hi_b += 1; }
+            text[lo_b..hi_b].to_owned()
+        })
+    }
+
+    pub fn field_set_caret_at(&self, sprite_id: i32, canvas_x: f64, canvas_y: f64, extend: bool) -> Result<bool, JsValue> {
+        let mode = if extend {
+            crate::player::keyboard_events::CaretAtMode::ExtendToAnchor
+        } else {
+            crate::player::keyboard_events::CaretAtMode::SetAndAnchor
+        };
+        self.with_context(|context| {
+            let (x, y) = crate::player::stage::canvas_to_movie_coords(context.player, canvas_x, canvas_y);
+            crate::player::keyboard_events::set_caret_at_screen_for_player(context.player, sprite_id as i16, x as i32, y as i32, mode)
+        })
+    }
+
+    pub fn field_drag_extend_to(&self, sprite_id: i32, canvas_x: f64, canvas_y: f64) -> Result<bool, JsValue> {
+        self.with_context(|context| {
+            let (x, y) = crate::player::stage::canvas_to_movie_coords(context.player, canvas_x, canvas_y);
+            crate::player::keyboard_events::set_caret_at_screen_for_player(context.player, sprite_id as i16, x as i32, y as i32, crate::player::keyboard_events::CaretAtMode::DragExtend)
+        })
+    }
+
+    pub fn field_select_word_at(&self, sprite_id: i32, canvas_x: f64, canvas_y: f64) -> Result<bool, JsValue> {
+        self.with_context(|context| {
+            let (x, y) = crate::player::stage::canvas_to_movie_coords(context.player, canvas_x, canvas_y);
+            crate::player::keyboard_events::set_caret_at_screen_for_player(context.player, sprite_id as i16, x as i32, y as i32, crate::player::keyboard_events::CaretAtMode::SelectWord)
+        })
+    }
+
+    pub fn field_select_line_at(&self, sprite_id: i32, canvas_x: f64, canvas_y: f64) -> Result<bool, JsValue> {
+        self.with_context(|context| {
+            let (x, y) = crate::player::stage::canvas_to_movie_coords(context.player, canvas_x, canvas_y);
+            crate::player::keyboard_events::set_caret_at_screen_for_player(context.player, sprite_id as i16, x as i32, y as i32, crate::player::keyboard_events::CaretAtMode::SelectLine)
+        })
+    }
+
+    pub fn field_select_all(&self) -> Result<(), JsValue> {
+        self.with_context(|context| {
+            let Some(sprite_id) = Self::focused_member_editable(context) else { return; };
+            let Some(member_ref) = context.player.movie.score.get_sprite(sprite_id).and_then(|s| s.member.clone()) else { return; };
+            let Some(member) = context.player.movie.cast_manager.find_mut_member_by_ref(&member_ref) else { return; };
+            let (len, start, end, anchor) = match &mut member.member_type {
+                CastMemberType::Field(field) if field.editable => (field.text.len() as i32, &mut field.sel_start, &mut field.sel_end, &mut field.sel_anchor),
+                CastMemberType::Text(text) if text.info.as_ref().is_some_and(|info| info.editable) => (text.text.len() as i32, &mut text.sel_start, &mut text.sel_end, &mut text.sel_anchor),
+                _ => return,
+            };
+            *start = 0; *end = len; *anchor = 0;
+            context.player.text_selection_start = 0;
+            context.player.text_selection_end = len.max(0) as u16;
+        })
+    }
+
+    pub fn delete_focused_field_selection(&self) -> Result<(), JsValue> {
+        self.with_context(|context| {
+            let Some(sprite_id) = Self::focused_member_editable(context) else { return; };
+            let Some(member_ref) = context.player.movie.score.get_sprite(sprite_id).and_then(|s| s.member.clone()) else { return; };
+            let Some(member) = context.player.movie.cast_manager.find_mut_member_by_ref(&member_ref) else { return; };
+            let (text, start, end, anchor) = match &mut member.member_type {
+                CastMemberType::Field(field) if field.editable => (&mut field.text, &mut field.sel_start, &mut field.sel_end, &mut field.sel_anchor),
+                CastMemberType::Text(text) if text.info.as_ref().is_some_and(|info| info.editable) => (&mut text.text, &mut text.sel_start, &mut text.sel_end, &mut text.sel_anchor),
+                _ => return,
+            };
+            crate::player::keyboard_events::apply_text_insertion(text, start, end, anchor, "");
+            context.player.text_selection_start = (*start).max(0) as u16;
+            context.player.text_selection_end = (*end).max(0) as u16;
+        })
+    }
+
+    pub fn set_clipboard_mirror(&self, text: String) -> Result<(), JsValue> {
+        self.with_context(|context| context.player.clipboard_mirror = text)
+    }
+
+    pub fn paste_text_into_focused_field(&self, text: String) -> Result<(), JsValue> {
+        self.with_context(|context| {
+            let Some(sprite_id) = Self::focused_member_editable(context) else { return; };
+            let Some(member_ref) = context.player.movie.score.get_sprite(sprite_id).and_then(|s| s.member.clone()) else { return; };
+            let Some(member) = context.player.movie.cast_manager.find_mut_member_by_ref(&member_ref) else { return; };
+            let (target, start, end, anchor) = match &mut member.member_type {
+                CastMemberType::Field(field) if field.editable => (&mut field.text, &mut field.sel_start, &mut field.sel_end, &mut field.sel_anchor),
+                CastMemberType::Text(text_member) if text_member.info.as_ref().is_some_and(|info| info.editable) => (&mut text_member.text, &mut text_member.sel_start, &mut text_member.sel_end, &mut text_member.sel_anchor),
+                _ => return,
+            };
+            crate::player::keyboard_events::apply_text_insertion(target, start, end, anchor, &text);
+            context.player.text_selection_start = (*start).max(0) as u16;
+            context.player.text_selection_end = (*end).max(0) as u16;
+        })
+    }
+
+    pub fn ime_composition_start(&self) -> Result<(), JsValue> {
+        self.with_context(|context| {
+            let Some(sprite_id) = Self::focused_member_editable(context) else { return; };
+            let Some(member_ref) = context.player.movie.score.get_sprite(sprite_id).and_then(|s| s.member.clone()) else { return; };
+            let Some(member) = context.player.movie.cast_manager.find_mut_member_by_ref(&member_ref) else { return; };
+            let (target, start, end, anchor) = match &mut member.member_type {
+                CastMemberType::Field(field) if field.editable => (&mut field.text, &mut field.sel_start, &mut field.sel_end, &mut field.sel_anchor),
+                CastMemberType::Text(text) if text.info.as_ref().is_some_and(|info| info.editable) => (&mut text.text, &mut text.sel_start, &mut text.sel_end, &mut text.sel_anchor),
+                _ => return,
+            };
+            if *start != *end { crate::player::keyboard_events::apply_text_insertion(target, start, end, anchor, ""); }
+            let pos = (*start).max(0);
+            context.player.ime_composition = Some((pos, pos));
+            context.player.text_selection_start = pos as u16;
+            context.player.text_selection_end = pos as u16;
+        })
+    }
+
+    pub fn ime_composition_update(&self, text: String) -> Result<(), JsValue> {
+        self.with_context(|context| {
+            let Some((start, end)) = context.player.ime_composition else { return; };
+            let Some(sprite_id) = Self::focused_member_editable(context) else { return; };
+            let Some(member_ref) = context.player.movie.score.get_sprite(sprite_id).and_then(|s| s.member.clone()) else { return; };
+            let Some(member) = context.player.movie.cast_manager.find_mut_member_by_ref(&member_ref) else { return; };
+            let (target, sel_start, sel_end, sel_anchor) = match &mut member.member_type {
+                CastMemberType::Field(field) if field.editable => (&mut field.text, &mut field.sel_start, &mut field.sel_end, &mut field.sel_anchor),
+                CastMemberType::Text(text_member) if text_member.info.as_ref().is_some_and(|info| info.editable) => (&mut text_member.text, &mut text_member.sel_start, &mut text_member.sel_end, &mut text_member.sel_anchor),
+                _ => return,
+            };
+            let len = target.len() as i32;
+            let lo = start.clamp(0, len) as usize;
+            let hi = end.clamp(0, len).max(lo as i32) as usize;
+            if !target.is_char_boundary(lo) || !target.is_char_boundary(hi) { return; }
+            target.replace_range(lo..hi, &text);
+            let new_end = lo as i32 + text.len() as i32;
+            *sel_start = new_end; *sel_end = new_end; *sel_anchor = new_end;
+            context.player.ime_composition = Some((start, new_end));
+            context.player.text_selection_start = new_end.max(0) as u16;
+            context.player.text_selection_end = new_end.max(0) as u16;
+        })
+    }
+
+    pub fn ime_composition_end(&self, text: String) -> Result<(), JsValue> {
+        self.ime_composition_update(text)?;
+        self.with_context(|context| context.player.ime_composition = None)
+    }
+
+    /// Queue an asynchronous load on this handle's owner-bound command loop.
+    /// The receiver is deliberately not serviced by the legacy global loop;
+    /// the frontend executor must attach the captured session/player/owner
+    /// before calling this method.
+    pub async fn load_movie_file(&self, path: String, autoplay: bool) -> Result<(), JsValue> {
+        self.dispatch_command(PlayerVMCommand::LoadMovieFromFile(path, autoplay)).await.map(|_| ())
+    }
+
+    pub async fn set_system_font_path(&self, path: String) -> Result<(), JsValue> {
+        self.dispatch_command(PlayerVMCommand::SetSystemFontPath(path)).await.map(|_| ())
+    }
+
+    pub async fn provide_net_task_data(&self, task_id: u32, data: Vec<u8>) -> Result<(), JsValue> {
+        let shared = self.with_context(|context| std::sync::Arc::clone(&context.player.net_manager.shared_state))?;
+        shared.lock().await.fulfill_task(task_id, Ok(data)).await;
+        Ok(())
+    }
+
+    pub async fn provide_net_task_error(&self, task_id: u32) -> Result<(), JsValue> {
+        let shared = self.with_context(|context| std::sync::Arc::clone(&context.player.net_manager.shared_state))?;
+        shared.lock().await.fulfill_task(task_id, Err(4)).await;
+        Ok(())
+    }
+
+    pub fn mcp_list_scripts(&self, cast_lib: i32, limit: i32, offset: i32) -> Result<String, JsValue> {
+        self.with_context(|context| {
+            player::mcp::mcp_list_scripts(
+                context.player,
+                context.symbols,
+                (cast_lib >= 0).then_some(cast_lib),
+                (limit >= 0).then_some(limit as usize),
+                (offset >= 0).then_some(offset as usize),
+            )
+        })
+    }
+
+    pub fn mcp_get_script(&self, cast_lib: i32, cast_member: i32) -> Result<String, JsValue> {
+        self.with_context(|context| {
+            player::mcp::mcp_get_script(context.player, context.symbols, cast_lib, cast_member)
+        })
+    }
+
+    pub fn mcp_disassemble_handler(
+        &self,
+        cast_lib: i32,
+        cast_member: i32,
+        handler_name: String,
+    ) -> Result<String, JsValue> {
+        self.with_context(|context| {
+            player::mcp::mcp_disassemble_handler(
+                context.player,
+                context.symbols,
+                cast_lib,
+                cast_member,
+                &handler_name,
+            )
+        })
+    }
+
+    pub fn mcp_decompile_handler(
+        &self,
+        cast_lib: i32,
+        cast_member: i32,
+        handler_name: String,
+    ) -> Result<String, JsValue> {
+        self.with_context(|context| {
+            player::mcp::mcp_decompile_handler(
+                context.player,
+                context.symbols,
+                cast_lib,
+                cast_member,
+                &handler_name,
+            )
+        })
+    }
+
+    pub fn mcp_get_call_stack(&self, depth: i32, include_locals: bool) -> Result<String, JsValue> {
+        self.with_context(|context| {
+            player::mcp::mcp_get_call_stack(
+                context.player,
+                context.symbols,
+                (depth >= 0).then_some(depth as usize),
+                include_locals,
+            )
+        })
+    }
+
+    pub fn mcp_get_globals(&self) -> Result<String, JsValue> {
+        self.with_context(|context| player::mcp::mcp_get_globals(context.player, context.symbols))
+    }
+
+    pub fn mcp_get_locals(&self, scope_index: i32) -> Result<String, JsValue> {
+        self.with_context(|context| {
+            player::mcp::mcp_get_locals(
+                context.player,
+                context.symbols,
+                (scope_index >= 0).then_some(scope_index as usize),
+            )
+        })
+    }
+
+    pub fn mcp_inspect_datum(&self, datum_id: u32) -> Result<String, JsValue> {
+        self.with_context(|context| {
+            player::mcp::mcp_inspect_datum(context.player, context.symbols, datum_id as usize)
+        })
+    }
+
+    pub fn mcp_inspect_cast_member(&self, cast_lib: i32, cast_member: i32) -> Result<String, JsValue> {
+        self.with_context(|context| {
+            player::mcp::mcp_inspect_cast_member(
+                context.player,
+                context.symbols,
+                cast_lib,
+                cast_member,
+            )
+        })
+    }
+
+    pub fn mcp_get_console_output(&self, last_n_lines: usize) -> Result<String, JsValue> {
+        self.with_context(|context| context.player.console.read_tail(last_n_lines))
+    }
+
+    pub fn mcp_get_context(&self) -> Result<String, JsValue> {
+        self.with_context(|context| player::mcp::mcp_get_context(context.player))
+    }
+
+    pub fn mcp_get_execution_state(&self) -> Result<String, JsValue> {
+        self.with_context(|context| player::mcp::mcp_get_execution_state(context.player))
+    }
+
+    pub fn mcp_list_cast_libs(&self) -> Result<String, JsValue> {
+        self.with_context(|context| player::mcp::mcp_list_cast_libs(context.player))
+    }
+
+    pub fn mcp_list_cast_members(&self, cast_lib: i32) -> Result<String, JsValue> {
+        self.with_context(|context| {
+            player::mcp::mcp_list_cast_members(
+                context.player,
+                (cast_lib >= 0).then_some(cast_lib),
+            )
+        })
+    }
+
+    pub fn mcp_list_breakpoints(&self) -> Result<String, JsValue> {
+        self.with_context(|context| player::mcp::mcp_list_breakpoints(context.player))
+    }
+
+    /// Evaluate a Lingo expression in this handle's owner-bound runtime and
+    /// format the result with the same authoritative symbol table.
+    pub async fn mcp_eval_lingo(&self, code: String) -> Result<String, JsValue> {
+        let result = player::eval_lingo_command_owned(
+            self.session.clone(),
+            self.player_id,
+            self.owner.clone(),
+            code,
+        )
+        .await;
+        self.with_context(|context| {
+            player::mcp::mcp_format_eval_result(context.player, context.symbols, result)
+        })
+    }
+
+    /// Evaluate a debugger command without re-entering the legacy global
+    /// player slot. Errors are reported through this same owner context.
+    pub async fn eval_command(&self, command: String) -> Result<(), JsValue> {
+        JsApi::dispatch_debug_message(&command);
+        let result = player::eval_lingo_command_owned(
+            self.session.clone(),
+            self.player_id,
+            self.owner.clone(),
+            command,
+        )
+        .await;
+        if let Err(error) = result {
+            self.with_context(|context| {
+                JsApi::dispatch_script_error(context.player, &error);
+            })?;
+        }
+        Ok(())
+    }
+
+    pub fn add_breakpoint(&self, script_name: String, handler_name: String, bytecode_index: usize) -> Result<(), JsValue> {
+        self.with_context(|context| {
+            context.player.breakpoint_manager.add_breakpoint(script_name, handler_name, bytecode_index);
+        })
+    }
+
+    pub fn toggle_breakpoint(&self, script_name: String, handler_name: String, bytecode_index: usize) -> Result<(), JsValue> {
+        self.with_context(|context| {
+            context.player.breakpoint_manager.toggle_breakpoint(
+                script_name,
+                handler_name,
+                bytecode_index,
+            );
+        })
+    }
+
+    pub fn remove_breakpoint(&self, script_name: String, handler_name: String, bytecode_index: usize) -> Result<(), JsValue> {
+        self.with_context(|context| {
+            context.player.breakpoint_manager.remove_breakpoint(script_name, handler_name, bytecode_index);
+        })
+    }
+
+    pub fn resume_breakpoint(&self) -> Result<(), JsValue> {
+        self.with_context(|context| context.player.resume_breakpoint())
+    }
+
+    pub fn step_into(&self) -> Result<(), JsValue> {
+        self.with_context(|context| context.player.step_into())
+    }
+
+    pub fn step_over(&self) -> Result<(), JsValue> {
+        self.with_context(|context| context.player.step_over())
+    }
+
+    pub fn step_out(&self) -> Result<(), JsValue> {
+        self.with_context(|context| context.player.step_out())
+    }
+
+    pub fn step_over_line(&self, skip_bytecode_indices: Vec<usize>) -> Result<(), JsValue> {
+        self.with_context(|context| context.player.step_over_line(skip_bytecode_indices))
+    }
+
+    pub fn step_into_line(&self, skip_bytecode_indices: Vec<usize>) -> Result<(), JsValue> {
+        self.with_context(|context| context.player.step_into_line(skip_bytecode_indices))
+    }
+
+    pub fn trigger_timeout(&self, name: String) -> Result<(), JsValue> {
+        if !self.owner.is_arena_live() {
+            return Err(JsValue::from_str("browser player handle is stale"));
+        }
+        self.command_tx
+            .try_send(PlayerVMExecutionItem {
+                command: PlayerVMCommand::TimeoutTriggered(name),
+                completer: None,
+            })
+            .map_err(|_| JsValue::from_str("browser player command loop stopped"))
+    }
+
+    pub fn get_breakpoints(&self) -> Result<js_sys::Array, JsValue> {
+        self.with_context(|context| JsApi::get_breakpoint_list(context.player).into_iter().collect())
+    }
+
+    pub fn request_datum(&self, datum_id: u32) -> Result<(), JsValue> {
+        self.with_context(|context| {
+            if let Some(datum_ref) = context.player.allocator.get_datum_ref(datum_id as DatumId) {
+                JsApi::dispatch_datum_snapshot(&datum_ref, context.symbols, context.player);
+            }
+        })
+    }
+
+    pub fn request_script_instance_snapshot(&self, script_instance_id: u32) -> Result<(), JsValue> {
+        self.with_context(|context| -> Result<(), JsValue> {
+            let instance_ref = if script_instance_id == 0 {
+                None
+            } else {
+                Some(context.player.allocator.get_script_instance_ref(script_instance_id)
+                    .ok_or_else(|| JsValue::from_str("script instance is not live"))?)
+            };
+            JsApi::dispatch_script_instance_snapshot(instance_ref, context.symbols, context.player);
+            Ok(())
+        }).and_then(|result| result)
+    }
+
+    pub fn clear_debug_messages(&self) -> Result<(), JsValue> {
+        self.with_context(|context| context.player.debug_datum_refs.clear())
+    }
+
+    pub fn set_eval_scope_index(&self, index: i32) -> Result<(), JsValue> {
+        self.with_context(|context| {
+            context.player.eval_scope_index = if index >= 0 { Some(index as u32) } else { None };
+        })
+    }
+
+    pub fn trigger_alert_hook(&self) -> Result<(), JsValue> {
+        if !self.owner.is_arena_live() {
+            return Err(JsValue::from_str("browser player handle is stale"));
+        }
+        self.command_tx
+            .try_send(PlayerVMExecutionItem {
+                command: PlayerVMCommand::TriggerAlertHook,
+                completer: None,
+            })
+            .map_err(|_| JsValue::from_str("browser player command loop stopped"))
+    }
+
+    pub fn get_cast_chunk_list(&self, cast_number: u32) -> Result<JsValue, JsValue> {
+        self.with_context(|context| JsApi::get_cast_chunk_list_for(context.player, cast_number).into())
+    }
+
+    pub fn get_movie_top_level_chunks(&self) -> Result<JsValue, JsValue> {
+        self.with_context(|context| JsApi::get_movie_top_level_chunks(context.player).into())
+    }
+
+    pub fn get_chunk_bytes(&self, cast_number: u32, chunk_id: u32) -> Result<Option<Vec<u8>>, JsValue> {
+        self.with_context(|context| JsApi::get_chunk_bytes(context.player, cast_number, chunk_id))
+    }
+
+    pub fn get_parsed_chunk(&self, cast_number: u32, chunk_id: u32) -> Result<JsValue, JsValue> {
+        self.with_context(|context| JsApi::get_parsed_chunk(context.player, context.symbols, cast_number, chunk_id).into())
+    }
+
+    pub fn subscribe_to_member(&self, cast_lib: i32, cast_member: i32) -> Result<(), JsValue> {
+        self.with_context(|context| {
+            let member_ref = cast_member_ref(cast_lib, cast_member);
+            if !context.player.subscribed_member_refs.contains(&member_ref) {
+                context.player.subscribed_member_refs.push(member_ref.clone());
+            }
+            JsApi::dispatch_cast_member_changed(member_ref, context.symbols, context.player);
+        })
+    }
+
+    pub fn unsubscribe_from_member(&self, cast_lib: i32, cast_member: i32) -> Result<(), JsValue> {
+        self.with_context(|context| {
+            let member_ref = cast_member_ref(cast_lib, cast_member);
+            context.player.subscribed_member_refs.retain(|item| item != &member_ref);
+        })
+    }
+
+    pub fn subscribe_to_channel_names(&self) -> Result<(), JsValue> {
+        let (names, owner_key) = self.with_context(|context| {
+            context.player.is_subscribed_to_channel_names = true;
+            JsApi::channel_names_snapshot_for_player(context.player)
+        })?;
+        JsApi::dispatch_channel_names_snapshot(names, &owner_key);
+        Ok(())
+    }
+
+    pub fn unsubscribe_from_channel_names(&self) -> Result<(), JsValue> {
+        self.with_context(|context| context.player.is_subscribed_to_channel_names = false)
+    }
+
+    pub fn subscribe_to_score(&self) -> Result<(), JsValue> {
+        let snapshot = self.with_context(|context| {
+            context.player.is_subscribed_to_score = true;
+            JsApi::score_snapshot_for_player(context.player)
+        })?;
+        if let Some((snapshot, owner_key)) = snapshot {
+            JsApi::dispatch_score_snapshot(snapshot, &owner_key);
+        }
+        Ok(())
+    }
+
+    pub fn unsubscribe_from_score(&self) -> Result<(), JsValue> {
+        self.with_context(|context| context.player.is_subscribed_to_score = false)
+    }
+
+    /// Read subscription flags for owner-isolation checks without exposing the
+    /// session or its mutable player state to JavaScript.
+    pub fn subscription_state(&self) -> Result<JsValue, JsValue> {
+        self.with_context(|context| -> Result<JsValue, JsValue> {
+            let state = js_sys::Object::new();
+            js_sys::Reflect::set(
+                &state,
+                &JsValue::from_str("score"),
+                &JsValue::from_bool(context.player.is_subscribed_to_score),
+            )?;
+            js_sys::Reflect::set(
+                &state,
+                &JsValue::from_str("channelNames"),
+                &JsValue::from_bool(context.player.is_subscribed_to_channel_names),
+            )?;
+            Ok(state.into())
+        })?
+    }
+
+    pub fn subscribe_to_cast_member_list(&self, cast_number: u32) -> Result<(), JsValue> {
+        self.with_context(|context| {
+            context.player.subscribed_cast_member_lists.insert(cast_number);
+            JsApi::dispatch_cast_member_list_changed(cast_number);
+        })
+    }
+
+    pub fn unsubscribe_from_cast_member_list(&self, cast_number: u32) -> Result<(), JsValue> {
+        self.with_context(|context| {
+            context.player.subscribed_cast_member_lists.remove(&cast_number);
+        })
+    }
+
+    pub fn list_w3d_members(&self) -> Result<String, JsValue> {
+        self.with_context(|context| {
+            let mut result = String::new();
+            for (lib_idx, cast) in context.player.movie.cast_manager.casts.iter().enumerate() {
+                for (_, member) in cast.members.iter() {
+                    if member.member_type.as_shockwave3d().is_some() {
+                        result.push_str(&format!(
+                            "castLib {}  member {} \"{}\"  (call handle.export_w3d_obj({}, {}) to download)\n",
+                            lib_idx + 1,
+                            member.number,
+                            member.name,
+                            lib_idx + 1,
+                            member.number,
+                        ));
+                    }
+                }
+            }
+            if result.is_empty() {
+                result.push_str("No Shockwave3D members found.");
+            }
+            result
+        })
+    }
+
+    pub fn export_w3d_raw(&self, cast_lib: i32, cast_member: i32) -> Result<(), JsValue> {
+        self.with_context(|context| {
+            let member_ref = CastMemberRef { cast_lib, cast_member };
+            let Some(member) = context.player.movie.cast_manager.find_member_by_ref(&member_ref) else {
+                return Err(JsValue::from_str("W3D member not found"));
+            };
+            let Some(w3d) = member.member_type.as_shockwave3d() else {
+                return Err(JsValue::from_str("member is not Shockwave3D"));
+            };
+            let magic = [0x49u8, 0x46, 0x58, 0x00];
+            let Some(offset) = (0..w3d.w3d_data.len().min(256))
+                .find(|&index| index + 4 <= w3d.w3d_data.len() && w3d.w3d_data[index..index + 4] == magic)
+            else {
+                return Err(JsValue::from_str("W3D member has no IFX payload"));
+            };
+            trigger_browser_download(
+                &format!("member_{}_{}.w3d", cast_lib, cast_member),
+                &w3d.w3d_data[offset..],
+                "application/octet-stream",
+            );
+            Ok(())
+        })?
+    }
+
+    pub fn export_w3d_obj(&self, cast_lib: i32, cast_member: i32) -> Result<(), JsValue> {
+        self.with_context(|context| export_w3d_obj_for_player(context.player, context.symbols, cast_lib, cast_member))?
+    }
+
+    /// Drop host-side external-Xtra slots for this exact owner generation.
+    pub fn dispose_external_xtra_host(&self) {
+        crate::player::xtra::external::dispose_external_host(&self.owner_identity());
+    }
+
+    pub fn external_xtra_host_dispatch(
+        &self,
+        op_id: u32,
+        args: &[u8],
+    ) -> Result<Vec<u8>, JsValue> {
+        if matches!(op_id, 5 | 6 | 7) {
+            let decoded = xtra_sdk::wire::decode_args(args)
+                .map_err(|error| JsValue::from_str(&format!("bad args: {}", error)))?;
+            let request = self.with_context(|context| {
+                crate::player::xtra::external::prepare_nested_host_request(
+                    context.player,
+                    op_id,
+                    &decoded,
+                )
+            })?.map_err(|error| JsValue::from_str(&error))?;
+            let response = crate::player::xtra::external::execute_request(&request)
+                .map_err(|error| JsValue::from_str(&error.message))?
+                .ok_or_else(|| JsValue::from_str("external Xtra host dispatch returned no response"))?;
+            let still_current = self
+                .with_context(|context| {
+                    request.owner.same_identity(&context.player.owner)
+                        && request.owner.is_arena_live()
+                        && context.player.owner.is_arena_live()
+                })
+                .unwrap_or(false);
+            if !still_current {
+                return Err(JsValue::from_str("external Xtra host dispatch owner was retired"));
+            }
+            return Ok(response.bytes);
+        }
+        self.with_context(|context| {
+            crate::player::xtra::external::host_call_dispatch(
+                context.player,
+                context.symbols,
+                op_id,
+                args,
+            )
+        })
+    }
+
+    pub fn register_external_xtra(&self, name: &str) -> Result<(), JsValue> {
+        self.with_context(|context| {
+            context.player.xtra_manager_state.external.register(name);
+        })
+    }
+
+    pub fn complete_external_xtra_load(
+        &self,
+        name: &str,
+        capability: &str,
+        success: bool,
+    ) -> Result<(), JsValue> {
+        let mut parts = capability.split(':');
+        let state_id = parts
+            .next()
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(|| JsValue::from_str("invalid external Xtra load capability"))?;
+        let request_id = parts
+            .next()
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(|| JsValue::from_str("invalid external Xtra load capability"))?;
+        if parts.next().is_some() {
+            return Err(JsValue::from_str("invalid external Xtra load capability"));
+        }
+        self.with_context(|context| {
+            context.player.xtra_manager_state.external.complete_load(
+                &context.player.owner,
+                state_id,
+                request_id,
+                name,
+                success,
+            );
+        })
+    }
+
+    /// Return a bridge snapshot using the session's authoritative symbols.
+    pub fn datum_snapshot(&self, datum_id: u32) -> Result<js_sys::Object, JsValue> {
+        self.with_context(|context| -> Result<js_sys::Object, JsValue> {
+            let datum_ref = context
+                .player
+                .allocator
+                .get_datum_ref(datum_id as usize)
+                .ok_or_else(|| JsValue::from_str("datum id is not live"))?;
+            crate::player::datum_formatting::format_concrete_datum(
+                context.player.get_datum(&datum_ref),
+                context.symbols,
+                context.player,
+            )
+            .map_err(|error| JsValue::from_str(&error.message))?;
+            Ok(js_api::datum_to_js_bridge_with_symbols(
+                &datum_ref,
+                context.symbols,
+                context.player,
+            ))
+        })
+        .and_then(|result| result)
+    }
+}
+
+impl Drop for BrowserPlayerHandle {
+    fn drop(&mut self) {
+        // Close before removing the player: DirPlayer and queued work retain
+        // sender clones, so dropping this handle alone would otherwise leave
+        // the receiver task alive and keep the session graph reachable.
+        self.command_tx.close();
+        self.dispose_external_xtra_host();
+        rendering::dispose_renderer_state(&self.renderer);
+        self.owner.mark_arena_dead();
+        if let Ok(mut session) = self.session.try_borrow_mut() {
+            session.unbind_renderer_state(self.player_id);
+            let _ = session.remove_player(self.player_id);
+            let teardowns = session.take_host_teardowns();
+            drop(session);
+            drop(teardowns);
+        }
+    }
 }
 
 #[wasm_bindgen]
@@ -312,16 +1981,16 @@ pub fn get_break_on_error() -> bool {
 /// or null if no trace log file is set or empty.
 #[wasm_bindgen]
 pub fn get_trace_log() -> JsValue {
-    use player::xtra::fileio::FILEIO_XTRA_MANAGER_OPT;
-
     let (path, data) = reserve_player_ref(|player| {
         let path = player.movie.trace_log_file.clone();
         if path.is_empty() {
             return (String::new(), Vec::new());
         }
-        let manager = unsafe { FILEIO_XTRA_MANAGER_OPT.as_ref() };
-        let data = manager
-            .and_then(|mgr| mgr.virtual_fs.get(&path))
+        let data = player
+            .xtra_manager_state
+            .fileio
+            .virtual_fs
+            .get(&path)
             .cloned()
             .unwrap_or_default();
         (path, data)
@@ -374,38 +2043,6 @@ pub fn get_interp_stats_report() -> String {
 // JS calls these after fetching and instantiating a plugin .wasm. The
 // loader and bridge live in `dirplayer-js-api`; the four host
 // environments (dev / polyfill / extension / Electron) share them.
-
-/// Register an externally-loaded plugin under its xtra name. Subsequent
-/// Lingo dispatches (`new(xtra "name")`, `the xtraList`, etc.) will route
-/// to the external plugin via the JS bridge. Case-insensitive.
-#[wasm_bindgen]
-pub fn register_external_xtra(name: &str) {
-    crate::player::xtra::external::register(name);
-}
-
-/// Single-entry dispatcher for every `dx_host_call` a plugin makes. The
-/// JS-side plugin import for `dirplayer_xtra_host::dx_host_call` reads
-/// the args from plugin memory, passes them here, and writes the
-/// returned bytes back into plugin memory. Returning an empty `Vec` is
-/// the "void" sentinel for fire-and-forget ops like `log`.
-#[wasm_bindgen]
-pub fn external_xtra_host_dispatch(op_id: u32, args: &[u8]) -> Vec<u8> {
-    crate::player::xtra::external::host_call_dispatch(op_id, args)
-}
-
-/// Signal completion of an on-demand xtra load. Called by JS after it
-/// resolves `name` through the registry and either successfully loads
-/// the plugin (`success = true`) or fails / can't find a matching URL
-/// (`success = false`). Wakes every Lingo handler that's awaiting
-/// `request_xtra_load(name)`; the bytecode dispatcher then retries the
-/// lookup with the now-registered xtra.
-///
-/// Idempotent; calling with an unknown name or after the waiters have
-/// already been drained is a no-op.
-#[wasm_bindgen]
-pub fn complete_external_xtra_load(name: &str, success: bool) {
-    crate::player::xtra::external::complete_load(name, success);
-}
 
 /// Returns the currently-loaded movie's declared xtra dependencies
 /// (parsed from its XTRl chunk). Each entry is a `js_sys::Object` with
@@ -489,8 +2126,15 @@ pub fn player_print_member_bitmap_hex(cast_lib: i32, cast_member: i32) {
 /// claims. Read-only, so it resolves the member synchronously.
 #[wasm_bindgen]
 pub fn player_print_member_sound_hex(cast_lib: i32, cast_member: i32) {
-    use crate::player::{cast_member::CastMemberType, reserve_player_ref};
-    reserve_player_ref(|player| {
+    reserve_player_ref(|player| print_member_sound_hex_for_player(player, cast_lib, cast_member));
+}
+
+fn print_member_sound_hex_for_player(
+    player: &crate::player::DirPlayer,
+    cast_lib: i32,
+    cast_member: i32,
+) {
+    use crate::player::cast_member::CastMemberType;
         let member_ref = CastMemberRef { cast_lib, cast_member };
         let Some(member) = player.movie.cast_manager.find_member_by_ref(&member_ref) else {
             web_sys::console::warn_1(
@@ -546,7 +2190,6 @@ pub fn player_print_member_sound_hex(cast_lib: i32, cast_member: i32) {
         }
         web_sys::console::log_1(&format!("🎧 first {} bytes (hex):\n{}", n, hex).into());
         web_sys::console::log_1(&format!("🎧 first {} bytes (ascii):\n{}", n, ascii).into());
-    });
 }
 
 /// Dev UI sound preview: play a sound member on channel 1 via the real
@@ -1284,15 +2927,6 @@ pub fn paste_text_into_focused_field(text: String) {
 // while a breakpoint is active.
 
 #[wasm_bindgen]
-pub fn request_datum(datum_id: u32) {
-    reserve_player_ref(|player| {
-        if let Some(datum_ref) = player.allocator.get_datum_ref(datum_id as DatumId) {
-            JsApi::dispatch_datum_snapshot(&datum_ref, player);
-        }
-    });
-}
-
-#[wasm_bindgen]
 pub fn get_cast_chunk_list(cast_number: u32) -> JsValue {
     reserve_player_ref(|player| {
         JsApi::get_cast_chunk_list_for(player, cast_number).into()
@@ -1314,13 +2948,6 @@ pub fn get_chunk_bytes(cast_number: u32, chunk_id: u32) -> Option<Vec<u8>> {
 }
 
 #[wasm_bindgen]
-pub fn get_parsed_chunk(cast_number: u32, chunk_id: u32) -> JsValue {
-    reserve_player_ref(|player| {
-        JsApi::get_parsed_chunk(player, cast_number, chunk_id).into()
-    })
-}
-
-#[wasm_bindgen]
 pub fn clear_debug_messages() {
     reserve_player_mut(|player| {
         player.debug_datum_refs.clear();
@@ -1332,36 +2959,6 @@ pub fn set_eval_scope_index(index: i32) {
     reserve_player_mut(|player| {
         player.eval_scope_index = if index >= 0 { Some(index as u32) } else { None };
     });
-}
-
-#[wasm_bindgen]
-pub fn request_script_instance_snapshot(script_instance_id: u32) {
-    reserve_player_ref(|player| {
-        JsApi::dispatch_script_instance_snapshot(
-            if script_instance_id > 0 {
-                Some(
-                    player
-                        .allocator
-                        .get_script_instance_ref(script_instance_id)
-                        .unwrap(),
-                )
-            } else {
-                None
-            },
-            player,
-        );
-    });
-}
-
-#[wasm_bindgen]
-pub fn subscribe_to_member(cast_lib: i32, cast_member: i32) {
-    let member_ref = cast_member_ref(cast_lib, cast_member);
-    reserve_player_mut(|player| {
-        if !player.subscribed_member_refs.contains(&member_ref) {
-            player.subscribed_member_refs.push(member_ref.clone());
-        }
-    });
-    JsApi::dispatch_cast_member_changed(member_ref);
 }
 
 #[wasm_bindgen]
@@ -1466,344 +3063,12 @@ pub fn provide_net_task_error(task_id: u32) {
 /// (so multiple sprites that share a single Flash cast member can display
 /// different frames at the same time — e.g. storyscramble's 3 story tiles
 /// pinned to poster frames 2/4/6 of one shared SWF). The renderer reads
-/// `flash_frame_buffers[sprite_num]` directly.
-#[wasm_bindgen]
-pub fn update_flash_frame(sprite_num: i32, width: u32, height: u32, rgba_data: &[u8]) {
-    use player::bitmap::bitmap::{Bitmap, PaletteRef, get_system_default_palette};
-
-    let expected_len = (width * height * 4) as usize;
-    if rgba_data.len() != expected_len {
-        warn!(
-            "update_flash_frame: expected {} bytes, got {}",
-            expected_len, rgba_data.len()
-        );
-        return;
-    }
-
-    let mut bitmap = Bitmap::new(
-        width as u16,
-        height as u16,
-        32,
-        32,
-        8, // alpha depth
-        PaletteRef::BuiltIn(get_system_default_palette()),
-    );
-    bitmap.data = rgba_data.to_vec();
-    bitmap.use_alpha = true;
-
-    unsafe {
-        // Nested `#movie` sub-player Flash: a synthetic key encodes
-        // (player_id, local_channel). Route the captured frame into THAT sub's
-        // flash_frame_buffers so its own draw_frame composites it into the sub
-        // stage — not the host's buffers.
-        if let Some((pid, ch)) = crate::player::decode_nested_flash_key(sprite_num) {
-            if let Some(sub) = crate::player::NESTED_PLAYERS
-                .get_mut(pid.wrapping_sub(1))
-                .and_then(|o| o.as_mut())
-            {
-                if let Some(&existing_ref) = sub.flash_frame_buffers.get(&ch) {
-                    sub.bitmap_manager.replace_bitmap(existing_ref, bitmap);
-                } else {
-                    let bitmap_ref = sub.bitmap_manager.add_bitmap(bitmap);
-                    sub.flash_frame_buffers.insert(ch, bitmap_ref);
-                }
-            }
-            return;
-        }
-
-        if let Some(player) = PLAYER_OPT.as_mut() {
-            let key = sprite_num as i16;
-
-            // Off-screen Flash-as-3D-texture (synthetic negative sprite number):
-            // route the captured frame into the named W3D texture rather than the
-            // on-stage frame buffer. The incremental texture upload skips re-upload
-            // when the byte length is unchanged, so re-pushing a static SWF frame
-            // every RAF is cheap. See player.flash_texture_targets.
-            if let Some((member_ref, tex_name)) = player.flash_texture_targets.get(&key).cloned() {
-                let mut tex_data = Vec::with_capacity(8 + rgba_data.len());
-                tex_data.extend_from_slice(&width.to_le_bytes());
-                tex_data.extend_from_slice(&height.to_le_bytes());
-                tex_data.extend_from_slice(rgba_data);
-                if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
-                    if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                        if let Some(scene) = w3d.scene_mut() {
-                            // Only bump the content version when the pixels actually
-                            // change size (cheap static-SWF guard mirroring the
-                            // renderer's length-based incremental check).
-                            let changed = scene.texture_images.get(&Symbol::from_str(&tex_name))
-                                .map_or(true, |old| old.len() != tex_data.len());
-                            scene.texture_images.insert(Symbol::from_str(&tex_name.clone()), tex_data);
-                            if changed {
-                                scene.texture_content_version += 1;
-                            }
-                        }
-                    }
-                }
-                return;
-            }
-
-            if let Some(&existing_ref) = player.flash_frame_buffers.get(&key) {
-                // Replace existing bitmap to reuse the BitmapRef.
-                player.bitmap_manager.replace_bitmap(existing_ref, bitmap);
-            } else {
-                let bitmap_ref = player.bitmap_manager.add_bitmap(bitmap);
-                player.flash_frame_buffers.insert(key, bitmap_ref);
-            }
-        }
-    }
-}
-
-// Flash-to-Lingo callback mechanism
-#[wasm_bindgen]
-pub fn trigger_lingo_callback(sprite_num: i32, handler_name: String, args: JsValue) -> bool {
-    use director::lingo::datum::Datum;
-
-    let arg_refs = if js_sys::Array::is_array(&args) {
-        let array = js_sys::Array::from(&args);
-        let mut refs = Vec::new();
-        for i in 0..array.length() {
-            let item = array.get(i);
-            let datum = if let Some(s) = item.as_string() {
-                Datum::String(s)
-            } else if let Some(n) = item.as_f64() {
-                Datum::Float(n)
-            } else {
-                Datum::Void
-            };
-            refs.push(player::player_alloc_datum(datum));
-        }
-        refs
-    } else {
-        let datum = if let Some(s) = args.as_string() {
-            Datum::String(s)
-        } else if let Some(n) = args.as_f64() {
-            Datum::Float(n)
-        } else {
-            Datum::Void
-        };
-        vec![player::player_alloc_datum(datum)]
-    };
-
-    player_dispatch_with_result(PlayerVMCommand::TriggerFlashCallback {
-        sprite_num,
-        handler_name: Symbol::from_str(&handler_name),
-        args: arg_refs,
-    })
-}
-
-/// Convert a JsValue to a DatumRef, handling objects as PropLists
-fn js_value_to_datum_ref(item: &JsValue) -> player::datum_ref::DatumRef {
-    js_value_to_datum_ref_with_flash(item, 1, 1)
-}
-
-fn js_value_to_datum_ref_with_flash(item: &JsValue, flash_cast_lib: i32, flash_cast_member: i32) -> player::datum_ref::DatumRef {
-    use director::lingo::datum::{Datum, DatumType};
-
-    if item.is_null() || item.is_undefined() {
-        return player::player_alloc_datum(Datum::Void);
-    }
-    if let Some(s) = item.as_string() {
-        return player::player_alloc_datum(Datum::String(s));
-    }
-    if let Some(n) = item.as_f64() {
-        if n.fract() == 0.0 && n >= i32::MIN as f64 && n <= i32::MAX as f64 {
-            return player::player_alloc_datum(Datum::Int(n as i32));
-        } else {
-            return player::player_alloc_datum(Datum::Float(n));
-        }
-    }
-    if let Some(b) = item.as_bool() {
-        return player::player_alloc_datum(Datum::Int(if b { 1 } else { 0 }));
-    }
-    // Check for arrays before objects (arrays are also objects in JS)
-    if js_sys::Array::is_array(item) {
-        let array = js_sys::Array::from(item);
-        let mut items = std::collections::VecDeque::new();
-        for i in 0..array.length() {
-            let val = array.get(i);
-            items.push_back(js_value_to_datum_ref_with_flash(&val, flash_cast_lib, flash_cast_member));
-        }
-        // Use XmlChildNodes type for 0-based indexing (Flash arrays are 0-based)
-        return player::player_alloc_datum(Datum::List(DatumType::XmlChildNodes, items, false));
-    }
-    if item.is_object() {
-        let obj = js_sys::Object::from(item.clone());
-
-        // Check for __dirplayer_stored_path - this is a Flash object reference
-        if let Ok(stored_path) = js_sys::Reflect::get(&obj, &JsValue::from_str("__dirplayer_stored_path")) {
-            if let Some(path) = stored_path.as_string() {
-                let flash_ref = director::lingo::datum::FlashObjectRef::from_path_with_member(&path, flash_cast_lib, flash_cast_member);
-                return player::player_alloc_datum(Datum::FlashObjectRef(flash_ref));
-            }
-        }
-
-        // Convert JS object to PropList
-        let entries = js_sys::Object::entries(&obj);
-        let mut props: std::collections::VecDeque<(player::datum_ref::DatumRef, player::datum_ref::DatumRef)> = std::collections::VecDeque::new();
-        let mut flash_type: Option<String> = None;
-
-        for i in 0..entries.length() {
-            let entry = js_sys::Array::from(&entries.get(i));
-            let key = entry.get(0).as_string().unwrap_or_default();
-            let val = entry.get(1);
-
-            if key == "#type" {
-                flash_type = val.as_string();
-                continue;
-            }
-
-            let key_ref = player::player_alloc_datum(Datum::Symbol(Symbol::from_str(&key)));
-            let val_ref = js_value_to_datum_ref_with_flash(&val, flash_cast_lib, flash_cast_member);
-            props.push_back((key_ref, val_ref));
-        }
-
-        // Store the type as a #type property if present
-        if let Some(t) = flash_type {
-            let key_ref = player::player_alloc_datum(Datum::Symbol(Symbol::from_str("#type")));
-            let val_ref = player::player_alloc_datum(Datum::String(t));
-            props.push_front((key_ref, val_ref));
-        }
-
-        return player::player_alloc_datum(Datum::PropList(props, false));
-    }
-    player::player_alloc_datum(Datum::Void)
-}
-
-#[wasm_bindgen]
-pub fn trigger_lingo_callback_on_script(cast_lib: i32, cast_member: i32, handler_name: String, args: String, flash_cast_lib: i32, flash_cast_member: i32) -> bool {
-    use director::lingo::datum::Datum;
-
-    let args_js_value = match js_sys::JSON::parse(&args) {
-        Ok(val) => val,
-        Err(_) => return false,
-    };
-
-    let mut arg_refs = Vec::new();
-
-    // Prepend oCaller (the calling object reference) - Director handlers expect this as first arg
-    arg_refs.push(player::player_alloc_datum(Datum::Void));
-
-    if js_sys::Array::is_array(&args_js_value) {
-        let array = js_sys::Array::from(&args_js_value);
-        for i in 0..array.length() {
-            let item = array.get(i);
-            let datum_ref = js_value_to_datum_ref_with_flash(&item, flash_cast_lib, flash_cast_member);
-            arg_refs.push(datum_ref);
-        }
-    } else {
-        return false;
-    }
-
-
-    player_dispatch_with_result(PlayerVMCommand::TriggerLingoCallbackOnScript {
-        cast_lib,
-        cast_member,
-        handler_name: Symbol::from_str(&handler_name),
-        args: arg_refs,
-    })
-}
-
-/// Flash `LocalConnection.send(connName, method, …args)` forwarded from the
-/// Ruffle fork's AVM1 hook. Routes to the Lingo handler a Director-created
-/// LocalConnection registered via `setCallback` (connName → lc_path →
-/// (handler, target)), dispatched to the exact target instance so `me` is
-/// correct. Returns false for a connection dirplayer doesn't own — the caller
-/// (fork) has already run Ruffle's normal routing, so a real SWF↔SWF
-/// LocalConnection is unaffected. Neopets DGS uses this for the encrypted-score
-/// / protocol channel (`send("gObjLC", "createESCORE", score)`).
-#[wasm_bindgen]
-pub fn local_connection_send(
-    connection_name: String,
-    method_name: String,
-    args_json: String,
-) -> bool {
-    use director::lingo::datum::Datum;
-
-    let params = player::reserve_player_ref(|player| {
-        let lc_path = player.flash_lc_connections.get(&connection_name)?.clone();
-        let cb = player.flash_lc_callbacks.get(&(lc_path, method_name.clone()))?;
-        Some(cb.clone())
-    });
-    let (handler, target) = match params {
-        Some(p) => p,
-        None => return false, // not dirplayer-owned — Ruffle handled it normally
-    };
-
-    let args_js_value = match js_sys::JSON::parse(&args_json) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-    let mut arg_refs = Vec::new();
-    // Director LocalConnection callback shape: `on <handler> me, aInfo, aMessage`.
-    // aInfo is a status/info arg Director supplies; pass VOID.
-    arg_refs.push(player::player_alloc_datum(Datum::Void));
-    if js_sys::Array::is_array(&args_js_value) {
-        let array = js_sys::Array::from(&args_js_value);
-        for i in 0..array.length() {
-            let item = array.get(i);
-            arg_refs.push(js_value_to_datum_ref(&item));
-        }
-    }
-
-    player_dispatch_with_result(PlayerVMCommand::TriggerLocalConnectionCallback {
-        target,
-        handler_name: handler,
-        args: arg_refs,
-    })
-}
-
-/// Dispatch a Flash `getURL("event: …")` body into Director's event chain.
-///
-/// Called from the JS Flash bridge whenever a SWF tries to navigate to a
-/// `event:`-scheme URL — Director's Flash Asset Xtra convention for sending a
-/// Lingo message back to the host movie.
-///
-/// The first whitespace-delimited token is the handler name. The remainder is
-/// the argument list, which Director's Flash Asset Xtra spells as a normal
-/// Lingo argument list — comma-separated literals. age_of_speed's off-game SWF
-/// builds `event:flash_start "1","1","0","1","1","0","1"` for
-/// `on flash_start me, fRaceId, fAmbientationId, …`; splitting that on
-/// whitespace yielded ONE String argument and left every real parameter VOID
-/// (`member(179 + gLevelID)` then resolved to an empty slot).
-///
-/// Quoting is significant and must be preserved: a quoted `"1"` stays a
-/// String, because these scripts compare against string literals
-/// (`if fGenericHelp = "1"`, `if fAudioState = "0"`) — coercing it to Int
-/// would silently break those tests.
-///
-/// Bodies with no comma keep the older whitespace tokenisation, so `send #done`
-/// still invokes `on send` with `#done` as its first arg — `send` is not a
-/// keyword, it's just the most common handler name games define for routing to
-/// sendSprite / sendAllSprites (e.g. storyscramble's BehaviorScript 24).
-///
-/// `cast_lib` / `cast_member` identify the Flash member that fired the
-/// navigation, so a future revision can target the host sprite first; for now
-/// the dispatch is global via `player_invoke_global_event`.
-///
-/// Returns true when the body was understood and queued, false when the form
-/// is unrecognised (caller may then fall through to a real navigation).
-#[wasm_bindgen]
-pub fn dispatch_flash_event(cast_lib: i32, cast_member: i32, body: String) -> bool {
-    use director::lingo::datum::Datum;
-
+pub(crate) fn parse_flash_event_body(body: &str) -> Option<(String, Vec<String>)> {
     let trimmed = body.trim();
     let mut tokens = trimmed.split_whitespace();
-    let Some(handler_token) = tokens.next() else {
-        warn!("[dispatch_flash_event] empty event body: {:?}", body);
-        return false;
-    };
-    // The handler token MAY have a leading `#` in Director's UI conventions
-    // (e.g. `event: #done`), but the canonical `event: send …` form uses a
-    // bare identifier. Strip the prefix in either case so handler lookup
-    // matches the script-side spelling.
-    let handler_name = handler_token.trim_start_matches('#').to_string();
-
-    // Everything after the handler token is the argument list.
-    let rest = trimmed[handler_token.len()..].trim();
-
-    // Split on commas that are OUTSIDE double quotes — an argument may legally
-    // contain one (`flash_openURL "http://host/p?a=1,2"`).
-    let mut raw_args: Vec<String> = Vec::new();
+    let handler = tokens.next()?.trim_start_matches('#').to_owned();
+    let rest = trimmed[trimmed.find(char::is_whitespace).unwrap_or(trimmed.len())..].trim();
+    let mut raw_args = Vec::new();
     if !rest.is_empty() {
         let mut current = String::new();
         let mut in_quotes = false;
@@ -1814,136 +3079,159 @@ pub fn dispatch_flash_event(cast_lib: i32, cast_member: i32, body: String) -> bo
                     current.push(ch);
                 }
                 ',' if !in_quotes => {
-                    raw_args.push(current.trim().to_string());
+                    raw_args.push(current.trim().to_owned());
                     current.clear();
                 }
                 _ => current.push(ch),
             }
         }
-        raw_args.push(current.trim().to_string());
-
-        // No commas at all: fall back to the historical whitespace split so
-        // legacy space-separated bodies keep working. An unquoted single token
-        // is unaffected either way; a *quoted* one must stay whole.
+        raw_args.push(current.trim().to_owned());
         if raw_args.len() == 1 && !raw_args[0].starts_with('"') {
-            raw_args = rest.split_whitespace().map(|s| s.to_string()).collect();
+            raw_args = rest.split_whitespace().map(str::to_owned).collect();
         }
     }
-
-    let mut arg_refs: Vec<player::datum_ref::DatumRef> = Vec::new();
-    for tok in raw_args {
-        // Token typing matches what Director's interpreter would produce
-        // when re-tokenising the event body before invoking the handler:
-        // - double-quoted → String, verbatim (quoting wins over numeric look)
-        // - leading `#` → Symbol
-        // - parses as i32 / f64 → Int / Float
-        // - otherwise → String (downstream handlers can `value()` / `integer()`)
-        let datum = if tok.len() >= 2 && tok.starts_with('"') && tok.ends_with('"') {
-            Datum::String(tok[1..tok.len() - 1].to_string())
-        } else if let Some(sym) = tok.strip_prefix('#') {
-            Datum::Symbol(Symbol::from_str(sym))
-        } else if let Ok(n) = tok.parse::<i32>() {
-            Datum::Int(n)
-        } else if let Ok(f) = tok.parse::<f64>() {
-            Datum::Float(f)
-        } else {
-            Datum::String(tok.to_string())
-        };
-        arg_refs.push(player::player_alloc_datum(datum));
-    }
-
-    player_dispatch(PlayerVMCommand::DispatchFlashEvent {
-        cast_lib,
-        cast_member,
-        handler_name: Symbol::from_str(&handler_name),
-        args: arg_refs,
-    });
-    true
+    Some((handler, raw_args))
 }
 
-/// Execute a `getURL("lingo: …")` navigation body from a Flash SWF as a
-/// Lingo command, matching Director's Flash Asset Xtra convention.
-///
-/// Director's Flash sprite interprets a `getURL` whose URL begins with the
-/// `lingo:` scheme by evaluating the remainder as a Lingo command in the
-/// movie's global handler context — exactly like `do "…"`. Pengapop's
-/// titleScreen SWF uses this for every button: the Play button navigates to
-/// `lingo:startGameTimed`, the hover/click sounds to
-/// `lingo:bdPlaySound(#generalSound,"tink")`, etc.
-///
-/// The body is everything after the `lingo:` scheme; we run it through the
-/// same `eval_lingo_command` path the debugger console and `do` use, so it
-/// supports bare handler calls (`startGameTimed`) and calls with args
-/// (`bdPlaySound(#generalSound,"tink")`). Returns true so the JS caller can
-/// swallow the navigation (nothing should actually open a URL).
-#[wasm_bindgen]
-pub fn dispatch_flash_lingo(body: String) -> bool {
-    let trimmed = body.trim().to_string();
-    if trimmed.is_empty() {
-        warn!("[dispatch_flash_lingo] empty lingo body");
-        return false;
+fn update_flash_frame_for_player(
+    player: &mut player::DirPlayer,
+    symbols: &mut player::symbols::symbol_table::SymbolTable,
+    sprite_num: i32,
+    width: u32,
+    height: u32,
+    rgba_data: &[u8],
+) -> Result<(), JsValue> {
+    use player::bitmap::bitmap::{get_system_default_palette, Bitmap, PaletteRef};
+
+    let expected_len = (width * height * 4) as usize;
+    if rgba_data.len() != expected_len {
+        return Err(JsValue::from_str("Flash frame pixel length does not match dimensions"));
     }
-    // Run asynchronously (like eval_command): the caller is inside a
-    // synchronous Flash mouse-event forward, so we must let the current
-    // command unwind before reserving the player to run the handler.
-    crate::player::spawn_player_local(async move {
-        let result = eval_lingo_command(trimmed).await;
-        if let Err(err) = result {
-            reserve_player_ref(|player| {
-                JsApi::dispatch_script_error(player, &err);
-            });
-        }
-    });
-    true
-}
+    let mut bitmap = Bitmap::new(
+        width as u16,
+        height as u16,
+        32,
+        32,
+        8,
+        PaletteRef::BuiltIn(get_system_default_palette()),
+    );
+    bitmap.data = rgba_data.to_vec();
+    bitmap.use_alpha = true;
 
-#[wasm_bindgen]
-pub fn set_lingo_script_property(cast_lib: i32, cast_member: i32, prop_name: String, value: JsValue) -> bool {
-    use director::lingo::datum::Datum;
-
-    let datum = if let Some(s) = value.as_string() {
-        Datum::String(s)
-    } else if let Some(n) = value.as_f64() {
-        if n.fract() == 0.0 && n >= i32::MIN as f64 && n <= i32::MAX as f64 {
-            Datum::Int(n as i32)
-        } else {
-            Datum::Float(n)
+    // A negative synthetic sprite number identifies an off-screen W3D texture.
+    // Resolve its texture symbol through this player's authoritative table so
+    // a callback cannot mutate a replacement session's symbol graph.
+    let key = sprite_num as i16;
+    if let Some((member_ref, texture_name)) = player.flash_texture_targets.get(&key).cloned() {
+        let texture_symbol = symbols.intern(&texture_name);
+        let mut texture_data = Vec::with_capacity(8 + rgba_data.len());
+        texture_data.extend_from_slice(&width.to_le_bytes());
+        texture_data.extend_from_slice(&height.to_le_bytes());
+        texture_data.extend_from_slice(rgba_data);
+        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+            if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                if let Some(scene) = w3d.scene_mut() {
+                    let changed = scene
+                        .texture_images
+                        .get(&texture_symbol)
+                        .map_or(true, |old| old.len() != texture_data.len());
+                    scene.texture_images.insert(texture_symbol, texture_data);
+                    if changed {
+                        scene.texture_content_version += 1;
+                    }
+                }
+            }
         }
-    } else if let Some(b) = value.as_bool() {
-        Datum::Int(if b { 1 } else { 0 })
+        return Ok(());
+    }
+
+    if let Some(&existing_ref) = player.flash_frame_buffers.get(&key) {
+        player.bitmap_manager.replace_bitmap(existing_ref, bitmap);
     } else {
-        Datum::Void
-    };
-
-    let value_ref = player::player_alloc_datum(datum);
-
-    player_dispatch_with_result(PlayerVMCommand::SetLingoScriptProperty {
-        cast_lib,
-        cast_member,
-        prop_name: Symbol::from_str(&prop_name),
-        value: value_ref,
-    })
+        let bitmap_ref = player.bitmap_manager.add_bitmap(bitmap);
+        player.flash_frame_buffers.insert(key, bitmap_ref);
+    }
+    Ok(())
 }
 
-fn player_dispatch_with_result(command: PlayerVMCommand) -> bool {
-    player_dispatch(command);
-    true
-}
+fn js_value_to_datum_ref_for_context(
+    item: &JsValue,
+    player: &mut player::DirPlayer,
+    symbols: &mut player::symbols::symbol_table::SymbolTable,
+    flash_cast_lib: i32,
+    flash_cast_member: i32,
+) -> player::datum_ref::DatumRef {
+    use director::lingo::datum::{Datum, DatumType, FlashObjectRef};
 
-// Eval command bypasses the command queue to allow evaluating expressions
-// while a breakpoint is active (e.g., inspecting variables in the debugger).
-
-#[wasm_bindgen]
-pub fn eval_command(command: String) {
-    crate::player::spawn_player_local(async move {
-        JsApi::dispatch_debug_message(&command);
-        let result = eval_lingo_command(command).await;
-        if let Err(err) = result {
-            reserve_player_ref(|player| {
-                JsApi::dispatch_script_error(player, &err);
-            });
+    if item.is_null() || item.is_undefined() {
+        return player.alloc_datum(Datum::Void);
+    }
+    if let Some(value) = item.as_string() {
+        return player.alloc_datum(Datum::String(value));
+    }
+    if let Some(value) = item.as_f64() {
+        let datum = if value.fract() == 0.0 && value >= i32::MIN as f64 && value <= i32::MAX as f64 {
+            Datum::Int(value as i32)
+        } else {
+            Datum::Float(value)
+        };
+        return player.alloc_datum(datum);
+    }
+    if let Some(value) = item.as_bool() {
+        return player.alloc_datum(Datum::Int(if value { 1 } else { 0 }));
+    }
+    if js_sys::Array::is_array(item) {
+        let array = js_sys::Array::from(item);
+        let mut values = std::collections::VecDeque::new();
+        for value in array.iter() {
+            values.push_back(js_value_to_datum_ref_for_context(
+                &value,
+                player,
+                symbols,
+                flash_cast_lib,
+                flash_cast_member,
+            ));
         }
-    });
+        return player.alloc_datum(Datum::List(DatumType::XmlChildNodes, values, false));
+    }
+    if item.is_object() {
+        let object = js_sys::Object::from(item.clone());
+        if let Ok(stored_path) = js_sys::Reflect::get(&object, &JsValue::from_str("__dirplayer_stored_path")) {
+            if let Some(path) = stored_path.as_string() {
+                return player.alloc_datum(Datum::FlashObjectRef(
+                    FlashObjectRef::from_path_with_member(&path, flash_cast_lib, flash_cast_member),
+                ));
+            }
+        }
+        let mut properties = std::collections::VecDeque::new();
+        let entries = js_sys::Object::entries(&object);
+        let mut flash_type = None;
+        for entry in entries.iter() {
+            let pair = js_sys::Array::from(&entry);
+            let key = pair.get(0).as_string().unwrap_or_default();
+            let value = pair.get(1);
+            if key == "#type" {
+                flash_type = value.as_string();
+                continue;
+            }
+            let key_ref = player.alloc_datum(Datum::Symbol(symbols.intern(&key)));
+            let value_ref = js_value_to_datum_ref_for_context(
+                &value,
+                player,
+                symbols,
+                flash_cast_lib,
+                flash_cast_member,
+            );
+            properties.push_back((key_ref, value_ref));
+        }
+        if let Some(value) = flash_type {
+            let key_ref = player.alloc_datum(Datum::Symbol(symbols.intern("#type")));
+            let value_ref = player.alloc_datum(Datum::String(value));
+            properties.push_front((key_ref, value_ref));
+        }
+        return player.alloc_datum(Datum::PropList(properties, false));
+    }
+    player.alloc_datum(Datum::Void)
 }
 
 /// Check if WebGL2 is supported in the browser
@@ -2007,111 +3295,54 @@ pub fn get_renderer_backend() -> String {
 }
 
 /// Download raw W3D/IFX data for external testing
-#[wasm_bindgen(js_name = "exportW3dRaw")]
-pub fn export_w3d_raw(cast_lib: i32, cast_member: i32) {
-    reserve_player_ref(|player| {
-        let member_ref = CastMemberRef { cast_lib, cast_member };
-        let member = match player.movie.cast_manager.find_member_by_ref(&member_ref) {
-            Some(m) => m,
-            None => return,
-        };
-        let w3d = match member.member_type.as_shockwave3d() {
-            Some(w) => w,
-            None => return,
-        };
-        // Find IFX start in the raw data
-        let data = &w3d.w3d_data;
-        let ifx_magic = [0x49u8, 0x46, 0x58, 0x00];
-        let offset = (0..data.len().min(256)).find(|&i| i + 4 <= data.len() && data[i..i+4] == ifx_magic);
-        if let Some(off) = offset {
-            let ifx_data = &data[off..];
-            trigger_browser_download(&format!("member_{}_{}.w3d", cast_lib, cast_member), ifx_data, "application/octet-stream");
-            debug!("Exported {} bytes of IFX data (offset {} in {} byte XMED)", ifx_data.len(), off, data.len());
-        } else {
-            debug!("No IFX magic found in W3D data");
-        }
-    });
-}
-
-#[wasm_bindgen(js_name = "exportW3dObj")]
-pub fn export_w3d_obj(cast_lib: i32, cast_member: i32) {
-    reserve_player_ref(|player| {
-        let member_ref = CastMemberRef { cast_lib, cast_member };
-        let member = match player.movie.cast_manager.find_member_by_ref(&member_ref) {
-            Some(m) => m,
-            None => {
-                web_sys::console::error_1(&format!("Member {}:{} not found", cast_lib, cast_member).into());
-                return;
-            }
-        };
-        let w3d = match member.member_type.as_shockwave3d() {
-            Some(w) => w,
-            None => {
-                web_sys::console::error_1(&"Not a Shockwave3D member".into());
-                return;
-            }
-        };
-        let scene = match &w3d.parsed_scene {
-            Some(s) => s,
-            None => {
-                web_sys::console::error_1(&"No parsed 3D scene".into());
-                return;
-            }
-        };
-
-        let name = if member.name.is_empty() {
-            format!("member_{}_{}", cast_lib, cast_member)
-        } else {
-            member.name.replace(' ', "_")
-        };
-
-        // Build ZIP containing OBJ + MTL + GLB + textures
-        let mtl_filename = format!("{}.mtl", name);
-        let obj_data = scene.export_obj_with_mtl(&mtl_filename);
-        let mtl_data = scene.export_mtl(&mtl_filename);
-        let glb_data = crate::director::chunks::w3d::gltf_export::export_glb(scene);
-
-        let obj_filename = format!("{}.obj", name);
-        let glb_filename = format!("{}.glb", name);
-        let zip_data = build_zip_with_glb(
-            &obj_filename, obj_data.as_bytes(),
-            &mtl_filename, mtl_data.as_bytes(),
-            &glb_filename, &glb_data,
-            &scene.texture_images,
-        );
-
-        trigger_browser_download(&format!("{}.zip", name), &zip_data, "application/zip");
-
-        debug!(
-            "Exported {}.obj ({} bytes), {}.mtl ({} bytes), {}.glb ({} bytes), {} textures",
-            name, obj_data.len(), name, mtl_data.len(), name, glb_data.len(), scene.texture_images.len()
-        );
-    });
-}
-
-/// List all Shockwave3D members in the movie (for use with exportW3dObj)
-#[wasm_bindgen(js_name = "listW3dMembers")]
-pub fn list_w3d_members() -> String {
-    reserve_player_ref(|player| {
-        let mut result = String::new();
-        for (lib_idx, cast) in player.movie.cast_manager.casts.iter().enumerate() {
-            for (_, member) in cast.members.iter() {
-                if member.member_type.as_shockwave3d().is_some() {
-                    let line = format!(
-                        "castLib {}  member {} \"{}\"  (call wasm.exportW3dObj({}, {}) to download)\n",
-                        lib_idx + 1, member.number, member.name,
-                        lib_idx + 1, member.number
-                    );
-                    result.push_str(&line);
-                }
-            }
-        }
-        if result.is_empty() {
-            result = "No Shockwave3D members found.".to_string();
-        }
-        debug!("{}", result);
-        result
-    })
+fn export_w3d_obj_for_player(
+    player: &player::DirPlayer,
+    symbols: &player::symbols::symbol_table::SymbolTable,
+    cast_lib: i32,
+    cast_member: i32,
+) -> Result<(), JsValue> {
+    let member_ref = CastMemberRef { cast_lib, cast_member };
+    let member = player
+        .movie
+        .cast_manager
+        .find_member_by_ref(&member_ref)
+        .ok_or_else(|| JsValue::from_str(&format!("Member {}:{} not found", cast_lib, cast_member)))?;
+    let w3d = member
+        .member_type
+        .as_shockwave3d()
+        .ok_or_else(|| JsValue::from_str("Not a Shockwave3D member"))?;
+    let scene = w3d
+        .parsed_scene
+        .as_ref()
+        .ok_or_else(|| JsValue::from_str("No parsed 3D scene"))?;
+    let name = if member.name.is_empty() {
+        format!("member_{}_{}", cast_lib, cast_member)
+    } else {
+        member.name.replace(' ', "_")
+    };
+    let mtl_filename = format!("{}.mtl", name);
+    let obj_data = scene
+        .export_obj_with_mtl(&mtl_filename, symbols)
+        .map_err(|error| JsValue::from_str(&error))?;
+    let mtl_data = scene
+        .export_mtl(&mtl_filename, symbols)
+        .map_err(|error| JsValue::from_str(&error))?;
+    let glb_data = crate::director::chunks::w3d::gltf_export::export_glb(scene, symbols)
+        .map_err(|error| JsValue::from_str(&error))?;
+    let obj_filename = format!("{}.obj", name);
+    let glb_filename = format!("{}.glb", name);
+    let zip_data = build_zip_with_glb(
+        &obj_filename,
+        obj_data.as_bytes(),
+        &mtl_filename,
+        mtl_data.as_bytes(),
+        &glb_filename,
+        &glb_data,
+        &scene.texture_images,
+        symbols,
+    );
+    trigger_browser_download(&format!("{}.zip", name), &zip_data, "application/zip");
+    Ok(())
 }
 
 /// Build a minimal uncompressed ZIP file containing OBJ + MTL + textures
@@ -2120,6 +3351,7 @@ fn build_zip_with_glb(
     mtl_name: &str, mtl_data: &[u8],
     glb_name: &str, glb_data: &[u8],
     textures: &std::collections::HashMap<crate::player::symbols::symbol::Symbol, Vec<u8>>,
+    symbols: &player::symbols::symbol_table::SymbolTable,
 ) -> Vec<u8> {
     let mut files: Vec<(String, &[u8])> = Vec::new();
     files.push((obj_name.to_string(), obj_data));
@@ -2127,7 +3359,7 @@ fn build_zip_with_glb(
     files.push((glb_name.to_string(), glb_data));
 
     for (tex_name, image_data) in textures {
-        let tex_name = tex_name.as_str();
+        let tex_name = symbols.display(tex_name).unwrap_or("foreign-texture");
         let ext = if image_data.len() >= 2 && image_data[0] == 0xFF && image_data[1] == 0xD8 {
             "jpg"
         } else if image_data.len() >= 2 && image_data[0] == 0x89 && image_data[1] == 0x50 {
@@ -2284,125 +3516,6 @@ fn trigger_browser_download(filename: &str, data: &[u8], mime_type: &str) {
 // MCP (Model Context Protocol) functions for VM debugging
 // These functions return JSON strings and are used by the MCP server
 // ============================================================================
-
-#[wasm_bindgen]
-pub fn mcp_list_scripts(cast_lib: i32, limit: i32, offset: i32) -> String {
-    reserve_player_ref(|player| {
-        let cast_lib_opt = if cast_lib < 0 { None } else { Some(cast_lib) };
-        let limit_opt = if limit < 0 { None } else { Some(limit as usize) };
-        let offset_opt = if offset < 0 { None } else { Some(offset as usize) };
-        player::mcp::mcp_list_scripts(player, cast_lib_opt, limit_opt, offset_opt)
-    })
-}
-
-#[wasm_bindgen]
-pub fn mcp_get_script(cast_lib: i32, cast_member: i32) -> String {
-    reserve_player_ref(|player| player::mcp::mcp_get_script(player, cast_lib, cast_member))
-}
-
-#[wasm_bindgen]
-pub fn mcp_disassemble_handler(cast_lib: i32, cast_member: i32, handler_name: String) -> String {
-    reserve_player_ref(|player| {
-        player::mcp::mcp_disassemble_handler(player, cast_lib, cast_member, &handler_name)
-    })
-}
-
-#[wasm_bindgen]
-pub fn mcp_decompile_handler(cast_lib: i32, cast_member: i32, handler_name: String) -> String {
-    reserve_player_ref(|player| {
-        player::mcp::mcp_decompile_handler(player, cast_lib, cast_member, &handler_name)
-    })
-}
-
-#[wasm_bindgen]
-pub fn mcp_get_call_stack(depth: i32, include_locals: bool) -> String {
-    reserve_player_ref(|player| {
-        let depth_opt = if depth < 0 { None } else { Some(depth as usize) };
-        player::mcp::mcp_get_call_stack(player, depth_opt, include_locals)
-    })
-}
-
-#[wasm_bindgen]
-pub fn mcp_get_context() -> String {
-    reserve_player_ref(|player| player::mcp::mcp_get_context(player))
-}
-
-#[wasm_bindgen]
-pub fn mcp_get_execution_state() -> String {
-    reserve_player_ref(|player| player::mcp::mcp_get_execution_state(player))
-}
-
-#[wasm_bindgen]
-pub fn mcp_get_globals() -> String {
-    reserve_player_ref(|player| player::mcp::mcp_get_globals(player))
-}
-
-#[wasm_bindgen]
-pub fn mcp_get_locals(scope_index: i32) -> String {
-    reserve_player_ref(|player| {
-        let index = if scope_index < 0 {
-            None
-        } else {
-            Some(scope_index as usize)
-        };
-        player::mcp::mcp_get_locals(player, index)
-    })
-}
-
-#[wasm_bindgen]
-pub fn mcp_inspect_datum(datum_id: u32) -> String {
-    reserve_player_ref(|player| player::mcp::mcp_inspect_datum(player, datum_id as usize))
-}
-
-#[wasm_bindgen]
-pub fn mcp_list_cast_libs() -> String {
-    reserve_player_ref(|player| player::mcp::mcp_list_cast_libs(player))
-}
-
-#[wasm_bindgen]
-pub fn mcp_get_console_output(last_n_lines: usize) -> String {
-    let lines = reserve_player_ref(|player| {
-        player
-            .console
-            .read_tail(last_n_lines) 
-    });
-    return lines;
-}
-
-
-#[wasm_bindgen]
-pub fn mcp_list_cast_members(cast_lib: i32) -> String {
-    reserve_player_ref(|player| {
-        let lib = if cast_lib < 0 { None } else { Some(cast_lib) };
-        player::mcp::mcp_list_cast_members(player, lib)
-    })
-}
-
-#[wasm_bindgen]
-pub fn mcp_inspect_cast_member(cast_lib: i32, cast_member: i32) -> String {
-    reserve_player_ref(|player| {
-        player::mcp::mcp_inspect_cast_member(player, cast_lib, cast_member)
-    })
-}
-
-#[wasm_bindgen]
-pub fn mcp_list_breakpoints() -> String {
-    reserve_player_ref(|player| player::mcp::mcp_list_breakpoints(player))
-}
-
-/// Evaluate a Lingo expression and return the result as JSON.
-/// Unlike eval_command, this waits for completion and returns the result.
-#[wasm_bindgen]
-pub async fn mcp_eval_lingo(code: String) -> String {
-    let result = eval_lingo_command(code).await;
-    reserve_player_ref(|player| player::mcp::mcp_format_eval_result(player, result))
-}
-
-/// Switch the renderer backend at runtime
-#[wasm_bindgen]
-pub fn set_renderer_backend(backend: &str) -> Result<(), JsValue> {
-    rendering::player_set_renderer_backend(backend)
-}
 
 /// Set whether PFR font rasterization is enabled
 #[wasm_bindgen]

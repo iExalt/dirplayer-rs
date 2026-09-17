@@ -1,3 +1,11 @@
+import {
+  registerVmCallbacks as registerRealVmCallbacks,
+  onScoreChanged as onRealScoreChanged,
+  onChannelChanged as onRealChannelChanged,
+  onChannelDisplayNameChanged as onRealChannelDisplayNameChanged,
+  onChannelDisplayNamesChanged as onRealChannelDisplayNamesChanged,
+} from './dirplayer-js-api-real.js';
+
 // Stubs for the dirplayer-js-api module.
 // In production, these are provided by the Electron host.
 export function onMovieLoaded() {}
@@ -5,10 +13,47 @@ export function onCastListChanged() {}
 export function onCastLibNameChanged() {}
 export function onCastMemberListChanged() {}
 export function onCastMemberChanged() {}
-export function onScoreChanged() {}
-export function onChannelChanged() {}
-export function onChannelDisplayNameChanged() {}
-export function onChannelDisplayNamesChanged() {}
+// BrowserPlayerHandle producer-boundary fixture. The Rust callback receives
+// an explicit owner key; route it to the exact registered callback and pass
+// the key through so the wasm test can verify ownership and synchronously
+// re-enter its handle while the producer's session borrow is released.
+const _browserHandleRegistrations = new Map();
+const _browserHandleThrowNext = new Set();
+function invokeBrowserHandleCallback(ownerKey, callback, kind, payload) {
+  if (_browserHandleThrowNext.delete(ownerKey)) {
+    throw new Error(`test callback failure for ${ownerKey}`);
+  }
+  return callback(kind, payload, ownerKey);
+}
+export function __testRegisterBrowserHandleCallback(ownerKey, callback) {
+  _browserHandleRegistrations.get(ownerKey)?.();
+  const registration = registerRealVmCallbacks({
+    onScoreChanged: (payload) => invokeBrowserHandleCallback(ownerKey, callback, 'score', payload),
+    onChannelChanged: (channel, payload) => invokeBrowserHandleCallback(ownerKey, callback, `channel:${channel}`, payload),
+    onChannelDisplayNameChanged: (_channel, payload) => invokeBrowserHandleCallback(ownerKey, callback, 'channelName', payload),
+    onChannelDisplayNamesChanged: (payload) => invokeBrowserHandleCallback(ownerKey, callback, 'channelNames', payload),
+  }, ownerKey);
+  _browserHandleRegistrations.set(ownerKey, registration);
+}
+export function __testThrowNextBrowserHandleCallback(ownerKey) {
+  _browserHandleThrowNext.add(ownerKey);
+}
+export function __testUnregisterBrowserHandleCallback(ownerKey) {
+  _browserHandleRegistrations.get(ownerKey)?.();
+  _browserHandleRegistrations.delete(ownerKey);
+}
+export function onScoreChanged(snapshot, ownerKey) {
+  onRealScoreChanged(snapshot, ownerKey);
+}
+export function onChannelChanged(channel, snapshot, ownerKey) {
+  onRealChannelChanged(channel, snapshot, ownerKey);
+}
+export function onChannelDisplayNameChanged(channel, displayName, ownerKey) {
+  onRealChannelDisplayNameChanged(channel, displayName, ownerKey);
+}
+export function onChannelDisplayNamesChanged(names, ownerKey) {
+  onRealChannelDisplayNamesChanged(names, ownerKey);
+}
 export function onFrameChanged() {}
 export function onScriptError(data) {
   const msg = data?.message || JSON.stringify(data);
@@ -60,18 +105,86 @@ export function onExternalEvent() {}
 // imports resolve to no-ops so tests without Flash still run.
 let _flashManager = null;
 let _flashManagerPromise = null;
+// Existing owner callback routing is the temporary browser-harness boundary.
+// The FlashOwnerHost itself remains captured by each registration closure.
+const _flashOwnerCallbacks = new Map();
+
+// BrowserTestPlayer registers a non-owning, exact-generation capability here.
+// The capability is disposed before the harness retires its player.
+export function dirplayer_registerFlashOwner(ownerKey, capability) {
+  if (typeof ownerKey !== 'string' || !ownerKey || !capability) return;
+  _flashOwnerCallbacks.get(ownerKey)?.dispose();
+  let disposed = false;
+  let registration;
+  const registrationReady = flashManager().then(m => {
+    if (disposed) return undefined;
+    const ownerRegistration = m.registerFlashOwner?.(ownerKey, capability);
+    const bridgeDisposer = m.initFlashBridge?.(capability, ownerRegistration);
+    registration = bridgeDisposer
+      ? { host: bridgeDisposer.host, dispose: () => bridgeDisposer() }
+      : ownerRegistration;
+    if (disposed) registration?.dispose?.();
+    return registration;
+  });
+  const callbacks = {
+    onLoaded: (...args) => {
+      if (disposed) return;
+      registrationReady.then(reg => {
+        if (!reg || reg.host.disposed) return;
+        return flashManager().then(m => m.createFlashInstanceForOwner?.(reg.host, ...args));
+      }).catch(e => console.error('createFlashInstance failed:', e));
+    },
+    onUnloaded: (spriteNum) => {
+      if (disposed) return;
+      registrationReady.then(reg => {
+        if (reg && !reg.host.disposed) flashManager().then(m => m.destroyFlashInstance?.(reg.host, spriteNum));
+      });
+    },
+    onReset: () => {
+      if (disposed) return;
+      registrationReady.then(reg => {
+        if (reg && !reg.host.disposed) flashManager().then(m => m.destroyAllFlashInstances?.(reg.host));
+      });
+    },
+    onPlayOwned: (spriteNum) => {
+      if (disposed || !registration) return;
+      return flashManager().then(m => m.playFlashForOwner?.(registration.host, spriteNum));
+    },
+    onLocalConnectionSendOwned: (name, method, argsJson) => {
+      if (disposed || !registration || !registration.host || registration.host.disposed) return false;
+      return !!_flashManager?.localConnectionSendForOwner?.(registration.host, name, method, argsJson);
+    },
+    dispose: () => {
+      disposed = true;
+      registration?.dispose?.();
+    },
+  };
+  _flashOwnerCallbacks.set(ownerKey, callbacks);
+  // These routers are stable for the page lifetime and resolve the exact
+  // owner closure, so registering a later player cannot replace an earlier
+  // owner's play callback. The unqualified legacy LocalConnection function
+  // remains the production single-owner path; new owner-aware callers use the
+  // explicit suffix below.
+  window.dirplayer_rufflePlayOwned = (requestedOwnerKey, spriteNum) =>
+    _flashOwnerCallbacks.get(requestedOwnerKey)?.onPlayOwned(spriteNum);
+  window.dirplayer_localConnectionSendOwned = (requestedOwnerKey, name, method, argsJson) =>
+    _flashOwnerCallbacks.get(requestedOwnerKey)?.onLocalConnectionSendOwned(name, method, argsJson) ?? false;
+}
+export function dirplayer_unregisterFlashOwner(ownerKey) {
+  if (typeof ownerKey !== 'string') return;
+  const callbacks = _flashOwnerCallbacks.get(ownerKey);
+  _flashOwnerCallbacks.delete(ownerKey);
+  callbacks?.dispose();
+}
 function flashManager() {
   if (_flashManager) return Promise.resolve(_flashManager);
   if (!_flashManagerPromise) {
     _flashManagerPromise = import('./flashPlayerManager.bundle.js')
       .then(mod => {
-        // Install the window.dirplayer_ruffle* globals the WASM frame loop
-        // calls into (setSize / isPlaying / getCurrentFrame / gotoFrameAndStop /
-        // getVariable / …). The dev app does this from callbacks.ts at startup;
-        // the test stub must do it here or those frame-loop externs reference
-        // undefined globals. (The Rust side also `catch`es them, so a failure
-        // here degrades to a no-op rather than killing the frame loop.)
-        try { mod.initFlashBridge?.(); } catch (e) { console.warn('[flash] initFlashBridge failed:', e); }
+        // Per-owner registration installs the bridge globals with the actual
+        // capability and captures the owner host.  Do not call initFlashBridge
+        // without a capability: that would create an unowned bridge or throw
+        // before the owner closure exists.
         return (_flashManager = mod);
       })
       .catch(err => {
@@ -93,21 +206,18 @@ function flashManager() {
 // that window. Bundle-missing still degrades to no-ops via the catch above.
 flashManager();
 
-export function onFlashMemberLoaded(spriteNum, castLib, castMember, swfData, width, height, pausedAtStart, assertedFrame) {
+export function onFlashMemberLoaded(spriteNum, castLib, castMember, swfData, width, height, pausedAtStart, assertedFrame, ownerKey) {
   const copy = new Uint8Array(swfData);
-  flashManager().then(m => {
-    m.createFlashInstance?.(spriteNum, castLib, castMember, copy, width, height, pausedAtStart, assertedFrame)
-      ?.catch?.(e => console.error('createFlashInstance failed:', e));
-  });
+  _flashOwnerCallbacks.get(ownerKey)?.onLoaded(spriteNum, castLib, castMember, copy, width, height, pausedAtStart, assertedFrame);
 }
-export function onFlashMemberUnloaded(spriteNum) {
-  flashManager().then(m => m.destroyFlashInstance?.(spriteNum));
+export function onFlashMemberUnloaded(spriteNum, ownerKey) {
+  _flashOwnerCallbacks.get(ownerKey)?.onUnloaded(spriteNum);
 }
-export function onFlashResetAll() {
+export function onFlashResetAll(ownerKey) {
   // Only tear down if the Flash bundle was actually loaded by a prior movie;
   // don't import it just to reset nothing on a pure non-Flash test run.
-  if (_flashManager) _flashManager.destroyAllFlashInstances?.();
-  else if (_flashManagerPromise) _flashManagerPromise.then(m => m.destroyAllFlashInstances?.());
+  if (typeof ownerKey !== 'string' || ownerKey.length === 0) return;
+  _flashOwnerCallbacks.get(ownerKey)?.onReset();
 }
 export function onStageSizeChanged() {}
 
@@ -133,6 +243,7 @@ export {
   loadExternalXtra,
   loadExternalXtras,
   getExternalXtrasReady,
+  disposeExternalXtraHost,
   onRequestXtraLoad,
   setXtraRegistry,
   getXtraRegistry,

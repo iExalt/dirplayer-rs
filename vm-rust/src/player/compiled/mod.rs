@@ -1,15 +1,15 @@
 //! Register-IR compiler PoC (Stage 2 of the perf plan).
 //!
 //! Compiles a handler's pure-sync bytecode into a flat, pre-decoded `IrOp`
-//! sequence executed by a tight loop that owns its operand stack and a DENSE
-//! `Vec<StackDatum>` local file on the native Rust stack — eliminating, for the
-//! compiled subset, the per-op `reserve_player`, the scope fetch, the locals
-//! `FxHashMap`, and the operand-stack `UnsafeCell` indirection.
+//! sequence executed by a tight loop over the validated player-owned scope.
+//! The compiled subset keeps dense locals and inline operand fast paths while
+//! avoiding repeated scope lookup and hash-map locals.
 //!
-//! This PoC is intentionally restricted to PURE opcodes (no calls, no globals,
-//! no params, no strings/props) and INT operands, so the IR runner needs no
-//! `player` access. Its only job is to answer the go/no-go question: does
-//! compiling the basic-op cluster to this form actually beat the interpreter?
+//! The standalone `run` benchmark is intentionally restricted to pure INT
+//! opcodes. The player-aware runner below also supports params and typed
+//! fallback operations while preserving interpreter-visible scope state.
+//! Its job is to answer the go/no-go question: does compiling the basic-op
+//! cluster to this form actually beat the interpreter?
 //! Measured by `run_ir_benchmark` against the same loops as the interpreter
 //! bench. If it doesn't clearly win here, it won't help origins.
 
@@ -18,8 +18,9 @@ use crate::director::lingo::datum::Datum;
 use crate::director::lingo::opcode::OpCode;
 use crate::player::compare::{datum_equals, datum_greater_than, datum_is_zero, datum_less_than};
 use crate::player::datum_operations::{add_datums, multiply_datums, subtract_datums};
-use crate::player::scope::{ScopeRef, StackDatum};
-use crate::player::{reserve_player_mut, reserve_player_ref, DatumRef, ScriptError};
+use crate::player::scope::{Scope, ScopeRef, StackDatum};
+use crate::player::symbols::symbol_table::SymbolTable;
+use crate::player::{DatumRef, DirPlayer, ScopeToken, ScriptError};
 
 /// Pre-decoded register-IR instruction. Jump targets are IR indices (already
 /// remapped from bytecode `pos`).
@@ -250,82 +251,103 @@ pub fn run(compiled: &CompiledHandler, locals_init: &[StackDatum]) -> StackDatum
 // `scope.args`, a dense native local file, the int fast paths, and the SAME
 // datum_operations / compare functions the interpreter uses for non-int values
 // (so results are identical). Writes the handler's return value into the scope.
-// NOT yet wired into dispatch — exercised only by unit tests until Stage 2B.
+// The entry is owner-aware so the trampoline can call it without ambient
+// player lookup.
 
 #[inline]
-fn ir_add(a: StackDatum, b: StackDatum) -> Result<StackDatum, ScriptError> {
+fn ir_add(
+    player: &mut DirPlayer,
+    symbols: &SymbolTable,
+    a: StackDatum,
+    b: StackDatum,
+) -> Result<StackDatum, ScriptError> {
     if let (StackDatum::Int(x), StackDatum::Int(y)) = (&a, &b) {
         return Ok(StackDatum::Int(x.wrapping_add(*y)));
     }
-    let (ar, br) = (a.into_ref(), b.into_ref());
-    reserve_player_mut(|player| {
-        let ad = player.get_datum(&ar).clone();
-        let bd = player.get_datum(&br).clone();
-        let r = add_datums(ad, bd, player)?;
-        Ok(StackDatum::Ref(player.alloc_datum(r)))
-    })
+    let ar = a.into_ref_with(&mut player.allocator, &mut player.bitmap_manager);
+    let br = b.into_ref_with(&mut player.allocator, &mut player.bitmap_manager);
+    let ad = player.get_datum(&ar).clone();
+    let bd = player.get_datum(&br).clone();
+    let r = add_datums(ad, bd, player, symbols)?;
+    Ok(StackDatum::Ref(player.alloc_datum(r)))
 }
 
 #[inline]
-fn ir_sub(a: StackDatum, b: StackDatum) -> Result<StackDatum, ScriptError> {
+fn ir_sub(
+    player: &mut DirPlayer,
+    symbols: &SymbolTable,
+    a: StackDatum,
+    b: StackDatum,
+) -> Result<StackDatum, ScriptError> {
     if let (StackDatum::Int(x), StackDatum::Int(y)) = (&a, &b) {
         return Ok(StackDatum::Int(x.wrapping_sub(*y)));
     }
-    let (ar, br) = (a.into_ref(), b.into_ref());
-    reserve_player_mut(|player| {
-        let ad = player.get_datum(&ar).clone();
-        let bd = player.get_datum(&br).clone();
-        let r = subtract_datums(ad, bd, player)?;
-        Ok(StackDatum::Ref(player.alloc_datum(r)))
-    })
+    let ar = a.into_ref_with(&mut player.allocator, &mut player.bitmap_manager);
+    let br = b.into_ref_with(&mut player.allocator, &mut player.bitmap_manager);
+    let ad = player.get_datum(&ar).clone();
+    let bd = player.get_datum(&br).clone();
+    let r = subtract_datums(ad, bd, player, symbols)?;
+    Ok(StackDatum::Ref(player.alloc_datum(r)))
 }
 
 #[inline]
-fn ir_mul(a: StackDatum, b: StackDatum) -> Result<StackDatum, ScriptError> {
+fn ir_mul(
+    player: &mut DirPlayer,
+    symbols: &SymbolTable,
+    a: StackDatum,
+    b: StackDatum,
+) -> Result<StackDatum, ScriptError> {
     if let (StackDatum::Int(x), StackDatum::Int(y)) = (&a, &b) {
         return Ok(StackDatum::Int(x.wrapping_mul(*y)));
     }
-    let (ar, br) = (a.into_ref(), b.into_ref());
-    reserve_player_mut(|player| {
-        let r = multiply_datums(ar, br, player)?;
-        Ok(StackDatum::Ref(player.alloc_datum(r)))
-    })
+    let ar = a.into_ref_with(&mut player.allocator, &mut player.bitmap_manager);
+    let br = b.into_ref_with(&mut player.allocator, &mut player.bitmap_manager);
+    let r = multiply_datums(ar, br, player, symbols)?;
+    Ok(StackDatum::Ref(player.alloc_datum(r)))
 }
 
 /// Comparison via the interpreter's datum predicates (so non-int compares match
 /// exactly). `kind`: 0=Lt 1=LtEq 2=Gt 3=GtEq 4=Eq 5=NtEq.
 #[inline]
-fn ir_cmp(a: StackDatum, b: StackDatum, kind: u8) -> Result<StackDatum, ScriptError> {
+fn ir_cmp(
+    player: &mut DirPlayer,
+    symbols: &SymbolTable,
+    a: StackDatum,
+    b: StackDatum,
+    kind: u8,
+) -> Result<StackDatum, ScriptError> {
     if let (StackDatum::Int(x), StackDatum::Int(y)) = (&a, &b) {
         let r = match kind {
             0 => x < y, 1 => x <= y, 2 => x > y, 3 => x >= y, 4 => x == y, _ => x != y,
         };
         return Ok(StackDatum::Int(r as i32));
     }
-    let (ar, br) = (a.into_ref(), b.into_ref());
-    reserve_player_ref(|player| {
-        let l = player.get_datum(&ar);
-        let r = player.get_datum(&br);
-        let res = match kind {
-            0 => datum_less_than(l, r, &player.allocator)?,
-            1 => datum_less_than(l, r, &player.allocator)? || datum_equals(l, r, &player.allocator)?,
-            2 => datum_greater_than(l, r, &player.allocator)?,
-            3 => datum_greater_than(l, r, &player.allocator)? || datum_equals(l, r, &player.allocator)?,
-            4 => datum_equals(l, r, &player.allocator)?,
-            _ => !datum_equals(l, r, &player.allocator)?,
-        };
-        Ok(StackDatum::Int(res as i32))
-    })
+    let ar = a.into_ref_with(&mut player.allocator, &mut player.bitmap_manager);
+    let br = b.into_ref_with(&mut player.allocator, &mut player.bitmap_manager);
+    let l = player.get_datum(&ar);
+    let r = player.get_datum(&br);
+    let res = match kind {
+        0 => datum_less_than(l, r, &player.allocator, symbols)?,
+        1 => datum_less_than(l, r, &player.allocator, symbols)? || datum_equals(l, r, &player.allocator, symbols)?,
+        2 => datum_greater_than(l, r, &player.allocator, symbols)?,
+        3 => datum_greater_than(l, r, &player.allocator, symbols)? || datum_equals(l, r, &player.allocator, symbols)?,
+        4 => datum_equals(l, r, &player.allocator, symbols)?,
+        _ => !datum_equals(l, r, &player.allocator, symbols)?,
+    };
+    Ok(StackDatum::Int(res as i32))
 }
 
 #[inline]
-fn ir_is_zero(v: &StackDatum) -> Result<bool, ScriptError> {
+fn ir_is_zero(player: &mut DirPlayer, symbols: &SymbolTable, v: &StackDatum) -> Result<bool, ScriptError> {
     match v {
         StackDatum::Int(n) => Ok(*n == 0),
         StackDatum::Void => Ok(true),
         other => {
-            let r = other.clone().into_ref();
-            reserve_player_ref(|player| datum_is_zero(player.get_datum(&r), &player.allocator))
+            let r = other.clone().into_ref_with(
+                &mut player.allocator,
+                &mut player.bitmap_manager,
+            );
+            datum_is_zero(player.get_datum(&r), &player.allocator, symbols)
         }
     }
 }
@@ -333,16 +355,17 @@ fn ir_is_zero(v: &StackDatum) -> Result<bool, ScriptError> {
 /// Lingo strings are value types: copy on assignment. Mirrors `set_local`.
 /// Inline primitives (the common case) are never strings, so they skip this.
 #[inline]
-fn cow_on_assign(v: StackDatum) -> StackDatum {
+fn cow_on_assign(player: &mut DirPlayer, v: StackDatum) -> StackDatum {
     if let StackDatum::Ref(dr) = &v {
         let dr = dr.clone();
-        reserve_player_mut(|player| match player.get_datum(&dr) {
-            Datum::String(s) => {
-                let s = s.clone();
-                StackDatum::Ref(player.alloc_datum(Datum::String(s)))
-            }
-            _ => StackDatum::Ref(dr.clone()),
-        })
+        let string = match player.get_datum(&dr) {
+            Datum::String(s) => Some(s.clone()),
+            _ => None,
+        };
+        match string {
+            Some(s) => StackDatum::Ref(player.alloc_datum(Datum::String(s))),
+            None => StackDatum::Ref(dr.clone()),
+        }
     } else {
         v
     }
@@ -350,12 +373,20 @@ fn cow_on_assign(v: StackDatum) -> StackDatum {
 
 /// Run a fully-pure compiled handler against `scope_ref`. Returns Ok on the
 /// handler's `ret`; the caller's teardown reads `scope.return_value`.
-pub fn run_handler(compiled: &CompiledHandler, scope_ref: ScopeRef) -> Result<(), ScriptError> {
+pub(crate) fn run_handler(
+    compiled: &CompiledHandler,
+    token: &ScopeToken,
+    player: &mut DirPlayer,
+    symbols: &SymbolTable,
+) -> Result<(), ScriptError> {
     // Size the local file. `run_handler_resumable` no longer does this — it is
     // entered once per ESCAPE, and sizing is a once-per-FRAME job. This entry
     // point has no frame setup behind it, so it does its own.
-    reserve_player_mut(|player| player.scopes[scope_ref].ensure_locals(compiled.n_locals));
-    match run_handler_resumable(compiled, scope_ref)? {
+    if !token.validate_top(player) {
+        return Err(crate::player::cancelled_scope_error());
+    }
+    player.scopes[token.slot()].ensure_locals(compiled.n_locals);
+    match run_handler_resumable(compiled, token, player, symbols)? {
         IrExit::Done => Ok(()),
         IrExit::Escape | IrExit::BackJump => Err(ScriptError::new(
             "run_handler: handler escaped; use run_handler_resumable".to_string(),
@@ -369,14 +400,15 @@ pub fn run_handler(compiled: &CompiledHandler, scope_ref: ScopeRef) -> Result<()
 /// the IR, which is the overwhelmingly common case for compute loops.
 #[inline]
 fn back_jump(
-    scope_ptr: *mut crate::player::scope::Scope,
+    player: &mut DirPlayer,
+    scope_ref: ScopeRef,
     target: usize,
     backjumps: &mut u32,
 ) -> Option<IrExit> {
     *backjumps = backjumps.wrapping_add(1);
-    let polled = reserve_player_ref(|player| player.input_polled);
+    let polled = player.input_polled;
     if polled || (*backjumps & 0xFFF) == 0 {
-        unsafe { (*scope_ptr).bytecode_index = target };
+        player.scopes[scope_ref].bytecode_index = target;
         return Some(IrExit::BackJump);
     }
     None
@@ -392,13 +424,12 @@ fn back_jump(
 ///
 /// `locals` is the caller-owned dense file; it survives across escapes so a
 /// resumed run continues with the same values.
-pub fn run_handler_resumable(
+pub(crate) fn run_handler_resumable(
     compiled: &CompiledHandler,
-    scope_ref: ScopeRef,
+    token: &ScopeToken,
+    player: &mut DirPlayer,
+    symbols: &SymbolTable,
 ) -> Result<IrExit, ScriptError> {
-    // `scopes` is a fixed, pre-filled pool that never reallocates (see
-    // `push_scope`), so this slot address is stable for the run.
-    //
     // Sizing the local file is NOT done here. This function is re-entered once
     // per escaped opcode — ~120 M times across the e2e suite — while the file
     // only needs sizing once per handler FRAME, which `setup_handler_frame`
@@ -406,25 +437,25 @@ pub fn run_handler_resumable(
     // `handler.local_name_ids.len()`, the value it passes). `Scope::local` and
     // `set_local` stay bounds-safe regardless: a caller that skipped it reads
     // VOID and grows on write rather than panicking.
-    let scope_ptr: *mut crate::player::scope::Scope =
-        reserve_player_mut(|player| &mut player.scopes[scope_ref] as *mut _);
+    if !token.validate_top(player) {
+        return Err(crate::player::cancelled_scope_error());
+    }
+    let scope_ref = token.slot();
 
     // ESCAPE FAST PATH. The driver re-enters once per escaped opcode, and in an
     // escape-dense handler the op waiting at `bytecode_index` is very often
     // another escape — so the run would enter the big loop below, look at one
     // op, and return.
     //
-    // That is not free: entering `run_handler_resumable_ptr` costs ~17 ns on
-    // wasm (the re-entry floor of 20.7 ns minus the 3.6 ns a same-signature
-    // stub call costs — docs/interpreter-escape-reentry.md §2a), because its
-    // one enormous `match` has to reserve a frame sized for its heaviest arm
-    // however early it returns. Answering here skips that frame entirely.
+    // That is not free: entering the private loop reserves a frame sized for
+    // its heaviest arm however early it returns. Answering here skips that
+    // frame entirely.
     //
     // This is a pure short-circuit: the big loop's `Escape` arm does exactly
     // `bytecode_index = pc; return Escape`, and `pc` was READ from
     // `bytecode_index`, so the write it skips is a write of the same value.
     // The `pc >= ops.len()` case is `Done` for the same reason.
-    let pc = unsafe { (*scope_ptr).bytecode_index };
+    let pc = player.scopes[scope_ref].bytecode_index;
     let escape_first = match compiled.ops.get(pc) {
         Some(IrOp::Escape) => true,
         None => {
@@ -438,116 +469,65 @@ pub fn run_handler_resumable(
         return Ok(IrExit::Escape);
     }
 
-    run_handler_resumable_ptr(compiled, scope_ptr)
+    run_handler_resumable_inner(compiled, player, symbols, scope_ref)
 }
 
-/// Benchmark control: the smallest possible function with the same SIGNATURE
-/// and the same first act as the real one — read `pc`, park it back on the
-/// scope, report an escape. Everything the real function has and this does not
-/// is the giant `match`. Comparing entry cost between the two prices the
-/// function's own frame rather than any work in the prologue.
+/// Benchmark control: a lower-level `&mut Scope` control for the validated
+/// runner. It measures the scope access and escape result without claiming to
+/// have the production runner's `&mut DirPlayer` contract or opcode match.
 #[inline(never)]
 pub fn run_handler_stub(
     compiled: &CompiledHandler,
-    scope_ptr: *mut crate::player::scope::Scope,
+    scope: &mut Scope,
 ) -> Result<IrExit, ScriptError> {
-    let pc = unsafe { (*scope_ptr).bytecode_index };
+    let pc = scope.bytecode_index;
     if pc >= compiled.ops.len() {
         return Ok(IrExit::Done);
     }
-    unsafe { (*scope_ptr).bytecode_index = pc };
+    scope.bytecode_index = pc;
     Ok(IrExit::Escape)
 }
 
-/// Benchmark control: `run_handler_stub` plus a frame the size of the real
-/// function's (624 bytes, read out of the release wasm), and nothing else.
-///
-/// This is the experiment that decides whether the ~17 ns entry cost is the
-/// SHADOW-STACK FRAME or something else about the big function. If this row
-/// benches near the stub, the frame is not the cost and splitting the `match`
-/// into `#[inline(never)]` arms would be wasted work; if it benches near the
-/// real function, the frame is the cost and shrinking it is the fix.
-#[inline(never)]
-pub fn run_handler_stub_framed(
+/// Private loop body. It is reachable only after `run_handler_resumable` has
+/// validated the owner, epoch, generation, and top-of-stack token.
+fn run_handler_resumable_inner(
     compiled: &CompiledHandler,
-    scope_ptr: *mut crate::player::scope::Scope,
+    player: &mut DirPlayer,
+    symbols: &SymbolTable,
+    scope_ref: ScopeRef,
 ) -> Result<IrExit, ScriptError> {
-    // 624 bytes RESERVED on the shadow stack — deliberately NOT initialised.
-    // `[0u8; 624]` would memset the frame on every call, which is work the real
-    // function never does: LLVM's prologue only decrements the stack pointer and
-    // lets each slot be written when used. `MaybeUninit` + a black-boxed pointer
-    // reserves the space and defeats removal without touching a byte of it.
-    let mut frame: core::mem::MaybeUninit<[u8; 624]> = core::mem::MaybeUninit::uninit();
-    core::hint::black_box(frame.as_mut_ptr());
-    let pc = unsafe { (*scope_ptr).bytecode_index };
-    if pc >= compiled.ops.len() {
-        return Ok(IrExit::Done);
-    }
-    unsafe { (*scope_ptr).bytecode_index = pc };
-    Ok(IrExit::Escape)
-}
-
-/// Benchmark control: the frame ZEROED rather than merely reserved.
-///
-/// Not a model of the real function — it is the upper bound, and it exists to
-/// show what the first version of `run_handler_stub_framed` accidentally
-/// measured. `[0u8; N]` memsets on every call; the real prologue does not. Keep
-/// both rows so the difference stays visible to whoever reads this next.
-#[inline(never)]
-pub fn run_handler_stub_zeroed(
-    compiled: &CompiledHandler,
-    scope_ptr: *mut crate::player::scope::Scope,
-) -> Result<IrExit, ScriptError> {
-    let mut frame = [0u8; 624];
-    core::hint::black_box(&mut frame);
-    let pc = unsafe { (*scope_ptr).bytecode_index };
-    if pc >= compiled.ops.len() {
-        return Ok(IrExit::Done);
-    }
-    unsafe { (*scope_ptr).bytecode_index = pc };
-    Ok(IrExit::Escape)
-}
-
-/// The loop body, entered with the scope pointer already in hand.
-///
-/// Split out of `run_handler_resumable` purely so the benchmark can price the
-/// two halves of the prologue — deriving the pointer, and `ensure_locals` —
-/// against each other and against neither. Callers outside the bench should use
-/// `run_handler_resumable`.
-pub fn run_handler_resumable_ptr(
-    compiled: &CompiledHandler,
-    scope_ptr: *mut crate::player::scope::Scope,
-) -> Result<IrExit, ScriptError> {
-    // Reads and writes go through the same raw pointer the operand stack uses.
-    // Nothing borrows across an escape: the Escape arm RETURNS, so the
-    // interpreter op that follows has exclusive access.
+    // Each macro evaluates its value before borrowing the stack slot. Nothing
+    // borrows across an escape: the Escape arm returns to the interpreter.
     macro_rules! lc_get {
         ($s:expr) => {
-            unsafe { (*scope_ptr).local($s as usize) }
+            player.scopes[scope_ref].local($s as usize)
         };
     }
     macro_rules! lc_set {
         ($s:expr, $v:expr) => {
-            unsafe { (*scope_ptr).set_local($s as usize, $v) }
+            player.scopes[scope_ref].set_local($s as usize, $v)
         };
     }
     macro_rules! st_push {
         ($v:expr) => {
-            unsafe { (*scope_ptr).stack.push_value($v) }
+            {{
+                let value = $v;
+                player.scopes[scope_ref].stack.push_value(value)
+            }}
         };
     }
     macro_rules! st_pop {
         () => {
-            unsafe { (*scope_ptr).stack.pop_value() }.unwrap_or(StackDatum::Void)
+            player.scopes[scope_ref].stack.pop_value().unwrap_or(StackDatum::Void)
         };
     }
 
     let ops = &compiled.ops;
-    let mut pc = unsafe { (*scope_ptr).bytecode_index };
+    let mut pc = player.scopes[scope_ref].bytecode_index;
     let mut backjumps: u32 = 0;
     loop {
         if pc >= ops.len() {
-            unsafe { (*scope_ptr).bytecode_index = pc };
+            player.scopes[scope_ref].bytecode_index = pc;
             return Ok(IrExit::Done);
         }
         match &ops[pc] {
@@ -555,7 +535,7 @@ pub fn run_handler_resumable_ptr(
                 // Hand the pc to the interpreter as a bytecode index (they are
                 // the same number by construction) and let the driver advance
                 // it. No locals handover: both sides read the same storage.
-                unsafe { (*scope_ptr).bytecode_index = pc };
+                player.scopes[scope_ref].bytecode_index = pc;
                 return Ok(IrExit::Escape);
             }
             _ => {}
@@ -563,37 +543,39 @@ pub fn run_handler_resumable_ptr(
         match &ops[pc] {
             IrOp::PushInt(n) => { st_push!(StackDatum::Int(*n)); pc += 1; }
             IrOp::GetLocal(s) => { st_push!(lc_get!(*s)); pc += 1; }
-            IrOp::SetLocal(s) => { let v = cow_on_assign(st_pop!()); lc_set!(*s, v); pc += 1; }
+            IrOp::SetLocal(s) => {
+                let raw = st_pop!();
+                let v = cow_on_assign(player, raw);
+                lc_set!(*s, v);
+                pc += 1;
+            }
             IrOp::GetParam(s) => {
-                // Through the pointer this function already derived, rather
-                // than a second lookup of the same scope. `reserve_player_ref`
-                // is not `#[inline(always)]` (unlike `reserve_player_mut`), so
-                // on wasm this was a real call per param read.
+                // Read through the already validated scope slot.
                 let s = *s as usize;
-                let dr = unsafe { (*scope_ptr).arg(s) };
+                let dr = player.scopes[scope_ref].arg(s);
                 st_push!(StackDatum::Ref(dr));
                 pc += 1;
             }
-            IrOp::Add => { let b = st_pop!(); let a = st_pop!(); st_push!(ir_add(a, b)?); pc += 1; }
-            IrOp::Sub => { let b = st_pop!(); let a = st_pop!(); st_push!(ir_sub(a, b)?); pc += 1; }
-            IrOp::Mul => { let b = st_pop!(); let a = st_pop!(); st_push!(ir_mul(a, b)?); pc += 1; }
-            IrOp::Lt => { let b = st_pop!(); let a = st_pop!(); st_push!(ir_cmp(a, b, 0)?); pc += 1; }
-            IrOp::LtEq => { let b = st_pop!(); let a = st_pop!(); st_push!(ir_cmp(a, b, 1)?); pc += 1; }
-            IrOp::Gt => { let b = st_pop!(); let a = st_pop!(); st_push!(ir_cmp(a, b, 2)?); pc += 1; }
-            IrOp::GtEq => { let b = st_pop!(); let a = st_pop!(); st_push!(ir_cmp(a, b, 3)?); pc += 1; }
-            IrOp::Eq => { let b = st_pop!(); let a = st_pop!(); st_push!(ir_cmp(a, b, 4)?); pc += 1; }
-            IrOp::NtEq => { let b = st_pop!(); let a = st_pop!(); st_push!(ir_cmp(a, b, 5)?); pc += 1; }
+            IrOp::Add => { let b = st_pop!(); let a = st_pop!(); st_push!(ir_add(player, symbols, a, b)?); pc += 1; }
+            IrOp::Sub => { let b = st_pop!(); let a = st_pop!(); st_push!(ir_sub(player, symbols, a, b)?); pc += 1; }
+            IrOp::Mul => { let b = st_pop!(); let a = st_pop!(); st_push!(ir_mul(player, symbols, a, b)?); pc += 1; }
+            IrOp::Lt => { let b = st_pop!(); let a = st_pop!(); st_push!(ir_cmp(player, symbols, a, b, 0)?); pc += 1; }
+            IrOp::LtEq => { let b = st_pop!(); let a = st_pop!(); st_push!(ir_cmp(player, symbols, a, b, 1)?); pc += 1; }
+            IrOp::Gt => { let b = st_pop!(); let a = st_pop!(); st_push!(ir_cmp(player, symbols, a, b, 2)?); pc += 1; }
+            IrOp::GtEq => { let b = st_pop!(); let a = st_pop!(); st_push!(ir_cmp(player, symbols, a, b, 3)?); pc += 1; }
+            IrOp::Eq => { let b = st_pop!(); let a = st_pop!(); st_push!(ir_cmp(player, symbols, a, b, 4)?); pc += 1; }
+            IrOp::NtEq => { let b = st_pop!(); let a = st_pop!(); st_push!(ir_cmp(player, symbols, a, b, 5)?); pc += 1; }
             IrOp::JmpIfZero(t) => {
                 let c = st_pop!();
-                if ir_is_zero(&c)? {
+                if ir_is_zero(player, symbols, &c)? {
                     let t = *t;
-                    if t <= pc { if let Some(e) = back_jump(scope_ptr, t, &mut backjumps) { return Ok(e); } }
+                    if t <= pc { if let Some(e) = back_jump(player, scope_ref, t, &mut backjumps) { return Ok(e); } }
                     pc = t;
                 } else { pc += 1; }
             }
             IrOp::Jmp(t) => {
                 let t = *t;
-                if t <= pc { if let Some(e) = back_jump(scope_ptr, t, &mut backjumps) { return Ok(e); } }
+                if t <= pc { if let Some(e) = back_jump(player, scope_ref, t, &mut backjumps) { return Ok(e); } }
                 pc = t;
             }
             IrOp::Pop(n) => { for _ in 0..*n { let _ = st_pop!(); } pc += 1; }
@@ -611,7 +593,7 @@ pub fn run_handler_resumable_ptr(
                 // branch (nintendo/rollcall rendered the instructions screen where
                 // the title belonged). Not clearing the stack also leaked operands
                 // into the pooled scope for its next use.
-                let scope = unsafe { &mut *scope_ptr };
+                let scope = &mut player.scopes[scope_ref];
                 scope.return_value = DatumRef::Void;
                 scope.stack.clear();
                 scope.bytecode_index = pc;
@@ -624,193 +606,253 @@ pub fn run_handler_resumable_ptr(
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
-    use crate::player::symbols::symbol_table::init_symbol_table;
-    use crate::player::testing::{run_test, TestPlayer};
+    use crate::director::lingo::datum::Datum;
+    use crate::player::ownership::{OwnerKey, OwnerToken};
+    use crate::player::ScriptErrorCode;
 
-    /// Top of the scope's operand stack, as an int. The IR shares the scope
-    /// stack with the interpreter, so a handler's computed value is read from
-    /// there — `Ret` itself yields VOID, exactly as the interpreter's does.
-    fn stack_top_int(scope_ref: ScopeRef) -> i32 {
-        reserve_player_ref(|player| {
-            let scope = player.scopes.get(scope_ref).unwrap();
-            let top = scope.stack.iter().last().cloned().unwrap_or(DatumRef::Void);
-            player.get_datum(&top).int_value().unwrap()
-        })
+    fn make_player() -> DirPlayer {
+        let (tx, _rx) = async_std::channel::unbounded();
+        DirPlayer::new_with_owner(
+            tx,
+            OwnerToken::new(OwnerKey { session: 7, player: 3, generation: 1 }),
+        )
     }
 
-    #[allow(dead_code)]
-    fn ret_int(scope_ref: ScopeRef) -> i32 {
-        reserve_player_ref(|player| {
-            let rv = player.scopes.get(scope_ref).unwrap().return_value.clone();
-            player.get_datum(&rv).int_value().unwrap()
-        })
+    fn make_symbols() -> SymbolTable {
+        SymbolTable::new()
+    }
+
+    fn token(player: &DirPlayer, slot: ScopeRef) -> ScopeToken {
+        let scope = &player.scopes[slot];
+        ScopeToken {
+            owner: player.owner.clone(),
+            slot,
+            generation: scope.generation,
+            epoch: player.scope_invalidation_epoch,
+        }
+    }
+
+    fn stack_top_int(player: &mut DirPlayer, slot: ScopeRef) -> i32 {
+        let top = {
+            let (scopes, allocator, bitmap_manager) =
+                (&mut player.scopes, &mut player.allocator, &mut player.bitmap_manager);
+            scopes[slot]
+                .stack
+                .snapshot_refs_with(allocator, bitmap_manager)
+                .pop()
+                .unwrap_or(DatumRef::Void)
+        };
+        player.get_datum(&top).int_value().unwrap()
     }
 
     #[test]
     fn run_handler_param_plus_one() {
-        init_symbol_table();
-        run_test(async {
-            let _p = TestPlayer::new();
-            let scope_ref = reserve_player_mut(|player| {
-                let s = player.push_scope();
-                let arg = player.alloc_datum(Datum::Int(5));
-                player.scopes.get_mut(s).unwrap().args.push(arg);
-                s
-            });
-            // return param(0) + 1
-            let compiled = CompiledHandler {
-                ops: vec![IrOp::GetParam(0), IrOp::PushInt(1), IrOp::Add],
-                n_locals: 0,
-            };
-            run_handler(&compiled, scope_ref).unwrap();
-            assert_eq!(stack_top_int(scope_ref), 6);
-            reserve_player_mut(|player| player.pop_scope());
-        });
+        let mut player = make_player();
+        let slot = player.push_scope();
+        let arg = player.alloc_datum(Datum::Int(5));
+        player.scopes[slot].args.push(arg);
+        let compiled = CompiledHandler {
+            ops: vec![IrOp::GetParam(0), IrOp::PushInt(1), IrOp::Add],
+            n_locals: 0,
+        };
+        let scope_token = token(&player, slot);
+        let symbols = make_symbols();
+        run_handler(&compiled, &scope_token, &mut player, &symbols).unwrap();
+        assert_eq!(stack_top_int(&mut player, slot), 6);
+        player.pop_scope();
     }
 
     #[test]
     fn run_handler_counted_loop_sum() {
-        init_symbol_table();
-        run_test(async {
-            let _p = TestPlayer::new();
-            let scope_ref = reserve_player_mut(|player| player.push_scope());
-            // sum=0; repeat with j=1 to 10 { sum = sum + j }; return sum  => 55
-            // locals: 0=sum, 1=j
-            let ops = vec![
-                IrOp::PushInt(0), IrOp::SetLocal(0),       // 0,1  sum = 0
-                IrOp::PushInt(1), IrOp::SetLocal(1),       // 2,3  j = 1
-                IrOp::GetLocal(1), IrOp::PushInt(10), IrOp::LtEq, IrOp::JmpIfZero(17), // 4-7 cond -> exit at 17
-                IrOp::GetLocal(0), IrOp::GetLocal(1), IrOp::Add, IrOp::SetLocal(0),    // 8-11 sum+=j
-                IrOp::GetLocal(1), IrOp::PushInt(1), IrOp::Add, IrOp::SetLocal(1),     // 12-15 j+=1
-                IrOp::Jmp(4),                              // 16  loop
-                IrOp::GetLocal(0),                         // 17  leave sum on the stack
-            ];
-            let compiled = CompiledHandler { ops, n_locals: 2 };
-            run_handler(&compiled, scope_ref).unwrap();
-            assert_eq!(stack_top_int(scope_ref), 55);
-            reserve_player_mut(|player| player.pop_scope());
-        });
+        let mut player = make_player();
+        let slot = player.push_scope();
+        let ops = vec![
+            IrOp::PushInt(0), IrOp::SetLocal(0),
+            IrOp::PushInt(1), IrOp::SetLocal(1),
+            IrOp::GetLocal(1), IrOp::PushInt(10), IrOp::LtEq, IrOp::JmpIfZero(17),
+            IrOp::GetLocal(0), IrOp::GetLocal(1), IrOp::Add, IrOp::SetLocal(0),
+            IrOp::GetLocal(1), IrOp::PushInt(1), IrOp::Add, IrOp::SetLocal(1),
+            IrOp::Jmp(4), IrOp::GetLocal(0),
+        ];
+        let compiled = CompiledHandler { ops, n_locals: 2 };
+        let scope_token = token(&player, slot);
+        let symbols = make_symbols();
+        run_handler(&compiled, &scope_token, &mut player, &symbols).unwrap();
+        assert_eq!(stack_top_int(&mut player, slot), 55);
+        player.pop_scope();
     }
 
-    /// A breakpoint on an IR-NATIVE opcode must stop the IR at that bytecode
-    /// index. Without the patch the IR runs `SetLocal` itself and only parks
-    /// `bytecode_index` when it escapes or returns, so the driver's breakpoint
-    /// check never sees the op and the breakpoint silently does nothing.
     #[test]
     fn breakpoint_on_ir_native_op_escapes_to_the_interpreter() {
         use crate::player::debug::Breakpoint;
-        init_symbol_table();
-        run_test(async {
-            let _player = TestPlayer::new();
-
-            // local0 = 5 ; local0 = 6 — every op is IR-native, so an unpatched
-            // run goes straight through to Done without a single escape.
-            let mut compiled = CompiledHandler {
-                ops: vec![
-                    IrOp::PushInt(5), IrOp::SetLocal(0),
-                    IrOp::PushInt(6), IrOp::SetLocal(0),
-                ],
-                n_locals: 1,
-            };
-            let bps = vec![
-                Breakpoint { script_name: "s".into(), handler_name: "h".into(), bytecode_index: 3 },
-                // Must be ignored: right index, wrong handler.
-                Breakpoint { script_name: "s".into(), handler_name: "other".into(), bytecode_index: 1 },
-                // Must be ignored rather than panic: past the end of the stream.
-                Breakpoint { script_name: "s".into(), handler_name: "h".into(), bytecode_index: 99 },
-            ];
-            apply_breakpoints(&mut compiled, &bps, "s", "h");
-            assert!(matches!(compiled.ops[3], IrOp::Escape), "breakpoint op must escape");
-            assert!(matches!(compiled.ops[1], IrOp::SetLocal(0)), "other handlers' breakpoints must not patch");
-
-            let scope_ref = reserve_player_mut(|player| player.push_scope());
-            match run_handler_resumable(&compiled, scope_ref).unwrap() {
-                IrExit::Escape => {}
-                _ => panic!("a breakpointed op must hand control back to the interpreter"),
-            }
-            assert_eq!(
-                reserve_player_ref(|p| p.scopes.get(scope_ref).unwrap().bytecode_index),
-                3,
-                "the driver looks up the breakpoint by this index, so it must be the op's own"
-            );
-            reserve_player_mut(|player| player.pop_scope());
-        });
+        let mut player = make_player();
+        let mut compiled = CompiledHandler {
+            ops: vec![IrOp::PushInt(5), IrOp::SetLocal(0), IrOp::PushInt(6), IrOp::SetLocal(0)],
+            n_locals: 1,
+        };
+        let bps = vec![
+            Breakpoint { script_name: "s".into(), handler_name: "h".into(), bytecode_index: 3 },
+            Breakpoint { script_name: "s".into(), handler_name: "other".into(), bytecode_index: 1 },
+            Breakpoint { script_name: "s".into(), handler_name: "h".into(), bytecode_index: 99 },
+        ];
+        apply_breakpoints(&mut compiled, &bps, "s", "h");
+        assert!(matches!(compiled.ops[3], IrOp::Escape));
+        assert!(matches!(compiled.ops[1], IrOp::SetLocal(0)));
+        let slot = player.push_scope();
+        let scope_token = token(&player, slot);
+        let symbols = make_symbols();
+        assert!(matches!(run_handler_resumable(&compiled, &scope_token, &mut player, &symbols), Ok(IrExit::Escape)));
+        assert_eq!(player.scopes[slot].bytecode_index, 3);
+        player.pop_scope();
     }
 
-    /// An unsupported opcode must become an `Escape` that stops the IR at the
-    /// RIGHT bytecode index, and a resumed run must continue with the dense
-    /// local file intact. This is the whole premise of Stage 3: a handler is no
-    /// longer rejected because it contains one interpreter-only op.
     #[test]
     fn compile_escapes_unsupported_opcode_and_resumes() {
         use crate::director::chunks::handler::{Bytecode, HandlerDef};
-        init_symbol_table();
-        run_test(async {
-            let _player = TestPlayer::new();
+        let mut player = make_player();
+        let handler = HandlerDef {
+            name_id: 0,
+            bytecode_array: vec![
+                Bytecode::new(OpCode::PushInt8, 5, 0),
+                Bytecode::new(OpCode::SetLocal, 0, 1),
+                Bytecode::new(OpCode::GetChunk, 0, 2),
+                Bytecode::new(OpCode::GetLocal, 0, 3),
+            ],
+            bytecode_index_map: fxhash::FxHashMap::default(),
+            argument_name_ids: vec![], local_name_ids: vec![0], global_name_ids: vec![],
+            compiled_ir: std::cell::RefCell::new(None),
+        };
+        let compiled = compile(&handler, 1).unwrap();
+        assert_eq!(compiled.ops.len(), handler.bytecode_array.len(), "IR must be 1:1");
+        assert!(matches!(compiled.ops[2], IrOp::Escape));
+        let slot = player.push_scope();
+        let scope_token = token(&player, slot);
+        let symbols = make_symbols();
+        assert!(matches!(run_handler_resumable(&compiled, &scope_token, &mut player, &symbols), Ok(IrExit::Escape)));
+        assert!(matches!(player.scopes[slot].local(0), StackDatum::Int(5)));
+        assert!(player.scopes[slot].local_is_assigned(0));
+        assert_eq!(player.scopes[slot].bytecode_index, 2);
+        player.scopes[slot].bytecode_index = 3;
+        assert!(matches!(run_handler_resumable(&compiled, &scope_token, &mut player, &symbols), Ok(IrExit::Done)));
+        assert_eq!(stack_top_int(&mut player, slot), 5);
+        player.pop_scope();
+    }
 
-            // local0 = 5 ; <getchunk: interpreter-only> ; return local0
-            let handler = HandlerDef {
-                name_id: 0,
-                bytecode_array: vec![
-                    Bytecode::new(OpCode::PushInt8, 5, 0),
-                    Bytecode::new(OpCode::SetLocal, 0, 1),
-                    Bytecode::new(OpCode::GetChunk, 0, 2),
-                    // No trailing Ret: `Ret` yields VOID and clears the stack
-                    // (Director semantics), so the computed value is asserted
-                    // from the stack, which the IR shares with the interpreter.
-                    Bytecode::new(OpCode::GetLocal, 0, 3),
-                ],
-                bytecode_index_map: fxhash::FxHashMap::default(),
-                argument_name_ids: vec![],
-                local_name_ids: vec![0],
-                global_name_ids: vec![],
-                compiled_ir: std::cell::RefCell::new(None),
-            };
-            let compiled = compile(&handler, 1).expect("escapes, never rejects");
-            assert_eq!(compiled.ops.len(), handler.bytecode_array.len(), "IR must be 1:1");
-            assert!(matches!(compiled.ops[2], IrOp::Escape));
+    #[test]
+    fn stale_or_foreign_token_rejects_without_mutating_scope() {
+        let mut player = make_player();
+        let slot = player.push_scope();
+        player.scopes[slot].bytecode_index = 4;
+        player.scopes[slot].set_local(0, StackDatum::Int(9));
+        player.scopes[slot].stack.push_value(StackDatum::Int(11));
+        player.scopes[slot].return_value = player.alloc_datum(Datum::Int(42));
+        let snapshot = (
+            player.scopes[slot].bytecode_index,
+            player.scopes[slot].locals.clone(),
+            player.scopes[slot].stack.len(),
+            player.scopes[slot].return_value.clone(),
+        );
+        let mut other = make_player();
+        let foreign = other.push_scope();
+        let foreign_token = token(&other, foreign);
+        let compiled = CompiledHandler { ops: vec![IrOp::PushInt(1)], n_locals: 8 };
+        let symbols = make_symbols();
+        assert_eq!(run_handler_resumable(&compiled, &foreign_token, &mut player, &symbols).err().unwrap().code, ScriptErrorCode::Abort);
+        assert_eq!(player.scopes[slot].bytecode_index, snapshot.0);
+        assert_eq!(player.scopes[slot].locals.len(), snapshot.1.len());
+        assert!(matches!(player.scopes[slot].local(0), StackDatum::Int(9)));
+        assert_eq!(player.scopes[slot].stack.len(), snapshot.2);
+        assert_eq!(stack_top_int(&mut player, slot), 11);
+        assert_eq!(player.scopes[slot].return_value, snapshot.3);
+        let epoch_stale = token(&player, slot);
+        player.bump_scope_invalidation_epoch();
+        assert_eq!(run_handler(&compiled, &epoch_stale, &mut player, &symbols).err().unwrap().code, ScriptErrorCode::Abort);
+        assert_eq!(player.scopes[slot].bytecode_index, snapshot.0);
+        assert!(matches!(player.scopes[slot].local(0), StackDatum::Int(9)));
+        assert_eq!(stack_top_int(&mut player, slot), 11);
+        assert_eq!(player.scopes[slot].locals.len(), snapshot.1.len());
+        let generation_stale = token(&player, slot);
+        player.pop_scope();
+        let replacement = player.push_scope();
+        assert_eq!(replacement, slot);
+        assert_eq!(run_handler_resumable(&compiled, &generation_stale, &mut player, &symbols).err().unwrap().code, ScriptErrorCode::Abort);
+        assert_eq!(player.scopes[slot].bytecode_index, 0);
+        assert_eq!(player.scopes[slot].locals.len(), 0);
+    }
 
-            let scope_ref = reserve_player_mut(|player| player.push_scope());
+    #[test]
+    fn noninteger_runner_uses_the_same_owner_and_copies_strings() {
+        let mut player = make_player();
+        let float_slot = player.push_scope();
+        let lhs = player.alloc_datum(Datum::Float(1.25));
+        let rhs = player.alloc_datum(Datum::Float(2.5));
+        player.scopes[float_slot].args.extend([lhs, rhs]);
+        let float_code = CompiledHandler {
+            ops: vec![
+                IrOp::GetParam(0), IrOp::GetParam(1), IrOp::Add,
+                IrOp::SetLocal(0), IrOp::GetLocal(0), IrOp::Ret,
+            ],
+            n_locals: 1,
+        };
+        let float_token = token(&player, float_slot);
+        let symbols = make_symbols();
+        run_handler(&float_code, &float_token, &mut player, &symbols).unwrap();
+        let float_local = match player.scopes[float_slot].local(0) {
+            StackDatum::Ref(ref datum) => player.get_datum(datum),
+            _ => panic!("noninteger add must materialize a datum"),
+        };
+        assert!(matches!(float_local, Datum::Float(value) if (*value - 3.75).abs() < f64::EPSILON));
+        assert!(player.scopes[float_slot].stack.is_empty());
+        assert_eq!(player.scopes[float_slot].return_value, DatumRef::Void);
+        player.pop_scope();
 
-            // First run stops AT the escaped op (pc == its bytecode index).
-            match run_handler_resumable(&compiled, scope_ref).unwrap() {
-                IrExit::Escape => {}
-                other => panic!("expected an escape, got {}", match other {
-                    IrExit::Done => "Done", IrExit::BackJump => "BackJump", _ => "?" }),
-            }
+        let string_slot = player.push_scope();
+        let source = player.alloc_datum(Datum::String("source".to_owned()));
+        player.scopes[string_slot].args.push(source.clone());
+        let string_code = CompiledHandler {
+            ops: vec![IrOp::GetParam(0), IrOp::SetLocal(0), IrOp::Ret],
+            n_locals: 1,
+        };
+        let string_token = token(&player, string_slot);
+        run_handler(&string_code, &string_token, &mut player, &symbols).unwrap();
+        let copied = match player.scopes[string_slot].local(0) {
+            StackDatum::Ref(datum) => datum,
+            _ => panic!("string assignment must retain a datum ref"),
+        };
+        assert_ne!(source.unwrap(), copied.unwrap());
+        assert!(matches!(player.get_datum(&copied), Datum::String(value) if value == "source"));
+        assert!(player.scopes[string_slot].stack.is_empty());
+    }
 
-            // The local written before the escape is visible in the SCOPE, not
-            // in any IR-private copy — that is what makes the sync unnecessary.
-            assert!(
-                matches!(
-                    reserve_player_ref(|p| p.scopes.get(scope_ref).unwrap().local(0)),
-                    StackDatum::Int(5)
-                ),
-                "the IR must write locals straight into the scope"
-            );
-            assert!(
-                reserve_player_ref(|p| p.scopes.get(scope_ref).unwrap().local_is_assigned(0)),
-                "an IR write must mark the slot assigned, or do/eval resolution breaks"
-            );
-            assert_eq!(
-                reserve_player_ref(|p| p.scopes.get(scope_ref).unwrap().bytecode_index),
-                2,
-                "escape must leave bytecode_index on the op the interpreter runs"
-            );
+    #[test]
+    fn compiled_symbol_operations_reject_foreign_table_symbols() {
+        let mut player = make_player();
+        let symbols = make_symbols();
+        let mut foreign_table = SymbolTable::new();
+        let foreign_symbol = foreign_table.intern("compiledForeign");
 
-            // The driver would run that op and advance; do just the advance.
-            reserve_player_mut(|player| {
-                player.scopes.get_mut(scope_ref).unwrap().bytecode_index = 3;
-            });
+        let arithmetic_slot = player.push_scope();
+        let foreign_ref = player.alloc_datum(Datum::Symbol(foreign_symbol.clone()));
+        let integer_ref = player.alloc_datum(Datum::Int(1));
+        player.scopes[arithmetic_slot].args.extend([foreign_ref, integer_ref]);
+        let arithmetic = CompiledHandler {
+            ops: vec![IrOp::GetParam(0), IrOp::GetParam(1), IrOp::Add],
+            n_locals: 0,
+        };
+        let arithmetic_token = token(&player, arithmetic_slot);
+        assert!(run_handler(&arithmetic, &arithmetic_token, &mut player, &symbols).is_err());
+        player.pop_scope();
 
-            // Resuming continues with locals intact and returns 5.
-            match run_handler_resumable(&compiled, scope_ref).unwrap() {
-                IrExit::Done => {}
-                IrExit::Escape => panic!("expected completion, got Escape"),
-                IrExit::BackJump => panic!("expected completion, got BackJump"),
-            }
-            assert_eq!(stack_top_int(scope_ref), 5, "dense locals must survive the escape");
-            reserve_player_mut(|player| player.pop_scope());
-        });
+        let comparison_slot = player.push_scope();
+        let foreign_ref = player.alloc_datum(Datum::Symbol(foreign_symbol));
+        let integer_ref = player.alloc_datum(Datum::Int(1));
+        player.scopes[comparison_slot].args.extend([foreign_ref, integer_ref]);
+        let comparison = CompiledHandler {
+            ops: vec![IrOp::GetParam(0), IrOp::GetParam(1), IrOp::Eq],
+            n_locals: 0,
+        };
+        let comparison_token = token(&player, comparison_slot);
+        assert!(run_handler(&comparison, &comparison_token, &mut player, &symbols).is_err());
+        player.pop_scope();
     }
 }

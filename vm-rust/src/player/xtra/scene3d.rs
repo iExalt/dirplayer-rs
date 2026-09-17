@@ -123,28 +123,70 @@ impl Scene3dStore {
         self.scenes.remove(&scene_id);
         self.tags.retain(|_, id| *id != scene_id);
     }
-}
 
-/// The global store. WASM is single-threaded, so `static mut` is sound — the
-/// same pattern the built-in Groove manager uses. Populated by
-/// `external::host_call_dispatch`, read by the webgl2 `XtraSceneRenderer`.
-pub static mut XTRA_SCENE_STORE: Option<Scene3dStore> = None;
-
-/// Run `f` against the store, initializing it on first use.
-pub fn with_store_mut<R>(f: impl FnOnce(&mut Scene3dStore) -> R) -> R {
-    unsafe {
-        let ptr = &raw mut XTRA_SCENE_STORE;
-        let store = (*ptr).get_or_insert_with(Scene3dStore::new);
-        f(store)
+    /// Remove all scenes owned by this player while retaining the id sequence.
+    /// Keeping ids monotonic prevents a reset player from reusing stale
+    /// renderer cache keys for the same WebGL renderer.
+    pub fn reset(&mut self) {
+        self.scenes.clear();
+        self.tags.clear();
     }
 }
 
-/// Drop every scene. Called from `DirPlayer::reset` so a plugin's scenes from a
-/// previous movie don't linger across loads (their GL resources are freed the
-/// next time the renderer sees the scene is gone).
-pub fn clear_all() {
-    with_store_mut(|s| {
-        s.scenes.clear();
-        s.tags.clear();
-    });
+#[cfg(test)]
+mod tests {
+    use super::Scene3dStore;
+    #[cfg(not(target_arch = "wasm32"))]
+    use crate::player::ownership::{OwnerKey, OwnerToken};
+    #[cfg(not(target_arch = "wasm32"))]
+    use crate::player::DirPlayer;
+    #[cfg(not(target_arch = "wasm32"))]
+    use async_std::channel;
+
+    #[test]
+    fn stores_isolate_overlapping_tags_and_reset() {
+        let mut first = Scene3dStore::new();
+        let mut second = Scene3dStore::new();
+
+        let first_scene = first.create("shared-tag");
+        let second_scene = second.create("shared-tag");
+        assert_eq!(first_scene, 1);
+        assert_eq!(second_scene, 1);
+        assert!(first.scenes.contains_key(&first_scene));
+        assert!(second.scenes.contains_key(&second_scene));
+
+        first.reset();
+        assert!(first.scenes.is_empty());
+        assert!(second.scenes.contains_key(&second_scene));
+
+        // The reset player must not reuse a retired renderer cache key.
+        let replacement_scene = first.create("shared-tag");
+        assert_eq!(replacement_scene, 2);
+        assert!(second.scenes.contains_key(&second_scene));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn player_reset_clears_only_its_scene_store() {
+        let (first_tx, _) = channel::unbounded();
+        let (second_tx, _) = channel::unbounded();
+        let mut first = DirPlayer::new_with_owner(
+            first_tx,
+            OwnerToken::new(OwnerKey { session: 11, player: 1, generation: 1 }),
+        );
+        let mut second = DirPlayer::new_with_owner(
+            second_tx,
+            OwnerToken::new(OwnerKey { session: 11, player: 2, generation: 1 }),
+        );
+
+        let first_scene = first.scene3d_store.create("shared-tag");
+        let second_scene = second.scene3d_store.create("shared-tag");
+        assert_eq!(first_scene, second_scene);
+        assert!(first.scene3d_store.scenes.contains_key(&first_scene));
+        assert!(second.scene3d_store.scenes.contains_key(&second_scene));
+
+        first.reset_owned_core();
+        assert!(first.scene3d_store.scenes.is_empty());
+        assert!(second.scene3d_store.scenes.contains_key(&second_scene));
+    }
 }

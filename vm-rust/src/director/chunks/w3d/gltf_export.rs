@@ -5,15 +5,24 @@
 
 use super::types::*;
 use super::skeleton::export_basis_transform;
+use crate::player::symbols::symbol::Symbol;
+use crate::player::symbols::symbol_table::SymbolTable;
+
+fn symbol_display(symbols: &SymbolTable, symbol: &Symbol, context: &str) -> Result<String, String> {
+    symbols
+        .display(symbol)
+        .map(str::to_owned)
+        .map_err(|_| format!("W3D glTF exporter encountered a foreign symbol in {context}"))
+}
 
 /// Export a W3dScene as a GLB (binary glTF) byte buffer.
-pub fn export_glb(scene: &W3dScene) -> Vec<u8> {
+pub fn export_glb(scene: &W3dScene, symbols: &SymbolTable) -> Result<Vec<u8>, String> {
     let mut bin = BinaryBuffer::new();
     let mut gltf = GltfRoot::new();
 
     let skeleton = scene.skeletons.first().filter(|s| !s.bones.is_empty());
     let mesh_bind_transform = skeleton
-        .and_then(|s| scene.find_transform_for_resource_pub(s.name))
+        .and_then(|s| scene.find_transform_for_resource_pub(s.name.clone()))
         .unwrap_or_else(identity_matrix);
 
     let mut root_children = vec![];
@@ -26,7 +35,7 @@ pub fn export_glb(scene: &W3dScene) -> Vec<u8> {
         if !is_identity(&mesh_bind_transform) {
             let node_idx = gltf.nodes.len();
             gltf.nodes.push(GltfNode {
-                name: format!("{}_BindRoot", skeleton.name),
+                name: format!("{}_BindRoot", symbol_display(symbols, &skeleton.name, "skeleton name")?),
                 matrix: Some(mesh_bind_transform),
                 ..Default::default()
             });
@@ -42,7 +51,7 @@ pub fn export_glb(scene: &W3dScene) -> Vec<u8> {
             let (rx, ry, rz, rw) =
                 normalize_quaternion(bind_pose.rot_x, bind_pose.rot_y, bind_pose.rot_z, bind_pose.rot_w);
             gltf.nodes.push(GltfNode {
-                name: bone.name.to_string(),
+                name: symbol_display(symbols, &bone.name, "bone name")?,
                 translation: Some([bind_pose.pos_x, bind_pose.pos_y, bind_pose.pos_z]),
                 rotation: Some([rx, ry, rz, rw]),
                 ..Default::default()
@@ -92,8 +101,8 @@ pub fn export_glb(scene: &W3dScene) -> Vec<u8> {
         });
     }
 
-    export_textures(&mut gltf, &mut bin, scene);
-    build_materials(&mut gltf, scene);
+    export_textures(&mut gltf, &mut bin, scene, symbols)?;
+    build_materials(&mut gltf, scene, symbols)?;
 
     // Export meshes
     let mut mesh_node_indices = vec![];
@@ -102,7 +111,7 @@ pub fn export_glb(scene: &W3dScene) -> Vec<u8> {
 
         // Combine ALL submeshes into one (matching C# BuildMesh behavior)
         let mut combined = ClodDecodedMesh {
-            name: *resource_name,
+            name: resource_name.clone(),
             positions: vec![], normals: vec![], tex_coords: vec![],
             faces: vec![], diffuse_colors: vec![], specular_colors: vec![],
             bone_indices: vec![], bone_weights: vec![],
@@ -137,20 +146,21 @@ pub fn export_glb(scene: &W3dScene) -> Vec<u8> {
 
         if combined.positions.is_empty() || combined.faces.is_empty() { continue; }
 
-        let mesh_idx = export_mesh(&mut gltf, &mut bin, &combined, resource_name.as_str(), scene);
+        let resource_name_text = symbol_display(symbols, resource_name, "model resource name")?;
+        let mesh_idx = export_mesh(&mut gltf, &mut bin, &combined, &resource_name_text, scene, symbols)?;
         let node_idx = gltf.nodes.len();
         let mut node = GltfNode {
-            name: resource_name.to_string(),
+            name: resource_name_text,
             mesh: Some(mesh_idx),
             ..Default::default()
         };
         if let Some(current_skin_idx) = skin_idx {
             if mesh_node_indices.is_empty() {
                 node.skin = Some(current_skin_idx);
-            } else if let Some(transform) = scene.find_transform_for_resource_pub(*resource_name) {
+            } else if let Some(transform) = scene.find_transform_for_resource_pub(resource_name.clone()) {
                 node.matrix = Some(transform);
             }
-        } else if let Some(transform) = scene.find_transform_for_resource_pub(*resource_name) {
+        } else if let Some(transform) = scene.find_transform_for_resource_pub(resource_name.clone()) {
             node.matrix = Some(transform);
         }
         gltf.nodes.push(node);
@@ -177,10 +187,11 @@ pub fn export_glb(scene: &W3dScene) -> Vec<u8> {
             bone_indices: vec![],
             bone_weights: vec![],
         };
-        let mesh_idx = export_mesh(&mut gltf, &mut bin, &decoded, mesh.name.as_str(), scene);
+        let mesh_name = symbol_display(symbols, &mesh.name, "raw mesh name")?;
+        let mesh_idx = export_mesh(&mut gltf, &mut bin, &decoded, &mesh_name, scene, symbols)?;
         let node_idx = gltf.nodes.len();
         gltf.nodes.push(GltfNode {
-            name: mesh.name.to_string(),
+            name: mesh_name,
             mesh: Some(mesh_idx),
             ..Default::default()
         });
@@ -196,7 +207,7 @@ pub fn export_glb(scene: &W3dScene) -> Vec<u8> {
             if motion.tracks.len() <= 1 {
                 continue;
             }
-            export_animation(&mut gltf, &mut bin, motion, skeleton, bone_node_start);
+            export_animation(&mut gltf, &mut bin, motion, skeleton, bone_node_start, symbols)?;
         }
     }
 
@@ -211,7 +222,7 @@ pub fn export_glb(scene: &W3dScene) -> Vec<u8> {
 
     // Serialize to GLB
     let json_str = serialize_gltf(&gltf, bin.data.len());
-    encode_glb(&json_str, &bin.data)
+    Ok(encode_glb(&json_str, &bin.data))
 }
 
 fn export_mesh(
@@ -220,7 +231,8 @@ fn export_mesh(
     mesh: &ClodDecodedMesh,
     name: &str,
     scene: &W3dScene,
-) -> usize {
+    symbols: &SymbolTable,
+) -> Result<usize, String> {
     let recalculated_normals = recalculate_smooth_normals(&mesh.positions, &mesh.faces);
 
     // Positions
@@ -323,7 +335,7 @@ fn export_mesh(
     } else { None };
 
     // Material
-    let mat_idx = resolve_material_index(gltf, scene, name);
+    let mat_idx = resolve_material_index(gltf, scene, name, symbols)?;
 
     let mesh_idx = gltf.meshes.len();
     let mut prim = GltfPrimitive {
@@ -348,7 +360,7 @@ fn export_mesh(
         name: name.to_string(),
         primitives: vec![prim],
     });
-    mesh_idx
+    Ok(mesh_idx)
 }
 
 fn export_animation(
@@ -357,12 +369,14 @@ fn export_animation(
     motion: &W3dMotion,
     skeleton: &W3dSkeleton,
     bone_node_start: usize,
-) {
+    symbols: &SymbolTable,
+) -> Result<(), String> {
     let mut channels = vec![];
     let mut samplers = vec![];
 
     for track in &motion.tracks {
-        let bone_idx = match skeleton.find_bone_by_name(track.bone_name) {
+        symbol_display(symbols, &track.bone_name, "animation track bone name")?;
+        let bone_idx = match skeleton.find_bone_by_name(track.bone_name.clone()) {
             Some(i) => i,
             None => continue,
         };
@@ -492,14 +506,15 @@ fn export_animation(
 
     if !channels.is_empty() {
         gltf.animations.push(GltfAnimation {
-            name: motion.name.to_string(),
+            name: symbol_display(symbols, &motion.name, "motion name")?,
             channels,
             samplers,
         });
     }
+    Ok(())
 }
 
-fn export_textures(gltf: &mut GltfRoot, bin: &mut BinaryBuffer, scene: &W3dScene) {
+fn export_textures(gltf: &mut GltfRoot, bin: &mut BinaryBuffer, scene: &W3dScene, symbols: &SymbolTable) -> Result<(), String> {
     for (name, data) in &scene.texture_images {
         if data.is_empty() {
             continue;
@@ -509,19 +524,21 @@ fn export_textures(gltf: &mut GltfRoot, bin: &mut BinaryBuffer, scene: &W3dScene
         let mime = if is_png { "image/png" } else { "image/jpeg" };
         let buf_view_idx = add_buffer_view(gltf, bin, data);
         let image_idx = gltf.images.len();
+        let display_name = symbol_display(symbols, name, "texture name")?;
         gltf.images.push(GltfImage {
             buffer_view: buf_view_idx,
             mime_type: mime.to_string(),
-            name: name.to_string(),
+            name: display_name.clone(),
         });
         gltf.textures.push(GltfTexture {
             source: image_idx,
-            name: name.to_string(),
+            name: display_name,
         });
     }
+    Ok(())
 }
 
-fn build_materials(gltf: &mut GltfRoot, scene: &W3dScene) {
+fn build_materials(gltf: &mut GltfRoot, scene: &W3dScene, symbols: &SymbolTable) -> Result<(), String> {
     for mat in &scene.materials {
         let mut base_color_texture = None;
 
@@ -530,7 +547,8 @@ fn build_materials(gltf: &mut GltfRoot, scene: &W3dScene) {
                 if layer.name.is_empty() {
                     continue;
                 }
-                if let Some(tex_idx) = gltf.textures.iter().position(|t| t.name == layer.name.as_str()) {
+                let layer_name = symbol_display(symbols, &layer.name, "texture layer name")?;
+                if let Some(tex_idx) = gltf.textures.iter().position(|t| t.name == layer_name) {
                     if layer.tex_mode == 0 || layer.tex_mode == 5 {
                         base_color_texture = Some(tex_idx);
                     }
@@ -540,7 +558,7 @@ fn build_materials(gltf: &mut GltfRoot, scene: &W3dScene) {
         }
 
         gltf.materials.push(GltfMaterial {
-            name: mat.name.to_string(),
+            name: symbol_display(symbols, &mat.name, "material name")?,
             base_color: [mat.diffuse[0], mat.diffuse[1], mat.diffuse[2], mat.opacity],
             metallic: mat.reflectivity,
             roughness: 1.0 - mat.reflectivity,
@@ -549,9 +567,10 @@ fn build_materials(gltf: &mut GltfRoot, scene: &W3dScene) {
             alpha_mode: if mat.opacity < 1.0 { Some("BLEND".into()) } else { None },
         });
     }
+    Ok(())
 }
 
-fn find_material_name_for_resource<'a>(scene: &'a W3dScene, resource_name: &str) -> Option<&'a str> {
+fn find_material_name_for_resource(scene: &W3dScene, resource_name: &str, symbols: &SymbolTable) -> Result<Option<String>, String> {
     for node in &scene.nodes {
         if node.node_type != W3dNodeType::Model {
             continue;
@@ -561,21 +580,24 @@ fn find_material_name_for_resource<'a>(scene: &'a W3dScene, resource_name: &str)
         } else {
             &node.resource_name
         };
-        if candidate.as_str() != resource_name || node.shader_name.is_empty() {
+        if symbol_display(symbols, candidate, "model resource name")? != resource_name || node.shader_name.is_empty() {
             continue;
         }
+        symbol_display(symbols, &node.shader_name, "shader name")?;
         if let Some(shader) = scene.shaders.iter().find(|s| s.name == node.shader_name) {
             if !shader.material_name.is_empty() {
-                return Some(shader.material_name.as_str());
+                return Ok(Some(symbol_display(symbols, &shader.material_name, "material name")?));
             }
         }
     }
-    None
+    Ok(None)
 }
 
-fn resolve_material_index(gltf: &mut GltfRoot, scene: &W3dScene, resource_name: &str) -> Option<usize> {
-    let mat_name = find_material_name_for_resource(scene, resource_name)?;
-    gltf.materials.iter().position(|m| m.name == mat_name)
+fn resolve_material_index(gltf: &mut GltfRoot, scene: &W3dScene, resource_name: &str, symbols: &SymbolTable) -> Result<Option<usize>, String> {
+    let Some(mat_name) = find_material_name_for_resource(scene, resource_name, symbols)? else {
+        return Ok(None);
+    };
+    Ok(gltf.materials.iter().position(|m| m.name == mat_name))
 }
 
 fn identity_matrix() -> [f32; 16] {

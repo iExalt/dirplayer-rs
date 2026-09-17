@@ -10,6 +10,7 @@ use crate::director::chunks::handler::HandlerDef;
 use crate::director::chunks::script::ScriptChunk;
 use crate::director::lingo::opcode::OpCode;
 use crate::director::lingo::script::ScriptContext;
+use crate::player::{ScriptError, symbols::{symbol::SymbolError, symbol_table::SymbolTable}};
 use super::ast::*;
 use super::enums::*;
 use super::code_writer::CodeWriter;
@@ -60,6 +61,8 @@ enum BlockContext {
 
 /// Decompiler state
 struct DecompilerState<'a> {
+    symbols: &'a SymbolTable,
+    error: Option<ScriptError>,
     handler: &'a HandlerDef,
     chunk: &'a ScriptChunk,
     lctx: &'a ScriptContext,
@@ -87,7 +90,7 @@ struct DecompilerState<'a> {
 }
 
 impl<'a> DecompilerState<'a> {
-    fn new(handler: &'a HandlerDef, chunk: &'a ScriptChunk, lctx: &'a ScriptContext, version: u16, multiplier: u32) -> Self {
+    fn new(handler: &'a HandlerDef, chunk: &'a ScriptChunk, lctx: &'a ScriptContext, version: u16, multiplier: u32, symbols: &'a SymbolTable) -> Self {
         let root_block = Rc::new(RefCell::new(BlockNode::new()));
         let current_block = root_block.clone();
 
@@ -101,6 +104,8 @@ impl<'a> DecompilerState<'a> {
         let bytecode_tags = vec![BytecodeInfo::default(); handler.bytecode_array.len()];
 
         Self {
+            symbols,
+            error: None,
             handler,
             chunk,
             lctx,
@@ -732,14 +737,24 @@ impl<'a> DecompilerState<'a> {
             OpCode::PushCons => {
                 let literal_id = (obj as u32 / self.multiplier) as usize;
                 if let Some(literal) = self.chunk.literals.get(literal_id) {
-                    let datum = match literal {
-                        crate::director::lingo::datum::Datum::String(s) => Datum::string(s.clone()),
-                        crate::director::lingo::datum::Datum::Int(i) => Datum::int(*i),
-                        crate::director::lingo::datum::Datum::Float(f) => Datum::float(*f as f64),
-                        crate::director::lingo::datum::Datum::Symbol(s) => Datum::symbol(s.to_string()),
-                        _ => Datum::void(),
+                    let node = match literal {
+                        crate::director::lingo::datum::Datum::Symbol(symbol) => {
+                            match self.symbols.display(symbol) {
+                                Ok(name) => AstNode::Literal(Datum::symbol(name.to_owned())),
+                                Err(_) => {
+                                    self.error = Some(SymbolError::Foreign.into());
+                                    AstNode::Error
+                                }
+                            }
+                        }
+                        literal => AstNode::Literal(match literal {
+                            crate::director::lingo::datum::Datum::String(s) => Datum::string(s.clone()),
+                            crate::director::lingo::datum::Datum::Int(i) => Datum::int(*i),
+                            crate::director::lingo::datum::Datum::Float(f) => Datum::float(*f as f64),
+                            _ => Datum::void(),
+                        }),
                     };
-                    Some(Rc::new(AstNode::Literal(datum)))
+                    Some(Rc::new(node))
                 } else {
                     Some(Rc::new(AstNode::Error))
                 }
@@ -1920,8 +1935,12 @@ pub fn decompile_handler(
     lctx: &ScriptContext,
     version: u16,
     multiplier: u32,
-) -> DecompiledHandler {
-    let mut state = DecompilerState::new(handler, chunk, lctx, version, multiplier);
+    symbols: &SymbolTable,
+) -> Result<DecompiledHandler, ScriptError> {
+    let mut state = DecompilerState::new(handler, chunk, lctx, version, multiplier, symbols);
     state.parse();
-    state.generate_output()
+    if let Some(error) = state.error.take() {
+        return Err(error);
+    }
+    Ok(state.generate_output())
 }

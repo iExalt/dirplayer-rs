@@ -20,7 +20,7 @@ use log::debug;
 use super::context::WebGL2Context;
 use super::mesh3d::Mesh3dBuffers;
 use crate::{
-    console_warn, director::chunks::w3d::types::*, player::symbols::{builtin::BuiltInSymbol, symbol::Symbol}
+    console_warn, director::chunks::w3d::types::*, player::symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable}
 };
 
 const SCENE3D_LOG: bool = false;
@@ -29,6 +29,26 @@ fn log(msg: &str) {
     if SCENE3D_LOG {
         debug!("[SCENE-3D] {}", msg);
     }
+}
+
+fn symbol_display<'a>(
+    symbols: &'a SymbolTable,
+    symbol: &Symbol,
+    context: &str,
+) -> Result<&'a str, JsValue> {
+    symbols
+        .display(symbol)
+        .map_err(|_| JsValue::from_str(&format!("W3D renderer: foreign {} symbol", context)))
+}
+
+fn symbol_lower<'a>(
+    symbols: &'a SymbolTable,
+    symbol: &Symbol,
+    context: &str,
+) -> Result<&'a str, JsValue> {
+    symbols
+        .lower(symbol)
+        .map_err(|_| JsValue::from_str(&format!("W3D renderer: foreign {} symbol", context)))
 }
 
 /// GPU state for a single Shockwave3D member
@@ -951,12 +971,17 @@ void main() {
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
         view_matrix: &[f32; 16],
         projection_matrix: &[f32; 16],
+        symbols: &mut SymbolTable,
     ) -> Result<(), JsValue> {
         let rs = match runtime_state {
             Some(rs) if !rs.particles.is_empty() => rs,
             _ => return Ok(()),
         };
-        self.ensure_particle_shader(context)?;
+        // Particle shader setup is optional, matching the historical renderer.
+        // Subsequent symbol ownership failures remain fallible and are propagated.
+        if self.ensure_particle_shader(context).is_err() {
+            return Ok(());
+        }
         let gl = context.gl();
         let gpu_data = self.member_data.get(member_key);
         let shader = self.particle_shader.as_ref().unwrap();
@@ -1011,7 +1036,12 @@ void main() {
             // Bind the particle texture (set via resource.texture) if present.
             let mut has_tex = false;
             if !ps.texture_name.is_empty() {
-                if let Some(tex) = gpu_data.and_then(|d| d.textures.get(&Symbol::from_str(&ps.texture_name))) {
+                // Particle texture names are interned by the parser. Preserve the
+                // identity lookup used by the old renderer; the table is mutable here
+                // because this is the one upload path that may encounter a late name.
+                let texture_symbol = symbols.intern(&ps.texture_name);
+                let tex = gpu_data.and_then(|d| d.textures.get(&texture_symbol));
+                if let Some(tex) = tex {
                     gl.active_texture(WebGl2RenderingContext::TEXTURE0);
                     gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(tex));
                     gl.uniform1i(shader.u_tex.as_ref(), 0);
@@ -1188,12 +1218,13 @@ void main() {
         key: (i32, i32),
         scene: &W3dScene,
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
+        symbols: &mut SymbolTable,
     ) -> Result<(), JsValue> {
         let current_version = (scene.nodes.len(), scene.clod_meshes.len() + scene.raw_meshes.len(), scene.texture_images.len(), scene.shaders.len());
         // Map each model resource to the active `#sds` subdivision applied to a
         // model node using it: resource_name (lowercase) → (depth, tension).
         // Only enabled modifiers with depth ≥ 1 subdivide.
-        let subdiv_map = Self::build_subdiv_map(scene, runtime_state);
+        let subdiv_map = Self::build_subdiv_map(scene, runtime_state, symbols)?;
         let sds_version = Self::sds_signature(&subdiv_map);
         if let Some(existing) = self.member_data.get(&key) {
             if existing.scene_version == current_version
@@ -1201,7 +1232,7 @@ void main() {
                 && existing.sds_version == sds_version
             {
                 if existing.texture_content_version != scene.texture_content_version {
-                    self.update_textures_incremental(context, key, scene);
+                    self.update_textures_incremental(context, key, scene, symbols)?;
                 }
                 return Ok(());
             }
@@ -1228,7 +1259,7 @@ void main() {
 
         let mut mesh_groups: HashMap<Symbol, Vec<Mesh3dBuffers>> = HashMap::new();
         let mut mesh_signatures: HashMap<Symbol, u64> = HashMap::new();
-        let mut all_meshes = Vec::new();
+        let all_meshes = Vec::new();
         // Meshes may only be carried over when NOTHING about the geometry has
         // changed: `#sds` rewrites it, and `mesh_content_version` is the scene's
         // own "geometry was mutated" signal.
@@ -1245,15 +1276,20 @@ void main() {
         });
 
         // Collect resource names used by LIGHT nodes (to skip their geometry)
-        let light_resources: std::collections::HashSet<Symbol> = scene.nodes.iter()
-            .filter(|n| n.node_type == W3dNodeType::Light)
-            .flat_map(|n| {
-                let mut names = vec![];
-                if !n.model_resource_name.is_empty() { names.push(n.model_resource_name); }
-                if !n.resource_name.is_empty() && n.resource_name.as_str() != "." { names.push(n.resource_name); }
-                names
-            })
-            .collect();
+        let mut light_resources = std::collections::HashSet::new();
+        for n in &scene.nodes {
+            if n.node_type != W3dNodeType::Light { continue; }
+            symbol_display(symbols, &n.model_resource_name, "light model resource name")?;
+            symbol_display(symbols, &n.resource_name, "light resource name")?;
+            if !n.model_resource_name.is_empty() {
+                light_resources.insert(n.model_resource_name.clone());
+            }
+            if !n.resource_name.is_empty()
+                && symbol_display(symbols, &n.resource_name, "resource name")? != "."
+            {
+                light_resources.insert(n.resource_name.clone());
+            }
+        }
 
         // Upload CLOD meshes (skip light geometry)
         for (name, decoded_meshes) in &scene.clod_meshes {
@@ -1271,7 +1307,7 @@ void main() {
                 if let Some(old) = old_gpu.as_mut() {
                     if old.mesh_signatures.get(name) == Some(&sig) {
                         if let Some(group) = old.mesh_groups.remove(name) {
-                            mesh_signatures.insert(*name, sig);
+                            mesh_signatures.insert(name.clone(), sig);
                             mesh_groups.insert(name.clone(), group);
                             continue;
                         }
@@ -1290,7 +1326,7 @@ void main() {
                 // models), so they're dropped for the subdivided copy.
                 let subdivided_mesh;
                 let mesh: &crate::director::chunks::w3d::types::ClodDecodedMesh =
-                    if let Some(&(depth, tension)) = subdiv_map.get(&name.to_lowercase()) {
+                    if let Some(&(depth, tension)) = subdiv_map.get(symbol_lower(symbols, name, "mesh resource name")?) {
                         let uv0 = mesh.tex_coords.first().cloned().unwrap_or_default();
                         let (p, n, u, f) = crate::director::chunks::w3d::subdivision::subdivide(
                             &mesh.positions, &mesh.normals, &uv0, &mesh.faces, depth as u32, tension,
@@ -1348,9 +1384,10 @@ void main() {
                     // Diagnostic: log bone data stats for first mesh with bones
                     {
                         use std::sync::Mutex; use std::collections::HashSet;
-                        static LOGGED_BD: Mutex<Option<HashSet<Symbol>>> = Mutex::new(None);
+                        static LOGGED_BD: Mutex<Option<HashSet<String>>> = Mutex::new(None);
                         if let Ok(mut g) = LOGGED_BD.lock() { let set = g.get_or_insert_with(HashSet::new);
-                        if set.insert(name.clone()) {
+                        if set.insert(symbol_lower(symbols, name, "mesh name")?.to_owned()) {
+                            let mesh_display = symbol_display(symbols, name, "mesh name")?;
                             let max_idx = bone_idx_packed.iter().flat_map(|v| v.iter()).cloned().fold(0.0f32, f32::max);
                             let wgt_sums: Vec<f32> = bone_wgt_packed.iter().map(|w| w.iter().sum::<f32>()).collect();
                             let min_sum = wgt_sums.iter().cloned().fold(f32::MAX, f32::min);
@@ -1359,7 +1396,7 @@ void main() {
                             let raw_lens: Vec<usize> = mesh.bone_indices.iter().take(3).map(|v| v.len()).collect();
                             debug!(
                                 "[W3D-BONEDATA] mesh=\"{}\" verts={} bone_idx_count={} bone_wgt_count={} max_bone_idx={:.0} wgt_range=[{:.3},{:.3}] zero_wgt_verts={} raw_per_vert_lens={:?} first3_idx={:?} first3_wgt={:?}",
-                                name, mesh.positions.len(), mesh.bone_indices.len(), mesh.bone_weights.len(),
+                                mesh_display, mesh.positions.len(), mesh.bone_indices.len(), mesh.bone_weights.len(),
                                 max_idx, min_sum, max_sum, zero_wgt, raw_lens,
                                 &bone_idx_packed[..3.min(bone_idx_packed.len())],
                                 &bone_wgt_packed[..3.min(bone_wgt_packed.len())],
@@ -1398,7 +1435,7 @@ void main() {
                 }
                 group.push(buffers);
             }
-            mesh_signatures.insert(*name, sig);
+            mesh_signatures.insert(name.clone(), sig);
             mesh_groups.insert(name.clone(), group);
         }
 
@@ -1446,7 +1483,7 @@ void main() {
         let mut alpha_textures = std::collections::HashSet::new();
         let mut soft_alpha_textures = std::collections::HashSet::new();
         for (tex_name, image_data) in &scene.texture_images {
-            let lower = tex_name.as_lower_str();
+            let lower = symbol_lower(symbols, tex_name, "texture name")?;
             // The SkyLine* textures in this game are authored vertically inverted in
             // the W3D (the JPEGs are stored upside-down, while houses/buildings/icons
             // are stored right-side-up). The skyline mesh UVs use the same convention
@@ -1468,29 +1505,29 @@ void main() {
                 if old.texture_versions.get(tex_name) == Some(&data_len) {
                     if let Some(tex) = old.textures.remove(tex_name) {
                         if let Some(sz) = old.texture_sizes.get(tex_name) {
-                            texture_sizes.insert(*tex_name, *sz);
+                            texture_sizes.insert(tex_name.clone(), *sz);
                         }
                         if old.alpha_textures.contains(tex_name) {
-                            alpha_textures.insert(*tex_name);
+                            alpha_textures.insert(tex_name.clone());
                         }
                         if old.soft_alpha_textures.contains(tex_name) {
-                            soft_alpha_textures.insert(*tex_name);
+                            soft_alpha_textures.insert(tex_name.clone());
                         }
-                        textures.insert(*tex_name, tex);
+                        textures.insert(tex_name.clone(), tex);
                         continue;
                     }
                 }
             }
             let flip_v = lower.contains("skyline");
             if let Some((tex, w, h, has_alpha, soft_alpha)) = self.decode_and_upload_texture(context, image_data, flip_v) {
-                texture_sizes.insert(*tex_name, (w, h));
+                texture_sizes.insert(tex_name.clone(), (w, h));
                 if has_alpha {
                     alpha_textures.insert(tex_name.clone());
                 }
                 if soft_alpha {
-                    soft_alpha_textures.insert(*tex_name);
+                soft_alpha_textures.insert(tex_name.clone());
                 }
-                textures.insert(*tex_name, tex);
+                textures.insert(tex_name.clone(), tex);
             }
         }
 
@@ -1524,11 +1561,11 @@ void main() {
         }
 
         // Detect and create cubemap textures from 6-face naming convention
-        let cube_maps = self.detect_and_create_cubemaps(context, scene);
+        let cube_maps = self.detect_and_create_cubemaps(context, scene, symbols)?;
 
         let mut texture_versions = HashMap::new();
         for (tex_name, image_data) in &scene.texture_images {
-            texture_versions.insert(*tex_name, image_data.len() as u64);
+            texture_versions.insert(tex_name.clone(), image_data.len() as u64);
         }
         self.member_data.insert(key, MemberGpuData {
             mesh_groups, mesh_signatures, all_meshes, textures, texture_sizes, cube_maps, inverse_bind_cache,
@@ -1550,15 +1587,22 @@ void main() {
     fn build_subdiv_map(
         scene: &W3dScene,
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
-    ) -> HashMap<String, (i32, f32)> {
+        symbols: &mut SymbolTable,
+    ) -> Result<HashMap<String, (i32, f32)>, JsValue> {
         let mut map = HashMap::new();
-        let rs = match runtime_state { Some(rs) => rs, None => return map };
-        if rs.sds_state.is_empty() { return map; }
+        let rs = match runtime_state { Some(rs) => rs, None => return Ok(map) };
+        if rs.sds_state.is_empty() { return Ok(map); }
         for node in &scene.nodes {
             if node.node_type != W3dNodeType::Model { continue; }
-            let sds = rs.sds_state.iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case(&node.name.as_str()))
-                .map(|(_, v)| v);
+            let mut sds = None;
+            for (name, value) in &rs.sds_state {
+                if symbol_lower(symbols, name, "SDS model name")?.eq_ignore_ascii_case(
+                    symbol_display(symbols, &node.name, "model name")?,
+                ) {
+                    sds = Some(value);
+                    break;
+                }
+            }
             let sds = match sds { Some(s) if s.enabled && s.depth >= 1 => s, _ => continue };
             let resource = if !node.model_resource_name.is_empty() {
                 &node.model_resource_name
@@ -1570,9 +1614,9 @@ void main() {
             // (Director itself clamps via a triangle/vertex budget; 4 levels =
             // ×256 faces is plenty for the readout range this movie uses).
             let depth = sds.depth.min(4);
-            map.insert(resource.to_lowercase(), (depth, sds.tension));
+            map.insert(symbol_lower(symbols, resource, "model resource name")?.to_owned(), (depth, sds.tension));
         }
-        map
+        Ok(map)
     }
 
     /// Order-independent signature of the subdivision map, so a runtime
@@ -1595,11 +1639,11 @@ void main() {
     }
 
     /// Incrementally re-upload only changed/new textures to GPU
-    fn update_textures_incremental(&mut self, context: &WebGL2Context, key: (i32, i32), scene: &W3dScene) {
-        let gpu_data = match self.member_data.get_mut(&key) { Some(d) => d, None => return };
+    fn update_textures_incremental(&mut self, context: &WebGL2Context, key: (i32, i32), scene: &W3dScene, symbols: &SymbolTable) -> Result<(), JsValue> {
+        let gpu_data = match self.member_data.get_mut(&key) { Some(d) => d, None => return Ok(()) };
 
         for (tex_name, image_data) in &scene.texture_images {
-            let lower = tex_name.as_lower_str();
+            let lower = symbol_lower(symbols, tex_name, "texture name")?;
             let data_len = image_data.len() as u64;
             let needs_upload = match gpu_data.texture_versions.get(tex_name) {
                 None => true,
@@ -1608,25 +1652,25 @@ void main() {
             if needs_upload {
                 let flip_v = lower.contains("skyline");
                 if let Some((tex, w, h, has_alpha, soft_alpha)) = decode_and_upload_texture_impl(context, image_data, flip_v) {
-                    gpu_data.texture_sizes.insert(*tex_name, (w, h));
+                    gpu_data.texture_sizes.insert(tex_name.clone(), (w, h));
                     if has_alpha {
-                        gpu_data.alpha_textures.insert(*tex_name);
+                        gpu_data.alpha_textures.insert(tex_name.clone());
                     } else {
                         gpu_data.alpha_textures.remove(&tex_name);
                     }
                     if soft_alpha {
-                        gpu_data.soft_alpha_textures.insert(*tex_name);
+                        gpu_data.soft_alpha_textures.insert(tex_name.clone());
                     } else {
                         gpu_data.soft_alpha_textures.remove(tex_name);
                     }
-                    gpu_data.textures.insert(*tex_name, tex);
-                    gpu_data.texture_versions.insert(*tex_name, data_len);
+                    gpu_data.textures.insert(tex_name.clone(), tex);
+                    gpu_data.texture_versions.insert(tex_name.clone(), data_len);
                 }
             }
         }
 
         // Remove GPU textures no longer in the scene
-        let scene_keys: std::collections::HashSet<Symbol> = scene.texture_images.keys().copied().collect();
+        let scene_keys: std::collections::HashSet<Symbol> = scene.texture_images.keys().cloned().collect();
         gpu_data.textures.retain(|k, _| scene_keys.contains(k));
         gpu_data.texture_sizes.retain(|k, _| scene_keys.contains(k));
         gpu_data.alpha_textures.retain(|k| scene_keys.contains(k));
@@ -1634,6 +1678,7 @@ void main() {
         gpu_data.texture_versions.retain(|k, _| scene_keys.contains(k));
 
         gpu_data.texture_content_version = scene.texture_content_version;
+        Ok(())
     }
 
     /// Render directly to the default framebuffer (for offscreen canvas readPixels)
@@ -1645,9 +1690,10 @@ void main() {
         width: u32,
         height: u32,
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
+        symbols: &mut SymbolTable,
     ) -> Result<(), JsValue> {
         self.ensure_shader(context)?;
-        self.ensure_member_data(context, member_key, scene, runtime_state)?;
+        self.ensure_member_data(context, member_key, scene, runtime_state, symbols)?;
 
         let gl = context.gl();
         self.ensure_checker_texture(&gl);
@@ -1667,14 +1713,14 @@ void main() {
 
         gl.use_program(Some(&shader.program));
 
-        let (view_matrix, camera_pos) = self.build_view_matrix(scene, runtime_state);
-        let projection_matrix = self.build_projection_matrix(scene, width as f32 / height as f32, runtime_state);
+        let (view_matrix, camera_pos) = self.build_view_matrix(scene, runtime_state, symbols)?;
+        let projection_matrix = self.build_projection_matrix(scene, width as f32 / height as f32, runtime_state, symbols)?;
 
         gl.uniform_matrix4fv_with_f32_array(shader.u_view.as_ref(), false, &view_matrix);
         gl.uniform_matrix4fv_with_f32_array(shader.u_projection.as_ref(), false, &projection_matrix);
         gl.uniform3f(shader.u_camera_pos.as_ref(), camera_pos[0], camera_pos[1], camera_pos[2]);
 
-        self.setup_lights(gl, shader, scene, &camera_pos, runtime_state);
+        self.setup_lights(gl, shader, scene, &camera_pos, runtime_state, symbols)?;
         gl.uniform1i(shader.u_diffuse_tex.as_ref(), 0);
         gl.uniform1i(shader.u_fog_enabled.as_ref(), 0);
         gl.uniform1i(shader.u_has_texcoord2.as_ref(), 0);
@@ -1694,7 +1740,14 @@ void main() {
 
             // Try to find and bind material + texture from scene shaders
             let mut tex_bound = false;
-            if let Some(mat) = scene.materials.iter().find(|m| !m.name.as_lower_str().contains("default")) {
+            let mut first_material = None;
+            for material in &scene.materials {
+                if !symbol_lower(symbols, &material.name, "material name")?.contains("default") {
+                    first_material = Some(material);
+                    break;
+                }
+            }
+            if let Some(mat) = first_material {
                 self.set_material_uniforms(gl, shader, mat);
             } else {
                 self.bind_default_material(gl, shader, scene);
@@ -1707,7 +1760,7 @@ void main() {
             let mut bound_tex_mode: u8 = 0;
             for w3d_shader in &scene.shaders {
                 if tex_bound { break; }
-                let layers = Self::find_texture_layers(&w3d_shader.texture_layers, gpu_data, w3d_shader.shader_type);
+                let layers = Self::find_texture_layers(&w3d_shader.texture_layers, gpu_data, w3d_shader.shader_type, symbols)?;
                 if layers.diffuse.is_some() {
                     bound_tex_mode = layers.diffuse_tex_mode;
                     tex_bound = Self::bind_texture_layers(gl, shader, &layers);
@@ -1734,9 +1787,10 @@ void main() {
                 for node in &scene.nodes {
                     if node.node_type != W3dNodeType::Model { continue; }
                     if !node.model_resource_name.is_empty() {
-                        drawn_resources.insert(node.model_resource_name);
+                        drawn_resources.insert(node.model_resource_name.clone());
                     } else if !node.resource_name.is_empty() {
-                        drawn_resources.insert(Symbol::from_str(node.resource_name.as_str().trim()));
+                        let resource_name = symbol_display(symbols, &node.resource_name, "resource name")?.trim().to_owned();
+                        drawn_resources.insert(symbols.intern(&resource_name));
                     }
                 }
                 let mut min_x = f32::MAX;
@@ -1794,8 +1848,9 @@ void main() {
         scene: &W3dScene,
         width: u32,
         height: u32,
+        symbols: &mut SymbolTable,
     ) -> Result<Option<&WebGlTexture>, JsValue> {
-        self.render_scene_with_state(context, member_key, scene, width, height, None)
+        self.render_scene_with_state(context, member_key, scene, width, height, None, symbols)
     }
 
     /// Render with optional runtime state for transform overrides and animation
@@ -1807,8 +1862,9 @@ void main() {
         width: u32,
         height: u32,
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
+        symbols: &mut SymbolTable,
     ) -> Result<Option<&WebGlTexture>, JsValue> {
-        self.render_scene_with_state_ex(context, member_key, scene, width, height, runtime_state, true)
+        self.render_scene_with_state_ex(context, member_key, scene, width, height, runtime_state, true, symbols)
     }
 
     /// Render with optional clearing control (for multi-camera setups)
@@ -1821,12 +1877,13 @@ void main() {
         height: u32,
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
         clear_fbo: bool,
+        symbols: &mut SymbolTable,
     ) -> Result<Option<&WebGlTexture>, JsValue> {
         // Liveness marker: proves the running wasm carries the soft-alpha pass
         // classification. Printed once per page load.
         self.ensure_shader(context)?;
         self.ensure_fbo(context, width, height)?;
-        self.ensure_member_data(context, member_key, scene, runtime_state)?;
+        self.ensure_member_data(context, member_key, scene, runtime_state, symbols)?;
         self.ensure_checker_texture(&context.gl());
         // Backdrops are drawn with the overlay quad later in this pass; ensure it
         // exists now while we still have &mut self (before the shader borrow).
@@ -1842,7 +1899,7 @@ void main() {
                             if mesh.tex_coords.len() >= 2 && !mesh.tex_coords[1].is_empty() {
                                 mesh_buf.update_texcoord2(context.gl(), &mesh.tex_coords[1]);
                                 mesh_buf.meshdeform_uv_synced = true;
-                                let resource_name = resource_name.as_str();
+                                let resource_name = symbol_display(symbols, resource_name, "resource name")?;
                                 // Log UV2 sync for MAP and Main models
                                 if resource_name.contains("MAP") || resource_name.starts_with("map")
                                     || resource_name.starts_with("Main")
@@ -1902,15 +1959,15 @@ void main() {
         gl.use_program(Some(&shader.program));
 
         // Set up camera
-        let (view_matrix, camera_pos) = self.build_view_matrix(scene, runtime_state);
-        let projection_matrix = self.build_projection_matrix(scene, width as f32 / height as f32, runtime_state);
+        let (view_matrix, camera_pos) = self.build_view_matrix(scene, runtime_state, symbols)?;
+        let projection_matrix = self.build_projection_matrix(scene, width as f32 / height as f32, runtime_state, symbols)?;
 
         gl.uniform_matrix4fv_with_f32_array(shader.u_view.as_ref(), false, &view_matrix);
         gl.uniform_matrix4fv_with_f32_array(shader.u_projection.as_ref(), false, &projection_matrix);
         gl.uniform3f(shader.u_camera_pos.as_ref(), camera_pos[0], camera_pos[1], camera_pos[2]);
 
         // Set up lighting (pass camera pos for headlight direction)
-        self.setup_lights(gl, shader, scene, &camera_pos, runtime_state);
+        self.setup_lights(gl, shader, scene, &camera_pos, runtime_state, symbols)?;
 
         // Set texture samplers
         gl.uniform1i(shader.u_diffuse_tex.as_ref(), 0);   // unit 0 = base/diffuse
@@ -1979,8 +2036,8 @@ void main() {
         // state are restored for the model loop.
         if clear_fbo {
             if let Some(rs) = runtime_state {
-                let cam_key = self.active_camera
-                    .unwrap_or_else(|| Symbol::from_str("defaultview"));
+                let cam_key = self.active_camera.clone()
+                    .unwrap_or_else(|| Symbol::builtin(BuiltInSymbol::DefaultView));
                 let backdrops = rs.camera_backdrops.get(&cam_key)
                     .filter(|b| !b.is_empty())
                     .or_else(|| {
@@ -2018,7 +2075,7 @@ void main() {
         if self.member_data.contains_key(&member_key) {
             // Get set of nodes explicitly detached by Lingo (parent = VOID)
             let detached_nodes: std::collections::HashSet<Symbol> = runtime_state
-                .map(|rs| rs.detached_nodes.iter().map(|s| s.as_str().into()).collect())
+                .map(|rs| rs.detached_nodes.iter().cloned().collect())
                 .unwrap_or_default();
 
             // Check if active camera has a rootNode filter
@@ -2028,36 +2085,22 @@ void main() {
                     .cloned()
             });
 
-            let model_nodes: Vec<&W3dNode> = scene.nodes.iter()
-                .filter(|n| n.node_type == W3dNodeType::Model)
-                .filter(|n| {
-                    // Skip directly detached nodes
-                    if detached_nodes.contains(&n.name) { return false; }
-
-                    // Skip #particle models — their resource is a billboard placeholder;
-                    // the particle system itself is drawn by render_particles, not as a
-                    // static quad here.
-                    let res = if !n.model_resource_name.is_empty() { &n.model_resource_name } else { &n.resource_name };
-                    if scene.model_resources.get(res)
-                        .and_then(|r| r.primitive_type.as_deref())
-                        .map(|t| t.eq_ignore_ascii_case("particle"))
-                        .unwrap_or(false)
-                    {
-                        return false;
-                    }
-
-                    if let Some(ref root) = root_node_filter {
-                        // Camera has rootNode: only render nodes in that subtree
-                        self.is_child_of(scene, n.name, *root)
-                    } else {
-                        // No rootNode: render world-visible models only.
-                        // Skip models whose parent (or ancestor) is detached — they belong
-                        // to a different camera's rootNode subtree (e.g., overlay HUD models
-                        // parented to a detached "overlays" camera).
-                        !self.has_detached_ancestor(scene, n.parent_name, &detached_nodes)
-                    }
-                })
-                .collect();
+            let mut model_nodes = Vec::new();
+            for n in scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Model) {
+                if detached_nodes.contains(&n.name) { continue; }
+                let res = if !n.model_resource_name.is_empty() { &n.model_resource_name } else { &n.resource_name };
+                if scene.model_resources.get(res)
+                    .and_then(|r| r.primitive_type.as_deref())
+                    .map(|t| t.eq_ignore_ascii_case("particle"))
+                    .unwrap_or(false)
+                { continue; }
+                let included = if let Some(root) = &root_node_filter {
+                    self.is_child_of(scene, n.name.clone(), root.clone(), symbols)?
+                } else {
+                    !self.has_detached_ancestor(scene, n.parent_name.clone(), &detached_nodes, symbols)?
+                };
+                if included { model_nodes.push(n); }
+            }
 
             // One-time diagnostic logging per member
             if !self.logged_members.contains(&member_key) {
@@ -2066,8 +2109,8 @@ void main() {
                 let mesh_group_keys: Vec<Symbol> = gpu_data.map(|d| d.mesh_groups.keys().cloned().collect()).unwrap_or_default();
                 let model_names: Vec<String> = model_nodes.iter().map(|n| {
                     let res = if !n.model_resource_name.is_empty() { &n.model_resource_name } else { &n.resource_name };
-                    format!("{}→{}", n.name, res)
-                }).collect();
+                    Ok(format!("{}→{}", symbol_display(symbols, &n.name, "model name")?, symbol_display(symbols, res, "resource name")?))
+                }).collect::<Result<_, JsValue>>()?;
                 log(&format!(
                     "[3D] Scene {:?}: {} model_nodes={:?}, mesh_groups={:?}, textures={}",
                     member_key, model_nodes.len(), model_names, mesh_group_keys,
@@ -2077,7 +2120,7 @@ void main() {
                 log(&format!(
                     "[3D] {} motions, skeletons={:?}",
                     scene.motions.len(),
-                    scene.skeletons.iter().map(|s| format!("{}({}b)", s.name, s.bones.len())).collect::<Vec<_>>(),
+                    scene.skeletons.iter().map(|s| Ok(format!("{}({}b)", symbol_display(symbols, &s.name, "skeleton name")?, s.bones.len()))).collect::<Result<Vec<_>, JsValue>>()?,
                 ));
             }
 
@@ -2114,9 +2157,16 @@ void main() {
                     for (model_name, bp) in &rs.bones_players {
                         if !bp.animation_playing { continue; }
                         let motion_name = match &bp.current_motion { Some(m) => m, None => continue };
-                        let motion = match scene.motions.iter().find(|m| m.name.eq_ignore_ascii_case(motion_name.as_str())) {
-                            Some(m) => m, None => continue,
-                        };
+                        let mut motion = None;
+                        for candidate in &scene.motions {
+                            if symbol_lower(symbols, &candidate.name, "motion name")?.eq_ignore_ascii_case(
+                                symbol_display(symbols, motion_name, "motion name")?,
+                            ) {
+                                motion = Some(candidate);
+                                break;
+                            }
+                        }
+                        let motion = match motion { Some(m) => m, None => continue };
                         let duration = motion.duration();
                         let eff_end = if bp.animation_end_time >= 0.0 { bp.animation_end_time.min(duration) } else { duration };
                         let eff_start = bp.animation_start_time.min(eff_end);
@@ -2139,7 +2189,7 @@ void main() {
                                 // Key by lowercase: bones_players keys are lowercased but scene node
                                 // names keep their original case (e.g. "footA"), so the node-draw
                                 // lookup must match case-insensitively or the feet never animate.
-                                self.motion_replace_transforms.insert(Symbol::from_str(&model_name.to_ascii_lowercase()), m);
+                                self.motion_replace_transforms.insert(model_name.clone(), m);
                             } else {
                                 // Multi-track skeletal → multiply each track onto its bone.
                                 self.motion_transforms.insert(track.bone_name.clone(), m);
@@ -2149,19 +2199,19 @@ void main() {
                 }
             } else if !scene.motions.is_empty() {
                 // Determine which motion to play: use runtime current_motion, or fallback to first
-                let is_playing = runtime_state.map(|rs| rs.animation_playing).unwrap_or(true);
+                let _is_playing = runtime_state.map(|rs| rs.animation_playing).unwrap_or(true);
                 let play_rate = runtime_state.map(|rs| rs.play_rate).unwrap_or(1.0);
                 let anim_scale = runtime_state.map(|rs| rs.animation_scale).unwrap_or(1.0);
                 let is_loop = runtime_state.map(|rs| rs.animation_loop).unwrap_or(true);
                 let start_time = runtime_state.map(|rs| rs.animation_start_time).unwrap_or(0.0);
                 let end_time = runtime_state.map(|rs| rs.animation_end_time).unwrap_or(-1.0);
 
-                let current_motion_name = runtime_state.and_then(|rs| rs.current_motion);
+                let current_motion_name = runtime_state.and_then(|rs| rs.current_motion.clone());
 
                 // Detect motion change — sync animation_time from runtime state
                 let motion_changed = current_motion_name != self.last_motion_name;
                 if motion_changed {
-                    self.last_motion_name = current_motion_name;
+                    self.last_motion_name = current_motion_name.clone();
                     // Sync initial time from runtime state (set by play() offset)
                     self.animation_time = runtime_state.map(|rs| rs.animation_time).unwrap_or(0.0);
                     self.motion_ended = false;
@@ -2181,12 +2231,12 @@ void main() {
                 self.blend_duration = runtime_state.map(|rs| rs.blend_duration).unwrap_or(self.blend_duration);
                 let _ = (play_rate, anim_scale);
 
-                let motion = if let Some(name) = current_motion_name {
+                let motion = if let Some(name) = current_motion_name.as_ref() {
                     // Director is case-insensitive. ClubMarian queues
                     // "root-skeleton-Motion0" while the W3D file stores
                     // "root-skeleton-motion0" — a strict `==` here was
                     // dropping the motion silently.
-                    scene.motions.iter().find(|m| m.name == name)
+                    scene.motions.iter().find(|m| m.name == *name)
                 } else {
                     None // Don't apply a motion until the game explicitly calls play()
                 };
@@ -2255,21 +2305,24 @@ void main() {
                 let mut cutout_nodes: Vec<&W3dNode> = Vec::new();
 
                 // Sort: skybox nodes first so they render before scene geometry
-                let mut sorted_model_nodes: Vec<&W3dNode> = model_nodes.iter().copied().collect();
-                sorted_model_nodes.sort_by_key(|n| {
-                    if n.name.as_lower_str().starts_with("sb_") && n.parent_name.as_lower_str().contains("skybox") { 0 } else { 1 }
-                });
+                let mut sorted_model_nodes = Vec::with_capacity(model_nodes.len());
+                for n in model_nodes {
+                    let is_skybox = symbol_lower(symbols, &n.name, "model name")?.starts_with("sb_")
+                        && symbol_lower(symbols, &n.parent_name, "parent name")?.contains("skybox");
+                    sorted_model_nodes.push((if is_skybox { 0u8 } else { 1u8 }, n));
+                }
+                sorted_model_nodes.sort_by_key(|(order, _)| *order);
 
                 // PASS 1: Render opaque geometry (skybox first, then scene)
                 gl.uniform1f(shader.u_alpha_threshold.as_ref(), 0.0);
-                for model_node in &sorted_model_nodes {
+                for (_, model_node) in &sorted_model_nodes {
                     if let Some(rs) = runtime_state {
                         if let Some(&vis_mode) = rs.node_visibility.get(&model_node.name) {
                             if vis_mode == 0 { continue; } // #none → skip
                         }
                     }
                     // Check if this model is transparent
-                    let opacity = self.get_model_opacity(scene, model_node, runtime_state);
+                    let opacity = self.get_model_opacity(scene, model_node, runtime_state, symbols)?;
                     // Translucent (blend<100) OR a script-marked `transparent` shader
                     // (soft alpha blend, e.g. the galaxy glow plane at blend=100) →
                     // transparent pass, sorted back-to-front. Without the transparent-shader
@@ -2295,7 +2348,7 @@ void main() {
                     // MenuScanLines camera filter is exactly this — opacity 1.0, but 55% of
                     // its atlas texels carry intermediate alpha, so it was rendering as solid
                     // black bars instead of a vignette.
-                    let has_soft_alpha = self.model_has_soft_alpha_texture(scene, model_node, &member_key, runtime_state);
+                    let has_soft_alpha = self.model_has_soft_alpha_texture(scene, model_node, &member_key, runtime_state, symbols)?;
                     // An additive surface is never opaque, whatever its texture looks
                     // like: it ADDS to the framebuffer, so it must be drawn blended and
                     // after the geometry it sits on top of. AreaZero's MenuCharacter FX
@@ -2314,36 +2367,36 @@ void main() {
                     // detail layer; treating it as framebuffer-additive drew every
                     // car blown-out white. Require the idiom, not just the layer.
                     let is_additive = opacity < 0.999
-                        && self.model_is_additive(scene, model_node, runtime_state);
-                    let wants_transparent = Self::model_uses_transparent_shader(model_node, runtime_state)
+                        && self.model_is_additive(scene, model_node, runtime_state, symbols)?;
+                    let wants_transparent = Self::model_uses_transparent_shader(model_node, runtime_state, symbols)?
                         || opacity < 0.999
                         || has_soft_alpha
                         || is_additive;
                     let is_transparent = wants_transparent
                         && (has_soft_alpha
                             || is_additive
-                            || !self.model_has_opaque_texture(scene, model_node, &member_key, runtime_state));
+                            || !self.model_has_opaque_texture(scene, model_node, &member_key, runtime_state, symbols)?);
 
                     // One-shot per (member, model): which of the three passes this
                     // model lands in, and the inputs that decided it. Deduped through
                     // a thread-local because `shader` holds a shared borrow of `self`
                     // for the whole of this function.
                     if is_transparent {
-                        let world_matrix = self.accumulate_transform_with_state(scene, model_node, runtime_state);
+                        let world_matrix = self.accumulate_transform_with_state(scene, model_node, runtime_state, symbols)?;
                         let dx = world_matrix[12] - camera_pos[0];
                         let dy = world_matrix[13] - camera_pos[1];
                         let dz = world_matrix[14] - camera_pos[2];
                         transparent_nodes.push((model_node, dx*dx + dy*dy + dz*dz));
                         continue;
                     }
-                    if self.model_has_alpha_texture(scene, model_node, &member_key, runtime_state) {
+                    if self.model_has_alpha_texture(scene, model_node, &member_key, runtime_state, symbols)? {
                         // Opaque material but alpha-keyed texture → cutout (alpha-tested
                         // opaque draw); keep depth writes so it occludes translucent water.
                         cutout_nodes.push(model_node);
                         continue;
                     }
 
-                    self.draw_model_node(gl, shader, scene, model_node, &member_key, runtime_state, &view_matrix, &projection_matrix, false);
+                    self.draw_model_node(gl, shader, scene, model_node, &member_key, runtime_state, &view_matrix, &projection_matrix, false, symbols)?;
                 }
 
                 // PASS 1b: Cutout geometry — opaque pass with alpha-test discard so
@@ -2353,7 +2406,7 @@ void main() {
                     gl.depth_mask(true);
                     gl.uniform1f(shader.u_alpha_threshold.as_ref(), 0.5);
                     for model_node in &cutout_nodes {
-                        self.draw_model_node(gl, shader, scene, model_node, &member_key, runtime_state, &view_matrix, &projection_matrix, false);
+                        self.draw_model_node(gl, shader, scene, model_node, &member_key, runtime_state, &view_matrix, &projection_matrix, false, symbols)?;
                     }
                     gl.uniform1f(shader.u_alpha_threshold.as_ref(), 0.0);
                 }
@@ -2380,7 +2433,7 @@ void main() {
                     );
 
                     for (model_node, _dist) in &transparent_nodes {
-                        self.draw_model_node(gl, shader, scene, model_node, &member_key, runtime_state, &view_matrix, &projection_matrix, true);
+                        self.draw_model_node(gl, shader, scene, model_node, &member_key, runtime_state, &view_matrix, &projection_matrix, true, symbols)?;
                     }
 
                     gl.depth_mask(true);
@@ -2390,7 +2443,7 @@ void main() {
         }
 
         // Render ShaderInker outlines (after geometry, before particles)
-        let _ = self.render_inker_outlines(context, scene, &member_key, &view_matrix, &projection_matrix, runtime_state);
+        self.render_inker_outlines(context, scene, &member_key, &view_matrix, &projection_matrix, runtime_state, symbols)?;
 
         // Re-activate main shader after outline pass (particles need it or their own shader)
         if let Some(ref shader) = self.shader {
@@ -2398,7 +2451,7 @@ void main() {
         }
 
         // Render particles (after opaque geometry), alpha-blended.
-        let _ = self.render_particles(context, &member_key, runtime_state, &view_matrix, &projection_matrix);
+        self.render_particles(context, &member_key, runtime_state, &view_matrix, &projection_matrix, symbols)?;
 
         // Note: overlays are rendered AFTER all camera passes, not per-camera
 
@@ -2792,7 +2845,8 @@ void main() {
         scene: &W3dScene,
         node: &W3dNode,
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
-    ) -> [f32; 16] {
+        symbols: &mut SymbolTable,
+    ) -> Result<[f32; 16], JsValue> {
         // Bone motion tracks share names with skeleton/model roots (for example "Bip01").
         // Applying those tracks to Model nodes with skeletons would animate the root twice:
         // once through skinning and again through u_model.
@@ -2804,9 +2858,9 @@ void main() {
             // resource_name, a root bone track like "bip01" gets applied twice:
             // once in skinning and again through u_model.
             let skeleton_key = if !node.model_resource_name.is_empty() {
-                node.model_resource_name
+                node.model_resource_name.clone()
             } else {
-                node.resource_name
+                node.resource_name.clone()
             };
             !scene.skeletons.iter().any(|s| s.name == skeleton_key && s.bones.len() > 1)
         } else {
@@ -2822,13 +2876,17 @@ void main() {
         // `worldPosition` reports it. Models WITHOUT a runtime override (Splat's
         // per-part keyframes) keep `motion * base`, relative to the rest pose.
         let runtime_override: Option<[f32; 16]> =
-            runtime_state.and_then(|rs| get_runtime_transform(rs, *&node.name));
+            runtime_state.and_then(|rs| get_runtime_transform(rs, node.name.clone()));
         // Get this node's transform: motion (combined with base), runtime override, or parsed
         let node_transform = if allow_motion_override {
-            if let Some(km) = (!self.motion_replace_transforms.is_empty())
-                .then(|| self.motion_replace_transforms.get(&Symbol::from_str(&node.name.to_ascii_lowercase())))
-                .flatten()
-            {
+            let motion_replace = if self.motion_replace_transforms.is_empty() {
+                None
+            } else {
+                let node_lower = symbol_lower(symbols, &node.name, "node name")?.to_owned();
+                let node_key = symbols.intern(&node_lower);
+                self.motion_replace_transforms.get(&node_key)
+            };
+            if let Some(km) = motion_replace {
                 // Lookup is case-insensitive (bones_players keys are lowercased;
                 // node names aren't).
                 match runtime_override {
@@ -2848,7 +2906,7 @@ void main() {
         };
 
         let mut chain = vec![node_transform];
-        let mut current_parent = node.parent_name.as_str();
+        let mut current_parent = symbol_display(symbols, &node.parent_name, "parent name")?;
 
         // Walk up parent chain. Director node names are case-insensitive, and
         // get_runtime_transform already looks them up that way — but the parent
@@ -2862,12 +2920,19 @@ void main() {
             && !current_parent.eq_ignore_ascii_case("world")
             && current_parent != "<world>"
         {
-            if let Some(parent_node) = scene.nodes.iter().find(|n| n.name.eq_ignore_ascii_case(current_parent)) {
+            let mut parent_node = None;
+            for candidate in &scene.nodes {
+                if symbol_lower(symbols, &candidate.name, "node name")?.eq_ignore_ascii_case(current_parent) {
+                    parent_node = Some(candidate);
+                    break;
+                }
+            }
+            if let Some(parent_node) = parent_node {
                 let parent_t = runtime_state
-                    .and_then(|rs| get_runtime_transform(rs, parent_node.name))
+                    .and_then(|rs| get_runtime_transform(rs, parent_node.name.clone()))
                     .unwrap_or(parent_node.transform);
                 chain.push(parent_t);
-                current_parent = parent_node.parent_name.as_str();
+                current_parent = symbol_display(symbols, &parent_node.parent_name, "parent name")?;
             } else {
                 break;
             }
@@ -2878,7 +2943,7 @@ void main() {
         for t in chain.into_iter().rev() {
             result = mat4_multiply_col_major(&result, &t);
         }
-        result
+        Ok(result)
     }
 
     /// Draw a single model node (extracted for opaque/transparent pass reuse).
@@ -2893,11 +2958,12 @@ void main() {
         view_matrix: &[f32; 16],
         projection_matrix: &[f32; 16],
         force_blend: bool,
-    ) {
+        symbols: &mut SymbolTable,
+    ) -> Result<(), JsValue> {
         let resource = if !model_node.model_resource_name.is_empty() {
-            model_node.model_resource_name
+            model_node.model_resource_name.clone()
         } else {
-            model_node.resource_name
+            model_node.resource_name.clone()
         };
         let res_info = scene.model_resources.get(&resource);
 
@@ -2907,16 +2973,19 @@ void main() {
         // render inside-out (no cull), camera-centered, past the normal far plane —
         // otherwise the box's inner faces are culled/clipped and the starfield
         // background is missing (only the foreground galaxy plane shows).
-        let is_skybox = (model_node.name.starts_with("SB_") && model_node.parent_name.as_lower_str().contains("skybox"))
-            || model_node.name.as_lower_str().contains("skybox");
+        let model_name_lower = symbol_lower(symbols, &model_node.name, "model name")?;
+        let parent_name_lower = symbol_lower(symbols, &model_node.parent_name, "parent name")?;
+        let is_skybox = (model_name_lower.starts_with("sb_") && parent_name_lower.contains("skybox"))
+            || model_name_lower.contains("skybox");
         let mut vis_mode = 1u8; // default #front
 
         if let Some(gpu_data) = self.member_data.get(member_key) {
             let has_skeleton_data = self.setup_skinning_for_resource(
-                gl, shader, scene, resource, model_node.name, gpu_data, runtime_state,
-            );
+                gl, shader, scene, resource.clone(), model_node.name.clone(), gpu_data, runtime_state,
+                symbols,
+            )?;
 
-            let world_matrix = self.accumulate_transform_with_state(scene, model_node, runtime_state);
+            let world_matrix = self.accumulate_transform_with_state(scene, model_node, runtime_state, symbols)?;
             if has_skeleton_data {
                 let has_runtime_model_override = runtime_state
                     .map(|rs| rs.node_transforms.contains_key(&model_node.name))
@@ -3007,13 +3076,13 @@ void main() {
                 for (mesh_idx, mesh_buf) in mesh_group.iter().enumerate() {
                     let bound = self.bind_material_for_mesh(
                         gl, shader, scene, model_node,
-                        res_info, mesh_idx, member_key, runtime_state, force_blend,
-                    );
+                        res_info, mesh_idx, member_key, runtime_state, force_blend, symbols,
+                    )?;
                     if !bound {
-                        self.bind_material(gl, shader, scene, model_node, member_key, runtime_state, force_blend);
+                        self.bind_material(gl, shader, scene, model_node, member_key, runtime_state, force_blend, symbols)?;
                     }
                     // Reflection map last so the per-mesh candidate search can't clobber it.
-                    self.apply_reflection_map(gl, shader, scene, model_node, member_key, runtime_state);
+                    self.apply_reflection_map(gl, shader, scene, model_node, member_key, runtime_state, symbols)?;
 
                     if mesh_buf.has_bones && has_skeleton_data {
                         gl.uniform1i(shader.u_skinning_enabled.as_ref(), 1);
@@ -3039,7 +3108,7 @@ void main() {
 
                     mesh_buf.bind(gl);
                     // renderStyle: #wire → edge lines, #point → points, else solid.
-                    match Self::mesh_render_style(scene, model_node, mesh_idx, runtime_state) {
+                    match Self::mesh_render_style(scene, model_node, mesh_idx, runtime_state, symbols)? {
                         1 => mesh_buf.draw_wire(gl),
                         2 => mesh_buf.draw_points(gl),
                         _ => mesh_buf.draw(gl),
@@ -3050,14 +3119,18 @@ void main() {
                 // Log missing mesh data — deduplicate by model name
                 use std::sync::Mutex;
                 use std::collections::HashSet;
-                static LOGGED_MISS: Mutex<Option<HashSet<Symbol>>> = Mutex::new(None);
+                static LOGGED_MISS: Mutex<Option<HashSet<String>>> = Mutex::new(None);
                 if let Ok(mut guard) = LOGGED_MISS.lock() {
                     let set = guard.get_or_insert_with(HashSet::new);
-                    if set.insert(model_node.name.clone()) {
+                    if set.insert(symbol_lower(symbols, &model_node.name, "model name")?.to_owned()) {
                         console_warn!(
                             "[W3D-MISS] model=\"{}\" resource=\"{}\" (res=\"{}\", mres=\"{}\") — NOT in mesh_groups({} keys). parent=\"{}\"",
-                            model_node.name, resource, model_node.resource_name,
-                            model_node.model_resource_name, gpu_data.mesh_groups.len(), model_node.parent_name,
+                            symbol_display(symbols, &model_node.name, "model name")?,
+                            symbol_display(symbols, &resource, "resource name")?,
+                            symbol_display(symbols, &model_node.resource_name, "resource name")?,
+                            symbol_display(symbols, &model_node.model_resource_name, "resource name")?,
+                            gpu_data.mesh_groups.len(),
+                            symbol_display(symbols, &model_node.parent_name, "parent name")?,
                         );
                     }
                 }
@@ -3076,6 +3149,7 @@ void main() {
             gl.enable(WebGl2RenderingContext::CULL_FACE);
             gl.cull_face(WebGl2RenderingContext::FRONT);
         }
+        Ok(())
     }
 
     /// Get the opacity of a model node's material (for transparency sorting).
@@ -3135,14 +3209,16 @@ void main() {
     fn model_uses_transparent_shader(
         model_node: &W3dNode,
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
-    ) -> bool {
-        let rs = match runtime_state { Some(rs) => rs, None => return false };
-        if rs.transparent_shaders.is_empty() { return false; }
-        let name = Self::node_shader_override(rs, model_node.name, None)
-            .copied()
-            .unwrap_or(model_node.shader_name);
-        if name.as_str().is_empty() { return false; }
-        rs.transparent_shaders.contains(&name)
+        symbols: &SymbolTable,
+    ) -> Result<bool, JsValue> {
+        let rs = match runtime_state { Some(rs) => rs, None => return Ok(false) };
+        if rs.transparent_shaders.is_empty() { return Ok(false); }
+        symbol_display(symbols, &model_node.name, "model name")?;
+        let name = Self::node_shader_override(rs, model_node.name.clone(), None)
+            .cloned()
+            .unwrap_or(model_node.shader_name.clone());
+        if symbol_display(symbols, &name, "shader name")?.is_empty() { return Ok(false); }
+        Ok(rs.transparent_shaders.contains(&name))
     }
 
     /// The `renderStyle` (0=#fill, 1=#wire, 2=#point) a given mesh of this model
@@ -3155,18 +3231,19 @@ void main() {
         model_node: &W3dNode,
         mesh_idx: usize,
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
-    ) -> u8 {
-        let rs = match runtime_state { Some(rs) => rs, None => return 0 };
-        if rs.shader_render_style.is_empty() { return 0; }
-        let lookup = |name: &Symbol| -> Option<u8> {
-            if name.as_str().is_empty() { return None; }
-            rs.shader_render_style.get(name).copied()
+        symbols: &SymbolTable,
+    ) -> Result<u8, JsValue> {
+        let rs = match runtime_state { Some(rs) => rs, None => return Ok(0) };
+        if rs.shader_render_style.is_empty() { return Ok(0); }
+        let lookup = |name: &Symbol| -> Result<Option<u8>, JsValue> {
+            if symbol_display(symbols, name, "shader name")?.is_empty() { return Ok(None); }
+            Ok(rs.shader_render_style.get(name).copied())
         };
         // Effective shader name for this mesh, most specific first.
         let mut names: Vec<Symbol> = Vec::new();
-        if let Some(n) = Self::node_shader_override(rs, model_node.name, Some(mesh_idx)) { names.push(*n); }
-        if let Some(n) = Self::node_shader_override(rs, model_node.name, None) { names.push(*n); }
-        if !model_node.shader_name.as_str().is_empty() { names.push(model_node.shader_name); }
+        if let Some(n) = Self::node_shader_override(rs, model_node.name.clone(), Some(mesh_idx)) { names.push(n.clone()); }
+        if let Some(n) = Self::node_shader_override(rs, model_node.name.clone(), None) { names.push(n.clone()); }
+        if !symbol_display(symbols, &model_node.shader_name, "shader name")?.is_empty() { names.push(model_node.shader_name.clone()); }
         let resource = if !model_node.model_resource_name.is_empty() {
             &model_node.model_resource_name
         } else {
@@ -3174,13 +3251,13 @@ void main() {
         };
         if let Some(res_info) = scene.model_resources.get(resource) {
             for b in &res_info.shader_bindings {
-                for s in &b.mesh_bindings { names.push(*s); }
+                for s in &b.mesh_bindings { names.push(s.clone()); }
             }
         }
         for n in &names {
-            if let Some(st) = lookup(n) { return st; }
+            if let Some(st) = lookup(n)? { return Ok(st); }
         }
-        0
+        Ok(0)
     }
 
     fn get_model_opacity(
@@ -3188,18 +3265,20 @@ void main() {
         scene: &W3dScene,
         model_node: &W3dNode,
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
-    ) -> f32 {
+        symbols: &SymbolTable,
+    ) -> Result<f32, JsValue> {
+        symbol_display(symbols, &model_node.name, "model name")?;
         // 1. Check node-level shader override
         let effective_shader_name = runtime_state
-            .and_then(|rs| Self::node_shader_override(rs, model_node.name, None).copied())
-            .unwrap_or(model_node.shader_name);
-        if !effective_shader_name.as_str().is_empty() {
-            if let Some(w3d_shader) = Self::find_shader_ci(&scene.shaders, effective_shader_name) {
-                if let Some(mat) = Self::find_material_ci(&scene.materials, w3d_shader.material_name) {
-                    return mat.opacity;
+            .and_then(|rs| Self::node_shader_override(rs, model_node.name.clone(), None).cloned())
+            .unwrap_or(model_node.shader_name.clone());
+        if !symbol_display(symbols, &effective_shader_name, "shader name")?.is_empty() {
+            if let Some(w3d_shader) = Self::find_shader_ci(&scene.shaders, effective_shader_name.clone(), symbols)? {
+                if let Some(mat) = Self::find_material_ci(&scene.materials, w3d_shader.material_name.clone(), symbols)? {
+                    return Ok(mat.opacity);
                 }
-                if let Some(mat) = Self::find_material_ci(&scene.materials, w3d_shader.name) {
-                    return mat.opacity;
+                if let Some(mat) = Self::find_material_ci(&scene.materials, w3d_shader.name.clone(), symbols)? {
+                    return Ok(mat.opacity);
                 }
             }
         }
@@ -3212,15 +3291,15 @@ void main() {
         if let Some(res_info) = scene.model_resources.get(resource) {
             for binding in &res_info.shader_bindings {
                 for shader_name in &binding.mesh_bindings {
-                    if let Some(w3d_shader) = Self::find_shader_ci(&scene.shaders, *shader_name) {
+                    if let Some(w3d_shader) = Self::find_shader_ci(&scene.shaders, shader_name.clone(), symbols)? {
                         let mat = if !w3d_shader.material_name.is_empty() {
-                            Self::find_material_ci(&scene.materials, w3d_shader.material_name)
+                            Self::find_material_ci(&scene.materials, w3d_shader.material_name.clone(), symbols)?
                         } else {
-                            Self::find_material_ci(&scene.materials, w3d_shader.name)
+                            Self::find_material_ci(&scene.materials, w3d_shader.name.clone(), symbols)?
                         };
                         if let Some(mat) = mat {
                             if mat.opacity < 0.999 {
-                                return mat.opacity; // Any transparent mesh → whole model is transparent
+                                return Ok(mat.opacity); // Any transparent mesh → whole model is transparent
                             }
                         }
                     }
@@ -3231,22 +3310,22 @@ void main() {
         if let Some(rs) = runtime_state {
             if let Some(shader_map) = rs.node_shaders.get(&model_node.name) {
                 for shader_name in shader_map.values() {
-                    if let Some(w3d_shader) = Self::find_shader_ci(&scene.shaders, *shader_name) {
+                    if let Some(w3d_shader) = Self::find_shader_ci(&scene.shaders, shader_name.clone(), symbols)? {
                         let mat = if !w3d_shader.material_name.is_empty() {
-                            Self::find_material_ci(&scene.materials, w3d_shader.material_name)
+                            Self::find_material_ci(&scene.materials, w3d_shader.material_name.clone(), symbols)?
                         } else {
-                            Self::find_material_ci(&scene.materials, w3d_shader.name)
+                            Self::find_material_ci(&scene.materials, w3d_shader.name.clone(), symbols)?
                         };
                         if let Some(mat) = mat {
                             if mat.opacity < 0.999 {
-                                return mat.opacity;
+                                return Ok(mat.opacity);
                             }
                         }
                     }
                 }
             }
         }
-        1.0 // Default opaque
+        Ok(1.0) // Default opaque
     }
 
     /// Check if a model's shader references any texture that has alpha data.
@@ -3263,29 +3342,31 @@ void main() {
         model_node: &W3dNode,
         member_key: &(i32, i32),
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
-    ) -> bool {
-        let gpu_data = match self.member_data.get(member_key) { Some(d) => d, None => return false };
+        symbols: &SymbolTable,
+    ) -> Result<bool, JsValue> {
+        let gpu_data = match self.member_data.get(member_key) { Some(d) => d, None => return Ok(false) };
+        symbol_display(symbols, &model_node.name, "model name")?;
         let mut shader_names: Vec<Symbol> = Vec::new();
         if let Some(rs) = runtime_state {
-            if let Some(m) = rs.node_shaders.get(&model_node.name) { shader_names.extend(m.values().copied()); }
+            if let Some(m) = rs.node_shaders.get(&model_node.name) { shader_names.extend(m.values().cloned()); }
         }
-        if !model_node.shader_name.as_str().is_empty() { shader_names.push(model_node.shader_name); }
+        if !symbol_display(symbols, &model_node.shader_name, "shader name")?.is_empty() { shader_names.push(model_node.shader_name.clone()); }
         let resource = if !model_node.model_resource_name.is_empty() { &model_node.model_resource_name } else { &model_node.resource_name };
         if let Some(res_info) = scene.model_resources.get(resource) {
-            for b in &res_info.shader_bindings { for s in &b.mesh_bindings { shader_names.push(*s); } }
+            for b in &res_info.shader_bindings { for s in &b.mesh_bindings { shader_names.push(s.clone()); } }
         }
         for shader_name in &shader_names {
-            if let Some(sh) = Self::find_shader_ci(&scene.shaders, *shader_name) {
+            if let Some(sh) = Self::find_shader_ci(&scene.shaders, shader_name.clone(), symbols)? {
                 for layer in &sh.texture_layers {
-                    let lname = layer.name.to_lowercase();
+                    symbol_lower(symbols, &layer.name, "texture name")?;
                     // A loaded texture that is NOT flagged as carrying alpha = opaque cover.
-                    if gpu_data.textures.contains_key(&Symbol::from_str(&lname)) && !gpu_data.alpha_textures.contains(&Symbol::from_str(&lname)) {
-                        return true;
+                    if gpu_data.textures.contains_key(&layer.name) && !gpu_data.alpha_textures.contains(&layer.name) {
+                        return Ok(true);
                     }
                 }
             }
         }
-        false
+        Ok(false)
     }
 
     fn model_has_alpha_texture(
@@ -3294,8 +3375,9 @@ void main() {
         model_node: &W3dNode,
         member_key: &(i32, i32),
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
-    ) -> bool {
-        self.model_binds_texture_in(scene, model_node, member_key, runtime_state, false)
+        symbols: &SymbolTable,
+    ) -> Result<bool, JsValue> {
+        self.model_binds_texture_in(scene, model_node, member_key, runtime_state, false, symbols)
     }
 
     /// True when a texture bound to this model has a smooth alpha ramp (not a
@@ -3307,8 +3389,9 @@ void main() {
         model_node: &W3dNode,
         member_key: &(i32, i32),
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
-    ) -> bool {
-        self.model_binds_texture_in(scene, model_node, member_key, runtime_state, true)
+        symbols: &SymbolTable,
+    ) -> Result<bool, JsValue> {
+        self.model_binds_texture_in(scene, model_node, member_key, runtime_state, true, symbols)
     }
 
     /// Shared walk of every shader that can affect `model_node`, testing whether
@@ -3320,13 +3403,16 @@ void main() {
         member_key: &(i32, i32),
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
         soft_only: bool,
-    ) -> bool {
+        symbols: &SymbolTable,
+    ) -> Result<bool, JsValue> {
         let gpu_data = match self.member_data.get(member_key) {
             Some(d) => d,
-            None => return false,
+            None => return Ok(false),
         };
         let set = if soft_only { &gpu_data.soft_alpha_textures } else { &gpu_data.alpha_textures };
-        if set.is_empty() { return false; }
+        if set.is_empty() { return Ok(false); }
+        symbol_display(symbols, &model_node.name, "model name")?;
+        symbol_display(symbols, &model_node.shader_name, "shader name")?;
 
         // Collect all shader names that affect this model
         let mut shader_names: Vec<Symbol> = Vec::new();
@@ -3357,15 +3443,16 @@ void main() {
 
         // Check if any shader's texture layers reference an alpha texture
         for shader_name in &shader_names {
-            if let Some(w3d_shader) = Self::find_shader_ci(&scene.shaders, *shader_name) {
+            if let Some(w3d_shader) = Self::find_shader_ci(&scene.shaders, shader_name.clone(), symbols)? {
                 for layer in &w3d_shader.texture_layers {
+                    symbol_display(symbols, &layer.name, "texture name")?;
                     if set.contains(&layer.name) {
-                        return true;
+                        return Ok(true);
                     }
                 }
             }
         }
-        false
+        Ok(false)
     }
 
     /// Compile post-processing shader for bloom (lazy init)
@@ -3597,7 +3684,8 @@ void main() {
         &self,
         context: &WebGL2Context,
         scene: &W3dScene,
-    ) -> HashMap<Symbol, WebGlTexture> {
+        symbols: &mut SymbolTable,
+    ) -> Result<HashMap<Symbol, WebGlTexture>, JsValue> {
         let suffixes = ["_posx", "_negx", "_posy", "_negy", "_posz", "_negz"];
         let gl_faces = [
             WebGl2RenderingContext::TEXTURE_CUBE_MAP_POSITIVE_X,
@@ -3612,11 +3700,11 @@ void main() {
         // Find base names that have all 6 faces in the raw texture data
         let mut candidates: HashMap<Symbol, u8> = HashMap::new();
         for name in scene.texture_images.keys() {
-            let lower = name.as_str().to_lowercase();
+            let lower = symbol_lower(symbols, name, "cubemap texture name")?.to_owned();
             for (i, suffix) in suffixes.iter().enumerate() {
                 if lower.ends_with(suffix) {
                     let base = lower[..lower.len() - suffix.len()].to_string();
-                    let entry = candidates.entry(Symbol::from_str(&base)).or_insert(0);
+                    let entry = candidates.entry(symbols.intern(&base)).or_insert(0);
                     *entry |= 1 << i;
                 }
             }
@@ -3634,7 +3722,8 @@ void main() {
 
             let mut all_ok = true;
             for (i, suffix) in suffixes.iter().enumerate() {
-                let face_name = Symbol::from_str(&format!("{}{}", base_name, suffix));
+                let base_display = symbol_display(symbols, base_name, "cubemap base name")?;
+                let face_name = symbols.intern(&format!("{}{}", base_display, suffix));
                 let face_data = scene.texture_images.iter()
                     .find(|(k, _)| **k == face_name)
                     .map(|(_, v)| v);
@@ -3667,15 +3756,14 @@ void main() {
                 gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_CUBE_MAP, WebGl2RenderingContext::TEXTURE_MAG_FILTER, WebGl2RenderingContext::LINEAR as i32);
                 gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_CUBE_MAP, WebGl2RenderingContext::TEXTURE_WRAP_S, WebGl2RenderingContext::CLAMP_TO_EDGE as i32);
                 gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_CUBE_MAP, WebGl2RenderingContext::TEXTURE_WRAP_T, WebGl2RenderingContext::CLAMP_TO_EDGE as i32);
-                log(&format!(
-                    "[3D-CUBEMAP] Created cubemap: \"{}\"", base_name
-                ));
+                let base_display = symbol_display(symbols, base_name, "cubemap base name")?;
+                log(&format!("[3D-CUBEMAP] Created cubemap: \"{}\"", base_display));
                 cube_maps.insert(base_name.clone(), cube_tex);
             }
             gl.bind_texture(WebGl2RenderingContext::TEXTURE_CUBE_MAP, None);
         }
 
-        cube_maps
+        Ok(cube_maps)
     }
 
     /// Process render-to-texture requests: render scene from specified camera into named texture.
@@ -3683,16 +3771,25 @@ void main() {
         &mut self,
         context: &WebGL2Context,
         member_key: (i32, i32),
-        scene: &W3dScene,
+        _scene: &W3dScene,
         width: u32,
         height: u32,
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
+        symbols: &SymbolTable,
     ) -> Result<(), JsValue> {
         let targets: Vec<(Symbol, Symbol)> = runtime_state
-            .map(|rs| rs.render_targets.iter().map(|(k, v)| (*k, *v)).collect())
+            .map(|rs| rs.render_targets.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
             .unwrap_or_default();
 
         if targets.is_empty() { return Ok(()); }
+
+        // Validate every consumed key before changing active-camera state or GPU
+        // maps. The caller supplies the authoritative table; foreign names fail
+        // explicitly instead of becoming unchecked texture-map entries.
+        for (cam_name, tex_name) in &targets {
+            symbol_display(symbols, cam_name, "render target camera name")?;
+            symbol_display(symbols, tex_name, "render target texture name")?;
+        }
 
         for (cam_name, tex_name) in &targets {
             // Temporarily set this camera as active
@@ -3725,14 +3822,14 @@ void main() {
 
             // Now copy RTT texture into the named texture in MemberGpuData
             if let Some(gpu_data) = self.member_data.get_mut(&member_key) {
-                let tex_key = *tex_name;
-                if let Some(existing_tex) = gpu_data.textures.get(&tex_key) {
+                let tex_key = tex_name.clone();
+                if let Some(_existing_tex) = gpu_data.textures.get(&tex_key) {
                     // Copy RTT result into existing texture via blit
                     // For simplicity, just replace the texture reference
                     // (proper impl would use glCopyTexSubImage2D)
                 }
                 // Insert/replace the RTT texture as the named texture
-                if let Some(ref rtt_tex) = self.rtt_texture {
+                if let Some(ref _rtt_tex) = self.rtt_texture {
                     // Create a copy texture and blit into it
                     let copy_tex = gl.create_texture().ok_or("rtt copy")?;
                     gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(&copy_tex));
@@ -3756,7 +3853,7 @@ void main() {
                         width as i32, height as i32,
                     );
                     gpu_data.textures.insert(tex_key, copy_tex);
-                    gpu_data.texture_sizes.insert(*tex_name, (width, height));
+                    gpu_data.texture_sizes.insert(tex_name.clone(), (width, height));
                 }
             }
 
@@ -3860,22 +3957,35 @@ void main() {
         view_matrix: &[f32; 16],
         projection_matrix: &[f32; 16],
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
+        symbols: &mut SymbolTable,
     ) -> Result<(), JsValue> {
         use crate::director::chunks::w3d::types::W3dShaderType;
 
         // Check if any model uses ShaderInker
-        let has_inker = scene.nodes.iter().any(|n| {
-            if n.node_type != W3dNodeType::Model { return false; }
+        let mut has_inker = false;
+        for n in &scene.nodes {
+            if n.node_type != W3dNodeType::Model { continue; }
+            symbol_display(symbols, &n.name, "model name")?;
+            symbol_display(symbols, &n.shader_name, "shader name")?;
             let shader_name = runtime_state
-                .and_then(|rs| Self::node_shader_override(rs, n.name, None).copied())
-                .unwrap_or(n.shader_name);
-            Self::find_shader_ci(&scene.shaders, shader_name)
+                .and_then(|rs| Self::node_shader_override(rs, n.name.clone(), None).cloned())
+                .unwrap_or(n.shader_name.clone());
+            if Self::find_shader_ci(&scene.shaders, shader_name, symbols)?
                 .map(|s| s.shader_type == W3dShaderType::Inker)
                 .unwrap_or(false)
-        });
+            {
+                has_inker = true;
+                break;
+            }
+        }
         if !has_inker { return Ok(()); }
 
-        self.ensure_outline_shader(context)?;
+        // Outline shader compilation is an optional enhancement. Keep ordinary
+        // GPU setup failures optional; ownership/table failures from the render
+        // walk below still propagate through `?`.
+        if self.ensure_outline_shader(context).is_err() {
+            return Ok(());
+        }
         let gl = context.gl();
         let outline = self.outline_shader.as_ref().unwrap();
 
@@ -3890,10 +4000,12 @@ void main() {
         gl.cull_face(WebGl2RenderingContext::FRONT);
 
         for model_node in scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Model) {
+            symbol_display(symbols, &model_node.name, "model name")?;
+            symbol_display(symbols, &model_node.shader_name, "shader name")?;
             let shader_name = runtime_state
-                .and_then(|rs| Self::node_shader_override(rs, model_node.name, None).copied())
-                .unwrap_or(model_node.shader_name);
-            let w3d_shader = match Self::find_shader_ci(&scene.shaders, shader_name) {
+                .and_then(|rs| Self::node_shader_override(rs, model_node.name.clone(), None).cloned())
+                .unwrap_or(model_node.shader_name.clone());
+            let w3d_shader = match Self::find_shader_ci(&scene.shaders, shader_name, symbols)? {
                 Some(s) if s.shader_type == W3dShaderType::Inker => s,
                 _ => continue,
             };
@@ -3903,7 +4015,7 @@ void main() {
             gl.uniform1f(outline.u_outline_width.as_ref(), width);
             gl.uniform4f(outline.u_outline_color.as_ref(), color[0], color[1], color[2], color[3]);
 
-            let world_matrix = self.accumulate_transform_with_state(scene, model_node, runtime_state);
+            let world_matrix = self.accumulate_transform_with_state(scene, model_node, runtime_state, symbols)?;
             gl.uniform_matrix4fv_with_f32_array(outline.u_model.as_ref(), false, &world_matrix);
 
             let resource = if !model_node.model_resource_name.is_empty() {
@@ -3929,33 +4041,85 @@ void main() {
     }
 
     /// Case-insensitive shader lookup (W3D files have inconsistent casing).
-    fn find_shader_ci<'a>(shaders: &'a [W3dShader], name: Symbol) -> Option<&'a W3dShader> {
-        shaders.iter().find(|s| s.name == name)
+    ///
+    /// The query and every visited entry are checked against the authoritative
+    /// symbol table before identity/casing comparison. This keeps foreign symbols
+    /// from becoming silent misses while retaining the authored first-match order.
+    fn find_shader_ci<'a>(
+        shaders: &'a [W3dShader],
+        name: Symbol,
+        symbols: &SymbolTable,
+    ) -> Result<Option<&'a W3dShader>, JsValue> {
+        // Symbols from one authoritative table carry canonical identity, which is
+        // the existing case-insensitive lookup contract and preserves non-ASCII
+        // behavior. Validation is separate so foreign symbols fail explicitly.
+        symbol_display(symbols, &name, "shader name")?;
+        for shader in shaders {
+            symbol_display(symbols, &shader.name, "shader name")?;
+            if shader.name == name {
+                return Ok(Some(shader));
+            }
+        }
+        Ok(None)
     }
 
     /// Case-insensitive material lookup.
-    fn find_material_ci<'a>(materials: &'a [W3dMaterial], name: Symbol) -> Option<&'a W3dMaterial> {
-        materials.iter().find(|m| m.name == name)
+    fn find_material_ci<'a>(
+        materials: &'a [W3dMaterial],
+        name: Symbol,
+        symbols: &SymbolTable,
+    ) -> Result<Option<&'a W3dMaterial>, JsValue> {
+        symbol_display(symbols, &name, "material name")?;
+        for material in materials {
+            symbol_display(symbols, &material.name, "material name")?;
+            if material.name == name {
+                return Ok(Some(material));
+            }
+        }
+        Ok(None)
     }
 
     /// Find the first shader that references a material by name.
-    fn find_shader_for_material_ci<'a>(scene: &'a W3dScene, material_name: Symbol) -> Option<&'a W3dShader> {
-        scene.shaders.iter().find(|s| s.material_name == material_name)
+    fn find_shader_for_material_ci<'a>(
+        scene: &'a W3dScene,
+        material_name: Symbol,
+        symbols: &SymbolTable,
+    ) -> Result<Option<&'a W3dShader>, JsValue> {
+        symbol_display(symbols, &material_name, "material name")?;
+        for shader in &scene.shaders {
+            symbol_display(symbols, &shader.material_name, "material name")?;
+            if shader.material_name == material_name {
+                return Ok(Some(shader));
+            }
+        }
+        Ok(None)
     }
 
     /// Resolve a candidate name to a shader, allowing either shader names or material names.
-    fn resolve_shader_candidate_ci<'a>(scene: &'a W3dScene, candidate: Symbol) -> Option<&'a W3dShader> {
-        Self::find_shader_ci(&scene.shaders, candidate)
-            .or_else(|| Self::find_shader_for_material_ci(scene, candidate))
+    fn resolve_shader_candidate_ci<'a>(
+        scene: &'a W3dScene,
+        candidate: Symbol,
+        symbols: &SymbolTable,
+    ) -> Result<Option<&'a W3dShader>, JsValue> {
+        if let Some(shader) = Self::find_shader_ci(&scene.shaders, candidate.clone(), symbols)? {
+            return Ok(Some(shader));
+        }
+        Self::find_shader_for_material_ci(scene, candidate, symbols)
     }
 
     /// Resolve a candidate name to a material, allowing either material names or shader names.
-    fn resolve_material_candidate_ci<'a>(scene: &'a W3dScene, candidate: Symbol) -> Option<&'a W3dMaterial> {
-        Self::find_material_ci(&scene.materials, candidate)
-            .or_else(|| {
-                Self::find_shader_ci(&scene.shaders, candidate)
-                    .and_then(|s| Self::find_material_ci(&scene.materials, s.material_name))
-            })
+    fn resolve_material_candidate_ci<'a>(
+        scene: &'a W3dScene,
+        candidate: Symbol,
+        symbols: &SymbolTable,
+    ) -> Result<Option<&'a W3dMaterial>, JsValue> {
+        if let Some(material) = Self::find_material_ci(&scene.materials, candidate.clone(), symbols)? {
+            return Ok(Some(material));
+        }
+        if let Some(shader) = Self::find_shader_ci(&scene.shaders, candidate, symbols)? {
+            return Self::find_material_ci(&scene.materials, shader.material_name.clone(), symbols);
+        }
+        Ok(None)
     }
 
     /// Resolve all texture layers for a shader: diffuse, extra blend layers, and specular map.
@@ -3965,7 +4129,8 @@ void main() {
         layers: &[crate::director::chunks::w3d::types::W3dTextureLayer],
         gpu_data: &'a MemberGpuData,
         shader_type: W3dShaderType,
-    ) -> TextureBindResult<'a> {
+        symbols: &SymbolTable,
+    ) -> Result<TextureBindResult<'a>, JsValue> {
         let identity = [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0];
         let mut result = TextureBindResult {
             diffuse: None,
@@ -3989,7 +4154,7 @@ void main() {
         for (layer_idx, layer) in layers.iter().enumerate() {
             if layer.name.is_empty() { continue; }
             if normal_map_shader && layer_idx == 0 { continue; }
-            let lower = layer.name.as_str().to_lowercase();
+            let lower = symbol_lower(symbols, &layer.name, "texture name")?.to_owned();
             let tex = gpu_data.textures.get(&layer.name);
             let tex = match tex {
                 Some(t) => t,
@@ -4086,7 +4251,7 @@ void main() {
         // Director uses that layout for lightmap-only meshes, which should render via
         // the non-textured material path plus the extra lightmap layer.
 
-        result
+        Ok(result)
     }
 
     /// Bind resolved texture layers to GPU: diffuse (unit 0), extra layers (units 1-2), specular (unit 3).
@@ -4167,12 +4332,16 @@ void main() {
         scene: &W3dScene,
         model_node: &W3dNode,
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
-    ) -> Option<Symbol> {
+        symbols: &SymbolTable,
+    ) -> Result<Option<Symbol>, JsValue> {
+        symbol_display(symbols, &model_node.name, "model name")?;
+        symbol_display(symbols, &model_node.shader_name, "shader name")?;
         // 1) Runtime override (model.shader = s1 / shaderList[1] = ref)
         if let Some(name) = runtime_state
-            .and_then(|rs| Self::node_shader_override(rs, model_node.name, None))
+            .and_then(|rs| Self::node_shader_override(rs, model_node.name.clone(), None))
         {
-            return Some(*name);
+            symbol_display(symbols, name, "shader override name")?;
+            return Ok(Some(name.clone()));
         }
         // 2) Model-resource first-mesh shader binding (prefer non-DefaultShader)
         let resource = if !model_node.model_resource_name.is_empty() {
@@ -4183,31 +4352,31 @@ void main() {
         if let Some(res) = scene.model_resources.get(resource) {
             let mut fallback: Option<Symbol> = None;
             for binding in &res.shader_bindings {
-                if !binding.mesh_bindings.is_empty() && !binding.mesh_bindings[0].as_str().is_empty() {
-                    let name = binding.mesh_bindings[0];
+                if !binding.mesh_bindings.is_empty() && !symbol_display(symbols, &binding.mesh_bindings[0], "shader binding name")?.is_empty() {
+                    let name = binding.mesh_bindings[0].clone();
                     if name != BuiltInSymbol::DefaultShader {
-                        return Some(name);
+                        return Ok(Some(name));
                     } else if fallback.is_none() {
                         fallback = Some(name);
                     }
                 }
             }
-            if fallback.is_some() { return fallback; }
+            if fallback.is_some() { return Ok(fallback); }
         }
         // 3) Node's shader_name
-        if !model_node.shader_name.as_str().is_empty() {
-            return Some(model_node.shader_name);
+        if !symbol_display(symbols, &model_node.shader_name, "shader name")?.is_empty() {
+            return Ok(Some(model_node.shader_name.clone()));
         }
         // 4) Model index → shader index
         let mi = scene.nodes.iter()
             .filter(|n| n.node_type == W3dNodeType::Model)
-            .position(|n| n.name == model_node.name);
+            .position(|n| n.name == model_node.name.clone());
         if let Some(mi) = mi {
             if mi < scene.shaders.len() {
-                return Some(scene.shaders[mi].name);
+                return Ok(Some(scene.shaders[mi].name.clone()));
             }
         }
-        None
+        Ok(None)
     }
 
     /// Bind the model's reflection / environment map as the FINAL material step.
@@ -4225,26 +4394,28 @@ void main() {
         model_node: &W3dNode,
         member_key: &(i32, i32),
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
-    ) {
+        symbols: &SymbolTable,
+    ) -> Result<(), JsValue> {
         // Resolve the model's SINGLE primary shader exactly as `model.shader`
         // (get_model_prop) does — that is the shader the reflectionMap helper was
         // assigned to. Scanning every shader the model's resource references is
         // wrong: house models share one model-resource whose bindings include the
         // glass's `roofshad`, so a broad scan applied the reflection (and its 50%
         // sky blend) to every surface and washed the scene white.
-        let shader_name = match Self::resolve_model_primary_shader(scene, model_node, runtime_state) {
+        let shader_name = match Self::resolve_model_primary_shader(scene, model_node, runtime_state, symbols)? {
             Some(s) => s,
-            None => return,
+            None => return Ok(()),
         };
-        let refl = Self::find_shader_ci(&scene.shaders, shader_name)
+        let refl = Self::find_shader_ci(&scene.shaders, shader_name, symbols)?
             .and_then(|sh| sh.texture_layers.iter()
                 .find(|l| l.tex_mode == 4 && !l.name.is_empty())
                 .map(|l| (l.name.clone(), l.blend_const)));
-        let (tex_name, blend_const) = match refl { Some(x) => x, None => return };
-        let gpu_data = match self.member_data.get(member_key) { Some(d) => d, None => return };
-        let tex = match gpu_data.textures.get(&Symbol::from_str(&tex_name.to_lowercase())) {
+        let (tex_name, blend_const) = match refl { Some(x) => x, None => return Ok(()) };
+        let gpu_data = match self.member_data.get(member_key) { Some(d) => d, None => return Ok(()) };
+        symbol_display(symbols, &tex_name, "reflection texture name")?;
+        let tex = match gpu_data.textures.get(&tex_name) {
             Some(t) => t,
-            None => return,
+            None => return Ok(()),
         };
         gl.active_texture(WebGl2RenderingContext::TEXTURE2);
         gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(tex));
@@ -4252,6 +4423,7 @@ void main() {
         gl.tex_parameteri(WebGl2RenderingContext::TEXTURE_2D, WebGl2RenderingContext::TEXTURE_WRAP_T, WebGl2RenderingContext::CLAMP_TO_EDGE as i32);
         gl.uniform1i(shader.u_layer2_blend.as_ref(), 5);
         gl.uniform1f(shader.u_layer2_intensity.as_ref(), blend_const.clamp(0.0, 1.0));
+        Ok(())
     }
 
     /// Bind material properties for a model node
@@ -4264,7 +4436,8 @@ void main() {
         member_key: &(i32, i32),
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
         force_blend: bool,
-    ) {
+        symbols: &SymbolTable,
+    ) -> Result<(), JsValue> {
         // Resolve shader → material chain:
         // 1. Check runtime shader override (node_shaders)
         // 2. ModelNode has a shader_name
@@ -4275,16 +4448,20 @@ void main() {
 
         // Check runtime shader override first
         let effective_shader_name = runtime_state
-            .and_then(|rs| Self::node_shader_override(rs, model_node.name, None).copied())
-            .unwrap_or(model_node.shader_name);
+            .and_then(|rs| Self::node_shader_override(rs, model_node.name.clone(), None).cloned())
+            .unwrap_or(model_node.shader_name.clone());
+        symbol_display(symbols, &effective_shader_name, "shader name")?;
 
-        if !effective_shader_name.as_str().is_empty() {
-            if let Some(w3d_shader) = Self::find_shader_ci(&scene.shaders, Symbol::from_str(effective_shader_name.as_str())) {
+        if !symbol_display(symbols, &effective_shader_name, "shader name")?.is_empty() {
+            if let Some(w3d_shader) = Self::find_shader_ci(&scene.shaders, effective_shader_name.clone(), symbols)? {
                 // Find material: try shader's material_name, then shader name itself
                 let mat = if !w3d_shader.material_name.is_empty() {
-                    Self::find_material_ci(&scene.materials, w3d_shader.material_name)
-                } else { None }
-                    .or_else(|| Self::find_material_ci(&scene.materials, w3d_shader.name));
+                    Self::find_material_ci(&scene.materials, w3d_shader.material_name.clone(), symbols)?
+                } else { None };
+                let mat = match mat {
+                    Some(mat) => Some(mat),
+                    None => Self::find_material_ci(&scene.materials, w3d_shader.name.clone(), symbols)?,
+                };
                 if let Some(mat) = mat {
                     self.set_material_uniforms(gl, shader, mat);
                     mat_found = true;
@@ -4292,7 +4469,7 @@ void main() {
 
                 // Bind texture layers
                 if let Some(gpu_data) = self.member_data.get(member_key) {
-                    let layers = Self::find_texture_layers(&w3d_shader.texture_layers, gpu_data, w3d_shader.shader_type);
+                    let layers = Self::find_texture_layers(&w3d_shader.texture_layers, gpu_data, w3d_shader.shader_type, symbols)?;
                     tex_bound = Self::bind_texture_layers(gl, shader, &layers);
                 }
             }
@@ -4322,24 +4499,26 @@ void main() {
                 let mut candidates: Vec<Symbol> = Vec::new();
                 for binding in &res_info.shader_bindings {
                     for mb in binding.mesh_bindings.iter().filter(|b| !b.is_empty()) {
-                        candidates.push(*mb);
+                        candidates.push(mb.clone());
                     }
                     if !binding.name.is_empty() {
-                        candidates.push(binding.name);
+                        candidates.push(binding.name.clone());
                     }
                 }
                 // Stable partition: specific shaders first, DefaultShader last.
-                candidates.sort_by_key(|c| c.eq_ignore_ascii_case("DefaultShader"));
+                // All candidate symbols originate in this authoritative table; the
+                // builtin identity is therefore equivalent to the old ASCII check.
+                candidates.sort_by_key(|c| *c == BuiltInSymbol::DefaultShader);
 
                 for cand in &candidates {
                     if tex_bound {
                         break;
                     }
-                    let Some(w3d_shader) = Self::find_shader_ci(&scene.shaders, *cand) else { continue };
+                    let Some(w3d_shader) = Self::find_shader_ci(&scene.shaders, cand.clone(), symbols)? else { continue };
                     let bound = if let Some(gpu_data) = self.member_data.get(member_key) {
                         let layers = Self::find_texture_layers(
-                            &w3d_shader.texture_layers, gpu_data, w3d_shader.shader_type,
-                        );
+                            &w3d_shader.texture_layers, gpu_data, w3d_shader.shader_type, symbols,
+                        )?;
                         Self::bind_texture_layers(gl, shader, &layers)
                     } else {
                         false
@@ -4348,14 +4527,16 @@ void main() {
                         tex_bound = true;
                         // The shader that supplied the texture owns the material too —
                         // otherwise the model keeps DefaultMaterial's colours.
-                        if let Some(mat) = Self::find_material_ci(&scene.materials, w3d_shader.material_name)
-                            .or_else(|| Self::find_material_ci(&scene.materials, w3d_shader.name))
-                        {
+                        let mat = match Self::find_material_ci(&scene.materials, w3d_shader.material_name.clone(), symbols)? {
+                            Some(mat) => Some(mat),
+                            None => Self::find_material_ci(&scene.materials, w3d_shader.name.clone(), symbols)?,
+                        };
+                        if let Some(mat) = mat {
                             self.set_material_uniforms(gl, shader, mat);
                             mat_found = true;
                         }
                     } else if !mat_found {
-                        if let Some(mat) = Self::find_material_ci(&scene.materials, w3d_shader.material_name) {
+                        if let Some(mat) = Self::find_material_ci(&scene.materials, w3d_shader.material_name.clone(), symbols)? {
                             self.set_material_uniforms(gl, shader, mat);
                             mat_found = true;
                         }
@@ -4372,7 +4553,7 @@ void main() {
         }
 
         // Set shader mode based on shader type (NPR support)
-        let w3d_shader_opt = Self::find_shader_ci(&scene.shaders, Symbol::from_str(effective_shader_name.as_str()));
+        let w3d_shader_opt = Self::find_shader_ci(&scene.shaders, effective_shader_name.clone(), symbols)?;
         if let Some(w3d_shader) = w3d_shader_opt {
             use crate::director::chunks::w3d::types::W3dShaderType;
             match w3d_shader.shader_type {
@@ -4400,16 +4581,17 @@ void main() {
         }
 
         // Apply blend mode based on material opacity and first texture layer's blend function
-        let first_blend_func = self.get_first_blend_func(scene, model_node, runtime_state);
-        let opacity = w3d_shader_opt
-            .and_then(|s| Self::find_material_ci(&scene.materials, s.material_name))
-            .map(|m| m.opacity)
-            .unwrap_or(1.0);
+        let first_blend_func = self.get_first_blend_func(scene, model_node, runtime_state, symbols)?;
+        let opacity = if let Some(s) = w3d_shader_opt {
+            Self::find_material_ci(&scene.materials, s.material_name.clone(), symbols)?
+                .map(|m| m.opacity).unwrap_or(1.0)
+        } else { 1.0 };
         Self::apply_blend_mode(gl, shader, opacity, first_blend_func, force_blend);
+        Ok(())
     }
 
     /// Get the first texture layer's blend_func for a model node
-    fn get_first_blend_func(&self, scene: &W3dScene, node: &W3dNode, runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>) -> u8 {
+    fn get_first_blend_func(&self, scene: &W3dScene, node: &W3dNode, runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>, symbols: &SymbolTable) -> Result<u8, JsValue> {
         // Consider EVERY shader that can affect this model, not just the node's
         // own `shader_name`. Director binds a material through the model
         // RESOURCE's per-mesh shader bindings; the node field is frequently left
@@ -4421,12 +4603,13 @@ void main() {
         // and sparks stayed invisible even once the pass routing was right.
         let mut names: Vec<Symbol> = Vec::new();
         if let Some(rs) = runtime_state {
-            if let Some(over) = Self::node_shader_override(rs, node.name, None) {
-                names.push(*over);
+            if let Some(over) = Self::node_shader_override(rs, node.name.clone(), None) {
+                names.push(over.clone());
             }
         }
         if !node.shader_name.is_empty() {
-            names.push(node.shader_name);
+            symbol_display(symbols, &node.shader_name, "shader name")?;
+            names.push(node.shader_name.clone());
         }
         let resource = if !node.model_resource_name.is_empty() {
             &node.model_resource_name
@@ -4442,10 +4625,11 @@ void main() {
         let mut first = 0u8;
         let mut seen = false;
         for n in names.iter().filter(|n| !n.is_empty()) {
-            if let Some(sh) = Self::find_shader_ci(&scene.shaders, *n) {
+            symbol_display(symbols, n, "shader name")?;
+            if let Some(sh) = Self::find_shader_ci(&scene.shaders, n.clone(), symbols)? {
                 let bf = Self::effective_blend_func(sh);
                 if bf == 1 {
-                    return 1;
+                    return Ok(1);
                 }
                 if !seen {
                     first = bf;
@@ -4453,7 +4637,7 @@ void main() {
                 }
             }
         }
-        first
+        Ok(first)
     }
 
     /// The blend function that actually decides how a shader composites.
@@ -4489,15 +4673,18 @@ void main() {
         scene: &W3dScene,
         node: &W3dNode,
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
-    ) -> bool {
+        symbols: &SymbolTable,
+    ) -> Result<bool, JsValue> {
         let mut names: Vec<Symbol> = Vec::new();
         if let Some(rs) = runtime_state {
             if let Some(map) = rs.node_shaders.get(&node.name) {
                 names.extend(map.values().cloned());
             }
         }
+        symbol_display(symbols, &node.name, "model name")?;
         if !node.shader_name.is_empty() {
-            names.push(node.shader_name);
+            symbol_display(symbols, &node.shader_name, "shader name")?;
+            names.push(node.shader_name.clone());
         }
         let resource = if !node.model_resource_name.is_empty() {
             &node.model_resource_name
@@ -4509,11 +4696,16 @@ void main() {
                 names.extend(binding.mesh_bindings.iter().cloned());
             }
         }
-        names.iter().any(|n| {
-            Self::find_shader_ci(&scene.shaders, *n)
+        for n in &names {
+            symbol_display(symbols, n, "shader name")?;
+            if Self::find_shader_ci(&scene.shaders, n.clone(), symbols)?
                 .map(|s| s.texture_layers.iter().any(|l| l.blend_func == 1))
                 .unwrap_or(false)
-        })
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Bind material for a specific mesh index using model resource shader bindings
@@ -4528,16 +4720,21 @@ void main() {
         member_key: &(i32, i32),
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
         force_blend: bool,
-    ) -> bool {
+        symbols: &SymbolTable,
+    ) -> Result<bool, JsValue> {
         // Check per-mesh shader override first (from Lingo shaderList[I] = shaderRef)
         if let Some(override_name) = runtime_state
-            .and_then(|rs| Self::node_shader_override(rs, model_node.name, Some(mesh_idx)))
+            .and_then(|rs| Self::node_shader_override(rs, model_node.name.clone(), Some(mesh_idx)))
         {
-            if let Some(w3d_shader) = Self::find_shader_ci(&scene.shaders, Symbol::from_str(override_name.as_str())) {
+            symbol_display(symbols, override_name, "shader name")?;
+            if let Some(w3d_shader) = Self::find_shader_ci(&scene.shaders, override_name.clone(), symbols)? {
                 let mat = if !w3d_shader.material_name.is_empty() {
-                    Self::find_material_ci(&scene.materials, w3d_shader.material_name)
-                } else { None }
-                    .or_else(|| Self::find_material_ci(&scene.materials, w3d_shader.name));
+                    Self::find_material_ci(&scene.materials, w3d_shader.material_name.clone(), symbols)?
+                } else { None };
+                let mat = match mat {
+                    Some(mat) => Some(mat),
+                    None => Self::find_material_ci(&scene.materials, w3d_shader.name.clone(), symbols)?,
+                };
                 if let Some(m) = mat {
                     self.set_material_uniforms(gl, shader, m);
                 } else {
@@ -4549,10 +4746,8 @@ void main() {
                     gl.uniform1f(shader.u_opacity.as_ref(), 1.0);
                 }
                 let mut tex_bound = false;
-                let mut has_lightmap_layer = false;
                 if let Some(gpu_data) = self.member_data.get(member_key) {
-                    let layers = Self::find_texture_layers(&w3d_shader.texture_layers, gpu_data, w3d_shader.shader_type);
-                    has_lightmap_layer = !layers.extra_layers.is_empty();
+                    let layers = Self::find_texture_layers(&w3d_shader.texture_layers, gpu_data, w3d_shader.shader_type, symbols)?;
                     tex_bound = Self::bind_texture_layers(gl, shader, &layers);
                 }
                 let is_prim = res_info.and_then(|r| r.primitive_type.as_ref()).is_some();
@@ -4577,13 +4772,13 @@ void main() {
                 let first_bf = Self::effective_blend_func(w3d_shader);
                 let opacity = mat.map(|m| m.opacity).unwrap_or(1.0);
                 Self::apply_blend_mode(gl, shader, opacity, first_bf, force_blend);
-                return true;
+                return Ok(true);
             }
         }
 
         let res_info = match res_info {
             Some(r) => r,
-            None => return false,
+            None => return Ok(false),
         };
 
         // Per-mesh shader candidates, SPECIFIC ONES FIRST.
@@ -4608,7 +4803,7 @@ void main() {
             if mesh_idx < binding.mesh_bindings.len() && !binding.mesh_bindings[mesh_idx].is_empty() {
                 let name = binding.mesh_bindings[mesh_idx].clone();
                 if name == BuiltInSymbol::DefaultShader
-                    || binding.name.as_str().eq_ignore_ascii_case("default")
+                    || symbol_display(symbols, &binding.name, "shader binding name")?.eq_ignore_ascii_case("default")
                 {
                     default_candidates.push(name);
                 } else {
@@ -4642,11 +4837,11 @@ void main() {
         // whole-model `shaderList = shader` is still honored: node_shader_override's
         // Some(idx) branch returns mesh 0 when it's the sole override.
         let effective_shader_name = runtime_state
-            .and_then(|rs| Self::node_shader_override(rs, model_node.name, Some(mesh_idx)))
+            .and_then(|rs| Self::node_shader_override(rs, model_node.name.clone(), Some(mesh_idx)))
             .cloned()
-            .unwrap_or_else(|| Symbol::from_str(&model_node.shader_name.clone().to_string()));
-        if !effective_shader_name.as_str().is_empty() {
-            candidate_names.push(Symbol::from_str(&effective_shader_name.as_str()));
+            .unwrap_or(model_node.shader_name.clone());
+        if !symbol_display(symbols, &effective_shader_name, "shader name")?.is_empty() {
+            candidate_names.push(effective_shader_name);
         }
 
         for binding in &res_info.shader_bindings {
@@ -4667,7 +4862,9 @@ void main() {
         //
         // Stable sort: everything else keeps its authored order, DefaultShader moves
         // to the end, and it still wins when it is the only candidate.
-        candidate_names.sort_by_key(|c| c.eq_ignore_ascii_case("DefaultShader"));
+        // Candidate symbols and the builtin share this table, so identity preserves
+        // the old case-insensitive partition without allocating display strings.
+        candidate_names.sort_by_key(|c| *c == BuiltInSymbol::DefaultShader);
 
         let mut best_material: Option<&W3dMaterial> = None;
         let mut best_blend_func = 0u8;
@@ -4677,18 +4874,21 @@ void main() {
                 continue;
             }
 
-            let w3d_shader = Self::resolve_shader_candidate_ci(scene, *candidate);
-            let mat = Self::resolve_material_candidate_ci(scene, *candidate)
-                .or_else(|| {
-                    w3d_shader.and_then(|s| {
-                        if !s.material_name.is_empty() {
-                            Self::find_material_ci(&scene.materials, s.material_name)
-                        } else {
-                            None
-                        }
-                    })
-                })
-                .or_else(|| w3d_shader.and_then(|s| Self::find_material_ci(&scene.materials, s.name)));
+            let w3d_shader = Self::resolve_shader_candidate_ci(scene, candidate.clone(), symbols)?;
+            let mat = if let Some(mat) = Self::resolve_material_candidate_ci(scene, candidate.clone(), symbols)? {
+                Some(mat)
+            } else if let Some(shader) = w3d_shader {
+                if !shader.material_name.is_empty() {
+                    match Self::find_material_ci(&scene.materials, shader.material_name.clone(), symbols)? {
+                        Some(mat) => Some(mat),
+                        None => Self::find_material_ci(&scene.materials, shader.name.clone(), symbols)?,
+                    }
+                } else {
+                    Self::find_material_ci(&scene.materials, shader.name.clone(), symbols)?
+                }
+            } else {
+                None
+            };
 
             // Skip DefaultShader as best_material when there are more specific candidates.
             // DefaultShader often has white default material that overrides model-specific
@@ -4704,7 +4904,7 @@ void main() {
 
             let mut tex_bound = false;
             if let (Some(gpu_data), Some(w3d_shader)) = (self.member_data.get(member_key), w3d_shader) {
-                let layers = Self::find_texture_layers(&w3d_shader.texture_layers, gpu_data, w3d_shader.shader_type);
+                let layers = Self::find_texture_layers(&w3d_shader.texture_layers, gpu_data, w3d_shader.shader_type, symbols)?;
                 tex_bound = Self::bind_texture_layers(gl, shader, &layers);
             }
 
@@ -4728,7 +4928,7 @@ void main() {
                     .unwrap_or(0);
                 let opacity = mat.map(|m| m.opacity).unwrap_or(1.0);
                 Self::apply_blend_mode(gl, shader, opacity, first_bf, force_blend);
-                return true;
+                return Ok(true);
             }
         }
 
@@ -4737,14 +4937,14 @@ void main() {
             use std::sync::Mutex;
             use std::collections::HashSet;
             static LOGGED_NOTEX2: Mutex<Option<HashSet<String>>> = Mutex::new(None);
-            let key = format!("{}:{}", model_node.name, mesh_idx);
+            let key = format!("{}:{}", symbol_display(symbols, &model_node.name, "model name")?, mesh_idx);
             if let Ok(mut guard) = LOGGED_NOTEX2.lock() {
                 let set = guard.get_or_insert_with(HashSet::new);
                 if set.insert(key) {
                     let has_best = best_material.is_some();
                     log(&format!(
                         "[W3D-NOTEX-MESH] model=\"{}\" mesh={} candidates={:?} has_best_material={} → using material-only (no texture)",
-                        model_node.name, mesh_idx, candidate_names, has_best,
+                        symbol_display(symbols, &model_node.name, "model name")?, mesh_idx, candidate_names, has_best,
                     ));
                 }
             }
@@ -4767,10 +4967,10 @@ void main() {
                 gl.uniform1i(shader.u_has_texture.as_ref(), 0);
             }
             Self::apply_blend_mode(gl, shader, mat.opacity, best_blend_func, force_blend);
-            return true;
+            return Ok(true);
         }
 
-        false
+        Ok(false)
     }
 
     fn set_material_uniforms(&self, gl: &WebGl2RenderingContext, shader: &Shader3d, mat: &W3dMaterial) {
@@ -4849,17 +5049,27 @@ void main() {
         scene: &W3dScene,
         resource_name: Symbol,
         model_name: Symbol,
-        gpu_data: &MemberGpuData,
+        _gpu_data: &MemberGpuData,
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
-    ) -> bool {
+        symbols: &SymbolTable,
+    ) -> Result<bool, JsValue> {
         // Only skin models that have a matching skeleton — no fallback to first()
         // to prevent walls/weapons from being skinned with the character skeleton.
         // Director is case-insensitive — script-side cloned resources can vary
         // case from the parsed W3D file.
-        let skeleton = scene.skeletons.iter().find(|s| s.name == resource_name);
+        symbol_display(symbols, &resource_name, "resource name")?;
+        symbol_display(symbols, &model_name, "model name")?;
+        let mut skeleton = None;
+        for candidate in &scene.skeletons {
+            symbol_display(symbols, &candidate.name, "skeleton name")?;
+            if candidate.name == resource_name {
+                skeleton = Some(candidate);
+                break;
+            }
+        }
         let skeleton = match skeleton {
             Some(s) if s.bones.len() > 1 => s,
-            _ => return false,
+            _ => return Ok(false),
         };
 
         // The bind pose is the skeleton's REST pose, for every rig. IFX captures it once
@@ -4889,10 +5099,10 @@ void main() {
         // absent so we fall back ENTIRELY to the legacy member fields (auto-play +
         // the advancing legacy clock). Otherwise its frozen time=0 shadowed the
         // legacy clock and the model rendered stuck on frame 0.
-        let bp = runtime_state.and_then(|rs| rs.bones_player(model_name))
+        let bp = runtime_state.and_then(|rs| rs.bones_player(model_name.clone()))
             .filter(|b| b.current_motion.is_some());
-        let current_motion_name = bp.and_then(|b| b.current_motion)
-            .or_else(|| runtime_state.and_then(|rs| rs.current_motion));
+        let current_motion_name = bp.and_then(|b| b.current_motion.clone())
+            .or_else(|| runtime_state.and_then(|rs| rs.current_motion.clone()));
         let is_loop = bp.map(|b| b.animation_loop)
             .or_else(|| runtime_state.map(|rs| rs.animation_loop)).unwrap_or(true);
         let root_lock = bp.map(|b| b.root_lock)
@@ -4905,15 +5115,17 @@ void main() {
             // so the model stands in that clip's frame 0 rather than the authored
             // T-pose. Agent Free Ride's boarder rode with his arms out because we
             // fell through to no motion at all.
-            crate::director::chunks::w3d::skeleton::default_motion_for_model(scene, model_name)
+            crate::director::chunks::w3d::skeleton::default_motion_for_model(scene, model_name.clone(), symbols)
+                .map_err(|e| JsValue::from_str(&e))?
         };
         // Manual per-bone overrides (bonesPlayer.bone[i].transform = t), keyed by
         // "modelname:boneindex". updateBoneRotation re-sets these each frame to
         // animate procedurally (the SweeTarts snake's S-wiggle), so we must skin
         // even when the played motion is sparse or absent.
+        let model_lower = symbol_lower(symbols, &model_name, "model name")?.to_owned();
         let bone_overrides: std::collections::HashMap<usize, [f32; 16]> = runtime_state
             .map(|rs| {
-                let prefix = format!("{}:", model_name.to_ascii_lowercase());
+                let prefix = format!("{}:", model_lower);
                 rs.bone_transform_overrides.iter()
                     .filter_map(|(k, v)| {
                         k.strip_prefix(&prefix)
@@ -4929,7 +5141,7 @@ void main() {
         if bone_overrides.is_empty()
             && motion.map(|m| m.tracks.len() < min_tracks).unwrap_or(true)
         {
-            return false;
+            return Ok(false);
         }
         let time = bp.map(|b| b.animation_time).unwrap_or(self.animation_time);
         let duration = motion.map(|m| m.duration()).unwrap_or(0.0);
@@ -4983,7 +5195,8 @@ void main() {
         // table and a game can clone several skeletons plus all their clips into one
         // member. Keep this to an authored idle: it is a FALLBACK for models whose fold
         // was not recorded, and widening it relativizes draws that never were.
-        let idle_root_mats = crate::director::chunks::w3d::skeleton::idle_reference_motion(scene, skeleton)
+        let idle_root_mats = crate::director::chunks::w3d::skeleton::idle_reference_motion(scene, skeleton, symbols)
+            .map_err(|e| JsValue::from_str(&e))?
             .map(|im| crate::director::chunks::w3d::skeleton::build_bone_matrices(skeleton, Some(im), 0.0));
         // Only models with an idle-rest motion (the biped actors/bots) are relativized;
         // everything else (dino, frog01, ClubMarian, …) keeps the original skin — no
@@ -4994,8 +5207,10 @@ void main() {
         // move: (node * R0) * inv(R0) * world * inv_bind == node * world * inv_bind.
         // Taking R0 from the recorded value rather than recomputing it is what keeps
         // the two sides from drifting apart.
-        let folded_com = scene.model_root_com.get(&model_name.to_ascii_lowercase())
-            .or_else(|| scene.model_root_com.get(&resource_name.to_ascii_lowercase()));
+        let model_key = symbol_lower(symbols, &model_name, "model name")?.to_owned();
+        let resource_key = symbol_lower(symbols, &resource_name, "resource name")?.to_owned();
+        let folded_com = scene.model_root_com.get(&model_key)
+            .or_else(|| scene.model_root_com.get(&resource_key));
         let root_relinv = match (folded_com, &idle_root_mats) {
             (Some(r0), _) => affine_inv(r0),
             (None, Some(m)) if !m.is_empty() => affine_inv(&m[0]),
@@ -5004,8 +5219,8 @@ void main() {
 
         // Check for motion blending (crossfade) — per-model blend state.
         let blend_weight = bp.map(|b| b.blend_weight).unwrap_or(self.blend_weight);
-        let prev_motion_name = bp.and_then(|b| b.previous_motion.map(|s| s.as_str()))
-            .or_else(|| runtime_state.and_then(|rs| rs.previous_motion.map(|s| s.as_str())));
+        let prev_motion_name = bp.and_then(|b| b.previous_motion.clone())
+            .or_else(|| runtime_state.and_then(|rs| rs.previous_motion.clone()));
         let blending = blend_weight < 1.0 && prev_motion_name.is_some();
 
         let bone_count = skeleton.bones.len().min(48);
@@ -5021,7 +5236,21 @@ void main() {
         }
 
         if blending {
-            let prev_motion = prev_motion_name.and_then(|n| scene.motions.iter().find(|m| m.name == n));
+            let prev_motion = if let Some(previous) = prev_motion_name.as_ref() {
+                let previous_display = symbol_display(symbols, previous, "previous motion name")?;
+                let mut found = None;
+                for candidate in &scene.motions {
+                    if symbol_lower(symbols, &candidate.name, "motion name")?
+                        .eq_ignore_ascii_case(previous_display)
+                    {
+                        found = Some(candidate);
+                        break;
+                    }
+                }
+                found
+            } else {
+                None
+            };
             let prev_matrices = crate::director::chunks::w3d::skeleton::build_bone_matrices_ex(
                 skeleton, prev_motion, t, root_lock,
                 if bone_overrides.is_empty() { None } else { Some(&bone_overrides) },
@@ -5049,7 +5278,7 @@ void main() {
             false,
             &skinning_matrices,
         );
-        true
+        Ok(true)
     }
 
     fn bind_default_material(&self, gl: &WebGl2RenderingContext, shader: &Shader3d, scene: &W3dScene) {
@@ -5067,35 +5296,56 @@ void main() {
     }
 
     /// Check if a node is a child (direct or indirect) of a given root node
-    fn is_child_of(&self, scene: &W3dScene, node_name: Symbol, root_name: Symbol) -> bool {
-        if node_name == root_name { return true; }
+    fn is_child_of(&self, scene: &W3dScene, node_name: Symbol, root_name: Symbol, symbols: &SymbolTable) -> Result<bool, JsValue> {
+        symbol_display(symbols, &node_name, "node name")?;
+        symbol_display(symbols, &root_name, "root name")?;
+        if node_name == root_name { return Ok(true); }
         let mut current = node_name;
         for _ in 0..20 { // max depth to prevent infinite loops
-            if let Some(node) = scene.nodes.iter().find(|n| n.name == current) {
-                if node.parent_name == root_name { return true; }
-                if node.parent_name.is_empty() { return false; }
-                current = node.parent_name;
+            let mut node = None;
+            for candidate in &scene.nodes {
+                if candidate.name == current {
+                    symbol_display(symbols, &candidate.name, "node name")?;
+                    symbol_display(symbols, &candidate.parent_name, "parent name")?;
+                    node = Some(candidate);
+                    break;
+                }
+            }
+            if let Some(node) = node {
+                if node.parent_name == root_name { return Ok(true); }
+                if node.parent_name.is_empty() { return Ok(false); }
+                current = node.parent_name.clone();
             } else {
-                return false;
+                return Ok(false);
             }
         }
-        false
+        Ok(false)
     }
 
     /// Check if any ancestor in the parent chain is in the detached set
-    fn has_detached_ancestor(&self, scene: &W3dScene, parent_name: Symbol, detached: &std::collections::HashSet<Symbol>) -> bool {
-        if parent_name.is_empty() || parent_name == BuiltInSymbol::World { return false; }
-        if detached.contains(&parent_name) { return true; }
+    fn has_detached_ancestor(&self, scene: &W3dScene, parent_name: Symbol, detached: &std::collections::HashSet<Symbol>, symbols: &SymbolTable) -> Result<bool, JsValue> {
+        symbol_display(symbols, &parent_name, "parent name")?;
+        if parent_name.is_empty() || parent_name == BuiltInSymbol::World { return Ok(false); }
+        if detached.contains(&parent_name) { return Ok(true); }
         // Walk up parent chain
         for _ in 0..10 {
-            if let Some(node) = scene.nodes.iter().find(|n| n.name == parent_name) {
-                if node.parent_name.is_empty() || node.parent_name == BuiltInSymbol::World { return false; }
-                if detached.contains(&node.parent_name) { return true; }
-                return self.has_detached_ancestor(scene, node.parent_name, detached);
+            let mut node = None;
+            for candidate in &scene.nodes {
+                if candidate.name == parent_name {
+                    symbol_display(symbols, &candidate.name, "node name")?;
+                    symbol_display(symbols, &candidate.parent_name, "parent name")?;
+                    node = Some(candidate);
+                    break;
+                }
             }
-            return false;
+            if let Some(node) = node {
+                if node.parent_name.is_empty() || node.parent_name == BuiltInSymbol::World { return Ok(false); }
+                if detached.contains(&node.parent_name) { return Ok(true); }
+                return self.has_detached_ancestor(scene, node.parent_name.clone(), detached, symbols);
+            }
+            return Ok(false);
         }
-        false
+        Ok(false)
     }
 
     /// Build view matrix from scene's ViewNode (or default camera)
@@ -5103,10 +5353,12 @@ void main() {
         &self,
         scene: &W3dScene,
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
-    ) -> ([f32; 16], [f32; 3]) {
+        symbols: &mut SymbolTable,
+    ) -> Result<([f32; 16], [f32; 3]), JsValue> {
         // 1. Determine which camera to use
         let default_cam = BuiltInSymbol::DefaultView;
-        let cam_name = self.active_camera.unwrap_or(default_cam.into());
+        let cam_name = self.active_camera.clone().unwrap_or(default_cam.into());
+        symbol_display(symbols, &cam_name, "camera name")?;
 
         // 2. Find the camera node (case-insensitive), fall back to first view node
         let view_node = scene.nodes.iter()
@@ -5114,28 +5366,28 @@ void main() {
             .or_else(|| scene.nodes.iter().find(|n| n.node_type == W3dNodeType::View));
 
         if let Some(node) = view_node {
-            let world_t = self.accumulate_transform_with_state(scene, node, runtime_state);
+            let world_t = self.accumulate_transform_with_state(scene, node, runtime_state, symbols)?;
             let cam_pos = [world_t[12], world_t[13], world_t[14]];
-            return (invert_transform(&world_t), cam_pos);
+            return Ok((invert_transform(&world_t), cam_pos));
         }
-        let cam_name = view_node.map(|n| n.name).unwrap_or(BuiltInSymbol::DefaultView.into());
+        let cam_name = view_node.map(|n| n.name.clone()).unwrap_or(BuiltInSymbol::DefaultView.into());
 
         // 3. Check runtime transform for this camera (case-insensitive)
         if let Some(rs) = runtime_state {
             if let Some(cam_t) = get_runtime_transform(rs, cam_name) {
                 let cam_pos = [cam_t[12], cam_t[13], cam_t[14]];
-                return (invert_transform(&cam_t), cam_pos);
+                return Ok((invert_transform(&cam_t), cam_pos));
             }
         }
 
         // Use world transform (accumulated through parent chain)
         if let Some(node) = view_node {
-            let world_t = self.accumulate_transform_with_state(scene, node, runtime_state);
+            let world_t = self.accumulate_transform_with_state(scene, node, runtime_state, symbols)?;
             let has_position = world_t[12].abs() > 0.01 || world_t[13].abs() > 0.01 || world_t[14].abs() > 0.01;
             if has_position {
                 let cam_pos = [world_t[12], world_t[13], world_t[14]];
                 let view = invert_transform(&world_t);
-                return (view, cam_pos);
+                return Ok((view, cam_pos));
             }
         }
 
@@ -5147,19 +5399,21 @@ void main() {
             0.0, 0.0, 1.0, 0.0,
             0.0, 0.0, -100.0, 1.0,
         ];
-        (view, cam_pos)
+        Ok((view, cam_pos))
     }
 
     /// Build perspective projection matrix from ViewNode
     fn build_projection_matrix(&self, scene: &W3dScene, _fbo_aspect: f32,
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
-    ) -> [f32; 16] {
+        symbols: &mut SymbolTable,
+    ) -> Result<[f32; 16], JsValue> {
         // Guard against a degenerate render-target aspect (0 / NaN / inf). The
         // projection is driven by the real sprite/FBO aspect (_fbo_aspect = w/h); a
         // 0-sized rect (e.g. briefly, before the score sizes a W3D sprite) would give
         // 0/inf/NaN and collapse the matrix, blanking the scene. Fall back to 4:3.
         let fbo_aspect = if _fbo_aspect.is_finite() && _fbo_aspect > 0.0 { _fbo_aspect } else { 4.0 / 3.0 };
-        let cam_name = self.active_camera.unwrap_or_else(|| Symbol::from_str("DefaultView"));
+        let cam_name = self.active_camera.clone().unwrap_or_else(|| Symbol::builtin(BuiltInSymbol::DefaultView));
+        symbol_display(symbols, &cam_name, "camera name")?;
         // Find camera node (case-insensitive), fall back to first view node
         let view_node = scene.nodes.iter()
             .find(|n| n.node_type == W3dNodeType::View && n.name == cam_name)
@@ -5178,11 +5432,11 @@ void main() {
             // are left alone — no per-frame scan and no override.
             let needs_fit = f <= 0.0 || f > 100000.0 || (f - 10000.0).abs() < 0.5;
             if needs_fit {
-                let cam_world = self.accumulate_transform_with_state(scene, node, runtime_state);
+                let cam_world = self.accumulate_transform_with_state(scene, node, runtime_state, symbols)?;
                 let cp = [cam_world[12], cam_world[13], cam_world[14]];
                 let mut scene_far = 0.0f32;
                 for m in scene.nodes.iter().filter(|nn| nn.node_type == W3dNodeType::Model) {
-                    let wt = self.accumulate_transform_with_state(scene, m, runtime_state);
+                    let wt = self.accumulate_transform_with_state(scene, m, runtime_state, symbols)?;
                     let d = ((wt[12]-cp[0]).powi(2) + (wt[13]-cp[1]).powi(2) + (wt[14]-cp[2]).powi(2)).sqrt();
                     if d > scene_far { scene_far = d; }
                 }
@@ -5226,13 +5480,14 @@ void main() {
         };
         // Flip Y: FBO renders with OpenGL Y-up but composited as 2D sprite with Y-down
         proj[5] = -proj[5];
-        proj
+        Ok(proj)
     }
 
     /// Set up lighting uniforms from scene lights
-    fn setup_lights(&self, gl: &WebGl2RenderingContext, shader: &Shader3d, scene: &W3dScene, camera_pos: &[f32; 3],
+    fn setup_lights(&self, gl: &WebGl2RenderingContext, shader: &Shader3d, scene: &W3dScene, _camera_pos: &[f32; 3],
         runtime_state: Option<&crate::player::cast_member::Shockwave3dRuntimeState>,
-    ) {
+        symbols: &mut SymbolTable,
+    ) -> Result<(), JsValue> {
         let mut positions = [0.0f32; 24]; // 8 * 3
         let mut colors = [0.0f32; 24];
         let mut types = [0i32; 8];
@@ -5265,9 +5520,16 @@ void main() {
             "defaultambient" | "defaultdirectional" | "uiambient" | "uidirectional");
         let is_fallback_directional = |name: &str| matches!(name,
             "defaultdirectional" | "uidirectional");
-        let has_movie_light = scene.lights.iter().any(|l|
-            l.enabled && !is_fallback_light(l.name.as_lower_str())
-            && matches!(l.light_type, W3dLightType::Directional | W3dLightType::Spot));
+        let mut has_movie_light = false;
+        for l in &scene.lights {
+            if l.enabled
+                && !is_fallback_light(symbol_lower(symbols, &l.name, "light name")?)
+                && matches!(l.light_type, W3dLightType::Directional | W3dLightType::Spot)
+            {
+                has_movie_light = true;
+                break;
+            }
+        }
 
         if scene.lights.is_empty() {
             // Default: one directional light from above-right
@@ -5302,7 +5564,7 @@ void main() {
                 }
                 // Suppress only the synthetic fallback *directional* key when the movie
                 // lights itself; keep the ambient fallback as Director's base fill.
-                if has_movie_light && is_fallback_directional(light.name.as_lower_str()) {
+                if has_movie_light && is_fallback_directional(symbol_lower(symbols, &light.name, "light name")?) {
                     continue;
                 }
                 // Skip lights that have been removed from world
@@ -5314,6 +5576,8 @@ void main() {
                 // Also skip lights whose node has empty parent (detached)
                 let light_node = scene.nodes.iter().find(|n| n.name == light.name);
                 if let Some(node) = light_node {
+                    symbol_display(symbols, &node.name, "light node name")?;
+                    symbol_display(symbols, &node.parent_name, "light parent name")?;
                     if node.parent_name.is_empty() {
                         continue;
                     }
@@ -5324,7 +5588,7 @@ void main() {
                 if let Some(ref cam) = self.active_camera {
                     if let Some(rs) = runtime_state {
                         if let Some(root) = rs.camera_root_nodes.get(&cam) {
-                            if !self.is_child_of(scene, light.name, *root) {
+                            if !self.is_child_of(scene, light.name.clone(), root.clone(), symbols)? {
                                 continue;
                             }
                         }
@@ -5366,10 +5630,18 @@ void main() {
                     0.0
                 };
 
-                if let Some(light_node) = scene.nodes.iter().find(|n| {
-                    n.node_type == W3dNodeType::Light && (n.resource_name == light.name || n.name == light.name)
-                }) {
-                    let world_t = self.accumulate_transform_with_state(scene, light_node, runtime_state);
+                let mut light_node = None;
+                for n in &scene.nodes {
+                    if n.node_type != W3dNodeType::Light { continue; }
+                    symbol_display(symbols, &n.resource_name, "light resource name")?;
+                    symbol_display(symbols, &n.name, "light node name")?;
+                    if n.resource_name == light.name || n.name == light.name {
+                        light_node = Some(n);
+                        break;
+                    }
+                }
+                if let Some(light_node) = light_node {
+                    let world_t = self.accumulate_transform_with_state(scene, light_node, runtime_state, symbols)?;
                     if lt == 1 {
                         // Directional: the beam travels along the light's -Z (confirmed by
                         // the spot cone, which uses -Z as its aim). The shader's L is the
@@ -5418,6 +5690,7 @@ void main() {
         gl.uniform1fv_with_f32_array(shader.u_light_spot_angle.as_ref(), &spot_angles[..n]);
         gl.uniform1fv_with_f32_array(shader.u_light_spot_exp.as_ref(), &spot_exps[..n]);
         gl.uniform3f(shader.u_global_ambient.as_ref(), global_ambient[0], global_ambient[1], global_ambient[2]);
+        Ok(())
     }
 
     /// Get the FBO texture (for use as sprite texture in 2D pipeline)
@@ -6037,4 +6310,3 @@ fn mat4_multiply_col_major(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
     }
     r
 }
-

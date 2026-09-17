@@ -10,13 +10,14 @@ use crate::{
         ci_string::CiStr,
         compare::sort_datums,
         datum_formatting::format_datum,
-        eval::eval_lingo_expr_runtime,
+        eval::eval_lingo_expr_static,
         geometry::IntRect,
         reserve_player_mut, reserve_player_ref,
+        session::ExecutionContext,
         sprite::{ColorRef, CursorRef},
-        symbols::{builtin::BuiltInSymbol, symbol::Symbol},
-        xtra::manager::{create_xtra_instance_async, is_xtra_registered},
-        DatumRef, DirPlayer, MathObject, ScriptError, XmlDocument,
+        symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable},
+        xtra::manager::{get_registered_xtra_names, is_xtra_registered},
+        DatumRef, DirPlayer, MathObject, ScriptError, ScriptErrorCode, XmlDocument,
     },
 };
 
@@ -27,12 +28,88 @@ use super::datum_handlers::{
     player_call_datum_handler,
     prop_list::{PropListDatumHandlers, PropListUtils},
     rect::RectUtils,
-    script_instance::ScriptInstanceDatumHandlers,
     sound_channel::{SoundChannelDatumHandlers, SoundStatus},
 };
 
 pub struct TypeHandlers {}
 pub struct TypeUtils {}
+
+/// Owned result of `new`. Host-backed Xtra creation remains a request for its
+/// owner; script constructors carry the exact child frame and fallback value.
+pub(crate) enum TypeNewPlan {
+    Complete(DatumRef),
+    ScriptChild {
+        receiver: crate::player::script_ref::ScriptInstanceRef,
+        handler_ref: crate::player::script::ScriptHandlerRef,
+        args: Vec<DatumRef>,
+        fallback: DatumRef,
+    },
+    Xtra { name: String, args: Vec<DatumRef> },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct AncestorCall {
+    pub(crate) receiver: crate::player::script_ref::ScriptInstanceRef,
+    /// The first ancestor to search. Handler lookup is intentionally deferred
+    /// until the callback is about to run: an earlier ancestor callback may
+    /// install or remove a later handler.
+    pub(crate) source: crate::player::script_ref::ScriptInstanceRef,
+    pub(crate) handler_name: Symbol,
+    pub(crate) args: Vec<DatumRef>,
+}
+
+pub(crate) enum AncestorCallPlan {
+    Complete(DatumRef),
+    Children(Vec<AncestorCall>),
+}
+
+/// Resolve one deferred ancestor callback against the current owner state.
+/// Returning `None` means that this ancestor chain has no matching handler and
+/// the caller should continue with the next original target.
+pub(crate) fn resolve_ancestor_call(
+    runtime: &mut ExecutionContext<'_>,
+    call: &AncestorCall,
+) -> Result<Option<(
+    crate::player::script_ref::ScriptInstanceRef,
+    crate::player::script::ScriptHandlerRef,
+    Vec<DatumRef>,
+)>, ScriptError> {
+    runtime.with_player_and_symbols(|player, symbols| {
+        crate::player::compare::validate_direct_symbol_fields(
+            &Datum::Symbol(call.handler_name.clone()),
+            symbols,
+        )?;
+        player
+            .allocator
+            .get_script_instance_opt(&call.receiver)
+            .ok_or_else(|| ScriptError::new_code(
+                ScriptErrorCode::InvalidReference,
+                "stale callAncestor receiver".to_owned(),
+            ))?;
+        let mut walk = call.source.clone();
+        for _ in 0..100 {
+            let instance = player
+                .allocator
+                .get_script_instance_opt(&walk)
+                .ok_or_else(|| ScriptError::new_code(
+                    ScriptErrorCode::InvalidReference,
+                    "stale callAncestor ancestor".to_owned(),
+                ))?;
+            if let Some(script) = player.movie.cast_manager.get_script_by_ref(&instance.script) {
+                if let Some(handler_ref) = script.get_own_handler_ref(call.handler_name.clone()) {
+                    return Ok(Some((
+                        call.receiver.clone(),
+                        handler_ref,
+                        call.args.clone(),
+                    )));
+                }
+            }
+            let Some(next) = instance.ancestor.clone() else { break };
+            walk = next;
+        }
+        Ok(None)
+    })
+}
 
 impl TypeUtils {
     pub fn get_datum_ilks(datum: &Datum) -> Result<Vec<BuiltInSymbol>, ScriptError> {
@@ -103,9 +180,15 @@ impl TypeUtils {
         datum_ref: &DatumRef,
         prop_key_ref: &DatumRef,
         player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
     ) -> Result<DatumRef, ScriptError> {
-        let datum = player.get_datum(datum_ref);
-        let prop_key = player.get_datum(prop_key_ref);
+        let datum = checked_datum(player, symbols, datum_ref)?;
+        let prop_key = checked_datum(player, symbols, prop_key_ref)?;
+        if let Datum::Symbol(symbol) = prop_key {
+            symbols
+                .display(symbol)
+                .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+        }
 
         // `formatted_key` is only ever read on an error/warn path, so it is
         // formatted there rather than eagerly here — this ran a full
@@ -115,6 +198,7 @@ impl TypeUtils {
                 prop_list,
                 prop_key_ref,
                 &player.allocator,
+                symbols,
                 false,
                 *is_sorted,
             )?,
@@ -168,67 +252,123 @@ impl TypeUtils {
             Datum::SpriteRef(sprite_number) => {
                 let sprite_number = *sprite_number;
                 let prop_name = match prop_key {
-                    Datum::Symbol(name) => *name,
-                    Datum::String(name) => Symbol::from_str(name),
+                    Datum::Symbol(name) => name.clone(),
+                    Datum::String(name) => symbols.intern(name),
                     _ => {
                         return Err(ScriptError::new(format!(
                             "Cannot index sprite {} with {}",
                             sprite_number,
-                            format_datum(prop_key_ref, player)
+                            format_datum(prop_key_ref, symbols, player)?
                         )))
                     }
                 };
                 let result = crate::player::score::sprite_get_prop(
                     player,
+                    symbols,
                     sprite_number,
                     prop_name,
                 )?;
                 // sprite_get_prop caches the behaviour's own DatumRef when the
                 // property lives on one, so in-place mutation still reaches the
                 // instance's storage rather than a clone.
-                return Ok(player
+                let result_ref = player
                     .last_sprite_prop_ref
                     .take()
-                    .unwrap_or_else(|| player.alloc_datum(result)));
+                    .unwrap_or_else(|| player.alloc_datum(result));
+                checked_datum(player, symbols, &result_ref)?;
+                return Ok(result_ref);
             }
             Datum::ScriptInstanceRef(instance_ref) => {
+                // A string/symbol key names an instance property.  Do this
+                // before numeric indexing: Datum::int_value intentionally
+                // maps a nonnumeric string to zero, which would otherwise
+                // swallow a valid property lookup as an index miss.
+                if let Datum::Symbol(prop_name) = prop_key {
+                    symbols
+                        .display(prop_name)
+                        .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+                    let instance = player
+                        .allocator
+                        .get_script_instance_opt(instance_ref)
+                        .ok_or_else(|| {
+                            ScriptError::new_code(
+                                crate::player::ScriptErrorCode::InvalidReference,
+                                format!("invalid script instance reference {instance_ref}"),
+                            )
+                        })?;
+                    if let Some(prop_ref) = instance.properties.get(prop_name) {
+                        let prop_ref = prop_ref.clone();
+                        checked_datum(player, symbols, &prop_ref)?;
+                        return Ok(prop_ref);
+                    }
+                }
+
+                if matches!(prop_key, Datum::String(_) | Datum::StringChunk(..)) {
+                    let prop_name = prop_key.string_value(symbols)?;
+                    let prop_name = symbols.intern(&prop_name);
+                    let instance = player
+                        .allocator
+                        .get_script_instance_opt(instance_ref)
+                        .ok_or_else(|| {
+                            ScriptError::new_code(
+                                crate::player::ScriptErrorCode::InvalidReference,
+                                format!("invalid script instance reference {instance_ref}"),
+                            )
+                        })?;
+                    if let Some(prop_ref) = instance.properties.get(&prop_name) {
+                        let prop_ref = prop_ref.clone();
+                        checked_datum(player, symbols, &prop_ref)?;
+                        return Ok(prop_ref);
+                    }
+                    return Ok(DatumRef::Void);
+                }
+
                 // Numeric index
-                if let Ok(index) = prop_key.int_value() {
-                    let instance = player.allocator.get_script_instance(instance_ref);
-                    let mut property_names: Vec<String> =
-                        instance.properties.keys().map(|k| k.as_str().to_owned()).collect();
-                    property_names.sort();
+                if matches!(prop_key, Datum::Int(_) | Datum::Float(_)) {
+                    let index = prop_key.int_value()?;
+                    if index <= 0 {
+                        return Ok(DatumRef::Void);
+                    }
+                    let instance = player
+                        .allocator
+                        .get_script_instance_opt(instance_ref)
+                        .ok_or_else(|| {
+                            ScriptError::new_code(
+                                crate::player::ScriptErrorCode::InvalidReference,
+                                format!("invalid script instance reference {instance_ref}"),
+                            )
+                        })?;
+                    let mut property_names: Vec<(Symbol, String)> = instance
+                        .properties
+                        .keys()
+                        .map(|key| {
+                            Ok::<_, ScriptError>((
+                                key.clone(),
+                                symbols
+                                    .display(key)
+                                    .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
+                                    .to_owned(),
+                            ))
+                        })
+                        .collect::<Result<_, ScriptError>>()?;
+                    property_names.sort_by(|left, right| left.1.cmp(&right.1));
                     let zero_based_index = (index - 1) as usize;
 
                     if zero_based_index < property_names.len() {
-                        let prop_name = &property_names[zero_based_index];
-                        if let Some(prop_ref) = instance.properties.get(&Symbol::from_str(prop_name)) {
-                            return Ok(prop_ref.clone());
+                        let prop_name = &property_names[zero_based_index].0;
+                        if let Some(prop_ref) = instance.properties.get(prop_name) {
+                            let prop_ref = prop_ref.clone();
+                            checked_datum(player, symbols, &prop_ref)?;
+                            return Ok(prop_ref);
                         }
                     }
                     return Ok(DatumRef::Void);
                 }
 
-                // Symbol key
-                if let Datum::Symbol(prop_name) = prop_key {
-                    let instance = player.allocator.get_script_instance(instance_ref);
-                    if let Some(prop_ref) = instance.properties.get(prop_name) {
-                        return Ok(prop_ref.clone());
-                    }
-                }
-
-                // String key
-                if let Ok(prop_name) = prop_key.string_value() {
-                    let instance = player.allocator.get_script_instance(instance_ref);
-                    if let Some(prop_ref) = instance.properties.get(&Symbol::from_str(&prop_name)) {
-                        return Ok(prop_ref.clone());
-                    }
-                }
-
                 return Ok(DatumRef::Void);
             }
             Datum::Int(i) => {
-                let prop_name = player.get_datum(prop_key_ref).string_value()?;
+                let prop_name = player.get_datum(prop_key_ref).string_value(symbols)?;
                 match prop_name.as_str() {
                     "abs" => {
                         let result = i.abs();
@@ -261,7 +401,7 @@ impl TypeUtils {
                 }
             }
             Datum::Float(f) => {
-                let prop_name = player.get_datum(prop_key_ref).string_value()?;
+                let prop_name = player.get_datum(prop_key_ref).string_value(symbols)?;
                 match prop_name.as_str() {
                     "abs" => {
                         let result = f.abs();
@@ -301,7 +441,7 @@ impl TypeUtils {
             // silent no-op on VOID rather than an error.
             Datum::Void => player.alloc_datum(Datum::Void),
             _ => {
-                let formatted_key = format_datum(prop_key_ref, player);
+                let formatted_key = format_datum(prop_key_ref, symbols, player)?;
                 web_sys::console::log_1(
                     &format!(
                         "  ❌ Cannot get sub-prop '{}' from type {}",
@@ -317,6 +457,7 @@ impl TypeUtils {
                 )));
             }
         };
+        checked_datum(player, symbols, &result)?;
         Ok(result)
     }
 
@@ -325,15 +466,17 @@ impl TypeUtils {
         prop_key_ref: &DatumRef,
         value_ref: &DatumRef,
         player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
     ) -> Result<(), ScriptError> {
-        let datum_type = player.get_datum(datum_ref).type_enum();
+        let datum_type = checked_datum(player, symbols, datum_ref)?.type_enum();
         match datum_type {
             DatumType::PropList => {
-                PropListUtils::set_prop(datum_ref, prop_key_ref, value_ref, player, false)
+                PropListUtils::set_prop(datum_ref, prop_key_ref, value_ref, player, symbols, false)
             }
             DatumType::List => {
-                let position = player.get_datum(prop_key_ref).int_value()?;
+                let position = checked_datum(player, symbols, prop_key_ref)?.int_value()?;
                 let index = position - 1;
+                checked_datum(player, symbols, value_ref)?;
                 let (_, list, _) = player.get_datum_mut(datum_ref).to_list_mut().unwrap();
                 if index < 0 {
                     return Err(ScriptError::new(format!("Index out of bounds: {index}")));
@@ -347,12 +490,12 @@ impl TypeUtils {
                 Ok(())
             }
             DatumType::Rect => {
-                let position = player.get_datum(prop_key_ref).int_value()?;
+                let position = checked_datum(player, symbols, prop_key_ref)?.int_value()?;
                 let index = (position - 1) as usize;
                 if index >= 4 {
                     return Err(ScriptError::new(format!("Rect index out of bounds: {position}")));
                 }
-                let new_val = player.get_datum(value_ref).clone();
+                let new_val = checked_datum(player, symbols, value_ref)?.clone();
                 let (component_val, is_float) = Datum::datum_to_inline_component(&new_val)?;
                 let (vals, flags) = player.get_datum_mut(datum_ref).to_rect_inline_mut()?;
                 vals[index] = component_val;
@@ -360,9 +503,10 @@ impl TypeUtils {
                 Ok(())
             }
             _ => {
+                let formatted_key = format_datum(prop_key_ref, symbols, player)?;
                 warn!(
                     "⚠️ Cannot set sub-prop `{}` on prop of type {} (ignored)",
-                    format_datum(prop_key_ref, player),
+                    formatted_key,
                     datum_type.type_str()
                 );
                 Ok(())
@@ -371,10 +515,93 @@ impl TypeUtils {
     }
 }
 
+/// Resolve a datum through the context-owned allocator and reject handles or
+/// direct symbols owned by another session before a synchronous type handler
+/// consumes the value.  Ordinary type/coercion failures remain the caller's
+/// existing fallback behavior.
+fn checked_datum<'a>(
+    player: &'a DirPlayer,
+    symbols: &SymbolTable,
+    datum_ref: &DatumRef,
+) -> Result<&'a Datum, ScriptError> {
+    let datum = match datum_ref {
+        DatumRef::Void => &Datum::Void,
+        _ => player
+            .allocator
+            .try_get_datum(datum_ref)
+            .ok_or_else(|| {
+                ScriptError::new_code(
+                    crate::player::ScriptErrorCode::InvalidReference,
+                    format!("invalid datum reference {datum_ref}"),
+                )
+            })?,
+    };
+    crate::player::compare::validate_direct_symbol_fields(datum, symbols)?;
+    Ok(datum)
+}
+
+fn get_script_instance_prop_explicit(
+    player: &mut DirPlayer,
+    symbols: &mut SymbolTable,
+    datum_ref: &DatumRef,
+    args: &Vec<DatumRef>,
+) -> Result<DatumRef, ScriptError> {
+    let prop_key = checked_datum(player, symbols, args.first().ok_or_else(|| {
+        ScriptError::new("get_a_prop requires a property name".to_owned())
+    })?)?;
+    let prop_name = match prop_key {
+        Datum::Symbol(name) => name.clone(),
+        _ => {
+            let prop_text = prop_key.string_value(symbols)?;
+            symbols.intern(&prop_text)
+        }
+    };
+    let instance_ref = checked_datum(player, symbols, datum_ref)?
+        .to_script_instance_ref()?
+        .clone();
+    let prop_ref = crate::player::script::script_get_prop_opt(
+        player,
+        symbols,
+        &instance_ref,
+        prop_name,
+    )?
+    .unwrap_or(DatumRef::Void);
+    checked_datum(player, symbols, &prop_ref)?;
+    Ok(prop_ref)
+}
+
 impl TypeHandlers {
-    pub fn objectp(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let obj = player.get_datum(&args[0]);
+    /// Owner-bound constructor for the native Multiuser/Curl subset. The
+    /// legacy async `new` entrypoint remains for script/cast construction and
+    /// external plugin loading; session-owned dispatch can use this method to
+    /// construct an Xtra without consulting process-global managers.
+    pub(crate) fn new_explicit(
+        runtime: &mut ExecutionContext<'_>,
+        args: &[DatumRef],
+    ) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
+            let subject_ref = args
+                .first()
+                .ok_or_else(|| ScriptError::new("new requires an object type".to_owned()))?;
+            let subject = checked_datum(player, symbols, subject_ref)?.clone();
+            let Datum::Xtra(xtra_name) = subject else {
+                return Err(ScriptError::new(
+                    "owner-bound Xtra construction requires an Xtra factory".to_owned(),
+                ));
+            };
+            let id = crate::player::xtra::manager::create_xtra_instance_explicit(
+                player,
+                symbols,
+                &xtra_name,
+                &args[1..],
+            )?;
+            Ok(player.alloc_datum(Datum::XtraInstance(xtra_name, id)))
+        })
+    }
+
+    pub fn objectp(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
+            let obj = checked_datum(player, symbols, &args[0])?;
             let is_object = match obj {
                 Datum::Void => false,
                 Datum::Float(_) => false,
@@ -387,9 +614,9 @@ impl TypeHandlers {
         })
     }
 
-    pub fn voidp(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let obj = player.get_datum(&args[0]);
+    pub fn voidp(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
+            let obj = checked_datum(player, symbols, &args[0])?;
             let is_void = match obj {
                 Datum::Void => true,
                 _ => false,
@@ -398,9 +625,9 @@ impl TypeHandlers {
         })
     }
 
-    pub fn listp(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let obj = player.get_datum(&args[0]);
+    pub fn listp(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
+            let obj = checked_datum(player, symbols, &args[0])?;
             let is_list = match obj {
                 Datum::List(..) => true,
                 Datum::PropList(..) => true,
@@ -410,9 +637,9 @@ impl TypeHandlers {
         })
     }
 
-    pub fn symbolp(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let obj = player.get_datum(&args[0]);
+    pub fn symbolp(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
+            let obj = checked_datum(player, symbols, &args[0])?;
             let is_symbol = match obj {
                 Datum::Symbol(_) => true,
                 _ => false,
@@ -421,9 +648,9 @@ impl TypeHandlers {
         })
     }
 
-    pub fn stringp(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let obj = player.get_datum(&args[0]);
+    pub fn stringp(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
+            let obj = checked_datum(player, symbols, &args[0])?;
             let is_string = match obj {
                 Datum::String(_) => true,
                 Datum::StringChunk(..) => true,
@@ -433,9 +660,9 @@ impl TypeHandlers {
         })
     }
 
-    pub fn integerp(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let obj = player.get_datum(&args[0]);
+    pub fn integerp(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
+            let obj = checked_datum(player, symbols, &args[0])?;
             let is_integer = match obj {
                 Datum::Int(_) => true,
                 _ => false,
@@ -444,9 +671,9 @@ impl TypeHandlers {
         })
     }
 
-    pub fn floatp(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let obj = player.get_datum(&args[0]);
+    pub fn floatp(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
+            let obj = checked_datum(player, symbols, &args[0])?;
             let is_float = match obj {
                 Datum::Float(_) => true,
                 _ => false,
@@ -455,10 +682,10 @@ impl TypeHandlers {
         })
     }
 
-    pub async fn value(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        let eval_expr = reserve_player_mut(|player| {
-            let datum = player.get_datum(&args[0]);
-            match datum {
+    pub fn value(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let eval_expr = runtime.with_player_and_symbols(|player, symbols| -> Result<_, ScriptError> {
+            let datum = checked_datum(player, symbols, &args[0])?;
+            let value = match datum {
                 Datum::String(s) => Some(s.clone()),
                 // StringChunk: produce the chunk's resolved text and
                 // parse that as Lingo, same as a plain string. Habbo
@@ -468,11 +695,12 @@ impl TypeHandlers {
                 // unchanged and `[1]` then errored with
                 // "No handler getAt for string chunk datum".
                 Datum::StringChunk(..) => {
-                    datum.string_value().ok()
+                    datum.string_value(symbols).ok()
                 },
                 _ => None,
-            }
-        });
+            };
+            Ok(value)
+        })?;
         match eval_expr {
             Some(s) => {
                 // Match the string-property `.value` cleanup — Coke Studios'
@@ -532,9 +760,7 @@ impl TypeHandlers {
                 // "Cannot get int property id". `is_expected_value_retry_fragment`
                 // below lists "]" as an expected fragment for the same reason.
                 if s.trim().is_empty() {
-                    return reserve_player_mut(|player| {
-                        Ok(player.alloc_datum(Datum::Int(0)))
-                    });
+                    return Ok(runtime.player.alloc_datum(Datum::Int(0)));
                 }
                 // TEMP diagnostic: log EVERY value() call that looks like a
                 // Lingo prop-list/list so we can confirm whether the Coke
@@ -544,7 +770,9 @@ impl TypeHandlers {
                     let t = s.trim_start();
                     t.starts_with("[#") || t.starts_with("[")
                 };
-                match eval_lingo_expr_runtime(cleaned.clone()).await {
+                match runtime.with_player_and_symbols(|player, symbols| {
+                    eval_lingo_expr_static(cleaned.clone(), player, symbols)
+                }) {
                     Ok(datum_ref) => {
                         if is_list_or_proplist_input {
                             debug!(
@@ -573,22 +801,29 @@ impl TypeHandlers {
         Ok(DatumRef::Void)
     }
 
-    pub fn ilk(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let obj = player.get_datum(&args[0]);
-            let ilk_type = args.get(1).map(|d| player.get_datum(d));
-
-            let result_datum = if let Some(query) = ilk_type {
-                let query = match query {
-                    Datum::Symbol(s) => *s,
-                    _ => Symbol::from_str(&query.string_value()?)
+    pub fn ilk(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let result_datum = {
+            let player = &*runtime.player;
+            let obj = checked_datum(player, &*runtime.symbols, &args[0])?;
+            if let Some(query_ref) = args.get(1) {
+                let query_symbol = if let Datum::Symbol(symbol) =
+                    checked_datum(player, &*runtime.symbols, query_ref)?
+                {
+                    symbol.clone()
+                } else {
+                    let text = checked_datum(player, &*runtime.symbols, query_ref)?
+                        .string_value(&*runtime.symbols)?;
+                    // `ilk()` compares a string query after interning it in
+                    // the session table, preserving symbol identity for
+                    // subsequent builtin checks.
+                    runtime.symbols.intern(&text)
                 };
-                datum_bool(TypeUtils::is_datum_ilk(&obj, query)?)
+                datum_bool(TypeUtils::is_datum_ilk(obj, query_symbol)?)
             } else {
-                Datum::Symbol(Symbol::builtin(TypeUtils::get_datum_ilk(&obj)?))
-            };
-            Ok(player.alloc_datum(result_datum))
-        })
+                Datum::Symbol(Symbol::builtin(TypeUtils::get_datum_ilk(obj)?))
+            }
+        };
+        Ok(runtime.player.alloc_datum(result_datum))
     }
 
     pub(crate) fn integer_impl(input: &str) -> Option<i32> {
@@ -716,9 +951,9 @@ impl TypeHandlers {
         result.parse::<f64>().ok()
     }
 
-    pub fn integer(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let value = player.get_datum(&args[0]);
+    pub fn integer(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
+            let value = checked_datum(player, symbols, &args[0])?;
             let result = match value {
                 Datum::Int(i) => Datum::Int(*i),
                 Datum::Float(f) => Datum::Int(f.round() as i32),
@@ -778,9 +1013,9 @@ impl TypeHandlers {
         })
     }
 
-    pub fn float(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let value = player.get_datum(&args[0]);
+    pub fn float(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
+            let value = checked_datum(player, symbols, &args[0])?;
             let result = match value {
                 Datum::Float(f) => Datum::Float(*f),
                 Datum::Int(i) => Datum::Float(*i as f64),
@@ -822,67 +1057,65 @@ impl TypeHandlers {
         })
     }
 
-    pub fn symbol(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let symbol_name = player.get_datum(&args[0]);
-            let result = if let Datum::Symbol(_) = symbol_name {
-                symbol_name.clone()
-            } else if let Datum::Void = symbol_name {
-                Datum::Symbol(Symbol::builtin(BuiltInSymbol::Void))
-            } else if symbol_name.is_string() {
-                let str_value = symbol_name.string_value()?;
-                // Director's symbol() trims whitespace from the input string
-                let trimmed = str_value.trim();
-                if trimmed.is_empty() {
-                    Datum::Symbol(Symbol::builtin(BuiltInSymbol::EmptyString))
-                } else if trimmed.starts_with("#") {
-                    Datum::Symbol(Symbol::from_str(&trimmed[1..]))
-                } else {
-                    Datum::Symbol(Symbol::from_str(trimmed))
-                }
+    pub fn symbol(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        let symbol_name = checked_datum(runtime.player, &*runtime.symbols, &args[0])?;
+        let result = if let Datum::Symbol(symbol) = symbol_name {
+            Datum::Symbol(symbol.clone())
+        } else if let Datum::Void = symbol_name {
+            Datum::Symbol(Symbol::builtin(BuiltInSymbol::Void))
+        } else if symbol_name.is_string() {
+            let str_value = symbol_name.string_value(&*runtime.symbols)?;
+            let trimmed = str_value.trim();
+            let symbol = if trimmed.is_empty() {
+                Symbol::builtin(BuiltInSymbol::EmptyString)
+            } else if trimmed.starts_with("#") {
+                runtime.symbols.intern(&trimmed[1..])
             } else {
-                return Err(ScriptError::new(format!(
-                    "Cannot convert datum of type {} to symbol",
-                    symbol_name.type_str()
-                )));
+                runtime.symbols.intern(trimmed)
             };
-            Ok(player.alloc_datum(result))
-        })
+            Datum::Symbol(symbol)
+        } else {
+            return Err(ScriptError::new(format!(
+                "Cannot convert datum of type {} to symbol",
+                symbol_name.type_str()
+            )));
+        };
+        Ok(runtime.player.alloc_datum(result))
     }
 
-    pub fn point(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn point(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
             if args.len() != 2 {
                 return Err(ScriptError::new("point() requires exactly 2 arguments".to_string()));
             }
 
-            let x = player.get_datum(&args[0]).clone();
-            let y = player.get_datum(&args[1]).clone();
+            let x = checked_datum(player, symbols, &args[0])?.clone();
+            let y = checked_datum(player, symbols, &args[1])?.clone();
             let point = Datum::build_point(&x, &y)?;
             Ok(player.alloc_datum(point))
         })
     }
 
-    pub fn rect(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn rect(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
             if args.len() != 2 && args.len() != 4 {
                 return Err(ScriptError::new("rect() requires 2 or 4 arguments".to_string()));
             }
 
             // Case 1: rect(left, top, right, bottom)
-            if args.len() == 4 && player.get_datum(&args[0]).is_number() {
-                let l = player.get_datum(&args[0]).clone();
-                let t = player.get_datum(&args[1]).clone();
-                let r = player.get_datum(&args[2]).clone();
-                let b = player.get_datum(&args[3]).clone();
+            if args.len() == 4 && checked_datum(player, symbols, &args[0])?.is_number() {
+                let l = checked_datum(player, symbols, &args[0])?.clone();
+                let t = checked_datum(player, symbols, &args[1])?.clone();
+                let r = checked_datum(player, symbols, &args[2])?.clone();
+                let b = checked_datum(player, symbols, &args[3])?.clone();
                 let rect = Datum::build_rect(&l, &t, &r, &b)?;
                 return Ok(player.alloc_datum(rect));
             }
 
             // Case 2: rect(Point, Point)
             if args.len() == 2 {
-                let (p1, f1) = player.get_datum(&args[0]).to_point_inline()?;
-                let (p2, f2) = player.get_datum(&args[1]).to_point_inline()?;
+                let (p1, f1) = checked_datum(player, symbols, &args[0])?.to_point_inline()?;
+                let (p2, f2) = checked_datum(player, symbols, &args[1])?.to_point_inline()?;
 
                 let flags = (if Datum::inline_is_float(f1, 0) { 1u8 } else { 0 })
                     | (if Datum::inline_is_float(f1, 1) { 2u8 } else { 0 })
@@ -896,10 +1129,10 @@ impl TypeHandlers {
         })
     }
 
-    pub fn cursor(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn cursor(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
             if args.len() == 1 {
-                let arg = player.get_datum(&args[0]);
+                let arg = checked_datum(player, symbols, &args[0])?;
                 if arg.is_int() {
                     let cursor_val = arg.int_value()?;
                     player.cursor = CursorRef::System(cursor_val);
@@ -914,7 +1147,7 @@ impl TypeHandlers {
                     let list = arg.to_list()?;
                     let mut members = vec![];
                     for item in list {
-                        let datum = player.get_datum(item);
+                        let datum = checked_datum(player, symbols, item)?;
                         let slot = match datum {
                             Datum::CastMember(member_ref) => {
                                 CastMemberRefHandlers::get_cast_slot_number(
@@ -956,102 +1189,112 @@ impl TypeHandlers {
         })
     }
 
-    pub async fn new(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        let obj_type = reserve_player_mut(|player| {
-            let obj = player.get_datum(&args[0]);
-            obj.type_enum()
-        });
-        let result = match obj_type {
-            DatumType::Symbol => reserve_player_mut(|player| {
-                let s = player.get_datum(&args[0]).string_value()?;
-                let (cast_num, slot) = if args.len() > 1 {
-                    match player.get_datum(&args[1]) {
-                        Datum::CastLib(cast_num) => (*cast_num, None),
-                        Datum::CastMember(member_ref) => {
-                            let cn = if member_ref.cast_lib > 0 { member_ref.cast_lib as u32 } else { 1 };
-                            let slot = if member_ref.cast_member > 0 { Some(member_ref.cast_member as u32) } else { None };
-                            (cn, slot)
+    pub fn prepare_new(
+        runtime: &mut ExecutionContext<'_>,
+        args: &[DatumRef],
+    ) -> Result<TypeNewPlan, ScriptError> {
+        if args.is_empty() {
+            return Err(ScriptError::new("new requires at least one argument".to_owned()));
+        }
+        runtime.with_player_and_symbols(|player, symbols| {
+            let subject = checked_datum(player, symbols, &args[0])?.clone();
+            match subject {
+                Datum::Symbol(_) => {
+                    let name = subject.string_value(symbols)?;
+                    let (cast_num, slot) = if let Some(location) = args.get(1) {
+                        match checked_datum(player, symbols, location)? {
+                            Datum::CastLib(cast_num) => (*cast_num, None),
+                            Datum::CastMember(member_ref) => (
+                                if member_ref.cast_lib > 0 { member_ref.cast_lib as u32 } else { 1 },
+                                (member_ref.cast_member > 0).then_some(member_ref.cast_member as u32),
+                            ),
+                            other => return Err(ScriptError::new(format!(
+                                "Unsupported new() location type: {}", other.type_str(),
+                            ))),
                         }
-                        other => Err(ScriptError::new(format!(
-                            "Unsupported new() location type: {}",
-                            other.type_str()
-                        )))?,
+                    } else {
+                        (1, None)
+                    };
+                    let cast = player.movie.cast_manager.get_cast_mut(cast_num);
+                    let member_slot = slot.unwrap_or_else(|| cast.first_free_member_id());
+                    if member_slot == 0 {
+                        return Err(ScriptError::new(format!(
+                            "new({}): cast library {} has no free member slots", name, cast_num,
+                        )));
                     }
-                } else {
-                    (1, None)
-                };
-                let cast = player.movie.cast_manager.get_cast_mut(cast_num);
-                let member_slot = slot.unwrap_or_else(|| cast.first_free_member_id());
-                // Slot 0 is not a member. Creating one there yields a `.number`
-                // with a zero member index, which collides with every other
-                // slot-0 member in the same cast lib and silently corrupts any
-                // name -> number map a movie keeps (see `first_free_member_id`).
-                // Fail loudly instead.
-                if member_slot == 0 {
-                    return Err(ScriptError::new(format!(
-                        "new({}): cast library {} has no free member slots",
-                        s, cast_num
-                    )));
+                    let member_ref = cast.create_member_at(
+                        member_slot,
+                        &name,
+                        &mut player.bitmap_manager,
+                        symbols,
+                    )?;
+                    player.movie.cast_manager.invalidate_member_name_cache();
+                    Ok(TypeNewPlan::Complete(player.alloc_datum(Datum::CastMember(member_ref))))
                 }
-                let member_ref = cast.create_member_at(
-                    member_slot,
-                    &s,
-                    &mut player.bitmap_manager,
-                )?;
-                player.movie.cast_manager.invalidate_member_name_cache();
-                Ok(player.alloc_datum(Datum::CastMember(member_ref)))
-            }),
-            DatumType::ScriptRef => {
-                Ok(
-                    player_call_datum_handler(&args[0], Symbol::builtin(BuiltInSymbol::New), &args[1..].to_vec())
-                        .await?,
-                )
+                Datum::ScriptRef(script_ref) => {
+                    use crate::player::handlers::datum_handlers::script::{
+                        ScriptConstructorPlan, ScriptDatumHandlers,
+                    };
+                    let plan = ScriptDatumHandlers::prepare_constructor(
+                        player,
+                        symbols,
+                        &args[0],
+                        &args[1..],
+                        BuiltInSymbol::New,
+                    )?;
+                    Ok(match plan {
+                        ScriptConstructorPlan::Complete(result) => TypeNewPlan::Complete(result),
+                        ScriptConstructorPlan::Child { receiver, handler_ref, args, fallback } =>
+                            TypeNewPlan::ScriptChild { receiver, handler_ref, args, fallback },
+                    })
+                }
+                Datum::Xtra(name) => Ok(TypeNewPlan::Xtra {
+                    name,
+                    args: args.to_vec(),
+                }),
+                other => Err(ScriptError::new(format!(
+                    "Unsupported new call with subject type: {}", other.type_enum().type_str(),
+                ))),
             }
-            DatumType::Xtra => {
-                let xtra_name = reserve_player_ref(|player| {
-                    player
-                        .get_datum(&args[0])
-                        .to_xtra_name()
-                        .unwrap()
-                        .to_owned()
-                });
-                let result_id = create_xtra_instance_async(&xtra_name, args).await?;
-                reserve_player_mut(|player| {
-                    Ok(player.alloc_datum(Datum::XtraInstance(xtra_name, result_id)))
-                })
-            }
-            _ => Err(ScriptError::new(format!(
-                "Unsupported new call with subject type: {}",
-                obj_type.type_str()
-            ))),
-        }?;
-        Ok(result)
+        })
     }
 
-    pub fn timeout(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn finish_script_new(
+        runtime: &mut ExecutionContext<'_>,
+        fallback: DatumRef,
+        result: DatumRef,
+    ) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
+            crate::player::handlers::datum_handlers::script::ScriptDatumHandlers::finish_constructor(
+                player, symbols, fallback, result,
+            )
+        })
+    }
+
+    pub fn timeout(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
             if args.is_empty() {
                 // Called without arguments: return the timeout factory
                 Ok(player.alloc_datum(Datum::TimeoutFactory))
             } else {
                 // Called with a name argument: return a timeout reference
-                let name = player.get_datum(&args[0]).string_value()?;
+                let name = checked_datum(player, symbols, &args[0])?.string_value(symbols)?;
                 Ok(player.alloc_datum(Datum::TimeoutRef(name)))
             }
         })
     }
 
-    pub fn rgb(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn rgb(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
             if args.len() == 3 {
-                let r = player.get_datum(&args[0]).int_value()? as u8;
-                let g = player.get_datum(&args[1]).int_value()? as u8;
-                let b = player.get_datum(&args[2]).int_value()? as u8;
+                let r = checked_datum(player, symbols, &args[0])?.int_value()? as u8;
+                let g = checked_datum(player, symbols, &args[1])?.int_value()? as u8;
+                let b = checked_datum(player, symbols, &args[2])?.int_value()? as u8;
                 Ok(player.alloc_datum(Datum::ColorRef(ColorRef::Rgb(r, g, b))))
             } else {
-                let first_arg = player.get_datum(&args[0]);
+                let first_arg = checked_datum(player, symbols, &args[0])?;
                 if first_arg.is_string() {
-                    let hex_str = first_arg.string_value()?.replace("#", "");
+                    let hex_str = first_arg.string_value(symbols)?.replace("#", "");
                     let r_str = if hex_str.len() >= 2 { &hex_str[0..2] } else { "00" };
                     let g_str = if hex_str.len() >= 4 { &hex_str[2..4] } else { "00" };
                     let b_str = if hex_str.len() >= 6 { &hex_str[4..6] } else { "00" };
@@ -1084,38 +1327,38 @@ impl TypeHandlers {
     /// Currently only `#adjustcolorfilter` is honored by `applyFilter`; the
     /// others are accepted (so scripts don't error out building them) but the
     /// applyFilter step is a no-op for them and logs a warning.
-    pub fn filter(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            if args.is_empty() {
-                return Err(ScriptError::new("filter() requires a filter symbol".to_string()));
-            }
-            // First arg is the filter type symbol.
-            let kind_sym = match player.get_datum(&args[0]) {
-                Datum::Symbol(s) => s.to_string(),
-                Datum::String(s) => s.to_string(),
-                _ => return Err(ScriptError::new(
-                    "filter() first argument must be a symbol".to_string(),
-                )),
-            };
-
+    pub fn filter(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        if args.is_empty() {
+            return Err(ScriptError::new("filter() requires a filter symbol".to_string()));
+        }
+        let kind_symbol = match checked_datum(runtime.player, &*runtime.symbols, &args[0])? {
+            Datum::Symbol(symbol) => symbol.clone(),
+            Datum::String(name) => runtime.symbols.intern(name),
+            _ => return Err(ScriptError::new(
+                "filter() first argument must be a symbol".to_string(),
+            )),
+        };
+        runtime.with_player_and_symbols(|player, symbols| {
             // Second arg (optional): property list with filter-specific params.
             let mut props: VecDeque<(DatumRef, DatumRef)> = VecDeque::new();
 
             // Insert #filterType first.
             let key_type = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::FilterType)));
-            let val_type = player.alloc_datum(Datum::Symbol(Symbol::from_str(&kind_sym)));
+            let val_type = player.alloc_datum(Datum::Symbol(kind_symbol.clone()));
             props.push_back((key_type, val_type));
 
             if args.len() > 1 {
                 // Clone the user PropList entries verbatim. We don't validate
                 // property names against the filter kind — Director's `filter()`
                 // is similarly permissive and just stashes whatever it gets.
-                let user_props_owned = match player.get_datum(&args[1]) {
+                let user_props_owned = match checked_datum(player, symbols, &args[1])? {
                     Datum::PropList(items, _) => Some(items.clone()),
                     _ => None,
                 };
                 if let Some(items) = user_props_owned {
                     for (k, v) in items.into_iter() {
+                        checked_datum(player, symbols, &k)?;
+                        checked_datum(player, symbols, &v)?;
                         props.push_back((k, v));
                     }
                 } else {
@@ -1141,23 +1384,23 @@ impl TypeHandlers {
     /// which expects a list-of-lists for the elevation matrix, and lets the
     /// `setVal`/`getVal` matrix methods reuse the existing list-mutation
     /// machinery.
-    pub fn new_matrix(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn new_matrix(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
             if args.len() < 2 {
                 return Err(ScriptError::new(
                     "newMatrix requires at least 2 arguments (rows, columns)".to_string(),
                 ));
             }
-            let rows = player.get_datum(&args[0]).int_value()?.max(0) as usize;
-            let cols = player.get_datum(&args[1]).int_value()?.max(0) as usize;
+            let rows = checked_datum(player, symbols, &args[0])?.int_value()?.max(0) as usize;
+            let cols = checked_datum(player, symbols, &args[1])?.int_value()?.max(0) as usize;
 
             // Optional 3rd arg: flat row-major list of values.
             let init_values: Option<Vec<f64>> = if args.len() > 2 {
-                match player.get_datum(&args[2]) {
+                match checked_datum(player, symbols, &args[2])? {
                     Datum::List(_, items, _) => {
                         let mut vals = Vec::with_capacity(items.len());
                         for it in items.iter() {
-                            vals.push(player.get_datum(it).float_value().unwrap_or(0.0));
+                            vals.push(checked_datum(player, symbols, it)?.float_value().unwrap_or(0.0));
                         }
                         Some(vals)
                     }
@@ -1204,12 +1447,15 @@ impl TypeHandlers {
     /// already decode via `decode_desc` (List form). The 3rd arg may be
     /// `void` when constraining a body to a fixed point in world space
     /// (chapter 15:84768).
-    pub fn constraint_desc(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn constraint_desc(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
             if args.len() < 7 {
                 return Err(ScriptError::new(
                     "ConstraintDesc requires (name, A, B, ptA, ptB, stiffness, damping)".to_string(),
                 ));
+            }
+            for arg in args.iter().take(7) {
+                checked_datum(player, symbols, arg)?;
             }
             // Just bundle the args into a List — the create* handlers decode
             // them. We could validate types up front, but Director itself is
@@ -1220,21 +1466,24 @@ impl TypeHandlers {
         })
     }
 
-    pub fn palette_index(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let color = player.get_datum(&args[0]).int_value()?;
+    pub fn palette_index(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
+            let color = checked_datum(player, symbols, &args[0])?.int_value()?;
             Ok(player.alloc_datum(Datum::ColorRef(ColorRef::PaletteIndex(color as u8))))
         })
     }
 
-    pub fn list(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn list(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
+            for arg in args {
+                checked_datum(player, symbols, arg)?;
+            }
             Ok(player.alloc_datum(Datum::List(DatumType::List, VecDeque::from(args.clone()), false)))
         })
     }
 
-    pub fn image(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn image(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
             // TODO: Palette ref can be on args[3], need to handle it
             if args.len() < 3 {
                 return Err(ScriptError::new(
@@ -1242,8 +1491,8 @@ impl TypeHandlers {
                 ));
             }
 
-            let width_datum = player.get_datum(&args[0]);
-            let height_datum = player.get_datum(&args[1]);
+            let width_datum = checked_datum(player, symbols, &args[0])?;
+            let height_datum = checked_datum(player, symbols, &args[1])?;
 
             let width = match width_datum {
                 Datum::Int(i) => *i as u16,
@@ -1269,11 +1518,11 @@ impl TypeHandlers {
                 }
             };
 
-            let bit_depth = player.get_datum(&args[2]).int_value()? as u8;
+            let bit_depth = checked_datum(player, symbols, &args[2])?.int_value()? as u8;
             let mut palette_ref = PaletteRef::BuiltIn(get_system_default_palette());
             let mut alpha_depth = 0;
             if args.len() >= 4 {
-                let arg3 = player.get_datum(&args[3]);
+                let arg3 = checked_datum(player, symbols, &args[3])?;
                 match arg3.type_enum() {
                     DatumType::Int => {
                         alpha_depth = arg3.int_value()? as u8;
@@ -1281,7 +1530,9 @@ impl TypeHandlers {
                     DatumType::Symbol => {
                         palette_ref = match arg3 {
                             Datum::Symbol(s) => {
-                                PaletteRef::BuiltIn(BuiltInPalette::from_symbol(*s).unwrap())
+                                PaletteRef::BuiltIn(BuiltInPalette::from_symbol(s.clone(), symbols)?.ok_or_else(|| {
+                                    ScriptError::new("image() palette symbol is not a built-in palette".to_string())
+                                })?)
                             }
                             _ => {
                                 return Err(ScriptError::new(format!(
@@ -1348,9 +1599,9 @@ impl TypeHandlers {
         })
     }
 
-    pub fn abs(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let value = player.get_datum(&args[0]);
+    pub fn abs(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
+            let value = checked_datum(player, symbols, &args[0])?;
             let result = match value {
                 Datum::Int(i) => Datum::Int(i.abs()),
                 Datum::Float(f) => Datum::Float(f.abs()),
@@ -1371,7 +1622,7 @@ impl TypeHandlers {
         })
     }
 
-    pub fn xtra(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn xtra(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         // `xtra("name")` returns a factory reference; the real
         // registration check happens at `new(xtra "name")` time, so an
         // unknown name doesn't error here. That keeps the door open for
@@ -1379,7 +1630,7 @@ impl TypeHandlers {
         // otherwise be short-circuited by this validator. Lingo movies
         // that mis-spell an xtra name surface the error from `new()`
         // instead, with a clearer "Xtra X not found" message.
-        reserve_player_mut(|player| {
+        runtime.with_player_and_symbols(|player, symbols| {
             // `xtra(xtraNameOrNum)` takes "a string that specifies the name of
             // the Xtra to return, or an integer that specifies the index
             // position of the Xtra to return" (Director 11.5 Scripting
@@ -1387,10 +1638,11 @@ impl TypeHandlers {
             // `repeat with i = 1 to the number of xtras` walks; without it the
             // integer would fall through to string_value() below and yield a
             // bogus Xtra literally named "3".
-            let arg = player.get_datum(&args[0]).clone();
+            let arg_ref = args.first().ok_or_else(|| ScriptError::new("xtra requires a name or index".to_owned()))?;
+            let arg = checked_datum(player, symbols, arg_ref)?.clone();
             if matches!(arg, Datum::Int(_) | Datum::Float(_)) {
                 let index = arg.int_value()?;
-                let names = crate::player::xtra::manager::get_registered_xtra_names();
+                let names = get_registered_xtra_names(player);
                 if index < 1 || index as usize > names.len() {
                     // "A reference to an empty object is returned if the
                     // specified Xtra is not found" — VOID is that empty
@@ -1402,7 +1654,7 @@ impl TypeHandlers {
                 return Ok(player.alloc_datum(Datum::Xtra(name)));
             }
 
-            let xtra_name = arg.string_value()?;
+            let xtra_name = arg.string_value(symbols)?;
             let xtra_name = xtra_name.trim().replace(".x32", "");
 
             // Validate xtra name format: [a-zA-Z0-9_-](\.x32)?
@@ -1415,7 +1667,7 @@ impl TypeHandlers {
                     xtra_name
                 )));
             }
-            if !is_xtra_registered(&xtra_name) {
+            if !is_xtra_registered(player, &xtra_name) {
                 debug!(
                     "Xtra '{}' not yet registered — deferring lookup to new() / on-demand load",
                     xtra_name
@@ -1425,14 +1677,14 @@ impl TypeHandlers {
         })
     }
 
-    pub fn union(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn union(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
             if args.len() != 2 {
                 return Err(ScriptError::new("Union requires 2 arguments".to_string()));
             }
 
-            let (left_vals, _lf) = player.get_datum(&args[0]).to_rect_inline()?;
-            let (right_vals, _rf) = player.get_datum(&args[1]).to_rect_inline()?;
+            let (left_vals, _lf) = checked_datum(player, symbols, &args[0])?.to_rect_inline()?;
+            let (right_vals, _rf) = checked_datum(player, symbols, &args[1])?.to_rect_inline()?;
 
             let left_tuple = (left_vals[0] as i32, left_vals[1] as i32, left_vals[2] as i32, left_vals[3] as i32);
             let right_tuple = (right_vals[0] as i32, right_vals[1] as i32, right_vals[2] as i32, right_vals[3] as i32);
@@ -1444,29 +1696,29 @@ impl TypeHandlers {
         })
     }
 
-    pub fn bit_xor(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn bit_xor(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
             if args.len() != 2 {
                 return Err(ScriptError::new(
                     "Bitwise XOR requires 2 arguments".to_string(),
                 ));
             }
-            let left = player.get_datum(&args[0]).int_value()?;
-            let right = player.get_datum(&args[1]).int_value()?;
+            let left = checked_datum(player, symbols, &args[0])?.int_value()?;
+            let right = checked_datum(player, symbols, &args[1])?.int_value()?;
 
             Ok(player.alloc_datum(Datum::Int(left ^ right)))
         })
     }
 
     /// vector() or vector(x, y, z)
-    pub fn vector(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn vector(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
             let (x, y, z) = match args.len() {
                 0 => (0.0, 0.0, 0.0),
                 3 => (
-                    player.get_datum(&args[0]).to_float()? as f64,
-                    player.get_datum(&args[1]).to_float()? as f64,
-                    player.get_datum(&args[2]).to_float()? as f64,
+                    checked_datum(player, symbols, &args[0])?.to_float()? as f64,
+                    checked_datum(player, symbols, &args[1])?.to_float()? as f64,
+                    checked_datum(player, symbols, &args[2])?.to_float()? as f64,
                 ),
                 _ => {
                     return Err(ScriptError::new(
@@ -1478,8 +1730,8 @@ impl TypeHandlers {
         })
     }
 
-    pub fn transform3d(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn transform3d(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
             // transform() with no args returns identity matrix
             if args.is_empty() {
                 return Ok(player.alloc_datum(Datum::transform3d([
@@ -1501,8 +1753,8 @@ impl TypeHandlers {
     /// The locale-dependent format is the point of the entry, so defer to the
     /// host's locale (the browser's) rather than hardcoding a US layout — that
     /// is the closest analogue to Director reading the OS time settings.
-    pub fn time(_args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn time(runtime: &mut ExecutionContext<'_>, _args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
             // Director returns the system SHORT time — hours and minutes only.
             // Measured against Director on this machine: `21:23`, where our
             // bare toLocaleTimeString gave `21:20:15`. Ask for 2-digit hour and
@@ -1536,13 +1788,13 @@ impl TypeHandlers {
         })
     }
 
-    pub fn date(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn date(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
             let date_id = player.allocator.get_free_script_instance_id();
             let date_obj = if args.len() >= 3 {
-                let year = player.get_datum(&args[0]).int_value()?;
-                let month = player.get_datum(&args[1]).int_value()?;
-                let day = player.get_datum(&args[2]).int_value()?;
+                let year = checked_datum(player, symbols, &args[0])?.int_value()?;
+                let month = checked_datum(player, symbols, &args[1])?.int_value()?;
+                let day = checked_datum(player, symbols, &args[2])?.int_value()?;
                 let js_date = js_sys::Date::new_0();
                 js_date.set_full_year(year as u32);
                 js_date.set_month((month - 1) as u32);
@@ -1560,33 +1812,35 @@ impl TypeHandlers {
         })
     }
 
-    pub fn color(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn color(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
             match args.len() {
                 1 => {
                     // color(paletteIndex) - single argument is palette index
-                    let index = player.get_datum(&args[0]).int_value()? as u8;
+                    let index = checked_datum(player, symbols, &args[0])?.int_value()? as u8;
                     Ok(player.alloc_datum(Datum::ColorRef(ColorRef::PaletteIndex(index))))
                 }
                 2 => {
                     // color(#rgb, "RRGGBB") or color(#paletteIndex, index)
-                    let first = player.get_datum(&args[0]);
+                    let first = checked_datum(player, symbols, &args[0])?;
                     if let Datum::Symbol(sym) = first {
                         match sym.into_builtin() {
                             Some(BuiltInSymbol::Rgb) => {
-                                let hex_str = player.get_datum(&args[1]).string_value()?.replace("#", "");
+                                let hex_str = checked_datum(player, symbols, &args[1])?.string_value(symbols)?.replace("#", "");
                                 let r = u8::from_str_radix(&hex_str[0..2], 16).unwrap_or(0);
                                 let g = u8::from_str_radix(&hex_str[2..4], 16).unwrap_or(0);
                                 let b = u8::from_str_radix(&hex_str[4..6], 16).unwrap_or(0);
                                 Ok(player.alloc_datum(Datum::ColorRef(ColorRef::Rgb(r, g, b))))
                             }
                             Some(BuiltInSymbol::PaletteIndex) => {
-                                let index = player.get_datum(&args[1]).int_value()? as u8;
+                                let index = checked_datum(player, symbols, &args[1])?.int_value()? as u8;
                                 Ok(player.alloc_datum(Datum::ColorRef(ColorRef::PaletteIndex(index))))
                             }
                             _ => Err(ScriptError::new(format!(
                                 "color(): unknown color type symbol #{}",
-                                sym
+                                symbols
+                                    .display(sym)
+                                    .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
                             ))),
                         }
                     } else {
@@ -1597,16 +1851,16 @@ impl TypeHandlers {
                 }
                 3 => {
                     // color(r, g, b)
-                    let r = player.get_datum(&args[0]).int_value()? as u8;
-                    let g = player.get_datum(&args[1]).int_value()? as u8;
-                    let b = player.get_datum(&args[2]).int_value()? as u8;
+                    let r = checked_datum(player, symbols, &args[0])?.int_value()? as u8;
+                    let g = checked_datum(player, symbols, &args[1])?.int_value()? as u8;
+                    let b = checked_datum(player, symbols, &args[2])?.int_value()? as u8;
                     Ok(player.alloc_datum(Datum::ColorRef(ColorRef::Rgb(r, g, b))))
                 }
                 4 => {
                     // color(#rgb, r, g, b) - first argument is symbol, skip it
-                    let r = player.get_datum(&args[1]).int_value()? as u8;
-                    let g = player.get_datum(&args[2]).int_value()? as u8;
-                    let b = player.get_datum(&args[3]).int_value()? as u8;
+                    let r = checked_datum(player, symbols, &args[1])?.int_value()? as u8;
+                    let g = checked_datum(player, symbols, &args[2])?.int_value()? as u8;
+                    let b = checked_datum(player, symbols, &args[3])?.int_value()? as u8;
                     Ok(player.alloc_datum(Datum::ColorRef(ColorRef::Rgb(r, g, b))))
                 }
                 _ => Err(ScriptError::new(format!(
@@ -1617,13 +1871,13 @@ impl TypeHandlers {
         })
     }
 
-    pub fn power(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn power(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
             if args.len() != 2 {
                 return Err(ScriptError::new("Power requires 2 arguments".to_string()));
             }
-            let base = player.get_datum(&args[0]);
-            let exponent = player.get_datum(&args[1]);
+            let base = checked_datum(player, symbols, &args[0])?;
+            let exponent = checked_datum(player, symbols, &args[1])?;
 
             match (base, exponent) {
                 (Datum::Int(base), Datum::Int(exponent)) => {
@@ -1643,21 +1897,21 @@ impl TypeHandlers {
         })
     }
 
-    pub fn add(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn add(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         if args.len() != 2 {
             return Err(ScriptError::new("Add requires 2 arguments".to_string()));
         }
-        let left_type = reserve_player_ref(|player| player.get_datum(&args[0]).type_enum());
-
+        let left_type = checked_datum(&*runtime.player, &*runtime.symbols, &args[0])?.type_enum();
         if left_type == DatumType::Void {
-            // Operations on void return void
             return Ok(DatumRef::Void);
         }
-
         match left_type {
-            DatumType::List => {
-                ListDatumHandlers::add(args.get(0).unwrap(), &vec![args.get(1).unwrap().clone()])
-            }
+            DatumType::List => ListDatumHandlers::add(
+                &mut *runtime.player,
+                &mut *runtime.symbols,
+                args.get(0).unwrap(),
+                &vec![args.get(1).unwrap().clone()],
+            ),
             _ => Err(ScriptError::new(format!(
                 "Add not supported for {}",
                 left_type.type_str()
@@ -1669,24 +1923,36 @@ impl TypeHandlers {
         Ok(DatumRef::Void)
     }
 
-    pub fn get_a_prop(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn get_a_prop(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         let datum_ref = args.get(0).unwrap();
-        let (datum_type, datum_debug) = reserve_player_mut(|player| {
-            let datum = player.get_datum(&args[0]);
+        let (datum_type, datum_debug) = runtime.with_player_and_symbols(|player, symbols| -> Result<_, ScriptError> {
+            let datum = checked_datum(player, symbols, &args[0])?;
             let debug_str = match datum {
-                Datum::Symbol(s) => format!("#{}", s),
+                Datum::Symbol(s) => format!(
+                    "#{}",
+                    symbols
+                        .display(s)
+                        .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
+                ),
                 Datum::String(s) => format!("\"{}\"", s),
                 Datum::Int(i) => format!("{}", i),
                 _ => format!("{:?}", datum.type_enum()),
             };
-            (datum.type_enum(), debug_str)
-        });
+            Ok((datum.type_enum(), debug_str))
+        })?;
         match datum_type {
             DatumType::PropList => {
-                PropListDatumHandlers::get_a_prop(datum_ref, &vec![args.get(1).unwrap().clone()])
+                runtime.with_player_and_symbols(|player, symbols| {
+                    PropListDatumHandlers::get_a_prop(player, symbols, datum_ref, &vec![args.get(1).unwrap().clone()])
+                })
             }
             DatumType::ScriptInstanceRef => {
-                ScriptInstanceDatumHandlers::get_a_prop(datum_ref, &vec![args.get(1).unwrap().clone()])
+                get_script_instance_prop_explicit(
+                    &mut *runtime.player,
+                    &mut *runtime.symbols,
+                    datum_ref,
+                    &vec![args.get(1).unwrap().clone()],
+                )
             }
             // On a LINEAR list, getaProp(list, n) is an indexed access
             // (1-based), equivalent to getAt — Director treats the second arg
@@ -1694,7 +1960,9 @@ impl TypeHandlers {
             // `getaProp(getaProp(Whom, i), #z)`: the inner call indexes the
             // list-of-proplists by integer, the outer looks up #z.
             DatumType::List => {
-                ListDatumHandlers::get_at(datum_ref, &vec![args.get(1).unwrap().clone()])
+                runtime.with_player_and_symbols(|player, symbols| {
+                    ListDatumHandlers::get_at(player, symbols, datum_ref, &vec![args.get(1).unwrap().clone()])
+                })
             }
             _ => Err(ScriptError::new(format!(
                 "Cannot getaProp prop of type: {} (value: {})",
@@ -1704,14 +1972,14 @@ impl TypeHandlers {
         }
     }
 
-    pub fn min(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn min(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
             if args.len() == 0 {
                 return Ok(player.alloc_datum(Datum::Int(0)));
             }
             let args_vec;
-            let args = if player.get_datum(&args[0]).is_list() {
-                args_vec = Vec::from(player.get_datum(&args[0]).to_list()?.clone());
+            let args = if checked_datum(player, symbols, &args[0])?.is_list() {
+                args_vec = Vec::from(checked_datum(player, symbols, &args[0])?.to_list()?.clone());
                 &args_vec
             } else {
                 args
@@ -1721,19 +1989,19 @@ impl TypeHandlers {
                 return Ok(player.alloc_datum(Datum::Int(0)));
             }
 
-            let sorted_list = sort_datums(args, &player.allocator)?;
+            let sorted_list = sort_datums(args, &player.allocator, symbols)?;
             return Ok(sorted_list.first().unwrap().clone());
         })
     }
 
-    pub fn max(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn max(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
             if args.len() == 0 {
                 return Ok(player.alloc_datum(Datum::Int(0)));
             }
             let args_vec;
-            let args = if player.get_datum(&args[0]).is_list() {
-                args_vec = Vec::from(player.get_datum(&args[0]).to_list()?.clone());
+            let args = if checked_datum(player, symbols, &args[0])?.is_list() {
+                args_vec = Vec::from(checked_datum(player, symbols, &args[0])?.to_list()?.clone());
                 &args_vec
             } else {
                 args
@@ -1743,30 +2011,30 @@ impl TypeHandlers {
                 return Ok(player.alloc_datum(Datum::Int(0)));
             }
 
-            let sorted_list = sort_datums(args, &player.allocator)?;
+            let sorted_list = sort_datums(args, &player.allocator, symbols)?;
             return Ok(sorted_list.last().unwrap().clone());
         })
     }
 
-    pub fn sort(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn sort(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
             let datum_ref = &args[0];
-            match player.get_datum(datum_ref) {
-                Datum::PropList(_, _) => PropListDatumHandlers::sort(datum_ref, &vec![]),
-                Datum::List(_, _, _) => ListDatumHandlers::sort(datum_ref, &vec![]),
+            match checked_datum(player, symbols, datum_ref)? {
+                Datum::PropList(_, _) => PropListDatumHandlers::sort(player, symbols, datum_ref, &vec![]),
+                Datum::List(_, _, _) => ListDatumHandlers::sort(player, symbols, datum_ref, &vec![]),
                 _ => Ok(DatumRef::Void),
             }
         })
     }
 
-    pub fn intersect(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn intersect(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
             if args.len() != 2 {
                 return Err(ScriptError::new("Intersect requires 2 arguments".to_string()));
             }
 
-            let (left_vals, _lf) = player.get_datum(&args[0]).to_rect_inline()?;
-            let (right_vals, _rf) = player.get_datum(&args[1]).to_rect_inline()?;
+            let (left_vals, _lf) = checked_datum(player, symbols, &args[0])?.to_rect_inline()?;
+            let (right_vals, _rf) = checked_datum(player, symbols, &args[1])?.to_rect_inline()?;
 
             let left = (left_vals[0] as i32, left_vals[1] as i32, left_vals[2] as i32, left_vals[3] as i32);
             let right = (right_vals[0] as i32, right_vals[1] as i32, right_vals[2] as i32, right_vals[3] as i32);
@@ -1795,8 +2063,8 @@ impl TypeHandlers {
     /// promotion rule is inferred, not specified. A degenerate source axis
     /// (zero width or height) would divide by zero; we fall back to a scale of
     /// 1 on that axis, which is also inferred.
-    pub fn map(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn map(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
             if args.len() != 3 {
                 return Err(ScriptError::new(
                     "map requires 3 arguments (targetRect/targetPoint, sourceRect, destinationRect)"
@@ -1804,8 +2072,8 @@ impl TypeHandlers {
                 ));
             }
 
-            let (src, src_flags) = player.get_datum(&args[1]).to_rect_inline()?;
-            let (dst, dst_flags) = player.get_datum(&args[2]).to_rect_inline()?;
+            let (src, src_flags) = checked_datum(player, symbols, &args[1])?.to_rect_inline()?;
+            let (dst, dst_flags) = checked_datum(player, symbols, &args[2])?.to_rect_inline()?;
 
             let scale = |s_lo: f64, s_hi: f64, d_lo: f64, d_hi: f64| {
                 let span = s_hi - s_lo;
@@ -1816,7 +2084,7 @@ impl TypeHandlers {
             let map_x = |x: f64| dst[0] + (x - src[0]) * sx;
             let map_y = |y: f64| dst[1] + (y - src[1]) * sy;
 
-            let target = player.get_datum(&args[0]);
+            let target = checked_datum(player, symbols, &args[0])?;
             let (mapped, target_flags, is_rect): (Vec<f64>, u8, bool) = match target {
                 Datum::Rect(vals, flags) => (
                     vec![map_x(vals[0]), map_y(vals[1]), map_x(vals[2]), map_y(vals[3])],
@@ -1870,16 +2138,16 @@ impl TypeHandlers {
     /// Director rect-inflate contract, inferred from documented behavior and
     /// the MM custom scroll bar's InstallElement, which pads the dragger active
     /// zone with `inflate(zone, 32, 32)` (an outward expansion).
-    pub fn inflate(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn inflate(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
             if args.len() != 3 {
                 return Err(ScriptError::new(
                     "inflate requires 3 arguments (rect, widthChange, heightChange)".to_string(),
                 ));
             }
-            let (vals, _f) = player.get_datum(&args[0]).to_rect_inline()?;
-            let dw = player.get_datum(&args[1]).int_value()?;
-            let dh = player.get_datum(&args[2]).int_value()?;
+            let (vals, _f) = checked_datum(player, symbols, &args[0])?.to_rect_inline()?;
+            let dw = checked_datum(player, symbols, &args[1])?.int_value()?;
+            let dh = checked_datum(player, symbols, &args[2])?.int_value()?;
             let rect = IntRect {
                 left: vals[0] as i32 - dw,
                 top: vals[1] as i32 - dh,
@@ -1896,15 +2164,15 @@ impl TypeHandlers {
     /// specified screen coordinate, or returns -1 if the point is not within
     /// the text." 1-based. Shares the hit-test core with `the mouseChar`.
     /// Used by the customHyperlink behavior to find the char under the mouse.
-    pub fn point_to_char(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn point_to_char(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
             if args.len() != 2 {
                 return Err(ScriptError::new(
                     "pointToChar requires 2 arguments (sprite, point)".to_string(),
                 ));
             }
-            let sprite_num = player.get_datum(&args[0]).to_sprite_ref()?;
-            let (pt_vals, _f) = player.get_datum(&args[1]).to_point_inline()?;
+            let sprite_num = checked_datum(player, symbols, &args[0])?.to_sprite_ref()?;
+            let (pt_vals, _f) = checked_datum(player, symbols, &args[1])?.to_point_inline()?;
             let result =
                 crate::player::compute_char_at(player, sprite_num, pt_vals[0] as i32, pt_vals[1] as i32);
             Ok(player.alloc_datum(Datum::Int(result)))
@@ -1915,15 +2183,15 @@ impl TypeHandlers {
     /// (Director 11.5 Scripting Dictionary p.618). Scrolls a field/text member
     /// by `amount` lines (positive = down). The MM custom scroll bar calls this
     /// global form from its `move`/`MoveBar` handlers.
-    pub fn scroll_by_line(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn scroll_by_line(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
             if args.len() != 2 {
                 return Err(ScriptError::new(
                     "scrollByLine requires 2 arguments (member, amount)".to_string(),
                 ));
             }
-            let member_ref = player.get_datum(&args[0]).to_member_ref()?;
-            let amount = player.get_datum(&args[1]).to_float()?;
+            let member_ref = checked_datum(player, symbols, &args[0])?.to_member_ref()?;
+            let amount = checked_datum(player, symbols, &args[1])?.to_float()?;
             crate::player::handlers::datum_handlers::cast_member::text::scroll_member_by_lines(
                 player, &member_ref, amount,
             );
@@ -1934,15 +2202,15 @@ impl TypeHandlers {
     /// `scrollByPage(member, amount)` — global form of `member.scrollByPage()`
     /// (Director 11.5 Scripting Dictionary p.619). Scrolls a field/text member
     /// by `amount` pages (a page = the lines visible in the member's box).
-    pub fn scroll_by_page(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn scroll_by_page(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
             if args.len() != 2 {
                 return Err(ScriptError::new(
                     "scrollByPage requires 2 arguments (member, amount)".to_string(),
                 ));
             }
-            let member_ref = player.get_datum(&args[0]).to_member_ref()?;
-            let amount = player.get_datum(&args[1]).to_float()?;
+            let member_ref = checked_datum(player, symbols, &args[0])?.to_member_ref()?;
+            let amount = checked_datum(player, symbols, &args[1])?.to_float()?;
             crate::player::handlers::datum_handlers::cast_member::text::scroll_member_by_pages(
                 player, &member_ref, amount,
             );
@@ -1956,18 +2224,18 @@ impl TypeHandlers {
     //     reserve_player_mut(|player| TypeUtils::get_sub_prop(datum_ref, prop_key_ref, player))
     // }
 
-    pub fn get_prop_at(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn get_prop_at(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         use crate::player::datum_formatting::format_concrete_datum;
-        reserve_player_ref(|player| {
+        runtime.with_player_and_symbols(|player, symbols| {
             let prop_list_ref = &args[0];
-            let position = player.get_datum(&args[1]).int_value()?;
+            let position = checked_datum(player, symbols, &args[1])?.int_value()?;
             let index = (position - 1) as usize;
             
-            let prop_list = player.get_datum(prop_list_ref);
+            let prop_list = checked_datum(player, symbols, prop_list_ref)?;
             
             debug!(
                 "🔍 getPropAt: proplist={}, index={}", 
-                format_concrete_datum(prop_list, player),
+                format_concrete_datum(prop_list, symbols, player)?,
                 position
             );
             
@@ -1985,7 +2253,7 @@ impl TypeHandlers {
                     
                     debug!(
                         "✅ getPropAt returned key: {}", 
-                        format_concrete_datum(player.get_datum(&key_ref), player)
+                        format_concrete_datum(checked_datum(player, symbols, &key_ref)?, symbols, player)?
                     );
                     
                     Ok(key_ref)
@@ -1997,27 +2265,27 @@ impl TypeHandlers {
         })
     }
 
-    pub fn pi(_: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| Ok(player.alloc_datum(Datum::Float(std::f64::consts::PI))))
+    pub fn pi(runtime: &mut ExecutionContext<'_>, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        Ok(runtime.player.alloc_datum(Datum::Float(std::f64::consts::PI)))
     }
 
-    pub fn sin(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let value = player.get_datum(&args[0]).to_float()?;
+    pub fn sin(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
+            let value = checked_datum(player, symbols, &args[0])?.to_float()?;
             Ok(player.alloc_datum(Datum::Float(value.sin())))
         })
     }
 
-    pub fn cos(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let value = player.get_datum(&args[0]).to_float()?;
+    pub fn cos(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
+            let value = checked_datum(player, symbols, &args[0])?.to_float()?;
             Ok(player.alloc_datum(Datum::Float(value.cos())))
         })
     }
 
-    pub fn sqrt(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let value = player.get_datum(&args[0]);
+    pub fn sqrt(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
+            let value = checked_datum(player, symbols, &args[0])?;
             
             let num = if let Ok(f) = value.float_value() {
                 f
@@ -2036,17 +2304,17 @@ impl TypeHandlers {
         })
     }
 
-    pub fn tan(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let value = player.get_datum(&args[0]).to_float()?;
+    pub fn tan(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
+            let value = checked_datum(player, symbols, &args[0])?.to_float()?;
             Ok(player.alloc_datum(Datum::Float(value.tan())))
         })
     }
 
-    pub fn atan(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn atan(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
             let num = |dr: &DatumRef| -> Result<f64, ScriptError> {
-                let value = player.get_datum(dr);
+                let value = checked_datum(player, symbols, dr)?;
                 if let Ok(f) = value.float_value() {
                     Ok(f)
                 } else if let Ok(i) = value.int_value() {
@@ -2076,8 +2344,8 @@ impl TypeHandlers {
         })
     }
 
-    pub fn sound(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn sound(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
             // Bare `sound` with no arguments is a harmless no-op in Director, not
             // a crash. Dora Soccer's timeoptions queue can leave `thingtodo =
             // "sound"` and later run `do("sound")`; indexing args[0] here panicked
@@ -2089,7 +2357,7 @@ impl TypeHandlers {
             // Command form: sound(#verb, channelNum, ...args)
             // e.g. sound #stop, 3  or  sound #play, 1, member("snd")
             if let Datum::Symbol(verb) = &first_arg {
-                let verb = *verb;
+                let verb = verb.clone();
                 let channel_num = if args.len() > 1 {
                     player.get_datum(&args[1]).int_value()? as u16
                 } else {
@@ -2103,7 +2371,7 @@ impl TypeHandlers {
                 }
                 let channel_datum = player.alloc_datum(Datum::SoundChannel(channel_num));
                 let remaining_args: Vec<DatumRef> = args[2..].to_vec();
-                SoundChannelDatumHandlers::call(player, &channel_datum, verb, &remaining_args)
+                SoundChannelDatumHandlers::call(player, symbols, &channel_datum, verb, &remaining_args)
             } else {
                 // Function form: sound(channelNum) - returns a SoundChannel datum
                 let channel_num = first_arg.int_value()? as u16;
@@ -2118,226 +2386,151 @@ impl TypeHandlers {
         })
     }
 
-    pub async fn call_ancestor(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        // callAncestor(#handler, me, arg1, arg2, ...)
-        //
-        // In Director, callAncestor:
-        // 1. Finds the ancestor of the 'me' argument (args[1])
-        // 2. Looks up the handler in the ancestor's SCRIPT
-        // 3. Executes the handler with 'me' still being the ORIGINAL instance
-        //
-        // The key insight: when inside an ancestor's handler (due to callAncestor),
-        // a nested callAncestor should use the CURRENT SCOPE's receiver to determine
-        // which ancestor to call next, NOT args[1] (which is still the original me).
-        //
-        // Example: if A has ancestor B, B has ancestor C:
-        // - A::start calls callAncestor(#start, me, ...)
-        //   -> current receiver is A, ancestor is B
-        //   -> B::start runs with receiver=A (so 'me' properties come from A)
-        // - Inside B::start, callAncestor(#start, me, ...) is called
-        //   -> current receiver is A, but we need B's ancestor (C)
-        //   -> We look at the scope's script_ref to find B, then get B's ancestor
-        let (ancestor_list, original_me_list, instance_datum_refs, handler_name, extra_args) = reserve_player_mut(|player| {
-            let handler_name = player.get_datum(&args[0]).symbol_value()?;
-
-            // Get the current scope's script_ref to determine which script we're currently in
+    /// Resolve every `callAncestor` target while the owner is borrowed. The
+    /// returned child list is ordered exactly like the legacy loop; the caller
+    /// executes one child at a time and retains the last result.
+    pub fn prepare_call_ancestor(
+        runtime: &mut ExecutionContext<'_>,
+        args: &[DatumRef],
+    ) -> Result<AncestorCallPlan, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
+            if args.len() < 2 {
+                return Err(ScriptError::new(
+                    "callAncestor requires a handler and instance".to_owned(),
+                ));
+            }
+            let handler_name = checked_datum(player, symbols, &args[0])?.symbol_value(symbols)?;
             let current_scope_ref = player.current_scope_ref();
             let current_script_ref = player.scopes.get(current_scope_ref)
                 .map(|scope| scope.script_ref.clone());
-
-            let list_or_script_instance = player.get_datum(&args[1]);
-            let instance_list = match list_or_script_instance {
-                Datum::List(_, list, _) => list.to_owned(),
-                Datum::ScriptInstanceRef(_) => {
-                    VecDeque::from(vec![args[1].clone()])
-                }
-                _ => {
-                    return Err(ScriptError::new(format!(
-                        "Can only callAncestor on script instances and lists"
-                    )))
-                }
+            let instance_list = match checked_datum(player, symbols, &args[1])? {
+                Datum::List(_, list, _) => list.clone(),
+                Datum::ScriptInstanceRef(_) => VecDeque::from([args[1].clone()]),
+                _ => return Err(ScriptError::new(
+                    "Can only callAncestor on script instances and lists".to_owned(),
+                )),
             };
-
-            let mut ancestor_list = vec![];
-            let mut original_me_list = vec![];
-            let mut instance_datum_refs = vec![];
-            for instance_ref in instance_list {
-                let original_me_ref = player.get_datum(&instance_ref).to_script_instance_ref()?;
-
-                // Determine which instance's ancestor to use:
-                // Walk the ancestor chain to find which instance's script matches
-                // the current scope's script_ref (i.e. "which level" we're at).
-                let ancestor_source = if let Some(ref script_ref) = current_script_ref {
-                    let mut walk_ref = original_me_ref.clone();
-                    let mut found = false;
-                    for _ in 0..100 {
-                        let walk_instance = player.allocator.get_script_instance(&walk_ref);
-                        if walk_instance.script == *script_ref {
-                            found = true;
-                            break;
-                        }
-                        if let Some(ref next_ancestor) = walk_instance.ancestor {
-                            walk_ref = next_ancestor.clone();
-                        } else {
-                            break;
-                        }
-                    }
-                    if found { walk_ref } else { original_me_ref.clone() }
-                } else {
-                    original_me_ref.clone()
-                };
-
-                let instance = player.allocator.get_script_instance(&ancestor_source);
-                match instance.ancestor.as_ref() {
-                    Some(ancestor) => {
-                        ancestor_list.push(ancestor.clone());
-                        original_me_list.push(original_me_ref.clone());
-                        instance_datum_refs.push(instance_ref.clone());
-                    }
-                    None => {
-                        // No ancestor — callAncestor is a no-op in Director, return immediately
-                        return Ok((vec![], vec![], vec![], handler_name, vec![]));
-                    }
-                }
-            }
-            // Get extra arguments beyond the instance list (args[2..])
-            // The instance itself will be prepended in each iteration
             let extra_args = args[2..].to_vec();
-            Ok((ancestor_list, original_me_list, instance_datum_refs, handler_name, extra_args))
-        })?;
-
-        let mut result = DatumRef::Void;
-        for ((ancestor_ref, original_me_ref), instance_datum_ref) in ancestor_list
-            .into_iter()
-            .zip(original_me_list.into_iter())
-            .zip(instance_datum_refs.into_iter())
-        {
-            // Walk up the ancestor chain to find a script that has the handler.
-            // For example, if A->B->C and B doesn't have the handler but C does,
-            // we should call C's handler.
-            let handler_and_instance = reserve_player_ref(|player| {
-                let mut walk_ref = ancestor_ref.clone();
-                for _ in 0..100 { // Safety limit
-                    let walk_instance = player.allocator.get_script_instance(&walk_ref);
-                    let script = player.movie.cast_manager.get_script_by_ref(&walk_instance.script);
-                    if let Some(script) = script {
-                        if let Some(handler_ref) = script.get_own_handler_ref(handler_name) {
-                            return Some((handler_ref, walk_ref.clone()));
+            let mut calls = Vec::new();
+            for instance_datum_ref in instance_list {
+                let original_me_ref = match checked_datum(player, symbols, &instance_datum_ref)? {
+                    Datum::ScriptInstanceRef(reference) => reference.clone(),
+                    _ => return Err(ScriptError::new(
+                        "callAncestor list contains a non-script instance".to_owned(),
+                    )),
+                };
+                let mut ancestor_source = original_me_ref.clone();
+                if let Some(current_script_ref) = &current_script_ref {
+                    let mut walk = original_me_ref.clone();
+                    for _ in 0..100 {
+                        let instance = player.allocator.get_script_instance_opt(&walk)
+                            .ok_or_else(|| ScriptError::new_code(
+                                ScriptErrorCode::InvalidReference,
+                                "stale callAncestor instance".to_owned(),
+                            ))?;
+                        if instance.script == *current_script_ref {
+                            ancestor_source = walk;
+                            break;
                         }
-                    }
-                    // Handler not found in this script, try the next ancestor
-                    if let Some(ref next_ancestor) = walk_instance.ancestor {
-                        walk_ref = next_ancestor.clone();
-                    } else {
-                        // No more ancestors
-                        break;
+                        let Some(next) = instance.ancestor.clone() else { break };
+                        walk = next;
                     }
                 }
-                None
-            });
-
-            if let Some((handler_ref, _handler_instance_ref)) = handler_and_instance {
-                // Build call_args with the individual instance first, then extra args.
-                // This ensures that when callAncestor is called with a list like [me],
-                // the handler receives 'me' as its first argument, not '[me]'.
-                let mut call_args = vec![instance_datum_ref.clone()];
-                call_args.extend(extra_args.clone());
-
-                // Call with the ORIGINAL me as receiver (for property access),
-                // but use the handler we found in the ancestor chain.
-                // use_raw_arg_list=true so args are used as-is
-                let scope_result = crate::player::player_call_script_handler_raw_args(
-                    Some(original_me_ref.clone()),  // receiver = original me, for property access
-                    handler_ref,                    // handler from ancestor's script
-                    &call_args,
-                    true,  // use_raw_arg_list = true: don't prepend receiver to args
-                ).await?;
-                crate::player::player_handle_scope_return(&scope_result);
-                result = scope_result.return_value;
+                let source = player.allocator.get_script_instance_opt(&ancestor_source)
+                    .ok_or_else(|| ScriptError::new_code(
+                        ScriptErrorCode::InvalidReference,
+                        "stale callAncestor instance".to_owned(),
+                    ))?;
+                let Some(walk) = source.ancestor.clone() else {
+                    return Ok(AncestorCallPlan::Complete(DatumRef::Void));
+                };
+                let mut child_args = Vec::with_capacity(extra_args.len() + 1);
+                child_args.push(instance_datum_ref);
+                child_args.extend(extra_args.iter().cloned());
+                calls.push(AncestorCall {
+                    receiver: original_me_ref,
+                    source: walk,
+                    handler_name: handler_name.clone(),
+                    args: child_args,
+                });
             }
-        }
-        Ok(result)
+            if calls.is_empty() {
+                Ok(AncestorCallPlan::Complete(DatumRef::Void))
+            } else {
+                Ok(AncestorCallPlan::Children(calls))
+            }
+        })
     }
 
-    pub async fn new_object(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn new_object(
+        runtime: &mut ExecutionContext<'_>,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
         if args.is_empty() {
             return Err(ScriptError::new(
-                "newObject requires at least one argument".to_string(),
+                "newObject requires at least one argument".to_owned(),
             ));
         }
-
-        let object_type = reserve_player_ref(|player| player.get_datum(&args[0]).string_value())?;
-
-        match object_type.to_lowercase().as_str() {
-            "xml" => reserve_player_mut(|player| {
-                let xml_id = player.next_xml_id;
-                player.next_xml_id += 1;
-                let xml_doc = XmlDocument {
-                    id: xml_id,
-                    root_element: None,
-                    content: String::new(),
-                    ignore_white: false,
-                };
-                player.xml_documents.insert(xml_id, xml_doc);
-                Ok(player.alloc_datum(Datum::XmlRef(xml_id)))
-            }),
-            "date" => reserve_player_mut(|player| {
-                let date_id = player.allocator.get_free_script_instance_id();
-                let date_obj = if args.len() >= 4 {
-                    // date(year, month, day)
-                    let year = player.get_datum(&args[1]).int_value()?;
-                    let month = player.get_datum(&args[2]).int_value()?;
-                    let day = player.get_datum(&args[3]).int_value()?;
-                    let js_date = js_sys::Date::new_0();
-                    js_date.set_full_year(year as u32);
-                    js_date.set_month((month - 1) as u32); // JS months are 0-based
-                    js_date.set_date(day as u32);
-                    js_date.set_hours(0);
-                    js_date.set_minutes(0);
-                    js_date.set_seconds(0);
-                    js_date.set_milliseconds(0);
-                    DateObject::from_timestamp(date_id, js_date.get_time() as i64)
-                } else {
-                    DateObject::new(date_id)
-                };
-                player.date_objects.insert(date_id, date_obj);
-                Ok(player.alloc_datum(Datum::DateRef(date_id)))
-            }),
-            "math" => reserve_player_mut(|player| {
-                let math_id = player.allocator.get_free_script_instance_id();
-                let math_obj = MathObject::new(math_id);
-                player.math_objects.insert(math_id, math_obj);
-                Ok(player.alloc_datum(Datum::MathRef(math_id)))
-            }),
-            "object" => {
-                reserve_player_mut(|player| {
-                    // Allocate an empty prop list, unsorted
-                    let obj = Datum::PropList(VecDeque::new(), false);
-                    Ok(player.alloc_datum(obj))
-                })
+        runtime.with_player_and_symbols(|player, symbols| {
+            let object_type = checked_datum(player, symbols, &args[0])?
+                .string_value(symbols)?;
+            match object_type.to_lowercase().as_str() {
+                "xml" => {
+                    let xml_id = player.next_xml_id;
+                    player.next_xml_id += 1;
+                    player.xml_documents.insert(xml_id, XmlDocument {
+                        id: xml_id,
+                        root_element: None,
+                        content: String::new(),
+                        ignore_white: false,
+                    });
+                    Ok(player.alloc_datum(Datum::XmlRef(xml_id)))
+                }
+                "date" => {
+                    let date_id = player.allocator.get_free_script_instance_id();
+                    let date_obj = if args.len() >= 4 {
+                        let year = checked_datum(player, symbols, &args[1])?.int_value()?;
+                        let month = checked_datum(player, symbols, &args[2])?.int_value()?;
+                        let day = checked_datum(player, symbols, &args[3])?.int_value()?;
+                        let js_date = js_sys::Date::new_0();
+                        js_date.set_full_year(year as u32);
+                        js_date.set_month((month - 1) as u32);
+                        js_date.set_date(day as u32);
+                        js_date.set_hours(0);
+                        js_date.set_minutes(0);
+                        js_date.set_seconds(0);
+                        js_date.set_milliseconds(0);
+                        DateObject::from_timestamp(date_id, js_date.get_time() as i64)
+                    } else {
+                        DateObject::new(date_id)
+                    };
+                    player.date_objects.insert(date_id, date_obj);
+                    Ok(player.alloc_datum(Datum::DateRef(date_id)))
+                }
+                "math" => {
+                    let math_id = player.allocator.get_free_script_instance_id();
+                    player.math_objects.insert(math_id, MathObject::new(math_id));
+                    Ok(player.alloc_datum(Datum::MathRef(math_id)))
+                }
+                "object" => Ok(player.alloc_datum(Datum::PropList(VecDeque::new(), false))),
+                "string" => {
+                    let value = args.get(1)
+                        .map(|value| checked_datum(player, symbols, value)?.string_value(symbols))
+                        .transpose()?
+                        .unwrap_or_default();
+                    Ok(player.alloc_datum(Datum::String(value)))
+                }
+                "array" => Ok(player.alloc_datum(Datum::List(
+                    DatumType::XmlChildNodes,
+                    VecDeque::new(),
+                    false,
+                ))),
+                _ => Err(ScriptError::new(format!(
+                    "newObject: Unsupported object type '{}'",
+                    object_type
+                ))),
             }
-            "string" => {
-                let value = if args.len() > 1 {
-                    reserve_player_ref(|player| player.get_datum(&args[1]).string_value())?
-                } else {
-                    String::new()
-                };
-                reserve_player_mut(|player| Ok(player.alloc_datum(Datum::String(value))))
-            }
-            "array" => {
-                reserve_player_mut(|player| {
-                    Ok(player.alloc_datum(Datum::List(
-                        crate::director::lingo::datum::DatumType::XmlChildNodes,
-                        VecDeque::new(),
-                        false,
-                    )))
-                })
-            }
-            _ => Err(ScriptError::new(format!(
-                "newObject: Unsupported object type '{}'",
-                object_type
-            ))),
-        }
+        })
     }
 
     pub fn sound_busy(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {       
@@ -2498,3 +2691,162 @@ pub fn is_expected_value_retry_fragment(input: &str, cleaned: &str) -> bool {
     false
 }
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod ownership_tests {
+    use super::TypeHandlers;
+    use crate::director::lingo::datum::{Datum, DatumType};
+    use crate::player::session::RuntimeSession;
+    use crate::player::symbols::{builtin::BuiltInSymbol, symbol_table::SymbolOwner};
+    use crate::player::{DatumRef, ScriptErrorCode};
+    use async_std::channel;
+    use std::collections::VecDeque;
+
+    fn session() -> RuntimeSession {
+        let mut session = RuntimeSession::new(SymbolOwner { session: 601, generation: 1 });
+        let (tx, _rx) = channel::unbounded();
+        assert!(session.add_player(1, tx));
+        let (tx, _rx) = channel::unbounded();
+        assert!(session.add_player(2, tx));
+        session
+    }
+
+    fn int(session: &mut RuntimeSession, player_id: u32, value: i32) -> DatumRef {
+        session
+            .with_player(player_id, |ctx| ctx.player.alloc_datum(Datum::Int(value)))
+            .unwrap()
+    }
+
+    #[test]
+    fn new_matrix_keeps_local_fallback_but_rejects_foreign_consumed_cell() {
+        let mut local = session();
+        let nested = local.with_player(1, |ctx| {
+            let text = ctx.player.alloc_datum(Datum::String("unsupported".to_owned()));
+            ctx.player.alloc_datum(Datum::List(
+                DatumType::List,
+                VecDeque::from([text]),
+                false,
+            ))
+        }).unwrap();
+        let initial = local.with_player(1, |ctx| {
+            ctx.player.alloc_datum(Datum::List(
+                DatumType::List,
+                VecDeque::from([nested]),
+                false,
+            ))
+        }).unwrap();
+        let result = local.with_player(1, |mut ctx| {
+            let rows = ctx.player.alloc_datum(Datum::Int(1));
+            let cols = ctx.player.alloc_datum(Datum::Int(1));
+            TypeHandlers::new_matrix(&mut ctx, &vec![rows, cols, initial])
+        }).unwrap().unwrap();
+        local.with_player(1, |ctx| {
+            let matrix = ctx.player.get_datum(&result);
+            let (_, rows, _) = matrix.to_list_tuple().unwrap();
+            let (_, cells, _) = ctx.player.get_datum(&rows[0]).to_list_tuple().unwrap();
+            assert!(matches!(ctx.player.get_datum(&cells[0]), Datum::Int(0)));
+        }).unwrap();
+
+        let mut foreign = session();
+        let foreign_value = int(&mut foreign, 2, 9);
+        let initial = foreign.with_player(1, |ctx| {
+            ctx.player.alloc_datum(Datum::List(
+                DatumType::List,
+                VecDeque::from([foreign_value]),
+                false,
+            ))
+        }).unwrap();
+        let error = foreign.with_player(1, |mut ctx| {
+            let rows = ctx.player.alloc_datum(Datum::Int(1));
+            let cols = ctx.player.alloc_datum(Datum::Int(1));
+            TypeHandlers::new_matrix(&mut ctx, &vec![rows, cols, initial]).unwrap_err()
+        }).unwrap();
+        assert_eq!(error.code, ScriptErrorCode::InvalidReference);
+    }
+
+    #[test]
+    fn list_rejects_foreign_retained_argument() {
+        let mut session = session();
+        let first = int(&mut session, 1, 3);
+        let second = int(&mut session, 1, 4);
+        let ordered = session.with_player(1, |mut ctx| {
+            TypeHandlers::list(&mut ctx, &vec![first.clone(), second.clone()]).unwrap()
+        }).unwrap();
+        session.with_player(1, |ctx| {
+            let (_, items, _) = ctx.player.get_datum(&ordered).to_list_tuple().unwrap();
+            assert_eq!(items[0], first);
+            assert_eq!(items[1], second);
+        }).unwrap();
+
+        let foreign = int(&mut session, 2, 17);
+        let error = session.with_player(1, |mut ctx| {
+            TypeHandlers::list(&mut ctx, &vec![foreign]).unwrap_err()
+        }).unwrap();
+        assert_eq!(error.code, ScriptErrorCode::InvalidReference);
+    }
+
+    #[test]
+    fn filter_ignores_local_non_property_second_argument() {
+        let mut session = session();
+        let kind = session.with_player(1, |ctx| {
+            ctx.player.alloc_datum(Datum::Symbol(crate::player::symbols::symbol::Symbol::builtin(
+                BuiltInSymbol::AdjustColorFilter,
+            )))
+        }).unwrap();
+        let ignored = int(&mut session, 1, 123);
+        let extra_ignored = int(&mut session, 2, 456);
+        let result = session.with_player(1, |mut ctx| {
+            TypeHandlers::filter(&mut ctx, &vec![kind, ignored, extra_ignored]).unwrap()
+        }).unwrap();
+        session.with_player(1, |ctx| {
+            match ctx.player.get_datum(&result) {
+                Datum::PropList(props, _) => assert_eq!(props.len(), 1),
+                other => panic!("filter returned {}", other.type_str()),
+            }
+        }).unwrap();
+    }
+
+    #[test]
+    fn filter_rejects_foreign_retained_property_entry() {
+        let mut session = session();
+        let kind = session.with_player(1, |ctx| {
+            ctx.player.alloc_datum(Datum::Symbol(crate::player::symbols::symbol::Symbol::builtin(
+                BuiltInSymbol::AdjustColorFilter,
+            )))
+        }).unwrap();
+        let mut foreign = RuntimeSession::new(SymbolOwner { session: 602, generation: 1 });
+        let (tx, _rx) = channel::unbounded();
+        assert!(foreign.add_player(1, tx));
+        let (foreign_key, foreign_value) = foreign.with_player(1, |ctx| {
+            let key = ctx.player.alloc_datum(Datum::Symbol(ctx.symbols.intern("foreignKey")));
+            let value = ctx.player.alloc_datum(Datum::Int(42));
+            (key, value)
+        }).unwrap();
+        let retained = session.with_player(1, |ctx| {
+            ctx.player.alloc_datum(Datum::PropList(
+                VecDeque::from([(foreign_key, foreign_value.clone())]),
+                false,
+            ))
+        }).unwrap();
+        let error = session.with_player(1, |mut ctx| {
+            TypeHandlers::filter(&mut ctx, &vec![kind.clone(), retained]).unwrap_err()
+        }).unwrap();
+        assert_eq!(error.code, ScriptErrorCode::InvalidReference);
+
+        // A local key must not mask a foreign value retained by the
+        // property-list argument. The key and value are consumed separately
+        // by filter, so both ownership directions need coverage.
+        let local_key = session.with_player(1, |ctx| {
+            ctx.player.alloc_datum(Datum::Symbol(ctx.symbols.intern("localKey")))
+        }).unwrap();
+        let retained_value = session.with_player(1, |ctx| {
+            ctx.player.alloc_datum(Datum::PropList(
+                VecDeque::from([(local_key, foreign_value)]),
+                false,
+            ))
+        }).unwrap();
+        let error = session.with_player(1, |mut ctx| {
+            TypeHandlers::filter(&mut ctx, &vec![kind, retained_value]).unwrap_err()
+        }).unwrap();
+        assert_eq!(error.code, ScriptErrorCode::InvalidReference);
+    }
+}

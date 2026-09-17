@@ -1,0 +1,117 @@
+{
+  "kind": "js-lingo-corrected-split",
+  "work": "/private/tmp/dirplayer-xtra-owned-20260916/js-lingo-work-20260916",
+  "patches": [
+    "/private/tmp/dirplayer-xtra-owned-20260916/js-lingo-corrected-legacy.patch",
+    "/private/tmp/dirplayer-xtra-owned-20260916/js-lingo-corrected-eval-session.patch"
+  ],
+  "files": [
+    {
+      "path": "vm-rust/src/player/js_lingo_loader.rs",
+      "before_sha256": "3dac9dcea71c6070ad3f6e85b25b2b939bff1c131f73144c24060e61dbbe4afb",
+      "after_sha256": "d4c832b86ae6861c79a1cab43ce31c4d3fcc9167b59e0e2ddcab479ac3e36421",
+      "before_bytes": 49066,
+      "after_bytes": 56339,
+      "before_source": "/private/tmp/dirplayer-xtra-owned-20260916/js-lingo-before-20260916/vm-rust/src/player/js_lingo_loader.rs",
+      "after_source": "/private/tmp/dirplayer-xtra-owned-20260916/js-lingo-work-20260916/vm-rust/src/player/js_lingo_loader.rs"
+    },
+    {
+      "path": "vm-rust/src/player/js_lingo/interpreter.rs",
+      "before_sha256": "4a14f7cb5ca174640d937e4a9c96fe42e099780429fc0d85c083c09a606e6e11",
+      "after_sha256": "82e7259cfa26e39655ace901509c6ffb2cd99f06c6856ddac305adfefb332a65",
+      "before_bytes": 106302,
+      "after_bytes": 107302,
+      "before_source": "/private/tmp/dirplayer-xtra-owned-20260916/js-lingo-before-20260916/vm-rust/src/player/js_lingo/interpreter.rs",
+      "after_source": "/private/tmp/dirplayer-xtra-owned-20260916/js-lingo-work-20260916/vm-rust/src/player/js_lingo/interpreter.rs"
+    },
+    {
+      "path": "vm-rust/src/player/js_lingo/builtins.rs",
+      "before_sha256": "452911e38fccfe6c1fa0dce91173ebb3a9c9170993c0aae93b6304de3c8a5305",
+      "after_sha256": "9cb4b99b9fb057e064cc773a8146e6d1bf33b8bf3c0023cf2c2c9f5bfb6c27c6",
+      "before_bytes": 12146,
+      "after_bytes": 13917,
+      "before_source": "/private/tmp/dirplayer-xtra-owned-20260916/js-lingo-before-20260916/vm-rust/src/player/js_lingo/builtins.rs",
+      "after_source": "/private/tmp/dirplayer-xtra-owned-20260916/js-lingo-work-20260916/vm-rust/src/player/js_lingo/builtins.rs"
+    },
+    {
+      "path": "vm-rust/src/player/handlers/datum_handlers/js_object.rs",
+      "before_sha256": "2aea255dcc1973b05e7449190c5216e36bafb3ba93f84accf6ca185e59d6924a",
+      "after_sha256": "ab51757bb4b90c0a2233579af077483ba0e8b6c3335ce73ac8e7c9f2c899a43b",
+      "before_bytes": 3692,
+      "after_bytes": 5473,
+      "before_source": "/private/tmp/dirplayer-xtra-owned-20260916/js-lingo-before-20260916/vm-rust/src/player/handlers/datum_handlers/js_object.rs",
+      "after_source": "/private/tmp/dirplayer-xtra-owned-20260916/js-lingo-work-20260916/vm-rust/src/player/handlers/datum_handlers/js_object.rs"
+    },
+    {
+      "path": "vm-rust/src/player/driver.rs",
+      "before_sha256": "f31d8446db0f89c364debd42f56300267ab88f433da428c100bce9e328c94b22",
+      "after_sha256": "9f9378825621c0d944b5cd449621fe0e83c064468cd7e19dd565afa36c5fdb4b",
+      "before_bytes": 276345,
+      "after_bytes": 293210,
+      "before_source": "/private/tmp/dirplayer-xtra-owned-20260916/js-lingo-before-20260916/vm-rust/src/player/driver.rs",
+      "after_source": "/private/tmp/dirplayer-xtra-owned-20260916/js-lingo-work-20260916/vm-rust/src/player/driver.rs"
+    },
+    {
+      "path": "vm-rust/src/player/commands.rs",
+      "before_sha256": "12596b1ef452ea5dd12f006920e9cadb43e4284deefa4bead50cf82203de9dfb",
+      "after_sha256": "7e01759b012e4bfa9c15e4f5e1287e3b288b5711729c186b21c6b856ea621754",
+      "before_bytes": 185643,
+      "after_bytes": 193330,
+      "before_source": "/private/tmp/dirplayer-xtra-owned-20260916/js-lingo-before-20260916/vm-rust/src/player/commands.rs",
+      "after_source": "/private/tmp/dirplayer-xtra-owned-20260916/js-lingo-work-20260916/vm-rust/src/player/commands.rs"
+    },
+    {
+      "path": "vm-rust/src/player/mod.rs",
+      "before_sha256": "6736cd9e3a4d729bacf8ced45de531f163a251ca037f6774c8a0a8484be030bb",
+      "after_sha256": "a6804fcb069255be07a90262e737151a84c900fe97b88993d7bf760d10aa5430",
+      "before_bytes": 532026,
+      "after_bytes": 533316,
+      "before_source": "/private/tmp/dirplayer-xtra-owned-20260916/js-lingo-before-20260916/vm-rust/src/player/mod.rs",
+      "after_source": "/private/tmp/dirplayer-xtra-owned-20260916/js-lingo-work-20260916/vm-rust/src/player/mod.rs"
+    },
+    {
+      "path": "vm-rust/src/player/script.rs",
+      "before_sha256": "359953b1b47f2efa6e27048a547a856e9da9aedf09809ca04c31ea8123314ba3",
+      "after_sha256": "e3aee05dc99a945aa76950fcfa535e884cbf2ad486d9d4f8732709a024bd43b1",
+      "before_bytes": 72211,
+      "after_bytes": 72842,
+      "before_source": "/private/tmp/dirplayer-xtra-owned-20260916/js-lingo-before-20260916/vm-rust/src/player/script.rs",
+      "after_source": "/private/tmp/dirplayer-xtra-owned-20260916/js-lingo-work-20260916/vm-rust/src/player/script.rs"
+    },
+    {
+      "path": "vm-rust/src/player/testing_browser.rs",
+      "before_sha256": "ddf5b12f02edf791f1dda098ea5a8f71ee426fd10995c4273e41b7bd57abf4f1",
+      "after_sha256": "d592560cacbc6ccab2b6e51baa2ed245a515cf1b97c220550c544b59a4f37aec",
+      "before_bytes": 56818,
+      "after_bytes": 67873,
+      "before_source": "/private/tmp/dirplayer-xtra-owned-20260916/js-lingo-before-20260916/vm-rust/src/player/testing_browser.rs",
+      "after_source": "/private/tmp/dirplayer-xtra-owned-20260916/js-lingo-work-20260916/vm-rust/src/player/testing_browser.rs"
+    },
+    {
+      "path": "vm-rust/src/player/eval.rs",
+      "before_sha256": "3ce01caac14a7e6c1a4d064ca63f1628dc00a6550b6c58dd14ded7f40f082a6e",
+      "after_sha256": "892273b83876fb0e582e0b53f1ee5a1ee357f44fef9f07442ca0842e2e08b414",
+      "before_bytes": 198203,
+      "after_bytes": 200174,
+      "before_source": "/private/tmp/dirplayer-xtra-owned-20260916/js-lingo-corrected-before-20260916/vm-rust/src/player/eval.rs",
+      "after_source": "/private/tmp/dirplayer-xtra-owned-20260916/js-lingo-work-20260916/vm-rust/src/player/eval.rs"
+    },
+    {
+      "path": "vm-rust/src/player/session.rs",
+      "before_sha256": "9e423d1deb7c6f897c206245bd2ae96c8a9778e40cfda59c9647e02b8c26d478",
+      "after_sha256": "003f0189487aa278596dcf2d82eb1c5db2b83effbb27254821e5372f716d89a6",
+      "before_bytes": 244459,
+      "after_bytes": 245264,
+      "before_source": "/private/tmp/dirplayer-xtra-owned-20260916/js-lingo-corrected-before-20260916/vm-rust/src/player/session.rs",
+      "after_source": "/private/tmp/dirplayer-xtra-owned-20260916/js-lingo-work-20260916/vm-rust/src/player/session.rs"
+    }
+  ],
+  "notes": [
+    "Synchronous JS runtime reentry returns explicit error; no queued side effects.",
+    "Deferred supported JS calls continue through owner-bound InternalVmRequest::JsObject executor.",
+    "Receiver-bound this, seeded runtime state, explicit production property read/write routing, owner/reset tests, monotonic object IDs, and generated two-owner browser fixture are retained.",
+    "The driver regressions execute real GetObjProp and SetObjProp opcodes through execute_internal_action, call driver.complete, assert opcode resumption and stack/last-handler effects, and reject a reset replacement ticket.",
+    "testing_browser.rs requires the unconditional test_fixtures visibility hunk when integrated.",
+    "No Cargo/build/cache artifacts were created."
+  ]
+}

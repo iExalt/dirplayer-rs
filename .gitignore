@@ -47,3 +47,6 @@ xtras/*/target/
 /dist-polyfill
 
 /test-results
+
+# Local native baseline browser cache; verified evidence uses the sibling cache.
+/.cache/native-bevy/

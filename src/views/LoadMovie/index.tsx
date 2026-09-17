@@ -2,8 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import styles from './styles.module.css';
 import logoUrl from '../../assets/logo128.png';
 import ThemeToggle from '../../components/ThemeToggle';
-import { load_movie_file, play, set_base_path, set_external_params, set_movie_path_override,
-  set_startup_do, set_startup_do_before, set_startup_go } from 'vm-rust';
+import { useVMHandle } from '../../components/VMProvider';
 import { parseLaunchCommand, findLaunchCommandInHtml, findLegacyServerInHtml, toLegacyUrl } from '../../utils/launchCommand';
 import { getExternalXtrasReady, resolveAndLoadMovieXtras, setXtraMovieBase, whenMovieLoaded } from 'dirplayer-js-api';
 import { useMountEffect } from '../../utils/hooks';
@@ -257,6 +256,7 @@ function matchesFilter(movie: RecentMovie, tokens: string[]): boolean {
 }
 
 export default function LoadMovie() {
+  const handle = useVMHandle();
   const dispatch = useDispatch();
   const movieLoadError = useSelector<RootState, string | undefined>(state => state.vm.movieLoadError);
   const defaultMovieUrl = process.env.REACT_APP_MOVIE_URL ? getFullPathFromOrigin(process.env.REACT_APP_MOVIE_URL) : '';
@@ -320,12 +320,12 @@ export default function LoadMovie() {
       }
       dispatch(movieUnloaded());
       const moviePath = getBasePath(fullPath);
-      set_base_path(moviePath);
+      handle.set_base_path(moviePath);
       // Make bare xtra filenames (e.g. localStorage entry "foo.wasm")
       // resolve against this movie's directory.
       setXtraMovieBase(moviePath);
-      set_external_params(paramsArrayToRecord(params ?? externalParams));
-      set_movie_path_override(fakePath ?? fakeMoviePath ?? '');
+      handle.set_external_params(paramsArrayToRecord(params ?? externalParams));
+      handle.set_movie_path_override(fakePath ?? fakeMoviePath ?? '');
       // Projector launch-command payloads (`--do` / `--doBefore` / `--go`, plus
       // the LeechProtectionRemovalHelp flags synthesised into `--do`). These
       // MUST be installed before load_movie_file: the movie-init sequence
@@ -337,9 +337,9 @@ export default function LoadMovie() {
       // a payload left behind by a load that failed before consuming it cannot
       // leak into the next movie (same hazard as the CORS proxy global above).
       const launch = parseLaunchCommand(launchCmd ?? launchCommand);
-      set_startup_do_before(launch.startupDoBefore);
-      set_startup_do(launch.startupDo);
-      set_startup_go(launch.startupGo);
+      handle.set_startup_do_before(launch.startupDoBefore);
+      handle.set_startup_do(launch.startupDo);
+      handle.set_startup_go(launch.startupGo);
       if (launch.ignored.length) {
         console.warn('[LoadMovie] launch command: ignored projector-only flags:', launch.ignored.join(', '));
       }
@@ -355,16 +355,16 @@ export default function LoadMovie() {
       // is actually populated — otherwise resolveAndLoadMovieXtras
       // sees an empty required-xtras list.
       const movieLoadedPromise = whenMovieLoaded();
-      await load_movie_file(fullPath, false);
+      await handle.load_movie_file(fullPath, false);
       await movieLoadedPromise;
-      await resolveAndLoadMovieXtras();
-      if (autoPlay) play();
+      await resolveAndLoadMovieXtras(handle);
+      if (autoPlay) handle.play();
     } catch (e) {
       console.error('Failed to load movie', e);
     } finally {
       setIsLoading(false);
     }
-  }, [autoPlay, dispatch, externalParams, fakeMoviePath, corsProxy, useCorsProxy, launchCommand]);
+  }, [autoPlay, dispatch, externalParams, fakeMoviePath, corsProxy, useCorsProxy, launchCommand, handle]);
 
   const onLoadClick = useCallback(async () => {
     if (!movieUrl.trim()) { setHasError(true); return; }

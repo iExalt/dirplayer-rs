@@ -1,39 +1,48 @@
 use crate::{
     director::lingo::datum::Datum,
     player::{
-        DirPlayer, ScriptError, bitmap::bitmap::{BuiltInPalette, PaletteRef}, cast_lib::CastMemberRef, cast_member::Media, handlers::datum_handlers::cast_member_ref::{CastMemberRefHandlers, borrow_member_mut}, reserve_player_mut, symbols::{builtin::BuiltInSymbol, symbol::Symbol}
+        DirPlayer, ScriptError, ScriptErrorCode, bitmap::bitmap::{BuiltInPalette, PaletteRef}, cast_lib::CastMemberRef, cast_member::Media, handlers::datum_handlers::cast_member_ref::{CastMemberRefHandlers, borrow_member_mut_with_player}, symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable}
     },
 };
 use num_traits::FromPrimitive;
 
 pub struct BitmapMemberHandlers {}
 
+fn with_bitmap_member_context<T, F>(player: &mut DirPlayer, f: F) -> Result<T, ScriptError>
+where
+    F: FnOnce(&mut DirPlayer) -> Result<T, ScriptError>,
+{
+    f(player)
+}
+
 impl BitmapMemberHandlers {
     pub fn get_prop(
         player: &mut DirPlayer,
+        symbols: &SymbolTable,
         cast_member_ref: &CastMemberRef,
         prop: Symbol,
     ) -> Result<Datum, ScriptError> {
+        symbols.display(&prop).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
         let member = player
             .movie
             .cast_manager
             .find_member_by_ref(cast_member_ref)
-            .unwrap();
-        let bitmap_member = member.member_type.as_bitmap().unwrap();
+            .ok_or_else(|| ScriptError::new("Invalid cast member reference".to_string()))?;
+        let bitmap_member = member.member_type.as_bitmap()
+            .ok_or_else(|| ScriptError::new("Expected a bitmap cast member".to_string()))?;
         let bitmap_ref = bitmap_member.image_ref;
         let bitmap = player.bitmap_manager.get_bitmap(bitmap_member.image_ref);
 
-        if !bitmap.is_some() {
-            return Err(ScriptError::new(format!(
-                "Cannot get prop of invalid bitmap ref"
-            )));
-        }
+        let bitmap = bitmap.ok_or_else(|| ScriptError::new_code(
+            ScriptErrorCode::InvalidReference,
+            "Cannot get prop of invalid bitmap ref".to_string(),
+        ))?;
         match prop.into_builtin() {
-            Some(BuiltInSymbol::Width) => Ok(Datum::Int(bitmap.map(|x| x.width as i32).unwrap_or(0))),
-            Some(BuiltInSymbol::Height) => Ok(Datum::Int(bitmap.map(|x| x.height as i32).unwrap_or(0))),
+            Some(BuiltInSymbol::Width) => Ok(Datum::Int(bitmap.width as i32)),
+            Some(BuiltInSymbol::Height) => Ok(Datum::Int(bitmap.height as i32)),
             Some(BuiltInSymbol::Image | BuiltInSymbol::Picture) => Ok(Datum::BitmapRef(bitmap_ref)),
             Some(BuiltInSymbol::Media) => Ok(Datum::media(Media::Bitmap {
-                bitmap: bitmap.unwrap().clone(),
+                bitmap: bitmap.clone(),
                 reg_point: bitmap_member.reg_point,
             })),
             // `palette` and `paletteRef` are the same thing in our model —
@@ -44,9 +53,7 @@ impl BitmapMemberHandlers {
             // errored even though the matching setter at line 200 accepts
             // the same name.
             Some(BuiltInSymbol::Palette | BuiltInSymbol::PaletteRef) => {
-                let palette = bitmap
-                    .map(|x| x.palette_ref.clone())
-                    .unwrap_or(PaletteRef::BuiltIn(BuiltInPalette::GrayScale));
+                let palette = bitmap.palette_ref.clone();
                 match palette {
                     PaletteRef::BuiltIn(builtin) => Ok(Datum::Symbol(Symbol::builtin(builtin.symbol()))),
                     PaletteRef::Member(member_ref) => {
@@ -71,38 +78,40 @@ impl BitmapMemberHandlers {
                 }
             },
             Some(BuiltInSymbol::Rect) => {
-                let width = bitmap.map(|x| x.width as i32).unwrap_or(0);
-                let height = bitmap.map(|x| x.height as i32).unwrap_or(0);
+                let width = bitmap.width as i32;
+                let height = bitmap.height as i32;
                 Ok(Datum::Rect([0.0, 0.0, width as f64, height as f64], 0))
             }
             Some(BuiltInSymbol::Depth) => Ok(Datum::Int(
-                bitmap
-                    .map(|x| x.bit_depth as i32)
-                    .unwrap_or(0),
+                bitmap.bit_depth as i32,
             )),
             Some(BuiltInSymbol::UseAlpha) => Ok(Datum::Int(if bitmap_member.info.use_alpha { 1 } else { 0 })),
             Some(BuiltInSymbol::TrimWhiteSpace) => Ok(Datum::Int(if bitmap_member.info.trim_white_space { 1 } else { 0 })),
             Some(BuiltInSymbol::CenterRegPoint) => Ok(Datum::Int(if bitmap_member.info.center_reg_point { 1 } else { 0 })),
             _ => Err(ScriptError::new(format!(
                 "Cannot get castMember property {} for bitmap",
-                prop
+                symbols.display(&prop).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
             ))),
         }
     }
 
     pub fn set_prop(
+        player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
         member_ref: &CastMemberRef,
         prop: Symbol,
         value: Datum,
     ) -> Result<(), ScriptError> {
+        symbols.display(&prop).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
         match prop.into_builtin() {
             Some(BuiltInSymbol::Image | BuiltInSymbol::Picture) => {
                 if value.is_void() {
                     return Ok(());
                 }
-                reserve_player_mut(|player| {
+                crate::player::compare::validate_direct_symbol_fields(&value, symbols)?;
+                with_bitmap_member_context(player, |player| {
                     let bitmap_ref = player.resolve_bitmap_ref(&value)?;
-                    let bitmap = player.bitmap_manager.get_bitmap(bitmap_ref).unwrap();
+                    let bitmap = player.bitmap_manager.get_bitmap(bitmap_ref).ok_or_else(|| ScriptError::new_code(ScriptErrorCode::InvalidReference, "Invalid bitmap reference".to_string()))?;
                     let new_width = bitmap.width;
                     let new_height = bitmap.height;
                     let mut clone = bitmap.clone();
@@ -112,8 +121,9 @@ impl BitmapMemberHandlers {
                             .movie
                             .cast_manager
                             .find_member_by_ref(member_ref)
-                            .unwrap();
-                        let bitmap_member = cast_member.member_type.as_bitmap().unwrap();
+                            .ok_or_else(|| ScriptError::new("Invalid cast member reference".to_string()))?;
+                        let bitmap_member = cast_member.member_type.as_bitmap()
+                            .ok_or_else(|| ScriptError::new("Expected a bitmap cast member".to_string()))?;
                         let old_palette = player.bitmap_manager.get_bitmap(bitmap_member.image_ref)
                             .map(|bm| bm.palette_ref.clone());
                         (bitmap_member.image_ref, old_palette)
@@ -137,8 +147,9 @@ impl BitmapMemberHandlers {
                         .movie
                         .cast_manager
                         .find_mut_member_by_ref(member_ref)
-                        .unwrap();
-                    let bitmap_member = cast_member.member_type.as_bitmap_mut().unwrap();
+                        .ok_or_else(|| ScriptError::new("Invalid cast member reference".to_string()))?;
+                    let bitmap_member = cast_member.member_type.as_bitmap_mut()
+                        .ok_or_else(|| ScriptError::new("Expected a bitmap cast member".to_string()))?;
                     bitmap_member.info.width = new_width as u16;
                     bitmap_member.info.height = new_height as u16;
                     // Director auto-centers regPoint when `member.image = ...` is
@@ -156,19 +167,21 @@ impl BitmapMemberHandlers {
                 })
             }
             Some(BuiltInSymbol::Media) => {
+                crate::player::compare::validate_direct_symbol_fields(&value, symbols)?;
                 let media = value.media_value()?;
                 let (media_bitmap, media_reg_point) = match media {
                     Media::Bitmap { bitmap, reg_point } => (bitmap, reg_point),
                     _ => return Err(ScriptError::new("Expected a bitmap media".to_string())),
                 };
-                reserve_player_mut(|player| {
+                with_bitmap_member_context(player, |player| {
                     let member_image_ref = {
                         let cast_member = player
                             .movie
                             .cast_manager
                             .find_member_by_ref(member_ref)
-                            .unwrap();
-                        let bitmap_member = cast_member.member_type.as_bitmap().unwrap();
+                            .ok_or_else(|| ScriptError::new("Invalid cast member reference".to_string()))?;
+                        let bitmap_member = cast_member.member_type.as_bitmap()
+                            .ok_or_else(|| ScriptError::new("Expected a bitmap cast member".to_string()))?;
                         bitmap_member.image_ref
                     };
                     player.bitmap_manager.replace_bitmap(member_image_ref, media_bitmap.clone());
@@ -177,21 +190,25 @@ impl BitmapMemberHandlers {
                         .movie
                         .cast_manager
                         .find_mut_member_by_ref(member_ref)
-                        .unwrap();
-                    let bitmap_member = cast_member.member_type.as_bitmap_mut().unwrap();
+                        .ok_or_else(|| ScriptError::new("Invalid cast member reference".to_string()))?;
+                    let bitmap_member = cast_member.member_type.as_bitmap_mut()
+                        .ok_or_else(|| ScriptError::new("Expected a bitmap cast member".to_string()))?;
                     bitmap_member.reg_point = media_reg_point;
                     cast_member.reg_point = (media_reg_point.0 as i32, media_reg_point.1 as i32);
                     Ok(())
                 })
             }
             Some(BuiltInSymbol::PaletteRef) => {
-                let bitmap_id = borrow_member_mut(
+                let bitmap_id = borrow_member_mut_with_player(
+                    player,
+                    symbols,
                     member_ref,
-                    |_| {},
-                    |cast_member, _| {
-                        let bitmap_member = cast_member.member_type.as_bitmap().unwrap();
+                    |_, _| {},
+                    |cast_member, _, _| {
+                        let bitmap_member = cast_member.member_type.as_bitmap()
+                            .ok_or_else(|| ScriptError::new("Expected a bitmap cast member".to_string()))?;
                         let bitmap = bitmap_member.image_ref;
-                        Ok(bitmap)
+                        Ok::<u32, ScriptError>(bitmap)
                     },
                 )?;
                 match value {
@@ -200,33 +217,35 @@ impl BitmapMemberHandlers {
                         // names is a script error, not a panic — `.unwrap()` here
                         // took down the whole VM on a typo or an unsupported
                         // palette name.
-                        let palette_ref = BuiltInPalette::from_symbol(name).ok_or_else(|| {
+                        let palette_name = symbols.display(&name).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?.to_owned();
+                        let palette_ref = BuiltInPalette::from_symbol(name.clone(), symbols)?.ok_or_else(|| {
                             ScriptError::new(format!(
                                 "Unknown built-in palette symbol #{} for paletteRef",
-                                name
+                                palette_name
                             ))
                         })?;
-                        reserve_player_mut(|player| {
-                            let bitmap = player.bitmap_manager.get_bitmap_mut(bitmap_id).unwrap();
+                        with_bitmap_member_context(player, |player| {
+                            let bitmap = player.bitmap_manager.get_bitmap_mut(bitmap_id).ok_or_else(|| ScriptError::new_code(ScriptErrorCode::InvalidReference, "Invalid bitmap reference".to_string()))?;
                             bitmap.palette_ref = PaletteRef::BuiltIn(palette_ref);
                             Ok(())
                         })?;
                     }
                     Datum::CastMember(member_ref) => {
-                        reserve_player_mut(|player| {
-                            let bitmap = player.bitmap_manager.get_bitmap_mut(bitmap_id).unwrap();
+                        with_bitmap_member_context(player, |player| {
+                            let bitmap = player.bitmap_manager.get_bitmap_mut(bitmap_id).ok_or_else(|| ScriptError::new_code(ScriptErrorCode::InvalidReference, "Invalid bitmap reference".to_string()))?;
                             bitmap.palette_ref = PaletteRef::Member(member_ref.clone());
                             Ok(())
                         })?;
                     }
                     Datum::PaletteRef(palette_ref) => {
-                        reserve_player_mut(|player| {
-                            let bitmap = player.bitmap_manager.get_bitmap_mut(bitmap_id).unwrap();
+                        with_bitmap_member_context(player, |player| {
+                            let bitmap = player.bitmap_manager.get_bitmap_mut(bitmap_id).ok_or_else(|| ScriptError::new_code(ScriptErrorCode::InvalidReference, "Invalid bitmap reference".to_string()))?;
                             bitmap.palette_ref = palette_ref;
                             Ok(())
                         })?;
                     }
                     _ => {
+                        crate::player::compare::validate_direct_symbol_fields(&value, symbols)?;
                         return Err(ScriptError::new(format!(
                             "Cannot set bitmap member paletteRef to type {}",
                             value.type_str()
@@ -236,25 +255,28 @@ impl BitmapMemberHandlers {
                 Ok(())
             }
             Some(BuiltInSymbol::Palette) => {
-                let bitmap_id = borrow_member_mut(
+                let bitmap_id = borrow_member_mut_with_player(
+                    player,
+                    symbols,
                     member_ref,
-                    |_| {},
-                    |cast_member, _| {
-                        let bitmap_member = cast_member.member_type.as_bitmap().unwrap();
+                    |_, _| {},
+                    |cast_member, _, _| {
+                        let bitmap_member = cast_member.member_type.as_bitmap()
+                            .ok_or_else(|| ScriptError::new("Expected a bitmap cast member".to_string()))?;
                         let bitmap = bitmap_member.image_ref;
-                        Ok(bitmap)
+                        Ok::<u32, ScriptError>(bitmap)
                     },
                 )?;
                 match value {
                     Datum::Int(palette_ref) => {
                         let member =
                             CastMemberRefHandlers::member_ref_from_slot_number(palette_ref as u32);
-                        reserve_player_mut(|player| {
-                            let bitmap = player.bitmap_manager.get_bitmap_mut(bitmap_id).unwrap();
+                        with_bitmap_member_context(player, |player| {
+                            let bitmap = player.bitmap_manager.get_bitmap_mut(bitmap_id).ok_or_else(|| ScriptError::new_code(ScriptErrorCode::InvalidReference, "Invalid bitmap reference".to_string()))?;
                             if palette_ref < 0 {
-                                bitmap.palette_ref = PaletteRef::BuiltIn(
-                                    BuiltInPalette::from_i16(palette_ref as i16).unwrap(),
-                                )
+                                let palette = BuiltInPalette::from_i16(palette_ref as i16)
+                                    .ok_or_else(|| ScriptError::new(format!("Unknown built-in palette value {}", palette_ref)))?;
+                                bitmap.palette_ref = PaletteRef::BuiltIn(palette)
                             } else {
                                 bitmap.palette_ref = PaletteRef::Member(member.clone());
                             }
@@ -262,13 +284,14 @@ impl BitmapMemberHandlers {
                         })?;
                     }
                     Datum::CastMember(member_ref) => {
-                        reserve_player_mut(|player| {
-                            let bitmap = player.bitmap_manager.get_bitmap_mut(bitmap_id).unwrap();
+                        with_bitmap_member_context(player, |player| {
+                            let bitmap = player.bitmap_manager.get_bitmap_mut(bitmap_id).ok_or_else(|| ScriptError::new_code(ScriptErrorCode::InvalidReference, "Invalid bitmap reference".to_string()))?;
                             bitmap.palette_ref = PaletteRef::Member(member_ref.clone());
                             Ok(())
                         })?;
                     }
                     _ => {
+                        crate::player::compare::validate_direct_symbol_fields(&value, symbols)?;
                         return Err(ScriptError::new(format!(
                             "Cannot set bitmap member palette to type {}",
                             value.type_str()
@@ -278,63 +301,75 @@ impl BitmapMemberHandlers {
                 Ok(())
             }
             Some(BuiltInSymbol::UseAlpha) => {
+                crate::player::compare::validate_direct_symbol_fields(&value, symbols)?;
                 let use_alpha = value.to_bool()?;
-                borrow_member_mut(
+                borrow_member_mut_with_player(
+                    player,
+                    symbols,
                     member_ref,
-                    |_| {},
-                    |cast_member, _| {
-                        let bitmap_member = cast_member.member_type.as_bitmap_mut().unwrap();
+                    |_, _| {},
+                    |cast_member, _, _| {
+                        let bitmap_member = cast_member.member_type.as_bitmap_mut()
+                            .ok_or_else(|| ScriptError::new("Expected a bitmap cast member".to_string()))?;
                         bitmap_member.info.use_alpha = use_alpha;
-                        Ok(())
+                        Ok::<(), ScriptError>(())
                     },
                 )?;
                 // Also update the actual bitmap's use_alpha flag
-                reserve_player_mut(|player| {
+                with_bitmap_member_context(player, |player| {
                     let member = player
                         .movie
                         .cast_manager
                         .find_member_by_ref(member_ref)
-                        .unwrap();
-                    let bitmap_member = member.member_type.as_bitmap().unwrap();
+                        .ok_or_else(|| ScriptError::new("Invalid cast member reference".to_string()))?;
+                    let bitmap_member = member.member_type.as_bitmap()
+                        .ok_or_else(|| ScriptError::new("Expected a bitmap cast member".to_string()))?;
                     let bitmap_ref = bitmap_member.image_ref;
-                    if let Some(bitmap) = player.bitmap_manager.get_bitmap_mut(bitmap_ref) {
-                        bitmap.use_alpha = use_alpha;
-                    }
+                    let bitmap = player.bitmap_manager.get_bitmap_mut(bitmap_ref).ok_or_else(|| ScriptError::new_code(ScriptErrorCode::InvalidReference, "Invalid bitmap reference".to_string()))?;
+                    bitmap.use_alpha = use_alpha;
                     Ok(())
                 })
             }
             Some(BuiltInSymbol::TrimWhiteSpace) => {
+                crate::player::compare::validate_direct_symbol_fields(&value, symbols)?;
                 let trim_white_space = value.to_bool()?;
-                borrow_member_mut(
+                borrow_member_mut_with_player(
+                    player,
+                    symbols,
                     member_ref,
-                    |_| {},
-                    |cast_member, _| {
-                        let bitmap_member = cast_member.member_type.as_bitmap_mut().unwrap();
+                    |_, _| {},
+                    |cast_member, _, _| {
+                        let bitmap_member = cast_member.member_type.as_bitmap_mut()
+                            .ok_or_else(|| ScriptError::new("Expected a bitmap cast member".to_string()))?;
                         bitmap_member.info.trim_white_space = trim_white_space;
-                        Ok(())
+                        Ok::<(), ScriptError>(())
                     },
                 )?;
-                reserve_player_mut(|player| {
+                with_bitmap_member_context(player, |player| {
                     let member = player
                         .movie
                         .cast_manager
                         .find_member_by_ref(member_ref)
-                        .unwrap();
-                    let bitmap_member = member.member_type.as_bitmap().unwrap();
+                        .ok_or_else(|| ScriptError::new("Invalid cast member reference".to_string()))?;
+                    let bitmap_member = member.member_type.as_bitmap()
+                        .ok_or_else(|| ScriptError::new("Expected a bitmap cast member".to_string()))?;
                     let bitmap_ref = bitmap_member.image_ref;
-                    if let Some(bitmap) = player.bitmap_manager.get_bitmap_mut(bitmap_ref) {
-                        bitmap.trim_white_space = trim_white_space;
-                    }
+                    let bitmap = player.bitmap_manager.get_bitmap_mut(bitmap_ref).ok_or_else(|| ScriptError::new_code(ScriptErrorCode::InvalidReference, "Invalid bitmap reference".to_string()))?;
+                    bitmap.trim_white_space = trim_white_space;
                     Ok(())
                 })
             }
             Some(BuiltInSymbol::CenterRegPoint) => {
+                crate::player::compare::validate_direct_symbol_fields(&value, symbols)?;
                 let center = value.to_bool()?;
-                borrow_member_mut(
+                borrow_member_mut_with_player(
+                    player,
+                    symbols,
                     member_ref,
-                    |_| {},
-                    |cast_member, _| {
-                        let bitmap_member = cast_member.member_type.as_bitmap_mut().unwrap();
+                    |_, _| {},
+                    |cast_member, _, _| {
+                        let bitmap_member = cast_member.member_type.as_bitmap_mut()
+                            .ok_or_else(|| ScriptError::new("Expected a bitmap cast member".to_string()))?;
                         bitmap_member.info.center_reg_point = center;
                         // Director snaps regPoint to bitmap center when the
                         // flag is turned on — the renderer also recomputes
@@ -344,31 +379,30 @@ impl BitmapMemberHandlers {
                         if center {
                             // Need bitmap dimensions: defer to next reserve_player_mut.
                         }
-                        Ok(())
+                        Ok::<(), ScriptError>(())
                     },
                 )?;
                 if center {
-                    reserve_player_mut(|player| {
+                    with_bitmap_member_context(player, |player| {
                         let member = player
                             .movie
                             .cast_manager
                             .find_member_by_ref(member_ref)
-                            .unwrap();
-                        let bitmap_member = member.member_type.as_bitmap().unwrap();
+                            .ok_or_else(|| ScriptError::new("Invalid cast member reference".to_string()))?;
+                        let bitmap_member = member.member_type.as_bitmap()
+                            .ok_or_else(|| ScriptError::new("Expected a bitmap cast member".to_string()))?;
                         let bitmap_ref = bitmap_member.image_ref;
-                        let (w, h) = if let Some(bm) = player.bitmap_manager.get_bitmap(bitmap_ref) {
-                            (bm.width as i32, bm.height as i32)
-                        } else {
-                            (0, 0)
-                        };
+                        let bitmap = player.bitmap_manager.get_bitmap(bitmap_ref).ok_or_else(|| ScriptError::new_code(ScriptErrorCode::InvalidReference, "Invalid bitmap reference".to_string()))?;
+                        let (w, h) = (bitmap.width as i32, bitmap.height as i32);
                         let reg_x = w / 2;
                         let reg_y = h / 2;
                         let member = player
                             .movie
                             .cast_manager
                             .find_mut_member_by_ref(member_ref)
-                            .unwrap();
-                        let bm = member.member_type.as_bitmap_mut().unwrap();
+                            .ok_or_else(|| ScriptError::new("Invalid cast member reference".to_string()))?;
+                        let bm = member.member_type.as_bitmap_mut()
+                            .ok_or_else(|| ScriptError::new("Expected a bitmap cast member".to_string()))?;
                         bm.reg_point = (reg_x as i16, reg_y as i16);
                         member.reg_point = (reg_x, reg_y);
                         Ok(())
@@ -378,7 +412,7 @@ impl BitmapMemberHandlers {
             }
             _ => Err(ScriptError::new(format!(
                 "Cannot set castMember prop {} for bitmap",
-                prop
+                symbols.display(&prop).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
             ))),
         }
     }

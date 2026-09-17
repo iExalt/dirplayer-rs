@@ -1,0 +1,55 @@
+[tools]
+rust = "1.98.1"
+node = "24.14.0"
+bun = "1.4.2"
+python = "3.14.7"
+"cargo:wasm-bindgen-cli" = "0.2.108"
+"cargo:wasm-pack" = "0.15.0"
+
+[env]
+CARGO_INCREMENTAL = "0"
+PLAYWRIGHT_BROWSERS_PATH = "{{config_root}}/.cache/native-bevy/playwright"
+
+[tasks."check:ownership"]
+description = "Fail when unreviewed runtime ownership findings remain"
+run = "python scripts/audit-runtime-ownership.py --check"
+
+[tasks."audit:ownership"]
+description = "Inventory runtime ownership and legacy access patterns"
+run = "python scripts/audit-runtime-ownership.py"
+
+[tasks."test:ownership-audit"]
+description = "Run focused ownership-audit scanner tests"
+run = "python scripts/test_audit_runtime_ownership.py"
+
+[tasks."test:symbol-ownership"]
+description = "Run the isolated production symbol ownership harness natively"
+run = "cargo test --manifest-path tools/symbol-ownership-tests/Cargo.toml --locked"
+
+[tasks."test:symbol-ownership:miri"]
+description = "Run the isolated symbol harness with preinstalled nightly Miri (no auto-install)"
+run = "rustup run nightly-2026-06-16 cargo miri test --manifest-path tools/symbol-ownership-tests/Cargo.toml --locked"
+
+[tasks."setup:browser"]
+description = "Install JavaScript dependencies and the Playwright Chromium browser"
+run = [
+  "npm ci --ignore-scripts --no-audit --no-fund",
+  "node node_modules/playwright/cli.js install chromium",
+  "rustup target add --toolchain 1.98.1 wasm32-unknown-unknown",
+]
+
+[tasks."baseline:browser:shapes"]
+description = "Run the focused dpt_shapes browser baseline"
+run = "E2E_FILTER=dpt_shapes npm run e2e-test-browser -- --reporter=line"
+
+[tasks."baseline:audio"]
+description = "Run the Director browser audio baseline using the caller or sibling fixture root"
+run = "node scripts/run-native-bevy-audio-baseline.mjs"
+
+[tasks."build:vm"]
+description = "Build the VM WebAssembly package with wasm-pack"
+run = "npm run build-vm"
+
+[tasks."test:protocol-fixtures"]
+description = "Validate protocol wire fixtures and POSIX transport checks"
+run = "python tools/protocol-fixtures/validate.py"

@@ -2,6 +2,7 @@
 //! Ported from SkeletonEvaluator.cs.
 
 use crate::player::symbols::symbol::Symbol;
+use crate::player::symbols::symbol_table::SymbolTable;
 
 use super::types::*;
 use std::collections::HashMap;
@@ -19,21 +20,66 @@ const TRANSLATION_EPSILON: f32 = 1e-5;
 ///
 /// Pick the rig's own like-named motion, else the first real motion (more than
 /// one track, and not the built-in default).
-pub fn default_motion_for_model<'a>(scene: &'a W3dScene, model_name: Symbol) -> Option<&'a W3dMotion> {
-    let node = scene.nodes.iter().find(|n| n.name == model_name)?;
-    let skeleton = scene.skeletons.iter().find(|s| {
-        s.bones.len() > 1
-            && (s.name == node.resource_name
-                || s.name == node.model_resource_name
-                || s.name == node.name)
-    })?;
-    scene.motions.iter()
-        .find(|m| m.name == skeleton.name)
-        .or_else(|| scene.motions.iter().find(|m| {
-            m.tracks.len() > 1
-                && !m.name.eq_ignore_ascii_case("DefaultMotion")
-                && motion_drives_skeleton(skeleton, m)
-        }))
+pub fn default_motion_for_model<'a>(
+    scene: &'a W3dScene,
+    model_name: Symbol,
+    symbols: &SymbolTable,
+) -> Result<Option<&'a W3dMotion>, String> {
+    symbols
+        .display(&model_name)
+        .map_err(|_| "W3D skeleton lookup encountered a symbol owned by another session".to_owned())?;
+    let mut node = None;
+    for candidate in &scene.nodes {
+        symbols.display(&candidate.name)
+            .map_err(|_| "W3D skeleton lookup encountered a symbol owned by another session".to_owned())?;
+        if candidate.name == model_name {
+            node = Some(candidate);
+            break;
+        }
+    }
+    let Some(node) = node else {
+        return Ok(None);
+    };
+    for name in [&node.name, &node.resource_name, &node.model_resource_name] {
+        symbols.display(name)
+            .map_err(|_| "W3D skeleton lookup encountered a symbol owned by another session".to_owned())?;
+    }
+    let mut skeleton = None;
+    for candidate in &scene.skeletons {
+        if candidate.bones.len() <= 1 {
+            continue;
+        }
+        symbols.display(&candidate.name)
+            .map_err(|_| "W3D skeleton lookup encountered a symbol owned by another session".to_owned())?;
+        if candidate.name == node.resource_name
+            || candidate.name == node.model_resource_name
+            || candidate.name == node.name
+        {
+            skeleton = Some(candidate);
+            break;
+        }
+    }
+    let Some(skeleton) = skeleton else {
+        return Ok(None);
+    };
+    for motion in &scene.motions {
+        symbols.display(&motion.name)
+            .map_err(|_| "W3D skeleton lookup encountered a symbol owned by another session".to_owned())?;
+        if motion.name == skeleton.name {
+            return Ok(Some(motion));
+        }
+    }
+    for motion in &scene.motions {
+        if motion.tracks.len() > 1
+            && !symbols.lower(&motion.name)
+                .map_err(|_| "W3D skeleton lookup encountered a symbol owned by another session".to_owned())?
+                .eq_ignore_ascii_case("DefaultMotion")
+            && motion_drives_skeleton(skeleton, motion, symbols)?
+        {
+            return Ok(Some(motion));
+        }
+    }
+    Ok(None)
 }
 
 /// True when `motion` was authored for `skeleton` — at least one of its tracks
@@ -43,8 +89,40 @@ pub fn default_motion_for_model<'a>(scene: &'a W3dScene, model_name: Symbol) -> 
 /// plus all their clips into one member has many motions that drive OTHER
 /// skeletons. Sampling one of those leaves every bone on its rest TRS (no track
 /// name matches), which reads as a plausible pose and is silently wrong.
-pub fn motion_drives_skeleton(skeleton: &W3dSkeleton, motion: &W3dMotion) -> bool {
-    motion.tracks.iter().any(|t| skeleton.bones.iter().any(|b| b.name == t.bone_name))
+pub fn motion_drives_skeleton(
+    skeleton: &W3dSkeleton,
+    motion: &W3dMotion,
+    symbols: &SymbolTable,
+) -> Result<bool, String> {
+    for track in &motion.tracks {
+        symbols.display(&track.bone_name)
+            .map_err(|_| "W3D skeleton lookup encountered a symbol owned by another session".to_owned())?;
+        for bone in &skeleton.bones {
+            symbols.display(&bone.name)
+                .map_err(|_| "W3D skeleton lookup encountered a symbol owned by another session".to_owned())?;
+            if bone.name == track.bone_name {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Check the motion tracks that the root ownership lookup visits, preserving
+/// the source order and short-circuit on the first matching root track.
+fn motion_drives_root(
+    root: &Symbol,
+    motion: &W3dMotion,
+    symbols: &SymbolTable,
+) -> Result<bool, String> {
+    for track in &motion.tracks {
+        symbols.display(&track.bone_name)
+            .map_err(|_| "W3D skeleton lookup encountered a symbol owned by another session".to_owned())?;
+        if track.bone_name == *root {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// The rig's authored idle, whose frame-0 root is the reference the renderer
@@ -65,12 +143,36 @@ pub fn motion_drives_skeleton(skeleton: &W3dSkeleton, motion: &W3dMotion) -> boo
 pub fn idle_reference_motion<'a>(
     scene: &'a W3dScene,
     skeleton: &W3dSkeleton,
-) -> Option<&'a W3dMotion> {
-    let root = skeleton.bones.first()?.name;
-    let own = || scene.motions.iter()
-        .filter(move |m| m.tracks.iter().any(|t| t.bone_name == root));
-    own().find(|m| m.name.as_lower_str().contains("idle_rest"))
-        .or_else(|| own().find(|m| m.name.as_lower_str().contains("idle")))
+    symbols: &SymbolTable,
+) -> Result<Option<&'a W3dMotion>, String> {
+    let Some(root) = skeleton.bones.first().map(|b| b.name.clone()) else {
+        return Ok(None);
+    };
+    symbols.display(&skeleton.name)
+        .map_err(|_| "W3D skeleton lookup encountered a symbol owned by another session".to_owned())?;
+    symbols.display(&root)
+        .map_err(|_| "W3D skeleton lookup encountered a symbol owned by another session".to_owned())?;
+    for motion in &scene.motions {
+        if !motion_drives_root(&root, motion, symbols)? {
+            continue;
+        }
+        let name = symbols.lower(&motion.name)
+            .map_err(|_| "W3D skeleton lookup encountered a symbol owned by another session".to_owned())?;
+        if name.contains("idle_rest") {
+            return Ok(Some(motion));
+        }
+    }
+    for motion in &scene.motions {
+        if !motion_drives_root(&root, motion, symbols)? {
+            continue;
+        }
+        let name = symbols.lower(&motion.name)
+            .map_err(|_| "W3D skeleton lookup encountered a symbol owned by another session".to_owned())?;
+        if name.contains("idle") {
+            return Ok(Some(motion));
+        }
+    }
+    Ok(None)
 }
 
 /// Frame 0 of the motion Director samples to fold a skinned model's biped COM
@@ -85,10 +187,22 @@ pub fn idle_reference_motion<'a>(
 pub fn import_root_com_motion<'a>(
     scene: &'a W3dScene,
     skeleton: &W3dSkeleton,
-) -> Option<&'a W3dMotion> {
-    let root = match skeleton.bones.first() { Some(b) => b.name, None => return None };
-    idle_reference_motion(scene, skeleton).or_else(|| scene.motions.iter()
-        .find(|m| m.name == skeleton.name && m.tracks.iter().any(|t| t.bone_name == root)))
+    symbols: &SymbolTable,
+) -> Result<Option<&'a W3dMotion>, String> {
+    let Some(root) = skeleton.bones.first().map(|b| b.name.clone()) else {
+        return Ok(None);
+    };
+    if let Some(motion) = idle_reference_motion(scene, skeleton, symbols)? {
+        return Ok(Some(motion));
+    }
+    for motion in &scene.motions {
+        symbols.display(&motion.name)
+            .map_err(|_| "W3D skeleton lookup encountered a symbol owned by another session".to_owned())?;
+        if motion.name == skeleton.name && motion_drives_root(&root, motion, symbols)? {
+            return Ok(Some(motion));
+        }
+    }
+    Ok(None)
 }
 
 pub fn has_meaningful_translation(x: f32, y: f32, z: f32) -> bool {
@@ -184,7 +298,7 @@ pub fn build_bone_matrices_ex(
             continue;
         }
         if let Some(mot) = motion {
-            if let Some(track) = mot.find_track_by_bone(bone.name) {
+            if let Some(track) = mot.find_track_by_bone(bone.name.clone()) {
                 let kf = track.evaluate(time);
                 // RAW translation. The parent-tip offset is applied by the world walk
                 // below, not folded in here — see the note on bone length there.

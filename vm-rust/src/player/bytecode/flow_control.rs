@@ -1,9 +1,7 @@
 use crate::{
-    director::lingo::datum::{Datum, DatumType},
+    director::lingo::datum::Datum,
     player::{
-        HandlerExecutionResult, PLAYER_OPT, ScriptError, compare::datum_is_zero, datum_formatting::format_datum, datum_ref::DatumRef, handlers::datum_handlers::{
-            player_call_datum_handler, script_instance::ScriptInstanceUtils,
-        }, player_call_script_handler_raw_args, player_ext_call, player_handle_scope_return, reserve_player_mut, reserve_player_ref, scope::StackDatum, script::{get_current_handler_def, get_current_script, get_name}, symbols::symbol::Symbol
+        HandlerExecutionResult, ScriptError, compare::datum_is_zero, datum_formatting::format_datum, datum_ref::DatumRef, handlers::datum_handlers::script_instance::ScriptInstanceUtils, scope::StackDatum, script::{get_current_handler_def, get_current_script}, symbols::symbol::Symbol
     },
 };
 
@@ -11,51 +9,103 @@ use super::handler_manager::BytecodeHandlerContext;
 
 pub struct FlowControlBytecodeHandler {}
 
+pub(crate) struct PreparedObjCall {
+    pub(crate) receiver: DatumRef,
+    pub(crate) name: Symbol,
+    pub(crate) args: Vec<DatumRef>,
+    pub(crate) push_return: bool,
+    pub(crate) lingo_target: Option<(crate::player::ScriptInstanceRef, crate::player::script::ScriptHandlerRef)>,
+}
+
+/// Decode ObjCall's stack payload once while the session owns its player.
+/// Script-instance routing intentionally follows the legacy resolution order;
+/// datum dispatch happens only after that route declines the call.
+pub(crate) fn prepare_obj_call(
+    runtime: &mut crate::player::session::ExecutionContext<'_>,
+    ctx: &BytecodeHandlerContext,
+) -> Result<PreparedObjCall, ScriptError> {
+    runtime.with_player_and_symbols(|player, symbols| {
+        let bytecode = player.get_ctx_current_bytecode(ctx);
+        let name = ctx.get_name(bytecode.obj as u16);
+        let name_text = symbols
+            .display(&name)
+            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+        let (mut all_args, no_ret) = {
+            let (scopes, allocator, bitmap_manager) =
+                (&mut player.scopes, &mut player.allocator, &mut player.bitmap_manager);
+            let scope = scopes.get_mut(ctx.scope_ref()).unwrap();
+            let bytecode_index = scope.bytecode_index;
+            match scope.pop_call_args(allocator, bitmap_manager) {
+                Some(value) => value,
+                None => {
+                    let current_handler_name = ctx.get_name(scope.handler_name_id);
+                    let current_handler_name = symbols
+                        .display(&current_handler_name)
+                        .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+                    return Err(ScriptError::new(format!(
+                        "obj_call '{}': expected arg marker in handler '{}' (script={}:{}, scope_ref={}, bytecode_index={})",
+                        name_text,
+                        current_handler_name,
+                        scope.script_ref.cast_lib,
+                        scope.script_ref.cast_member,
+                        ctx.scope_ref(),
+                        bytecode_index
+                    )));
+                }
+            }
+        };
+        if all_args.is_empty() {
+            return Err(ScriptError::new(format!(
+                "obj_call '{}': arg list has no receiver",
+                name_text
+            )));
+        }
+        let receiver = all_args.remove(0);
+        let args = all_args;
+        let lingo_target = match &receiver {
+            DatumRef::Void => None,
+            _ => match player.allocator.try_get_datum(&receiver) {
+                Some(Datum::ScriptInstanceRef(instance_ref)) => {
+                    let instance_ref = instance_ref.clone();
+                    if crate::player::virtual_scripts::VirtualScriptRegistry::has_instance_handler(
+                        player,
+                        symbols,
+                        &instance_ref,
+                        name.clone(),
+                    )? {
+                        None
+                    } else {
+                        ScriptInstanceUtils::get_handler(name.clone(), &receiver, player)?
+                            .map(|handler_ref| (instance_ref, handler_ref))
+                    }
+                }
+                Some(_) => None,
+                None => {
+                    return Err(ScriptError::new(format!(
+                        "invalid datum reference {receiver}"
+                    )));
+                }
+            },
+        };
+        Ok(PreparedObjCall {
+            receiver,
+            name,
+            args,
+            push_return: !no_ret,
+            lingo_target,
+        })
+    })
+}
+
 impl FlowControlBytecodeHandler {
-    pub fn ret(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
-        reserve_player_mut(|player| {
-            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+    pub fn ret(runtime: &mut crate::player::session::ExecutionContext,
+        ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+        runtime.with_player(|player| {
+            let scope = player.scopes.get_mut(ctx.scope_ref()).unwrap();
             scope.return_value = DatumRef::Void;
             scope.stack.clear();
         });
         Ok(HandlerExecutionResult::Stop)
-    }
-
-    pub async fn ext_call(
-        ctx: &BytecodeHandlerContext,
-    ) -> Result<HandlerExecutionResult, ScriptError> {
-        // let script = get_current_script(player.to_owned(), ctx.to_owned());
-        let (name, arg_ref_list, is_no_ret) = {
-            let player = unsafe { crate::player::player_mut() };
-            let player_cell = &player;
-
-            let name_id = player.get_ctx_current_bytecode(&ctx).obj as u16;
-
-            let _ = player_cell;
-            let name = ctx.get_name(name_id);
-            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-            let bytecode_index = scope.bytecode_index;
-            let (args, is_no_ret) = match scope.pop_call_args() {
-                Some(v) => v,
-                None => {
-                    return Err(ScriptError::new(format!(
-                        "ext_call '{}': expected arg marker on stack (scope_ref={}, bytecode_index={})",
-                        name, ctx.scope_ref, bytecode_index
-                    )));
-                }
-            };
-            (name, args, is_no_ret)
-        };
-
-        let (result_ctx, return_value) =
-            player_ext_call(name.clone(), &arg_ref_list, ctx.scope_ref).await;
-        if !is_no_ret {
-            reserve_player_mut(|player| {
-                let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-                scope.stack.push(return_value);
-            });
-        }
-        return Ok(result_ctx);
     }
 
     /// `tell <target>` — pop the target and record what the enclosed statements
@@ -63,10 +113,15 @@ impl FlowControlBytecodeHandler {
     /// (the loader→game command bridge); `tell sprite(<film loop>)` re-points
     /// score reads at the film loop's own playhead; other targets run on THIS
     /// player. Stack is a Vec so `tell` blocks can nest.
-    pub fn start_tell(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
-        reserve_player_mut(|player| {
-            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-            let target_ref = scope.stack.pop().ok_or_else(|| {
+    pub fn start_tell(runtime: &mut crate::player::session::ExecutionContext,
+        ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+        runtime.with_player(|player| {
+            let target_ref = {
+                let (scopes, allocator, bitmap_manager) =
+                    (&mut player.scopes, &mut player.allocator, &mut player.bitmap_manager);
+                let scope = scopes.get_mut(ctx.scope_ref()).unwrap();
+                scope.stack.pop_ref_with(allocator, bitmap_manager)
+            }.ok_or_else(|| {
                 ScriptError::new("starttell: operand stack is empty".to_string())
             })?;
             let target = player.get_datum(&target_ref).clone();
@@ -104,126 +159,40 @@ impl FlowControlBytecodeHandler {
     }
 
     /// `end tell` — pop the current tell target.
-    pub fn end_tell(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+    pub fn end_tell(runtime: &mut crate::player::session::ExecutionContext,
+        ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
         let _ = ctx;
-        reserve_player_mut(|player| {
+        runtime.with_player(|player| {
             player.tell_target_stack.pop();
         });
         Ok(HandlerExecutionResult::Advance)
     }
 
-    /// `tellcall` — like `ext_call` but dispatches the command into the current
-    /// `tell` target. For a nested `#movie` target the args are marshaled into
-    /// the sub-player, the command runs there (with the active id pinned across
-    /// awaits), and the result is marshaled back. No nested target → runs here.
-    pub async fn tell_call(
+    pub fn local_call(
+        runtime: &mut crate::player::session::ExecutionContext,
         ctx: &BytecodeHandlerContext,
     ) -> Result<HandlerExecutionResult, ScriptError> {
-        let (name, arg_ref_list, is_no_ret, target) = {
-            let player = unsafe { crate::player::player_mut() };
-            let name_id = player.get_ctx_current_bytecode(&ctx).obj as u16;
-            let name = get_name(&player, &ctx, name_id).unwrap().to_owned();
-            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-            let (args, is_no_ret) = scope.pop_call_args().ok_or_else(|| {
-                ScriptError::new(format!("tell_call '{}': expected arg marker on stack", name))
-            })?;
-            let target = player.tell_target_stack.last().and_then(|t| t.nested_player);
-            (name, args, is_no_ret, target)
-        };
-
-        let nested_id = match target {
-            Some(id) => id,
-            None => {
-                // No nested target — behave like ext_call on this player.
-                let (result_ctx, return_value) =
-                    player_ext_call(Symbol::from_str(&name.clone()), &arg_ref_list, ctx.scope_ref).await;
-                if !is_no_ret {
-                    reserve_player_mut(|player| {
-                        player.scopes.get_mut(ctx.scope_ref).unwrap().stack.push(return_value);
-                    });
-                }
-                return Ok(result_ctx);
-            }
-        };
-
-        // Marshal args from the host into the nested sub-player's allocator, and
-        // PAUSE the sub's own frame loop for the duration of the tell dispatch.
-        // Otherwise the sub's frame loop (a separate async task) runs its scripts
-        // concurrently with the tell's `sendAllSprites` — both push/pop scopes on
-        // the same player between awaits, corrupting its scope stack (observed as
-        // a hang). `command_handler_yielding` is the engine's existing "a command
-        // handler is running, don't advance the frame loop" gate.
-        let nested_args: Vec<DatumRef> = unsafe {
-            let host = crate::player::player_mut();
-            match crate::player::NESTED_PLAYERS
-                .get_mut(nested_id - 1)
-                .and_then(|o| o.as_mut())
-            {
-                Some(sub) => {
-                    sub.command_handler_yielding = true;
-                    arg_ref_list
-                        .iter()
-                        .map(|r| crate::player::marshal_datum(host, sub, r))
-                        .collect()
-                }
-                None => return Ok(HandlerExecutionResult::Advance),
-            }
-        };
-
-        // Run the command inside the nested player, active id pinned across awaits.
-        let (_result_ctx, nested_return) = crate::player::with_active_player(
-            nested_id,
-            player_ext_call(Symbol::from_str(&name.clone()), &nested_args, ctx.scope_ref),
-        )
-        .await;
-
-        // Resume the sub's frame loop.
-        unsafe {
-            if let Some(sub) = crate::player::NESTED_PLAYERS
-                .get_mut(nested_id - 1)
-                .and_then(|o| o.as_mut())
-            {
-                sub.command_handler_yielding = false;
-            }
-        }
-
-        if !is_no_ret {
-            let host_ret = unsafe {
-                let host = crate::player::player_mut();
-                match crate::player::NESTED_PLAYERS
-                    .get(nested_id - 1)
-                    .and_then(|o| o.as_ref())
-                {
-                    Some(sub) => crate::player::marshal_datum(sub, host, &nested_return),
-                    None => DatumRef::Void,
-                }
-            };
-            reserve_player_mut(|player| {
-                player.scopes.get_mut(ctx.scope_ref).unwrap().stack.push(host_ret);
-            });
-        }
-        Ok(HandlerExecutionResult::Advance)
-    }
-
-    pub async fn local_call(
-        ctx: &BytecodeHandlerContext,
-    ) -> Result<HandlerExecutionResult, ScriptError> {
-        let (handler_ref, is_no_ret, args, receiver) = reserve_player_mut(|player| {
+        runtime.with_player_and_symbols(|player, symbols| {
             let (args, is_no_ret) = {
-                let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-                match scope.pop_call_args() {
+                let (scopes, allocator, bitmap_manager) =
+                    (&mut player.scopes, &mut player.allocator, &mut player.bitmap_manager);
+                let scope = scopes.get_mut(ctx.scope_ref()).unwrap();
+                match scope.pop_call_args(allocator, bitmap_manager) {
                     Some(v) => v,
                     None => {
                         let current_handler_name = ctx.get_name(scope.handler_name_id);
+                        let current_handler_name = symbols
+                            .display(&current_handler_name)
+                            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
                         return Err(ScriptError::new(format!(
                             "local_call: expected arg marker in handler '{}' (script={}:{}, scope_ref={}, bytecode_index={})",
-                            current_handler_name, scope.script_ref.cast_lib, scope.script_ref.cast_member, ctx.scope_ref, scope.bytecode_index
+                            current_handler_name, scope.script_ref.cast_lib, scope.script_ref.cast_member, ctx.scope_ref(), scope.bytecode_index
                         )));
                     }
                 }
             };
 
-            let script = get_current_script(&player, &ctx).unwrap();
+            let script = get_current_script(&ctx);
 
             let handler_index = player.get_ctx_current_bytecode(&ctx).obj as usize;
             let mut handler_ref = match script.get_own_handler_ref_at(handler_index) {
@@ -238,62 +207,64 @@ impl FlowControlBytecodeHandler {
                     )));
                 }
             };
-            let handler_name = handler_ref.1;
+            let handler_name = handler_ref.1.clone();
 
             // if first arg is a script or script instance and has a handler by the same name
             // use that handler instead
             let mut receiver;
-            let receiver_handler =
-                ScriptInstanceUtils::get_handler_from_first_arg(&args, handler_name);
-            if receiver_handler.is_some() {
-                let handler_pair = receiver_handler.unwrap();
+            if let Some(handler_pair) =
+                ScriptInstanceUtils::get_handler_from_first_arg(
+                    player,
+                    symbols,
+                    &args,
+                    &handler_name,
+                )?
+            {
                 receiver = handler_pair.0;
                 handler_ref = handler_pair.1;
             } else {
-                receiver = reserve_player_ref(|player| {
-                    let scope = player.scopes.get(ctx.scope_ref).unwrap();
-                    scope.receiver.clone()
-                });
+                let scope = player.scopes.get(ctx.scope_ref()).unwrap();
+                receiver = scope.receiver.clone();
             }
-            Ok((handler_ref, is_no_ret, args, receiver))
-        })?;
-        // Hand the call to the trampoline driver instead of recursively awaiting
-        // (which would box a future). `use_raw_arg_list: true` matches the old
-        // `player_call_script_handler_raw_args(.., true)` call; the driver does
-        // `player_handle_scope_return` + the result push on the callee's return.
-        Ok(HandlerExecutionResult::Call(crate::player::PendingCall {
-            receiver,
-            handler_ref,
-            args,
-            use_raw_arg_list: true,
-            push_return: !is_no_ret,
-        }))
+            // Hand the call to the trampoline driver instead of recursively awaiting
+            // (which would box a future). `use_raw_arg_list: true` matches the old
+            // `player_call_script_handler_raw_args(.., true)` call; the driver does
+            // `player_handle_scope_return` + the result push on the callee's return.
+            Ok(HandlerExecutionResult::Call(crate::player::PendingCall {
+                receiver,
+                handler_ref,
+                args,
+                use_raw_arg_list: true,
+                push_return: !is_no_ret,
+            }))
+        })
     }
 
     pub fn jmp_if_zero(
+        runtime: &mut crate::player::session::ExecutionContext,
         ctx: &BytecodeHandlerContext,
     ) -> Result<HandlerExecutionResult, ScriptError> {
-        reserve_player_mut(|player| {
+        runtime.with_player_and_symbols(|player, symbols| {
             // Inline-aware: an int/void condition (the overwhelming common case
             // for loop/if guards) is tested directly without materializing a
             // DatumRef or touching the arena.
-            let is_zero = {
-                let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-                match scope.stack.pop_value() {
-                    Some(StackDatum::Int(n)) => n == 0,
-                    Some(StackDatum::Void) => true,
-                    Some(other) => {
-                        let value_id = other.into_ref();
-                        datum_is_zero(player.get_datum(&value_id), &player.allocator)?
-                    }
-                    None => {
-                        let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-                        let current_handler_name = ctx.get_name(scope.handler_name_id);
-                        return Err(ScriptError::new(format!(
-                            "jmp_if_zero: stack underflow in handler '{}' (script={}:{}, scope_ref={}, bytecode_index={})",
-                            current_handler_name, scope.script_ref.cast_lib, scope.script_ref.cast_member, ctx.scope_ref, scope.bytecode_index
-                        )));
-                    }
+            let popped = player.scopes.get_mut(ctx.scope_ref()).unwrap().stack.pop_value();
+            let is_zero = match popped {
+                Some(StackDatum::Int(n)) => n == 0,
+                Some(StackDatum::Void) => true,
+                Some(other) => {
+                    let value_id = other.into_ref_with(&mut player.allocator, &mut player.bitmap_manager);
+                    datum_is_zero(player.get_datum(&value_id), &player.allocator, symbols)?
+                }
+                None => {
+                    let scope = player.scopes.get_mut(ctx.scope_ref()).unwrap();
+                    let current_handler_name = symbols
+                        .display(&ctx.get_name(scope.handler_name_id))
+                        .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+                    return Err(ScriptError::new(format!(
+                        "jmp_if_zero: stack underflow in handler '{}' (script={}:{}, scope_ref={}, bytecode_index={})",
+                        current_handler_name, scope.script_ref.cast_lib, scope.script_ref.cast_member, ctx.scope_ref(), scope.bytecode_index
+                    )));
                 }
             };
 
@@ -303,11 +274,11 @@ impl FlowControlBytecodeHandler {
 
             if is_zero {
                 let new_bytecode_index = {
-                    let handler = get_current_handler_def(player, &ctx);
+                    let handler = get_current_handler_def(&ctx);
                     let dest_pos = (position as i32 + offset) as usize;
                     handler.bytecode_index_map[&dest_pos] as usize
                 };
-                let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                let scope = player.scopes.get_mut(ctx.scope_ref()).unwrap();
                 scope.bytecode_index = new_bytecode_index;
                 Ok(HandlerExecutionResult::Jump)
             } else {
@@ -316,200 +287,53 @@ impl FlowControlBytecodeHandler {
         })
     }
 
-    pub fn jmp(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn jmp(runtime: &mut crate::player::session::ExecutionContext,
+        ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+        runtime.with_player(|player| {
             let bytecode = player.get_ctx_current_bytecode(ctx);
             let new_bytecode_index = {
-                let handler = get_current_handler_def(player, &ctx);
+                let handler = get_current_handler_def(&ctx);
                 let dest_pos = (bytecode.pos as i32 + bytecode.obj as i32) as usize;
                 handler.bytecode_index_map[&dest_pos] as usize
             };
-            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+            let scope = player.scopes.get_mut(ctx.scope_ref()).unwrap();
             scope.bytecode_index = new_bytecode_index;
             Ok(HandlerExecutionResult::Jump)
         })
     }
 
-    pub async fn obj_call(
-        ctx: &BytecodeHandlerContext,
-    ) -> Result<HandlerExecutionResult, ScriptError> {
-        // let token = start_profiling("_obj_call_prepare".to_string());
-        // Resolve args AND the trampoline target in one player borrow. The
-        // trampoline fast path: if the receiver is a script instance whose script
-        // (or an ancestor) defines this handler as a plain user handler (not a
-        // virtual handler), hand the call to the driver instead of awaiting — and
-        // boxing — player_call_datum_handler. Everything else (datum methods like
-        // `string.char[..]`/`delete`, virtual handlers, system-event no-ops,
-        // ancestor delegation) falls through to the existing path below. Folded
-        // into this block so a datum-method objcall pays only one get_datum.
-        let (obj_ref, handler_name, args, is_no_ret, lingo_target) = reserve_player_mut(|player| {
-            let bytecode = player.get_ctx_current_bytecode(&ctx);
-            // ctx.get_name indexes ctx.names_ptr directly (no per-op get_cast).
-            let target_handler_name = ctx.get_name(bytecode.obj as u16);
-            // The receiver is the FIRST argument; `pop_call_args` returns them in
-            // stack order, so it is at index 0.
-            let (mut all_args, is_no_ret) = {
-                let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-                match scope.pop_call_args() {
-                    Some(v) => v,
-                    None => {
-                        let current_handler_name = ctx.get_name(scope.handler_name_id);
-                        return Err(ScriptError::new(format!(
-                            "obj_call '{}': expected arg marker in handler '{}' (script={}:{}, scope_ref={}, bytecode_index={})",
-                            target_handler_name, current_handler_name, scope.script_ref.cast_lib, scope.script_ref.cast_member, ctx.scope_ref, scope.bytecode_index
-                        )));
-                    }
-                }
-            };
-            if all_args.is_empty() {
-                return Err(ScriptError::new(format!(
-                    "obj_call '{}': arg list has no receiver", target_handler_name
-                )));
-            }
-            let obj = all_args.remove(0);
-            let args: Vec<DatumRef> = all_args;
-
-            let lingo_target = if let Datum::ScriptInstanceRef(instance_ref) = player.get_datum(&obj) {
-                let instance_ref = instance_ref.clone();
-                if crate::player::virtual_scripts::VirtualScriptRegistry::has_instance_handler(player, &instance_ref, target_handler_name) {
-                    None
-                } else {
-                    ScriptInstanceUtils::get_handler(target_handler_name, &obj, player)?
-                        .map(|hr| (instance_ref, hr))
-                }
-            } else {
-                None
-            };
-
-            Ok((obj, target_handler_name, args, is_no_ret, lingo_target))
-        })?;
-
-        if let Some((instance_ref, handler_ref)) = lingo_target {
-            // `use_raw_arg_list: false` matches the old
-            // `player_call_script_handler(Some(instance), handler_ref, args)`
-            // (prepends `me`); the driver does player_handle_scope_return + push.
-            return Ok(HandlerExecutionResult::Call(crate::player::PendingCall {
-                receiver: Some(instance_ref),
-                handler_ref,
-                args,
-                use_raw_arg_list: false,
-                push_return: !is_no_ret,
-            }));
-        }
-
-        // end_profiling(token);
-        // let token = start_profiling(handler_name.clone());
-        let result = player_call_datum_handler(&obj_ref, handler_name, &args).await?;
-        // end_profiling(token);
-        // let token = start_profiling("_obj_call_push_result".to_string());
-        reserve_player_mut(|player| {
-            player.last_handler_result = result.clone();
-            if !is_no_ret {
-                let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-                scope.stack.push(result);
-            };
-        });
-        // end_profiling(token);
-        Ok(HandlerExecutionResult::Advance)
-    }
-
-    pub async fn obj_call_v4(
-        ctx: &BytecodeHandlerContext,
-    ) -> Result<HandlerExecutionResult, ScriptError> {
-        // ObjCallV4 is like ObjCall but the handler name comes from the stack
-        // (pushed by PushVarRef) instead of the bytecode operand.
-        // In Director 4 syntax, `handlerName(objectSymbol)` calls a handler on the
-        // object referenced by the symbol. The first arg is typically a symbol that
-        // needs to be resolved to a global variable to find the actual object.
-        // Stack: [..., ArgList([receiver, args...]), Symbol(handlerName)]
-        let (obj_ref, handler_name, args, is_no_ret, route_to_global) = reserve_player_mut(|player| {
-            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-            let handler_name_ref = scope.stack.pop().ok_or_else(|| ScriptError::new("obj_call_v4: stack underflow (handler name)".to_string()))?;
-            // The handler name is pushed ABOVE the arg marker, so pop it first;
-            // the marker is then on top exactly as for the other call opcodes.
-            let (mut all_args, is_no_ret) = scope.pop_call_args().ok_or_else(|| {
-                ScriptError::new("obj_call_v4: expected arg marker on stack".to_string())
-            })?;
-
-            let handler_name = player.get_datum(&handler_name_ref).symbol_value()?;
-
-            if all_args.is_empty() {
-                return Err(ScriptError::new(
-                    "obj_call_v4: arg list has no receiver".to_string(),
-                ));
-            }
-            let mut obj = all_args.remove(0);
-            let args: Vec<DatumRef> = all_args;
-
-            // In Director 4 calling convention, the receiver is often passed as a
-            // symbol (e.g. #oTrackControl). Resolve it by looking up the symbol
-            // name in globals to get the actual script instance.
-            if let Datum::Symbol(sym_name) = player.get_datum(&obj) {
-                if let Some(global_ref) = player.globals.get(sym_name) {
-                    obj = global_ref.clone();
-                }
-            }
-
-            // Decide whether this is a real method call (receiver is a script
-            // object) or the D4 `name(receiver, ..)` form of a MOVIE HANDLER
-            // call where the first arg just happens to be the receiver. Director
-            // gives a movie handler priority when the receiver isn't an object
-            // with that method. hackey's `vector(HERE, there)` compiles to
-            // ObjCallV4 with HERE (a list) as receiver, but `vector` is a movie
-            // handler (`on vector HERE, there`) — calling it as a list method
-            // failed with "No handler vector for list datum".
-            let is_object_receiver = matches!(
-                player.get_datum(&obj),
-                Datum::ScriptInstanceRef(_) | Datum::ScriptRef(_)
-            );
-            let route_to_global = !is_object_receiver
-                && crate::player::player_global_handler_exists(player, &handler_name.as_str());
-
-            Ok((obj, handler_name, args, is_no_ret, route_to_global))
-        })?;
-        let result = if route_to_global {
-            // Movie-handler call: pass the receiver as the first argument so
-            // `on vector HERE, there` receives (HERE, there).
-            let mut full_args = Vec::with_capacity(args.len() + 1);
-            full_args.push(obj_ref.clone());
-            full_args.extend(args.iter().cloned());
-            crate::player::player_call_global_handler(handler_name, &full_args).await?
-        } else {
-            player_call_datum_handler(&obj_ref, handler_name, &args).await?
-        };
-        reserve_player_mut(|player| {
-            player.last_handler_result = result.clone();
-            if !is_no_ret {
-                let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-                scope.stack.push(result);
-            };
-        });
-        Ok(HandlerExecutionResult::Advance)
-    }
-
-    pub fn end_repeat(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn end_repeat(runtime: &mut crate::player::session::ExecutionContext,
+        ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+        runtime.with_player(|player| {
             let new_index = {
                 let bytecode = player.get_ctx_current_bytecode(ctx);
-                let handler = get_current_handler_def(player, &ctx);
+                let handler = get_current_handler_def(&ctx);
                 let return_pos = bytecode.pos - bytecode.obj as usize;
                 handler.bytecode_index_map[&return_pos] as usize
             };
-            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+            let scope = player.scopes.get_mut(ctx.scope_ref()).unwrap();
             scope.bytecode_index = new_index;
             Ok(HandlerExecutionResult::Jump)
         })
     }
 
     pub fn call_javascript(
+        runtime: &mut crate::player::session::ExecutionContext,
         ctx: &BytecodeHandlerContext,
     ) -> Result<HandlerExecutionResult, ScriptError> {
-        reserve_player_mut(|player| {
-            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-            let arg1 = scope.stack.pop().ok_or_else(|| ScriptError::new("call_javascript: stack underflow (arg1)".to_string()))?;
-            let arg2 = scope.stack.pop().ok_or_else(|| ScriptError::new("call_javascript: stack underflow (arg2)".to_string()))?;
-            let arg1_formatted = format_datum(&arg1, player);
-            let arg2_formatted = format_datum(&arg2, player);
+        runtime.with_player_and_symbols(|player, symbols| {
+            let (arg1, arg2) = {
+                let (scopes, allocator, bitmap_manager) =
+                    (&mut player.scopes, &mut player.allocator, &mut player.bitmap_manager);
+                let scope = scopes.get_mut(ctx.scope_ref()).unwrap();
+                let arg1 = scope.stack.pop_ref_with(allocator, bitmap_manager)
+                    .ok_or_else(|| ScriptError::new("call_javascript: stack underflow (arg1)".to_string()))?;
+                let arg2 = scope.stack.pop_ref_with(allocator, bitmap_manager)
+                    .ok_or_else(|| ScriptError::new("call_javascript: stack underflow (arg2)".to_string()))?;
+                (arg1, arg2)
+            };
+            let arg1_formatted = format_datum(&arg1, symbols, player)?;
+            let arg2_formatted = format_datum(&arg2, symbols, player)?;
 
             log::warn!("TODO: call_javascript with args: {}, {}", arg1_formatted, arg2_formatted);
             Ok(HandlerExecutionResult::Advance)

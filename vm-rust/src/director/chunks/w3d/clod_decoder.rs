@@ -5,7 +5,7 @@
 
 use log::debug;
 
-use crate::player::symbols::symbol::Symbol;
+use crate::player::symbols::symbol_table::SymbolTable;
 
 use super::bitstream::IFXBitStreamCompressed;
 use super::clod_types::*;
@@ -700,14 +700,14 @@ impl ClodMeshDecoder {
     }
 
     /// Get combined decoded meshes as ClodDecodedMesh objects.
-    pub fn get_decoded_meshes(&self) -> Vec<ClodDecodedMesh> {
+    pub fn get_decoded_meshes(&self, symbols: &mut SymbolTable) -> Vec<ClodDecodedMesh> {
         self.meshes
             .iter()
             .enumerate()
             .map(|(i, mesh)| {
                 let normals = recompute_smooth_normals(&mesh.positions, &mesh.faces);
                 ClodDecodedMesh {
-                    name: Symbol::from_str(&format!("mesh_{}", i)),
+                    name: symbols.intern(&format!("mesh_{}", i)),
                     positions: mesh.positions.clone(),
                     normals,
                     tex_coords: mesh.tex_coords.clone(),
@@ -722,7 +722,7 @@ impl ClodMeshDecoder {
     }
 
     /// Get decoded meshes at a specific LOD level (0.0 = lowest, 1.0 = highest)
-    pub fn get_decoded_meshes_at_lod(&self, lod: f32) -> Vec<ClodDecodedMesh> {
+    pub fn get_decoded_meshes_at_lod(&self, lod: f32, symbols: &mut SymbolTable) -> Vec<ClodDecodedMesh> {
         self.meshes
             .iter()
             .enumerate()
@@ -730,7 +730,7 @@ impl ClodMeshDecoder {
                 let total_steps = mesh.step_records.len();
                 if total_steps == 0 {
                     return ClodDecodedMesh {
-                        name: Symbol::from_str(&format!("mesh_{}", i)),
+                        name: symbols.intern(&format!("mesh_{}", i)),
                         positions: mesh.positions.clone(),
                         normals: recompute_smooth_normals(&mesh.positions, &mesh.faces),
                         tex_coords: mesh.tex_coords.clone(),
@@ -792,7 +792,7 @@ impl ClodMeshDecoder {
                 let positions = mesh.positions[..vert_count].to_vec();
                 let normals = recompute_smooth_normals(&positions, &faces);
                 ClodDecodedMesh {
-                    name: Symbol::from_str(&format!("mesh_{}", i)),
+                    name: symbols.intern(&format!("mesh_{}", i)),
                     positions,
                     normals,
                     tex_coords: tc,
@@ -807,7 +807,7 @@ impl ClodMeshDecoder {
     }
 
     /// Get decoded meshes at full resolution (all patches applied)
-    pub fn get_decoded_meshes_full_resolution(&self) -> Vec<ClodDecodedMesh> {
+    pub fn get_decoded_meshes_full_resolution(&self, symbols: &mut SymbolTable) -> Vec<ClodDecodedMesh> {
         self.meshes
             .iter()
             .enumerate()
@@ -824,7 +824,7 @@ impl ClodMeshDecoder {
 
                 let normals = recompute_smooth_normals(&mesh.positions, &faces);
                 ClodDecodedMesh {
-                    name: Symbol::from_str(&format!("mesh_{}", i)),
+                    name: symbols.intern(&format!("mesh_{}", i)),
                     positions: mesh.positions.clone(),
                     normals,
                     tex_coords: mesh.tex_coords.clone(),

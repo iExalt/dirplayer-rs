@@ -2,16 +2,39 @@ import assert from "node:assert/strict";
 
 // test: Run against a loaded Director fixture with two distinct, short sound members.
 // The caller owns Chromium and resource serving; no copyrighted fixture is bundled.
-export async function testSoundPlayback(page, member, otherMember) {
+export async function testSoundPlayback(page, member, otherMember, {audioContext = "any"} = {}) {
+  let patched = false;
+  try {
+    await page.evaluate((filter) => {
+      vm.stop();
+      window.soundTestStarts = [];
+      window.__soundTestOriginalStart = AudioBufferSourceNode.prototype.start;
+      const context = filter === "director" ? window.getAudioContext() : null;
+      AudioBufferSourceNode.prototype.start = function (...args) {
+        const result = window.__soundTestOriginalStart.apply(this, args);
+        if (!context || this.context === context) {
+          window.soundTestStarts.push({ rate: this.playbackRate.value, duration: this.buffer?.duration });
+        }
+        return result;
+      };
+    }, audioContext);
+    patched = true;
+    return await runSoundPlaybackCases(page, member, otherMember);
+  } finally {
+    if (patched) await page.evaluate(() => {
+      if (window.__soundTestOriginalStart) {
+        AudioBufferSourceNode.prototype.start = window.__soundTestOriginalStart;
+        delete window.__soundTestOriginalStart;
+      }
+    });
+  }
+}
+
+async function runSoundPlaybackCases(page, member, otherMember) {
+  /* The caller owns the temporary prototype patch; this function runs the cases. */
+  /* Keep this initial stop in case a caller invokes the helper after another test. */
   await page.evaluate(() => {
     vm.stop();
-    window.soundTestStarts = [];
-    const start = AudioBufferSourceNode.prototype.start;
-    AudioBufferSourceNode.prototype.start = function (...args) {
-      const result = start.apply(this, args);
-      window.soundTestStarts.push({ rate: this.playbackRate.value, duration: this.buffer?.duration });
-      return result;
-    };
   });
   const evaluate = async code => {
     const result = await page.evaluate(async code => JSON.parse(await vm.mcp_eval_lingo(code)), code);

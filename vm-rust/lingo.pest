@@ -103,7 +103,7 @@ script_ref = { ^"script" ~ !(alpha | digit | "_") ~ term_arg }
 // Chunk expressions for "char 1 of myStr", "line 1 to 3 of myStr", etc.
 chunk_type = { &reserved_keyword ~ (^"char" | ^"word" | ^"line" | ^"item") }
 chunk_range = { ^"to" ~ expr }
-chunk_expr  = { chunk_type ~ expr ~ chunk_range? ~ ^"of" ~ (the_prop_of | the_prop | chunk_expr | field_ref | handler_call | lang_ident) }
+chunk_expr  = { chunk_type ~ expr ~ chunk_range? ~ ^"of" ~ (the_prop_of | the_prop | chunk_expr | field_ref | handler_call | string | lang_ident) }
 
 // Director's legacy "the number of <chunk> in/of <expr>" — counts lines /
 // words / items / chars in a string. Used by classic behavior scripts:
@@ -121,7 +121,7 @@ list_index = { "[" ~ expr ~ "]" }
 // Boolean operators
 and_op = { ^"and" }
 or_op  = { ^"or" }
-not_op = { ^"not" }
+not_op = @{ ^"not" ~ !(alpha | digit | "_") }
 // Unary minus on an EXPRESSION (`-pWorldUp`). Ordered after `primitive` in
 // `term` so a signed literal (`-5`) still parses as one `number_int` rather
 // than a negation of 5; only a `-` followed by something non-numeric gets here.

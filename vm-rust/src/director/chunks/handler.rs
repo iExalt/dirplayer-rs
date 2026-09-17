@@ -188,8 +188,8 @@ pub struct HandlerDef {
     pub local_name_ids: Vec<u16>,
     pub global_name_ids: Vec<u16>,
     /// Lazily-compiled register IR, cached HERE rather than in a side map so it
-    /// lives and dies with the handler it was compiled from. A map keyed by
-    /// `handler_def_ptr` would risk an unloaded cast's address being reused by a
+    /// lives and dies with the handler it was compiled from. A map keyed by a
+    /// handler address would risk an unloaded cast's address being reused by a
     /// different handler, which is a correctness hazard, not just a stale cache.
     /// `None` = not attempted yet; `Some((_, None))` = attempted and ineligible.
     ///

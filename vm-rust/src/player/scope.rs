@@ -3,10 +3,12 @@ use fxhash::FxHashMap;
 use crate::director::lingo::datum::Datum;
 
 use super::{
+    allocator::{DatumAllocator, DatumAllocatorTrait},
+    bitmap::manager::BitmapManager,
     cast_lib::{CastMemberRef, INVALID_CAST_MEMBER_REF},
     symbols::symbol::Symbol,
     script_ref::ScriptInstanceRef,
-    DatumRef, PLAYER_OPT,
+    DatumRef,
 };
 
 pub type ScopeRef = usize;
@@ -40,29 +42,29 @@ pub enum StackDatum {
 }
 
 impl StackDatum {
-    /// Materialize this value into a `DatumRef` (pooled fast path for
-    /// int/symbol). Requires the global player to be initialized.
+    /// Materialize this value against the explicit owner allocator.
     #[inline]
-    pub fn into_ref(self) -> DatumRef {
+    pub fn into_ref_with(
+        self,
+        allocator: &mut DatumAllocator,
+        bitmap_manager: &mut BitmapManager,
+    ) -> DatumRef {
         match self {
             StackDatum::Ref(dr) => dr,
             StackDatum::Void => DatumRef::Void,
-            // Allocate in the ACTIVE player's arena, not PLAYER_OPT's. A nested
-            // #movie runs with ACTIVE_PLAYER_ID != 0; allocating its stack values
-            // in the HOST arena while DatumRef::drop frees them against the active
-            // one corrupts both. Same de-globalisation gap the nested datum-leak
-            // fix closed on the free side.
             StackDatum::Int(n) => {
-                let player = unsafe { crate::player::player_mut() };
-                player.allocator.alloc_int(n)
+                allocator.drain_reclaims(bitmap_manager);
+                allocator.alloc_int(n)
             }
             StackDatum::Symbol(s) => {
-                let player = unsafe { crate::player::player_mut() };
-                player.allocator.alloc_symbol(s)
+                allocator.drain_reclaims(bitmap_manager);
+                allocator.alloc_symbol(s)
             }
             StackDatum::Float(f) => {
-                let player = unsafe { crate::player::player_mut() };
-                player.alloc_datum(Datum::Float(f))
+                allocator.drain_reclaims(bitmap_manager);
+                allocator
+                    .alloc_datum(Datum::Float(f), bitmap_manager)
+                    .unwrap()
             }
             // A marker is consumed by the call opcode that follows it and is
             // never a value. Degrade to Void rather than panic if some generic
@@ -72,27 +74,13 @@ impl StackDatum {
     }
 }
 
-/// The Lingo operand stack. Stores `StackDatum` (inline primitives or refs) in
-/// `UnsafeCell`s so inline entries can be materialized to a `DatumRef` lazily
-/// in place even behind a shared `&` (sound: the stack is only reached through
-/// the globally-mutable `PLAYER_OPT`, same pattern as the arena's ref-counts).
-/// It presents the same `DatumRef`-based API the interpreter already used, so
-/// the hundreds of existing push/pop/len/last/index call sites are unchanged.
-#[derive(Default)]
+/// The Lingo operand stack. Primitive values remain inline until an explicit
+/// owner-aware consumer asks for a `DatumRef`. Materialization is cached in the
+/// slot, so repeated reads preserve one arena identity without requiring
+/// interior mutability or an ambient player.
+#[derive(Clone, Default)]
 pub struct OperandStack {
-    items: Vec<std::cell::UnsafeCell<StackDatum>>,
-}
-
-impl Clone for OperandStack {
-    fn clone(&self) -> Self {
-        OperandStack {
-            items: self
-                .items
-                .iter()
-                .map(|c| std::cell::UnsafeCell::new(unsafe { (*c.get()).clone() }))
-                .collect(),
-        }
-    }
+    items: Vec<StackDatum>,
 }
 
 impl OperandStack {
@@ -101,21 +89,27 @@ impl OperandStack {
         OperandStack { items: Vec::new() }
     }
 
-    // --- DatumRef-facing API (unchanged for existing call sites) ---
+    // --- Explicit owner-aware DatumRef API ---
     #[inline]
     pub fn push(&mut self, dr: DatumRef) {
-        self.items.push(std::cell::UnsafeCell::new(StackDatum::Ref(dr)));
+        self.items.push(StackDatum::Ref(dr));
     }
     #[inline]
-    pub fn pop(&mut self) -> Option<DatumRef> {
-        self.items.pop().map(|c| c.into_inner().into_ref())
+    pub fn pop_ref_with(
+        &mut self,
+        allocator: &mut DatumAllocator,
+        bitmap_manager: &mut BitmapManager,
+    ) -> Option<DatumRef> {
+        self.items
+            .pop()
+            .map(|value| value.into_ref_with(allocator, bitmap_manager))
     }
     /// Pop the top entry as a raw `StackDatum` (inline value or ref) WITHOUT
     /// materializing. Inline-aware consumers (arithmetic, compare, jmpifz) use
     /// this so an inline int/float never round-trips through the arena.
     #[inline]
     pub fn pop_value(&mut self) -> Option<StackDatum> {
-        self.items.pop().map(|c| c.into_inner())
+        self.items.pop()
     }
     #[inline]
     pub fn len(&self) -> usize {
@@ -138,30 +132,29 @@ impl OperandStack {
         self.items.swap(a, b);
     }
     #[inline]
-    pub fn last(&self) -> Option<&DatumRef> {
-        if self.items.is_empty() {
-            return None;
-        }
-        Some(self.ensure_ref(self.items.len() - 1))
+    pub fn last_ref_with(
+        &mut self,
+        allocator: &mut DatumAllocator,
+        bitmap_manager: &mut BitmapManager,
+    ) -> Option<DatumRef> {
+        self.get_ref_with(self.items.len().checked_sub(1)?, allocator, bitmap_manager)
     }
     #[inline]
-    pub fn last_mut(&mut self) -> Option<&mut DatumRef> {
-        if self.items.is_empty() {
-            return None;
+    pub fn get_ref_with(
+        &mut self,
+        i: usize,
+        allocator: &mut DatumAllocator,
+        bitmap_manager: &mut BitmapManager,
+    ) -> Option<DatumRef> {
+        let value = self.items.get_mut(i)?;
+        if !matches!(value, StackDatum::Ref(_)) {
+            let inline = std::mem::replace(value, StackDatum::Void);
+            *value = StackDatum::Ref(inline.into_ref_with(allocator, bitmap_manager));
         }
-        let i = self.items.len() - 1;
-        self.ensure_ref(i);
-        match self.items[i].get_mut() {
-            StackDatum::Ref(dr) => Some(dr),
-            _ => unreachable!("ensure_ref guarantees Ref"),
+        match value {
+            StackDatum::Ref(dr) => Some(dr.clone()),
+            _ => unreachable!("materialization guarantees Ref"),
         }
-    }
-    #[inline]
-    pub fn get(&self, i: usize) -> Option<&DatumRef> {
-        if i >= self.items.len() {
-            return None;
-        }
-        Some(self.ensure_ref(i))
     }
     /// Discard the top `n` entries without materializing them. Dropping a
     /// `Ref` entry decrements its arena refcount exactly as moving it out and
@@ -175,11 +168,16 @@ impl OperandStack {
     }
     /// Move the top `n` entries out as owned `DatumRef`s (used by pop_n).
     #[inline]
-    pub fn split_off_refs(&mut self, at: usize) -> Vec<DatumRef> {
+    pub fn split_off_refs_with(
+        &mut self,
+        at: usize,
+        allocator: &mut DatumAllocator,
+        bitmap_manager: &mut BitmapManager,
+    ) -> Vec<DatumRef> {
         self.items
             .split_off(at)
             .into_iter()
-            .map(|c| c.into_inner().into_ref())
+            .map(|value| value.into_ref_with(allocator, bitmap_manager))
             .collect()
     }
     /// Drain the top `n` entries directly into `buf` (materializing inline values),
@@ -189,23 +187,30 @@ impl OperandStack {
     /// once per Lingo call (8.1M times in the Habbo preloader), so dropping that extra
     /// per-call allocation matters. `buf` is a (typically pooled) deque, cleared first.
     #[inline]
-    pub fn drain_top_into_deque(
+    pub fn drain_top_into_deque_with(
         &mut self,
         n: usize,
         mut buf: std::collections::VecDeque<DatumRef>,
+        allocator: &mut DatumAllocator,
+        bitmap_manager: &mut BitmapManager,
     ) -> std::collections::VecDeque<DatumRef> {
         let at = self.items.len() - n;
         buf.clear();
         buf.reserve(n);
-        for c in self.items.drain(at..) {
-            buf.push_back(c.into_inner().into_ref());
+        for value in self.items.drain(at..) {
+            buf.push_back(value.into_ref_with(allocator, bitmap_manager));
         }
         buf
     }
-    /// Iterate the stack as `&DatumRef` (bottom to top). Materializes inline
-    /// entries in place first.
-    pub fn iter(&self) -> impl Iterator<Item = &DatumRef> {
-        (0..self.items.len()).map(move |i| self.ensure_ref(i))
+    /// Materialize a diagnostic snapshot without exposing stack borrows.
+    pub fn snapshot_refs_with(
+        &mut self,
+        allocator: &mut DatumAllocator,
+        bitmap_manager: &mut BitmapManager,
+    ) -> Vec<DatumRef> {
+        (0..self.items.len())
+            .map(|i| self.get_ref_with(i, allocator, bitmap_manager).unwrap())
+            .collect()
     }
 
     // --- Inline push fast paths (no Datum/arena) ---
@@ -214,49 +219,23 @@ impl OperandStack {
     /// this stack with the interpreter, so it needs the untyped push.
     #[inline]
     pub fn push_value(&mut self, v: StackDatum) {
-        self.items.push(std::cell::UnsafeCell::new(v));
+        self.items.push(v);
     }
     #[inline]
     pub fn push_int(&mut self, n: i32) {
-        self.items.push(std::cell::UnsafeCell::new(StackDatum::Int(n)));
+        self.items.push(StackDatum::Int(n));
     }
     #[inline]
     pub fn push_float(&mut self, f: f64) {
-        self.items.push(std::cell::UnsafeCell::new(StackDatum::Float(f)));
+        self.items.push(StackDatum::Float(f));
     }
     #[inline]
     pub fn push_symbol(&mut self, s: Symbol) {
-        self.items.push(std::cell::UnsafeCell::new(StackDatum::Symbol(s)));
+        self.items.push(StackDatum::Symbol(s));
     }
     #[inline]
     pub fn push_void(&mut self) {
-        self.items.push(std::cell::UnsafeCell::new(StackDatum::Void));
-    }
-
-    /// Materialize the inline entry at `i` into a `Ref` in place and return it.
-    /// The `UnsafeCell` makes the in-place mutation through `&self` sound.
-    #[inline]
-    fn ensure_ref(&self, i: usize) -> &DatumRef {
-        let cell = &self.items[i];
-        unsafe {
-            let sd = &mut *cell.get();
-            if !matches!(sd, StackDatum::Ref(_)) {
-                let dr = std::mem::replace(sd, StackDatum::Void).into_ref();
-                *sd = StackDatum::Ref(dr);
-            }
-            match &*cell.get() {
-                StackDatum::Ref(dr) => dr,
-                _ => unreachable!(),
-            }
-        }
-    }
-}
-
-impl std::ops::Index<usize> for OperandStack {
-    type Output = DatumRef;
-    #[inline]
-    fn index(&self, i: usize) -> &DatumRef {
-        self.ensure_ref(i)
+        self.items.push(StackDatum::Void);
     }
 }
 
@@ -313,7 +292,11 @@ impl Scope {
     /// `None` means the top of stack was not a marker, which would mean the
     /// bytecode ran a call opcode without a preceding `pusharglist`. Callers
     /// report that as a stack error rather than guessing.
-    pub fn pop_call_args(&mut self) -> Option<(Vec<DatumRef>, bool)> {
+    pub fn pop_call_args(
+        &mut self,
+        allocator: &mut DatumAllocator,
+        bitmap_manager: &mut BitmapManager,
+    ) -> Option<(Vec<DatumRef>, bool)> {
         let (count, no_ret) = match self.stack.pop_value()? {
             StackDatum::ArgMarker { count, no_ret } => (count as usize, no_ret),
             // Not a marker: put nothing back — the caller errors out. Restoring
@@ -323,17 +306,23 @@ impl Scope {
         if self.stack.len() < count {
             return None;
         }
-        Some((self.pop_n(count), no_ret))
+        Some((self.pop_n(count, allocator, bitmap_manager), no_ret))
     }
 
-    pub fn pop_n(&mut self, n: usize) -> Vec<DatumRef> {
+    pub fn pop_n(
+        &mut self,
+        n: usize,
+        allocator: &mut DatumAllocator,
+        bitmap_manager: &mut BitmapManager,
+    ) -> Vec<DatumRef> {
         // Move the top `n` entries out of the stack rather than clone-then-pop.
         // `split_off` transfers ownership of the tail with zero ref-count churn,
         // where the old `to_vec()` + pop loop did 2n ref-count ops plus an extra
         // allocation. `pusharglist`/`pusharglistnoret` (the heaviest opcodes in
         // the Habbo preloader) call this on every Lingo call.
         let split_at = self.stack.len() - n;
-        self.stack.split_off_refs(split_at)
+        self.stack
+            .split_off_refs_with(split_at, allocator, bitmap_manager)
     }
 
     pub fn default(scope_ref: ScopeRef) -> Scope {
@@ -387,9 +376,7 @@ impl Scope {
     }
 
     /// Read an argument by index, VOID past the end. Mirrors `local`, and
-    /// exists so the IR can reach args through the scope pointer it already
-    /// holds: writing `(*scope_ptr).args.get(i)` at the call site would autoref
-    /// through the Vec's `Deref` to a slice, which is a raw-pointer footgun.
+    /// keeps malformed bytecode from turning an argument lookup into a panic.
     #[inline]
     pub fn arg(&self, index: usize) -> DatumRef {
         self.args.get(index).cloned().unwrap_or(DatumRef::Void)
@@ -403,16 +390,12 @@ impl Scope {
     }
 
     pub fn reset(&mut self) {
-        // Bump the generation so the trampoline's stale-scope guard
-        // (`post_gen != scope_generation`) trips for any handler still
-        // suspended on this slot. The movie-change transition resets every
-        // scope while a handler from the old movie can be parked across the
-        // `go to movie` await; without this bump that handler would resume
-        // against a reset (sentinel `script_ref`) scope and run opcodes like
-        // `set homeScore` on a non-existent script (-1:-1). `push_scope`
-        // overwrites the generation explicitly right after calling reset(),
-        // so this is harmless on the allocation path.
-        self.generation = self.generation.wrapping_add(1);
+        // Bump the generation before clearing the slot so a suspended handler
+        // can never become valid again after slot reuse.
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .expect("scope generation exhausted");
         self.script_ref = INVALID_CAST_MEMBER_REF;
         self.receiver = None;
         self.cached_handler_instance = None;
@@ -426,5 +409,91 @@ impl Scope {
         self.stack.clear();
         self.passed = false;
         self.stop_requested = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::player::{
+        allocator::DatumAllocatorTrait,
+        ownership::OwnerKey,
+    };
+
+    fn allocator() -> DatumAllocator {
+        DatumAllocator::new(OwnerKey::transitional())
+    }
+
+    #[test]
+    fn repeated_materialization_reuses_the_cached_handle() {
+        let mut allocator = allocator();
+        let mut bitmaps = BitmapManager::new();
+        let mut stack = OperandStack::new();
+        stack.push_float(12.5);
+
+        let first = stack.get_ref_with(0, &mut allocator, &mut bitmaps).unwrap();
+        let second = stack.last_ref_with(&mut allocator, &mut bitmaps).unwrap();
+        let snapshot = stack.snapshot_refs_with(&mut allocator, &mut bitmaps);
+
+        assert_eq!(first, second);
+        assert_eq!(snapshot, vec![first.clone()]);
+        assert!(matches!(
+            allocator.try_get_datum(&first),
+            Some(Datum::Float(value)) if *value == 12.5
+        ));
+        let next = allocator
+            .alloc_datum(Datum::String("next".into()), &mut bitmaps)
+            .unwrap();
+        assert_eq!(next.unwrap(), first.unwrap() + 1);
+    }
+
+    #[test]
+    fn inline_materialization_stays_in_its_owner_arena() {
+        let mut first = allocator();
+        let mut second = allocator();
+        let mut first_bitmaps = BitmapManager::new();
+        let mut second_bitmaps = BitmapManager::new();
+        let mut stack = OperandStack::new();
+        stack.push_int(10_000);
+        let second_reference = second
+            .alloc_datum(Datum::String("second".into()), &mut second_bitmaps)
+            .unwrap();
+
+        let reference = stack
+            .pop_ref_with(&mut first, &mut first_bitmaps)
+            .unwrap();
+        let id = reference.unwrap();
+        assert_eq!(id, second_reference.unwrap());
+        assert!(matches!(
+            first.try_get_datum(&reference),
+            Some(Datum::Int(value)) if *value == 10_000
+        ));
+        assert!(second.try_get_datum(&reference).is_none());
+
+        drop(reference);
+        first.drain_reclaims(&mut first_bitmaps);
+        second.drain_reclaims(&mut second_bitmaps);
+        assert!(!first.contains_datum(id));
+        assert!(matches!(
+            second.try_get_datum(&second_reference),
+            Some(Datum::String(value)) if value == "second"
+        ));
+    }
+
+    #[test]
+    fn discard_drops_inline_values_without_materializing_them() {
+        let mut allocator = allocator();
+        let mut bitmaps = BitmapManager::new();
+        let before = allocator
+            .alloc_datum(Datum::String("before".into()), &mut bitmaps)
+            .unwrap();
+        let mut stack = OperandStack::new();
+        stack.push_float(3.25);
+        stack.discard(1);
+        let after = allocator
+            .alloc_datum(Datum::String("after".into()), &mut bitmaps)
+            .unwrap();
+
+        assert_eq!(after.unwrap(), before.unwrap() + 1);
     }
 }

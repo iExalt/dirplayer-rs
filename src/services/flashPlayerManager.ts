@@ -6,7 +6,7 @@
  * can be composited with Director sprites (Director sprites can layer on top).
  */ 
 
-import { update_flash_frame, trigger_lingo_callback_on_script, dispatch_flash_event, dispatch_flash_lingo, local_connection_send } from 'vm-rust';
+import type { BrowserPlayerHandle } from 'vm-rust';
 import {
   isBridgeRequired,
   waitForBridge,
@@ -23,6 +23,7 @@ import {
 } from './ruffleBridgeClient';
 
 interface FlashInstance {
+  browserHandle: FlashOwnerCapability;
   spriteNum: number;     // Director sprite number this instance belongs to
   castLib: number;       // SWF source cast member (diagnostics + cleanup)
   castMember: number;
@@ -58,11 +59,33 @@ interface FlashInstance {
   stopped?: boolean;
 }
 
+/** Exact owner-bound operations needed by a Flash host. Test harnesses use a
+ * non-owning capability; production uses the BrowserPlayerHandle adapter. */
+export interface FlashOwnerCapability {
+  owner_identity(): string;
+  update_flash_frame(spriteNum: number, width: number, height: number, rgba: Uint8Array): void;
+  trigger_lingo_callback_on_script(
+    castLib: number,
+    castMember: number,
+    handlerName: string,
+    argsJson: string,
+    flashCastLib: number,
+    flashCastMember: number,
+  ): boolean;
+  local_connection_send(connectionName: string, methodName: string, argsJson: string): boolean;
+  dispatch_flash_event(castLib: number, castMember: number, body: string): boolean;
+  dispatch_flash_lingo(body: string): Promise<boolean>;
+}
+
 // Per-sprite Flash instance map. Each Flash sprite gets its own Ruffle
 // player so multiple sprites that share a single Flash cast member can
 // display different frames simultaneously (e.g. storyscramble's 3 story
 // tiles all use cast 2:1 but show poster frames 2/4/6).
 const instances = new Map<string, FlashInstance>();
+// A sprite number is only unique inside one runtime. Keep an index only while
+// it names exactly one owner; ambiguous numbers are deliberately rejected by
+// legacy Ruffle callbacks instead of being delivered to the wrong provider.
+const spriteIndex = new Map<number, string>();
 
 // Track pending Flash instance creations so the WASM frame loop can wait for them
 let flashLoadingCount = 0;
@@ -365,7 +388,16 @@ function getSocketProxyConfig(): Array<{host: string, port: number, proxyUrl: st
 // sprite number. Sprite numbers are unique within a movie so castLib /
 // castMember don't need to be part of the key.
 function instanceKey(spriteNum: number): string {
-  return `${spriteNum}`;
+  return spriteIndex.get(spriteNum) ?? `__ambiguous__:${spriteNum}`;
+}
+
+function bindSpriteIndex(spriteNum: number, key: string): void {
+  const previous = spriteIndex.get(spriteNum);
+  if (previous && previous !== key) {
+    spriteIndex.delete(spriteNum);
+  } else if (!previous) {
+    spriteIndex.set(spriteNum, key);
+  }
 }
 
 // Publish the count of live Ruffle instances so dirplayer's Rust frame loop can
@@ -458,9 +490,9 @@ function dispatchMouseEvent(
  * Also exposed as `window.dirplayer_dispatchFlashEvent` so the chain can
  * be hand-fired from DevTools while debugging.
  */
-export function dispatchFlashEvent(castLib: number, castMember: number, body: string): boolean {
+export function dispatchFlashEvent(handle: FlashOwnerCapability, castLib: number, castMember: number, body: string): boolean {
   try {
-    return dispatch_flash_event(castLib, castMember, body);
+    return handle.dispatch_flash_event(castLib, castMember, body);
   } catch (e) {
     console.warn('[Flash] dispatchFlashEvent error:', e);
     return false;
@@ -477,9 +509,9 @@ export function dispatchFlashEvent(castLib: number, castMember: number, body: st
  * SFX → `lingo:bdPlaySound(#generalSound,"s_mouseOver")`, etc. The body is
  * everything after the `lingo:` prefix.
  */
-export function dispatchFlashLingo(body: string): boolean {
+export async function dispatchFlashLingo(handle: FlashOwnerCapability, body: string): Promise<boolean> {
   try {
-    return dispatch_flash_lingo(body);
+    return await handle.dispatch_flash_lingo(body);
   } catch (e) {
     console.warn('[Flash] dispatchFlashLingo error:', e);
     return false;
@@ -492,7 +524,8 @@ export function dispatchFlashLingo(body: string): boolean {
  * Ruffle fork's `dirplayer_addOpenUrlHandler` patch; until it lands the
  * call is a no-op and navigations stay denied via `openUrlMode: 'deny'`.
  */
-function registerEventUrlHandler(player: any, castLib: number, castMember: number): void {
+function registerEventUrlHandler(host: FlashOwnerHost, player: any, castLib: number, castMember: number): void {
+  const handle = host.capability;
   if (typeof player?.dirplayer_addOpenUrlHandler !== 'function') {
     console.warn(
       `[Flash] ${castLib}:${castMember}: dirplayer_addOpenUrlHandler missing on Ruffle player — ` +
@@ -502,6 +535,7 @@ function registerEventUrlHandler(player: any, castLib: number, castMember: numbe
     return;
   }
   player.dirplayer_addOpenUrlHandler((url: string, _target: string): boolean => {
+    if (host.disposed) return true;
     if (typeof url !== 'string') {
       return false;
     }
@@ -511,19 +545,20 @@ function registerEventUrlHandler(player: any, castLib: number, castMember: numbe
     // `lingo:bdPlaySound(...)`). Swallow the navigation either way.
     if (url.startsWith('lingo:')) {
       const body = url.slice('lingo:'.length).trim();
-      const handled = dispatchFlashLingo(body);
-      if (!handled) {
+      void dispatchFlashLingo(handle, body).then((handled) => {
+        if (!handled) {
         console.warn(
           `[Flash] ${castLib}:${castMember}: empty/failed lingo URL body: ${JSON.stringify(body)}`
         );
-      }
+        }
+      });
       return true;
     }
     if (!url.startsWith('event:')) {
       return false; // not ours — let Ruffle's openUrlMode decide
     }
     const body = url.slice('event:'.length).trim();
-    const handled = dispatchFlashEvent(castLib, castMember, body);
+    const handled = dispatchFlashEvent(handle, castLib, castMember, body);
     if (!handled) {
       console.warn(
         `[Flash] ${castLib}:${castMember}: unrecognised event URL body: ${JSON.stringify(body)}`
@@ -551,7 +586,8 @@ function registerEventUrlHandler(player: any, castLib: number, castMember: numbe
  * the command name is the handler; any args string is appended so
  * dispatch_flash_event tokenises trailing args.
  */
-function registerFSCommandHandler(player: any, castLib: number, castMember: number): void {
+function registerFSCommandHandler(host: FlashOwnerHost, player: any, castLib: number, castMember: number): void {
+  const handle = host.capability;
   // Prefer the fork's namespaced `dirplayer_addFSCommandHandler` (binds only to
   // our player, never a stock Ruffle sharing the page); fall back to the stock
   // `addFSCommandHandler` if an older bundle is loaded.
@@ -564,11 +600,12 @@ function registerFSCommandHandler(player: any, castLib: number, castMember: numb
     return;
   }
   reg.call(player, (command: string, args: string): void => {
+    if (host.disposed) return;
     if (typeof command !== 'string' || !command.trim()) return;
     const body = (typeof args === 'string' && args.trim())
       ? `${command.trim()} ${args.trim()}`
       : command.trim();
-    const handled = dispatchFlashEvent(castLib, castMember, body);
+    const handled = dispatchFlashEvent(handle, castLib, castMember, body);
     if (!handled) {
       console.warn(
         `[Flash] ${castLib}:${castMember}: unhandled fscommand: ${JSON.stringify(command)} ${JSON.stringify(args)}`
@@ -587,17 +624,20 @@ function registerFSCommandHandler(player: any, castLib: number, castMember: numb
  * Lingo dispatch runs. Neopets' DGS include movie fires `fscommand("FlashLoader
  * Loaded")` this way; without it the loader stalls at load_state 6.
  */
-function registerBridgeCallbacks(bridgeId: string, castLib: number, castMember: number): void {
+function registerBridgeCallbacks(host: FlashOwnerHost, bridgeId: string, castLib: number, castMember: number): void {
+  const handle = host.capability;
   bridgeOnEvent(bridgeId, (name, detail) => {
-    const d = detail as { url?: string; target?: string; command?: string; args?: string } | undefined;
+    if (host.disposed) return;
+    const d = detail as { ownerKey?: string; url?: string; target?: string; command?: string; args?: string } | undefined;
     if (!d) return;
+    if (d.ownerKey !== host.ownerKey) return;
     if (name === 'openUrl') {
       const url = d.url;
       if (typeof url !== 'string') return;
       if (url.startsWith('lingo:')) {
-        dispatchFlashLingo(url.slice('lingo:'.length).trim());
+        void dispatchFlashLingo(handle, url.slice('lingo:'.length).trim());
       } else if (url.startsWith('event:')) {
-        dispatchFlashEvent(castLib, castMember, url.slice('event:'.length).trim());
+        dispatchFlashEvent(handle, castLib, castMember, url.slice('event:'.length).trim());
       }
     } else if (name === 'fsCommand') {
       const command = d.command;
@@ -606,10 +646,10 @@ function registerBridgeCallbacks(bridgeId: string, castLib: number, castMember: 
       const body = (typeof args === 'string' && args.trim())
         ? `${command.trim()} ${args.trim()}`
         : command.trim();
-      dispatchFlashEvent(castLib, castMember, body);
+      dispatchFlashEvent(handle, castLib, castMember, body);
     }
   });
-  void bridgeRegisterCallbackForwarders(bridgeId);
+  void bridgeRegisterCallbackForwarders(bridgeId, host.ownerKey);
 }
 
 /**
@@ -731,7 +771,8 @@ function setFlashSize(spriteNum: number, w: number, h: number): void {
  * Each sprite gets its own player so multiple sprites that share a single
  * Flash cast member can display different frames simultaneously.
  */
-export async function createFlashInstance(
+export async function createFlashInstanceForOwner(
+  host: FlashOwnerHost,
   spriteNum: number,
   castLib: number,
   castMember: number,
@@ -741,7 +782,10 @@ export async function createFlashInstance(
   pausedAtStart: boolean = false,
   assertedFrame: number = -1,
 ): Promise<void> {
-  const key = instanceKey(spriteNum);
+  const ownerKey = host.ownerKey;
+  const browserHandle = host.capability;
+  if (host.disposed) throw new Error(`Flash owner ${ownerKey} is disposed`);
+  const key = `${ownerKey}:${spriteNum}`;
 
   // Skip when Flash is explicitly disabled by the host. The Lingo
   // bridge functions all early-return on missing instance, so the
@@ -755,7 +799,7 @@ export async function createFlashInstance(
   }
 
   // Destroy existing instance for this sprite if any.
-  destroyFlashInstance(spriteNum);
+  destroyFlashInstance(host, spriteNum);
 
   // Per-sprite frame intent is now owned by the Rust sprite
   // (`flash_asserted_frame`) and threaded in as `assertedFrame`, which we pin
@@ -810,7 +854,7 @@ export async function createFlashInstance(
     if (!(await waitForBridge())) {
       throw new Error('main-world Ruffle bridge did not become ready');
     }
-    bridgeId = await bridgeCreatePlayer();
+    bridgeId = await bridgeCreatePlayer(host.ownerKey);
     const elem = bridgeFindElement(bridgeId);
     if (!elem) throw new Error('bridge created player but DOM element not found: ' + bridgeId);
     player = elem;
@@ -821,12 +865,17 @@ export async function createFlashInstance(
     // Direct mode (page-loaded polyfill, same world as Ruffle).
     const ruffle = await loadRuffle();
     player = ruffle.createPlayer();
+    if (typeof player.dirplayer_set_owner_key !== 'function') {
+      throw new Error('dirplayer Ruffle player does not support owner binding');
+    }
+    player.dirplayer_set_owner_key(host.ownerKey);
     player.style.width = `${renderW}px`;
     player.style.height = `${renderH}px`;
     container.appendChild(player);
   }
 
   const instance: FlashInstance = {
+    browserHandle,
     spriteNum,
     castLib,
     castMember,
@@ -843,7 +892,17 @@ export async function createFlashInstance(
     pausedAtStart,
   };
 
+  // The owner may have been reset while Ruffle was loading.  Do not publish
+  // a late instance into the replacement runtime; remove the detached player
+  // and container while they are still local to this request.
+  if (host.disposed || host.capability !== browserHandle) {
+    try { player.remove?.(); } catch { /* stale host cleanup */ }
+    container.remove();
+    return;
+  }
   instances.set(key, instance);
+  host.instances.set(key, instance);
+  bindSpriteIndex(spriteNum, key);
   syncActiveFlashCount();
 
   // Copy data out of WASM memory immediately — the underlying ArrayBuffer
@@ -931,6 +990,15 @@ export async function createFlashInstance(
     await ruffleInstance.load(loadConfig);
   }
 
+  // Reset/unregister can race the asynchronous SWF load.  Stop before any
+  // post-load callback registration or frame work when this generation is no
+  // longer the published owner.
+  if (host.disposed || host.capability !== browserHandle) {
+    try { player.remove?.(); } catch { /* stale host cleanup */ }
+    container.remove();
+    return;
+  }
+
   // Honour Director's `pausedAtStart` Flash member property.
   // Ruffle's own `autoplay: 'off'` leaves the SWF in a preroll state
   // where `_currentframe=0` and `GotoFrame` is a no-op, so we keep
@@ -973,10 +1041,10 @@ export async function createFlashInstance(
     // world, and callback functions can't cross worlds — so the host registers
     // its own forwarders and posts each event/fscommand back here. Handles both
     // the event:/lingo: URL channel and fscommand in one call.
-    registerBridgeCallbacks(bridgeId, castLib, castMember);
+    registerBridgeCallbacks(host, bridgeId, castLib, castMember);
   } else {
-    registerEventUrlHandler(player, castLib, castMember);
-    registerFSCommandHandler(player, castLib, castMember);
+    registerEventUrlHandler(host, player, castLib, castMember);
+    registerFSCommandHandler(host, player, castLib, castMember);
   }
 
   // Find the internal canvas element that Ruffle renders to
@@ -1012,11 +1080,13 @@ export async function createFlashInstance(
     // `live.rufflePlayer.GotoFrame(...)` calls aren't seen as targeting
     // a not-yet-ready instance. After this point any Lingo goTo/play/stop
     // calls bypass the queue.
-    if (live) live.ready = true;
+    if (live && !host.disposed && host.capability === browserHandle) live.ready = true;
 
     // Replay any beginSprite-time `gotoFrame(sprite,N)` / `play(sprite)` /
     // `stop(sprite)` Lingo calls that arrived before this instance was created.
-    flushPendingGoto(spriteNum);
+    if (!host.disposed && host.capability === browserHandle) {
+      flushPendingGoto(host, spriteNum, key);
+    }
 
     // Finally, re-assert the sprite's authoritative frame (from Rust). The
     // early pin above set it before autoplay, but the 3s AS-init window +
@@ -1024,7 +1094,7 @@ export async function createFlashInstance(
     // the poster survives to `ready` (StoryScramble tiles). Skipped if a queued
     // `play`/`gotoFrame` already resumed the sprite (the flush's stopped flag
     // reflects that).
-    if (assertedFrame >= 0 && live && live.stopped) {
+    if (assertedFrame >= 0 && live && !host.disposed && host.capability === browserHandle && live.stopped) {
       try {
         playerExec(live, 'GotoFrame', [assertedFrame, false]);
         await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
@@ -1117,7 +1187,7 @@ function startFrameCapture(key: string): void {
             scratchCtx.clearRect(0, 0, width, height);
             scratchCtx.drawImage(canvas, 0, 0);
             const imageData = scratchCtx.getImageData(0, 0, width, height);
-            update_flash_frame(inst.spriteNum, width, height, new Uint8Array(imageData.data.buffer));
+            void inst.browserHandle.update_flash_frame(inst.spriteNum, width, height, new Uint8Array(imageData.data.buffer));
           }
         }
       } catch (e) {
@@ -1142,8 +1212,9 @@ function startFrameCapture(key: string): void {
 /**
  * Destroy a Flash instance and clean up resources.
  */
-export function destroyFlashInstance(spriteNum: number): void {
-  const key = instanceKey(spriteNum);
+export function destroyFlashInstance(host: FlashOwnerHost, spriteNum: number): void {
+  const ownerKey = host.ownerKey;
+  const key = `${ownerKey}:${spriteNum}`;
   const instance = instances.get(key);
   if (!instance) return;
 
@@ -1166,6 +1237,26 @@ export function destroyFlashInstance(spriteNum: number): void {
 
   instance.container.remove();
   instances.delete(key);
+  host.instances.delete(key);
+  if (spriteIndex.get(spriteNum) === key) spriteIndex.delete(spriteNum);
+  syncActiveFlashCount();
+}
+
+export function destroyAllFlashInstances(host: FlashOwnerHost): void {
+  const ownerPrefix = `${host.ownerKey}:`;
+  host.pendingQueue.clearOwner(host.ownerKey);
+  Array.from(instances.entries()).forEach(([key, instance]) => {
+    if (!key.startsWith(ownerPrefix)) return;
+    if (instance.animFrameId !== null) cancelAnimationFrame(instance.animFrameId);
+    try {
+      instance.rufflePlayer.remove();
+      if (instance.bridgeId) void bridgeDestroyPlayer(instance.bridgeId);
+    } catch { /* owner teardown is best effort */ }
+    instance.container.remove();
+    instances.delete(key);
+    host.instances.delete(key);
+    if (spriteIndex.get(instance.spriteNum) === key) spriteIndex.delete(instance.spriteNum);
+  });
   syncActiveFlashCount();
 }
 
@@ -1271,7 +1362,7 @@ function setVariable(spriteNum: number, path: string, value: string): boolean {
  * (after the inheritance seed — so explicit `gotoFrame(N)` from
  * beginSprite wins over an inherited sibling frame).
  */
-type PendingOp =
+export type PendingOp =
   | { kind: 'goto'; frame: number }
   | { kind: 'gotoLabel'; label: string }
   | { kind: 'play' }
@@ -1279,7 +1370,126 @@ type PendingOp =
   | { kind: 'rewind' }
   | { kind: 'setVariable'; path: string; value: string }
   | { kind: 'callFunction'; path: string; argsXml: string };
-const pendingOps = new Map<number, PendingOp[]>();
+/**
+ * Queues Flash operations until the corresponding Ruffle instance is ready.
+ *
+ * The legacy queue is indexed only by sprite number. Owner-qualified queues
+ * always use the complete owner-and-sprite instance key, so a second runtime
+ * using the same sprite number cannot consume the first runtime's operations.
+ * Keeping this policy in one small object makes the readiness and retirement
+ * boundaries testable without constructing a browser Ruffle instance.
+ */
+export class FlashPendingQueue {
+  private readonly legacy = new Map<number, PendingOp[]>();
+  private readonly owned = new Map<string, PendingOp[]>();
+
+  enqueueLegacy(spriteNum: number, op: PendingOp): void {
+    const list = this.legacy.get(spriteNum) ?? [];
+    list.push(op);
+    this.legacy.set(spriteNum, list);
+  }
+
+  enqueueOwned(ownerKey: string, spriteNum: number, op: PendingOp): void {
+    const key = `${ownerKey}:${spriteNum}`;
+    const list = this.owned.get(key) ?? [];
+    list.push(op);
+    this.owned.set(key, list);
+  }
+
+  /**
+   * Drain operations at the exact readiness boundary. Legacy operations are
+   * consumed only when the sprite index still resolves to this instance;
+   * owner-qualified operations are consumed only for the requested key.
+   */
+  drainReady(
+    spriteNum: number,
+    instanceKey: string | undefined,
+    ready: boolean,
+    legacyTargetMatches: boolean,
+  ): PendingOp[] {
+    if (!ready) return [];
+    const ownedOps = instanceKey ? this.owned.get(instanceKey) : undefined;
+    const legacyOps = legacyTargetMatches ? this.legacy.get(spriteNum) : undefined;
+    const drained = [...(legacyOps ?? []), ...(ownedOps ?? [])];
+    if (legacyTargetMatches) this.legacy.delete(spriteNum);
+    if (instanceKey) this.owned.delete(instanceKey);
+    return drained;
+  }
+
+  clearOwner(ownerKey: string): void {
+    const prefix = `${ownerKey}:`;
+    Array.from(this.owned.keys()).forEach((key) => {
+      if (key.startsWith(prefix)) this.owned.delete(key);
+    });
+  }
+
+  clear(): void {
+    this.legacy.clear();
+    this.owned.clear();
+  }
+}
+
+const pendingQueue = new FlashPendingQueue();
+
+/** Explicit per-owner host state. The legacy maps remain only for old
+ * unqualified Ruffle bridge calls; owner-qualified callbacks use this host's
+ * capability, instances, and pending queue. */
+export class FlashOwnerHost {
+  readonly instances = new Map<string, FlashInstance>();
+  readonly pendingQueue = new FlashPendingQueue();
+  disposed = false;
+
+  constructor(readonly ownerKey: string, readonly capability: FlashOwnerCapability) {}
+
+  dispose(): void {
+    this.disposed = true;
+    this.pendingQueue.clear();
+  }
+}
+
+/** Owner-qualified bridge operations used by the browser harness router. */
+export function playFlashForOwner(host: FlashOwnerHost, spriteNum: number): void {
+  if (!host.disposed) playFlashOwned(host, spriteNum);
+}
+
+export function localConnectionSendForOwner(
+  host: FlashOwnerHost,
+  name: string,
+  method: string,
+  argsJson: string,
+): boolean {
+  if (host.disposed) return false;
+  try { return !!host.capability.local_connection_send(name, method, argsJson); } catch { return false; }
+}
+
+export interface FlashOwnerRegistration {
+  readonly host: FlashOwnerHost;
+  dispose(): void;
+}
+
+/** Create an owner host synchronously. The caller retains this registration
+ * in its callback closure; no process-global owner registry is needed. */
+export function registerFlashOwner(
+  ownerKey: string,
+  capability: FlashOwnerCapability,
+): FlashOwnerRegistration {
+  if (!ownerKey || capability.owner_identity() !== ownerKey) {
+    throw new Error(`invalid Flash owner capability ${ownerKey}`);
+  }
+  const host = new FlashOwnerHost(ownerKey, capability);
+  return {
+    host,
+    dispose: () => {
+      if (host.disposed) return;
+      host.dispose();
+      // Mark the generation closed before invoking Ruffle teardown hooks.
+      // Those hooks can synchronously re-enter the bridge; they must observe
+      // the closed host and cannot enqueue or publish new work. Resource
+      // enumeration remains valid after the flag is set.
+      destroyAllFlashInstances(host);
+    },
+  };
+}
 
 /**
  * Pending goto-and-pin target per sprite. Director's `the frame of
@@ -1428,17 +1638,25 @@ function schedulePin(instance: FlashInstance, frame: number): void {
 }
 
 function queueOp(spriteNum: number, op: PendingOp): void {
-  const list = pendingOps.get(spriteNum) ?? [];
-  list.push(op);
-  pendingOps.set(spriteNum, list);
+  pendingQueue.enqueueLegacy(spriteNum, op);
 }
 
-function flushPendingGoto(spriteNum: number): void {
-  const ops = pendingOps.get(spriteNum);
-  if (!ops || ops.length === 0) return;
-  pendingOps.delete(spriteNum);
-  const instance = instances.get(instanceKey(spriteNum));
-  if (!instance) return;
+function queueOwnedOp(host: FlashOwnerHost, spriteNum: number, op: PendingOp): void {
+  if (host.disposed) return;
+  host.pendingQueue.enqueueOwned(host.ownerKey, spriteNum, op);
+}
+
+function flushPendingGoto(host: FlashOwnerHost, spriteNum: number, instanceKeyOverride?: string): void {
+  // A keyed instance only consumes its own owner queue. Legacy numeric
+  // operations are replayed only when the sprite-number index still names
+  // this exact instance; an ambiguous number must never cross runtimes.
+  const ownedKey = instanceKeyOverride;
+  const instance = instances.get(ownedKey ?? instanceKey(spriteNum));
+  if (!instance || !instance.ready) return;
+  const isUniqueLegacyTarget = !ownedKey || instanceKey(spriteNum) === ownedKey;
+  const ops = (ownedKey ? host.pendingQueue : pendingQueue)
+    .drainReady(spriteNum, ownedKey, true, isUniqueLegacyTarget);
+  if (ops.length === 0) return;
   for (const op of ops) {
     try {
       switch (op.kind) {
@@ -1714,11 +1932,10 @@ function stopFlash(spriteNum: number): void {
  * Routing through `GotoFrame(currentFrame, false)` hits MovieClip's
  * `goto_frame`, which both re-seats the playhead and clears that flag.
  */
-function playFlash(spriteNum: number): void {
-  const key = instanceKey(spriteNum);
-  const instance = instances.get(key);
+function playFlashInstance(instance: FlashInstance, spriteNum: number, host?: FlashOwnerHost): void {
   if (!instance || !instance.ready) {
-    queueOp(spriteNum, { kind: 'play' });
+    if (host) queueOwnedOp(host, spriteNum, { kind: 'play' });
+    else queueOp(spriteNum, { kind: 'play' });
     return;
   }
   // Cancel any in-flight pin from a `mySprite.frame = N` call earlier
@@ -1729,6 +1946,24 @@ function playFlash(spriteNum: number): void {
   playerExec(instance, 'play');
   const cur = parseInt(playerGetVar(instance, '/:_currentframe') || '1', 10) || 1;
   playerExec(instance, 'GotoFrame', [cur, false]);
+}
+
+function playFlash(spriteNum: number): void {
+  const instance = instances.get(instanceKey(spriteNum));
+  if (!instance) {
+    queueOp(spriteNum, { kind: 'play' });
+    return;
+  }
+  playFlashInstance(instance, spriteNum);
+}
+
+function playFlashOwned(host: FlashOwnerHost, spriteNum: number): void {
+  const instance = instances.get(`${host.ownerKey}:${spriteNum}`);
+  if (!instance) {
+    queueOwnedOp(host, spriteNum, { kind: 'play' });
+    return;
+  }
+  playFlashInstance(instance, spriteNum, host);
 }
 
 /**
@@ -2006,7 +2241,15 @@ function registerLingoCallback(
  * or another script tag). The matching #[wasm_bindgen(js_name = ...)]
  * imports in the Rust side use the same prefixed names.
  */
-export function initFlashBridge(): void {
+export type FlashBridgeDisposer = (() => void) & { host: FlashOwnerHost };
+
+export function initFlashBridge(
+  browserHandle: BrowserPlayerHandle,
+  existingRegistration?: FlashOwnerRegistration,
+): FlashBridgeDisposer {
+  const ownerKey = browserHandle.owner_identity();
+  const registration = existingRegistration ?? registerFlashOwner(ownerKey, browserHandle);
+  const host = registration.host;
   const win = window as any;
   // Flash LocalConnection.send bridge (Neopets DGS score/protocol). The Ruffle
   // fork calls dirplayer_localConnectionSend(connName, method, argsJson); route
@@ -2014,16 +2257,24 @@ export function initFlashBridge(): void {
   // Direct in dev (fork + this run in one world); in the MV3 extension the fork
   // is main-world, so the bridge host re-fires it here as a `dirplayer-lc-send`
   // DOM event (below).
-  win.dirplayer_localConnectionSend = (name: string, method: string, argsJson: string): boolean => {
-    try { return !!local_connection_send(name, method, argsJson); } catch { return false; }
+  const localConnectionSend = (name: string, method: string, argsJson: string): boolean => {
+    try { return !!browserHandle.local_connection_send(name, method, argsJson); } catch { return false; }
   };
+  win.dirplayer_localConnectionSend = localConnectionSend;
+  let extensionListener: ((ev: Event) => void) | undefined;
   if (isExtensionContext()) {
-    window.addEventListener('dirplayer-lc-send', (ev) => {
+    extensionListener = (ev: Event) => {
       const d = (ev as CustomEvent).detail as
-        { name?: string; method?: string; argsJson?: string } | undefined;
-      if (!d || typeof d.name !== 'string') return;
-      try { local_connection_send(d.name, d.method || '', d.argsJson || '[]'); } catch { /* ignore */ }
-    });
+        { ownerKey?: string; name?: string; method?: string; argsJson?: string } | undefined;
+      // Main-world bridge producers must carry the exact owner generation.
+      // An unqualified DOM event cannot be safely delivered when multiple
+      // runtimes share the page, so legacy producers are intentionally ignored
+      // until they migrate to the owner-qualified event contract.
+      if (!d || d.ownerKey !== host.ownerKey) return;
+      if (typeof d.name !== 'string') return;
+      localConnectionSendForOwner(host, d.name, d.method || '', d.argsJson || '[]');
+    };
+    window.addEventListener('dirplayer-lc-send', extensionListener);
   }
   win.dirplayer_ruffleGetVariable = getVariable;
   win.dirplayer_flashInstances = instances;
@@ -2052,7 +2303,7 @@ export function initFlashBridge(): void {
   // Expose as global function for Ruffle's wasm_bindgen extern
   // Ruffle sends args as a JSON array of base64-encoded JSON values.
   // Decode them to native JS values before passing to WASM.
-  win.dirplayer_triggerLingoCallbackOnScript = (castLib: number, castMember: number, handlerName: string, argsJson: string, flashCastLib: number, flashCastMember: number) => {
+  const triggerLingoCallbackOnScript = (castLib: number, castMember: number, handlerName: string, argsJson: string, flashCastLib: number, flashCastMember: number) => {
     try {
       const b64Args: string[] = JSON.parse(argsJson);
       const decodedArgs = b64Args.map((b64: string) => {
@@ -2063,12 +2314,13 @@ export function initFlashBridge(): void {
           return b64; // fallback: pass as-is
         }
       });
-      return trigger_lingo_callback_on_script(castLib, castMember, handlerName, JSON.stringify(decodedArgs), flashCastLib, flashCastMember);
+      return browserHandle.trigger_lingo_callback_on_script(castLib, castMember, handlerName, JSON.stringify(decodedArgs), flashCastLib, flashCastMember);
     } catch (e) {
       console.error('[triggerLingoCallback] decode error:', e);
-      return trigger_lingo_callback_on_script(castLib, castMember, handlerName, argsJson, flashCastLib, flashCastMember);
+      return browserHandle.trigger_lingo_callback_on_script(castLib, castMember, handlerName, argsJson, flashCastLib, flashCastMember);
     }
   };
+  win.dirplayer_triggerLingoCallbackOnScript = triggerLingoCallbackOnScript;
 
   // Expose flash loading state for the WASM frame loop to check. The loop
   // BLOCKS (up to 15s) while this is true, so it must only be true when the
@@ -2094,7 +2346,7 @@ export function initFlashBridge(): void {
   // Flash sprites. Returns true (proceed) when the instance is ready OR when no
   // instance exists and nothing is loading (so the caller can't hang forever on
   // a sprite that will never get an instance).
-  win.dirplayer_isFlashInstanceReady = (spriteNum: number): boolean => {
+  const isFlashInstanceReady = (spriteNum: number): boolean => {
     const inst = instances.get(instanceKey(spriteNum));
     // Only "ready" once the instance exists AND has finished AS init. A missing
     // instance is NOT ready: the sprite's SWF is (or is about to be) loading, so
@@ -2105,12 +2357,15 @@ export function initFlashBridge(): void {
     // hang forever.
     return !!(inst && inst.ready);
   };
+  win.dirplayer_isFlashInstanceReady = isFlashInstanceReady;
 
   // Hand-fired test entry for Flash `event: …` dispatch — lets you prove
   // the WASM dispatch chain end-to-end from DevTools without waiting for
   // a real SWF `getURL("event: …")` call. Example:
   //   dirplayer_dispatchFlashEvent(1, 45, "send #done")
-  win.dirplayer_dispatchFlashEvent = dispatchFlashEvent;
+  const dispatchFlashEventForHandle = (castLib: number, castMember: number, body: string) =>
+    dispatchFlashEvent(browserHandle, castLib, castMember, body);
+  win.dirplayer_dispatchFlashEvent = dispatchFlashEventForHandle;
 
   // Mouse forwarding: dirplayer's WASM-side mouseDown/mouseUp handlers
   // call this when the click lands on a Flash sprite, so the SWF's own
@@ -2130,28 +2385,29 @@ export function initFlashBridge(): void {
       allowNetworking: 'all',
     };
   }
-}
-
-/**
- * Destroy all Flash instances.
- */
-export function destroyAllFlashInstances(): void {
-  instances.forEach((instance) => {
-    if (instance.animFrameId !== null) {
-      cancelAnimationFrame(instance.animFrameId);
+  const dispose = (() => {
+    registration.dispose();
+    if (win.dirplayer_localConnectionSend === localConnectionSend) {
+      // The legacy signature has no owner key and cannot be restored to an
+      // older runtime without resurrecting a disposed capability. Owner-aware
+      // callers use the stable dirplayer-js-api router instead.
+      delete win.dirplayer_localConnectionSend;
     }
-    try {
-      instance.rufflePlayer.remove();
-      if (instance.bridgeId) {
-        void bridgeDestroyPlayer(instance.bridgeId);
-      }
-    } catch (e) {
-      // Ignore
+    if (extensionListener) {
+      window.removeEventListener('dirplayer-lc-send', extensionListener);
     }
-    instance.container.remove();
-  });
-  instances.clear();
-  syncActiveFlashCount();
+    if (win.dirplayer_isFlashInstanceReady === isFlashInstanceReady) {
+      delete win.dirplayer_isFlashInstanceReady;
+    }
+    if (win.dirplayer_dispatchFlashEvent === dispatchFlashEventForHandle) {
+      delete win.dirplayer_dispatchFlashEvent;
+    }
+    if (win.dirplayer_triggerLingoCallbackOnScript === triggerLingoCallbackOnScript) {
+      delete win.dirplayer_triggerLingoCallbackOnScript;
+    }
+  }) as FlashBridgeDisposer;
+  dispose.host = host;
+  return dispose;
 }
 
 /**

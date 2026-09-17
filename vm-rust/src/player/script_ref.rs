@@ -1,23 +1,32 @@
-use super::{allocator::{ScriptInstanceAllocatorTrait, ALLOCATOR_RESETTING}, script::ScriptInstanceId, ACTIVE_PLAYER_ID, NESTED_PLAYERS, PLAYER_OPT};
+use super::{allocator::ScriptInstanceAllocatorTrait, ownership::OwnerToken, script::ScriptInstanceId};
 
 #[derive(Debug)]
-pub struct ScriptInstanceRef(ScriptInstanceId, *mut u32);
+pub struct ScriptInstanceRef(ScriptInstanceId, *mut u32, OwnerToken);
 
 impl ScriptInstanceRef {
     #[inline]
-    pub fn from_id(id: ScriptInstanceId, ref_count: *mut u32) -> Self {
+    pub(crate) fn from_id(id: ScriptInstanceId, ref_count: *mut u32, owner: OwnerToken) -> Self {
         let val = id.into();
+        if !owner.retain_handle() {
+            return Self(val, ref_count, owner);
+        }
         unsafe {
             let mut_ref = &mut *ref_count;
             *mut_ref += 1;
         }
-        Self(val, ref_count)
+        Self(val, ref_count, owner)
     }
 
     #[inline]
     pub fn id(&self) -> ScriptInstanceId {
         self.0
     }
+
+    #[inline]
+    pub(crate) fn owner(&self) -> &OwnerToken { &self.2 }
+
+    #[inline]
+    pub(crate) fn ref_count_ptr(&self) -> *mut u32 { self.1 }
 }
 
 impl std::ops::Deref for ScriptInstanceRef {
@@ -31,33 +40,23 @@ impl std::ops::Deref for ScriptInstanceRef {
 
 impl Clone for ScriptInstanceRef {
     fn clone(&self) -> Self {
-        Self::from_id(self.0, self.1)
+        Self::from_id(self.0, self.1, self.2.clone())
     }
 }
 
 impl Drop for ScriptInstanceRef {
     #[inline]
     fn drop(&mut self) {
-        unsafe {
-            if ALLOCATOR_RESETTING {
-                return;
-            }
-            let rc = &mut *self.1;
-            *rc -= 1;
-            if *rc == 0 {
-                // Route to the ACTIVE player's allocator (a nested sub-player owns
-                // its own script instances) — see the DatumRef::drop note.
-                let player_opt = if ACTIVE_PLAYER_ID == 0 {
-                    PLAYER_OPT.as_mut()
-                } else {
-                    NESTED_PLAYERS
-                        .get_mut(ACTIVE_PLAYER_ID - 1)
-                        .and_then(|o| o.as_mut())
-                };
-                if let Some(player) = player_opt {
-                    player.allocator.on_script_instance_ref_dropped(self.0);
-                }
-            }
+        if !self.2.is_arena_live() {
+            return;
+        }
+        let rc = unsafe { &mut *self.1 };
+        if *rc == 0 {
+            return;
+        }
+        *rc -= 1;
+        if *rc == 0 {
+            self.2.enqueue(super::ownership::ReclaimKind::ScriptInstance(self.0));
         }
     }
 }

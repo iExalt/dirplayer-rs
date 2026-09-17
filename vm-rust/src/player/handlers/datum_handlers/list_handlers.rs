@@ -1,19 +1,23 @@
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 use log::debug;
 
 use crate::player::datum_formatting::format_concrete_datum;
 use crate::player::symbols::builtin::BuiltInSymbol;
 use crate::player::symbols::symbol::Symbol;
-use crate::symbol_match;
+use crate::player::symbols::symbol_table::SymbolTable;
 use crate::{
     director::lingo::datum::{datum_bool, Datum},
     player::{
-        allocator::{DatumAllocator, DatumAllocatorTrait},
-        compare::{datum_equals, datum_less_than},
+        allocator::DatumAllocator,
+        compare::{
+            datum_equals, datum_less_than, validate_direct_symbol_fields,
+            validate_reachable_symbols,
+        },
         handlers::types::TypeUtils,
-        player_duplicate_datum, reserve_player_mut, reserve_player_ref, DatumRef, DirPlayer,
-        ScriptError,
+        player_duplicate_datum,
+        session::ExecutionContext,
+        DatumRef, DirPlayer, ScriptError,
     },
 };
 
@@ -25,15 +29,29 @@ impl ListDatumUtils {
         list_vec: &VecDeque<DatumRef>,
         item: &DatumRef,
         allocator: &DatumAllocator,
+        symbols: &SymbolTable,
     ) -> Result<i32, ScriptError> {
         let mut low = 0;
         let mut high = list_vec.len() as i32;
-        let item = allocator.get_datum(item);
+        let item = match item {
+            DatumRef::Void => &Datum::Void,
+            _ => allocator
+                .try_get_datum(item)
+                .ok_or_else(|| ScriptError::new("invalid datum reference".to_string()))?,
+        };
+        validate_direct_symbol_fields(item, symbols)?;
 
         while low < high {
             let mid = (low + high) / 2;
-            let left = allocator.get_datum(list_vec.get(mid as usize).unwrap());
-            if datum_less_than(left, item, &allocator)? {
+            let left_ref = list_vec.get(mid as usize).unwrap();
+            let left = match left_ref {
+                DatumRef::Void => &Datum::Void,
+                _ => allocator
+                    .try_get_datum(left_ref)
+                    .ok_or_else(|| ScriptError::new("invalid datum reference".to_string()))?,
+            };
+            validate_direct_symbol_fields(left, symbols)?;
+            if datum_less_than(left, item, allocator, symbols)? {
                 low = mid + 1;
             } else {
                 high = mid;
@@ -47,7 +65,11 @@ impl ListDatumUtils {
         list_vec: &VecDeque<DatumRef>,
         prop_name: Symbol,
         _datums: &DatumAllocator,
+        symbols: &SymbolTable,
     ) -> Result<Datum, ScriptError> {
+        symbols
+            .display(&prop_name)
+            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
         // `into_builtin()` rather than `into_builtin_or_error()`: a symbol that
         // is not a builtin is simply a property this list does not have, which
         // is the VOID case below, not an error.
@@ -75,8 +97,36 @@ impl ListDatumUtils {
 }
 
 impl ListDatumHandlers {
+    /// Validate a reference and only the symbol-bearing fields of its outer
+    /// datum. Mutators use this before taking a mutable list borrow; nested
+    /// values remain opaque unless the operation itself compares them.
+    fn validate_direct_ref(
+        player: &DirPlayer,
+        symbols: &SymbolTable,
+        datum_ref: &DatumRef,
+    ) -> Result<(), ScriptError> {
+        let datum = match datum_ref {
+            DatumRef::Void => return Ok(()),
+            _ => player
+                .allocator
+                .try_get_datum(datum_ref)
+                .ok_or_else(|| ScriptError::new(format!("invalid datum reference {datum_ref}")))?,
+        };
+        validate_direct_symbol_fields(datum, symbols)
+    }
+
+    fn validate_search_ref(
+        player: &DirPlayer,
+        symbols: &SymbolTable,
+        datum_ref: &DatumRef,
+        visited: &mut HashSet<usize>,
+    ) -> Result<(), ScriptError> {
+        validate_reachable_symbols(datum_ref, &player.allocator, symbols, visited)
+    }
+
     pub fn get_prop(
         player: &mut DirPlayer,
+        symbols: &SymbolTable,
         datum_ref: &DatumRef,
         prop_name: Symbol,
     ) -> Result<DatumRef, ScriptError> {
@@ -87,18 +137,29 @@ impl ListDatumHandlers {
         // `appearanceToString` (MovieScript 2 global events line 299) that
         // do `inList.string` then strip `[`, `]`, spaces to serialise an
         // appearance list into a flat custom-delimited string.
-        if prop_name.as_str().eq_ignore_ascii_case("string") {
+        Self::validate_direct_ref(player, symbols, datum_ref)?;
+        let prop_name_text = symbols
+            .display(&prop_name)
+            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+        if prop_name_text.eq_ignore_ascii_case("string") {
             let datum_clone = player.get_datum(datum_ref).clone();
-            let s = format_concrete_datum(&datum_clone, player);
+            let s = format_concrete_datum(&datum_clone, symbols, player)?;
             return Ok(player.alloc_datum(Datum::String(s)));
         }
         let list_vec = player.get_datum(datum_ref).to_list()?;
-        let result = ListDatumUtils::get_prop(&list_vec, prop_name, &player.allocator)?;
+        let result = ListDatumUtils::get_prop(&list_vec, prop_name, &player.allocator, symbols)?;
         Ok(player.alloc_datum(result))
     }
 
-    pub fn get_at(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn get_at(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        Self::validate_direct_ref(player, symbols, datum)?;
+        Self::validate_direct_ref(player, symbols, &args[0])?;
+        {
             let (list_type, list_vec, _) = player.get_datum(datum).to_list_tuple()?;
             // A VOID index (e.g. `list[uninitializedGlobal]`) yields VOID in Director
             // rather than raising — real movies rely on this (leo3d's checkbonbon does
@@ -130,16 +191,30 @@ impl ListDatumHandlers {
 
             let result = list_vec[position as usize].clone();
             Ok(result)
-        })
+        }
     }
 
-    pub fn set_at(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let position = player.get_datum(&args[0]).int_value()?;
-            let (_, list_vec, ..) = player.get_datum_mut(datum).to_list_mut()?;
+    pub fn set_at(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        {
+            let position_datum = match &args[0] {
+                DatumRef::Void => &Datum::Void,
+                _ => player
+                    .allocator
+                    .try_get_datum(&args[0])
+                    .ok_or_else(|| ScriptError::new("invalid datum reference".to_string()))?,
+            };
+            let position = position_datum.int_value()?;
+            Self::validate_direct_ref(player, symbols, datum)?;
+            Self::validate_direct_ref(player, symbols, &args[0])?;
             let index = position - 1;
-            let item_ref = &args[1];
-
+            // Receiver validation precedes the non-positive no-op, preserving
+            // the list type error while skipping the unused value.
+            player.get_datum(datum).to_list_tuple()?;
             // Non-positive positions: `index < list_vec.len()` is true for a
             // negative index, so without this guard `list_vec[(-1) as usize]`
             // indexes with a huge value and VecDeque panics (crashing the whole
@@ -151,6 +226,10 @@ impl ListDatumHandlers {
             if index < 0 {
                 return Ok(DatumRef::Void);
             }
+
+            Self::validate_direct_ref(player, symbols, &args[1])?;
+            let (_, list_vec, ..) = player.get_datum_mut(datum).to_list_mut()?;
+            let item_ref = &args[1];
 
             if index < list_vec.len() as i32 {
                 list_vec[index as usize] = item_ref.clone();
@@ -165,49 +244,51 @@ impl ListDatumHandlers {
             player.note_actor_list_mutation(datum);
             player.note_script_instance_list_mutation(datum);
             Ok(DatumRef::Void)
-        })
+        }
     }
 
     pub fn call(
+        runtime: &mut ExecutionContext,
         datum: &DatumRef,
         handler_name: Symbol,
         args: &Vec<DatumRef>,
     ) -> Result<DatumRef, ScriptError> {
+        let (player, symbols) = (&mut *runtime.player, &mut *runtime.symbols);
         match handler_name.into_builtin() {
-            Some(BuiltInSymbol::Count) => Self::count(datum, args),
-            Some(BuiltInSymbol::GetAt) => Self::get_at(datum, args),
-            Some(BuiltInSymbol::SetAt) => Self::set_at(datum, args),
-            Some(BuiltInSymbol::Sort) => Self::sort(datum, args),
-            Some(BuiltInSymbol::GetOne) => Self::get_one(datum, args),
-            Some(BuiltInSymbol::Add) => Self::add(datum, args),
-            Some(BuiltInSymbol::Duplicate) => Self::duplicate(datum, args),
-            Some(BuiltInSymbol::AddAt) => Self::add_at(datum, args),
-            Some(BuiltInSymbol::GetLast) => Self::get_last(datum, args),
-            Some(BuiltInSymbol::Append | BuiltInSymbol::Push) => Self::append(datum, args),
-            Some(BuiltInSymbol::DeleteOne) => Self::delete_one(datum, args),
-            Some(BuiltInSymbol::DeleteAt) => Self::delete_at(datum, args),
-            Some(BuiltInSymbol::DeleteAll) => Self::delete_all(datum, args),
-            Some(BuiltInSymbol::FindPos) => Self::find_pos(datum, args),
-            Some(BuiltInSymbol::GetPos) => Self::get_one(datum, args),
-            Some(BuiltInSymbol::FindPosNear) => Self::find_pos_near(datum, args),
+            Some(BuiltInSymbol::Count) => Self::count(player, symbols, datum, args),
+            Some(BuiltInSymbol::GetAt) => Self::get_at(player, symbols, datum, args),
+            Some(BuiltInSymbol::SetAt) => Self::set_at(player, symbols, datum, args),
+            Some(BuiltInSymbol::Sort) => Self::sort(player, symbols, datum, args),
+            Some(BuiltInSymbol::GetOne) => Self::get_one(player, symbols, datum, args),
+            Some(BuiltInSymbol::Add) => Self::add(player, symbols, datum, args),
+            Some(BuiltInSymbol::Duplicate) => Self::duplicate(player, symbols, datum, args),
+            Some(BuiltInSymbol::AddAt) => Self::add_at(player, symbols, datum, args),
+            Some(BuiltInSymbol::GetLast) => Self::get_last(player, symbols, datum, args),
+            Some(BuiltInSymbol::Append | BuiltInSymbol::Push) => {
+                Self::append(player, symbols, datum, args)
+            }
+            Some(BuiltInSymbol::DeleteOne) => Self::delete_one(player, symbols, datum, args),
+            Some(BuiltInSymbol::DeleteAt) => Self::delete_at(player, symbols, datum, args),
+            Some(BuiltInSymbol::DeleteAll) => Self::delete_all(player, symbols, datum, args),
+            Some(BuiltInSymbol::FindPos) => Self::find_pos(player, symbols, datum, args),
+            Some(BuiltInSymbol::GetPos) => Self::get_one(player, symbols, datum, args),
+            Some(BuiltInSymbol::FindPosNear) => Self::find_pos_near(player, symbols, datum, args),
             //"getPos" => Self::find_pos(datum, args), TODO: Check which getPos is correct
-            Some(BuiltInSymbol::Join) => Self::join(datum, args),
-            Some(BuiltInSymbol::GetPropRef | BuiltInSymbol::GetProp) => Self::get_prop_ref(datum, args),
+            Some(BuiltInSymbol::Join) => Self::join(player, symbols, datum, args),
+            Some(BuiltInSymbol::GetPropRef | BuiltInSymbol::GetProp) => {
+                Self::get_prop_ref(player, symbols, datum, args)
+            }
             Some(BuiltInSymbol::ToString) => {
-                Ok(reserve_player_mut(|player| {
-                    let s = crate::player::datum_formatting::format_datum(datum, player);
-                    player.alloc_datum(Datum::String(s))
-                }))
-            },
+                let s = crate::player::datum_formatting::format_datum(datum, symbols, player)?;
+                Ok(player.alloc_datum(Datum::String(s)))
+            }
             Some(BuiltInSymbol::GetTypeOf) => {
                 // Flash objects have getTypeOf() for error checking.
                 // A list is never an error type, so return empty string.
-                Ok(reserve_player_mut(|player| {
-                    player.alloc_datum(Datum::String("".to_string()))
-                }))
-            },
-            Some(BuiltInSymbol::Max) => Self::max(datum, args),
-            Some(BuiltInSymbol::Min) => Self::min(datum, args),
+                Ok(player.alloc_datum(Datum::String("".to_string())))
+            }
+            Some(BuiltInSymbol::Max) => Self::max(player, symbols, datum, args),
+            Some(BuiltInSymbol::Min) => Self::min(player, symbols, datum, args),
             // Director matrix methods (chapter 15): when a list-of-lists is
             // used as a matrix (the layout `newMatrix` produces), `setVal`
             // and `getVal` access cells by 1-based (row, col) indices.
@@ -216,17 +297,33 @@ impl ListDatumHandlers {
             // 4th arg that's a leftover from copy-paste; e.g. the Batman
             // terrain script's `myMatrix.setVal(b+1, a+1, h, y)` — we drop the
             // `y` to match Director's tolerant behaviour).
-            Some(BuiltInSymbol::SetVal) => Self::set_val(datum, args),
-            Some(BuiltInSymbol::GetVal) => Self::get_val(datum, args),
-            _ => Err(ScriptError::new(format!(
-                "No handler {handler_name} for list datum"
-            ))),
+            Some(BuiltInSymbol::SetVal) => Self::set_val(player, symbols, datum, args),
+            Some(BuiltInSymbol::GetVal) => Self::get_val(player, symbols, datum, args),
+            _ => {
+                let handler_text = symbols
+                    .display(&handler_name)
+                    .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+                Err(ScriptError::new(format!(
+                    "No handler {handler_text} for list datum"
+                )))
+            }
         }
     }
 
     /// `matrix.setVal(row, col, value [, ignored…])` — 1-based, row-major.
-    pub fn set_val(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn set_val(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        Self::validate_direct_ref(player, symbols, datum)?;
+        if args.len() >= 3 {
+            Self::validate_direct_ref(player, symbols, &args[0])?;
+            Self::validate_direct_ref(player, symbols, &args[1])?;
+            Self::validate_direct_ref(player, symbols, &args[2])?;
+        }
+        {
             if args.len() < 3 {
                 return Err(ScriptError::new(
                     "setVal requires (row, col, value)".to_string(),
@@ -238,7 +335,8 @@ impl ListDatumHandlers {
             if row < 0 || col < 0 {
                 return Err(ScriptError::new(format!(
                     "setVal: row/col must be 1-based positive (got {}, {})",
-                    row + 1, col + 1
+                    row + 1,
+                    col + 1
                 )));
             }
             // Look up the row reference.
@@ -247,33 +345,44 @@ impl ListDatumHandlers {
                 if (row as usize) >= list_vec.len() {
                     return Err(ScriptError::new(format!(
                         "setVal: row {} out of range (matrix has {} rows)",
-                        row + 1, list_vec.len()
+                        row + 1,
+                        list_vec.len()
                     )));
                 }
                 list_vec[row as usize].clone()
             };
+            Self::validate_direct_ref(player, symbols, &row_ref)?;
             // Mutate the inner row.
             let (_, row_vec, _) = player.get_datum_mut(&row_ref).to_list_mut()?;
             if (col as usize) >= row_vec.len() {
                 return Err(ScriptError::new(format!(
                     "setVal: col {} out of range (row has {} cols)",
-                    col + 1, row_vec.len()
+                    col + 1,
+                    row_vec.len()
                 )));
             }
             row_vec[col as usize] = value_ref;
             player.note_actor_list_mutation(datum);
             player.note_script_instance_list_mutation(datum);
             Ok(DatumRef::Void)
-        })
+        }
     }
 
     /// `matrix.getVal(row, col)` — 1-based, row-major.
-    pub fn get_val(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn get_val(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        Self::validate_direct_ref(player, symbols, datum)?;
+        if args.len() >= 2 {
+            Self::validate_direct_ref(player, symbols, &args[0])?;
+            Self::validate_direct_ref(player, symbols, &args[1])?;
+        }
+        {
             if args.len() < 2 {
-                return Err(ScriptError::new(
-                    "getVal requires (row, col)".to_string(),
-                ));
+                return Err(ScriptError::new("getVal requires (row, col)".to_string()));
             }
             let row = player.get_datum(&args[0]).int_value()? - 1;
             let col = player.get_datum(&args[1]).int_value()? - 1;
@@ -281,58 +390,82 @@ impl ListDatumHandlers {
             if row < 0 || (row as usize) >= list_vec.len() {
                 return Err(ScriptError::new(format!(
                     "getVal: row {} out of range (matrix has {} rows)",
-                    row + 1, list_vec.len()
+                    row + 1,
+                    list_vec.len()
                 )));
             }
             let row_ref = list_vec[row as usize].clone();
+            Self::validate_direct_ref(player, symbols, &row_ref)?;
             let (_, row_vec, _) = player.get_datum(&row_ref).to_list_tuple()?;
             if col < 0 || (col as usize) >= row_vec.len() {
                 return Err(ScriptError::new(format!(
                     "getVal: col {} out of range (row has {} cols)",
-                    col + 1, row_vec.len()
+                    col + 1,
+                    row_vec.len()
                 )));
             }
             Ok(row_vec[col as usize].clone())
-        })
+        }
     }
 
-    pub fn max(datum: &DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn max(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        _: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        Self::validate_direct_ref(player, symbols, datum)?;
+        {
             let list_vec = player.get_datum(datum).to_list()?;
             if list_vec.is_empty() {
                 return Ok(DatumRef::Void);
             }
             let mut max_item = list_vec[0].clone();
+            Self::validate_direct_ref(player, symbols, &max_item)?;
             for item_ref in list_vec.iter().skip(1) {
+                Self::validate_direct_ref(player, symbols, item_ref)?;
                 let item = player.get_datum(item_ref);
                 let current_max = player.get_datum(&max_item);
-                if datum_less_than(current_max, item, &player.allocator)? {
+                if datum_less_than(current_max, item, &player.allocator, symbols)? {
                     max_item = item_ref.clone();
                 }
             }
             Ok(max_item)
-        })
+        }
     }
 
-    pub fn min(datum: &DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn min(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        _: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        Self::validate_direct_ref(player, symbols, datum)?;
+        {
             let list_vec = player.get_datum(datum).to_list()?;
             if list_vec.is_empty() {
                 return Ok(DatumRef::Void);
             }
             let mut min_item = list_vec[0].clone();
+            Self::validate_direct_ref(player, symbols, &min_item)?;
             for item_ref in list_vec.iter().skip(1) {
+                Self::validate_direct_ref(player, symbols, item_ref)?;
                 let item = player.get_datum(item_ref);
                 let current_min = player.get_datum(&min_item);
-                if datum_less_than(item, current_min, &player.allocator)? {
+                if datum_less_than(item, current_min, &player.allocator, symbols)? {
                     min_item = item_ref.clone();
                 }
             }
             Ok(min_item)
-        })
+        }
     }
 
-    pub fn get_prop_ref(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn get_prop_ref(
+        player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
         if args.is_empty() {
             return Err(ScriptError::new(
                 "getPropRef requires at least one argument".to_string(),
@@ -340,209 +473,248 @@ impl ListDatumHandlers {
         }
 
         let key = args[0].clone();
+        Self::validate_direct_ref(player, &*symbols, datum)?;
+        Self::validate_direct_ref(player, &*symbols, &key)?;
+        if args.len() >= 2 {
+            Self::validate_direct_ref(player, &*symbols, &args[1])?;
+        }
+        let items = player.get_datum(datum).to_list()?;
+        let index = player.get_datum(&key).int_value()?;
+        let actual_index = if index == 0 {
+            0
+        } else if index >= 1 {
+            (index - 1) as usize
+        } else {
+            return Err(ScriptError::new(format!("Index out of bounds: {}", index)));
+        };
+        if actual_index >= items.len() {
+            return Err(ScriptError::new(format!("Index out of bounds: {}", index)));
+        }
+        let result = items[actual_index].clone();
+        if args.len() >= 2 && player.get_datum(&args[0]).is_int() {
+            TypeUtils::get_sub_prop(&result, &args[1], player, symbols)
+        } else {
+            Ok(result)
+        }
+    }
 
-        let result = reserve_player_mut(|player| {
-            let items = player.get_datum(datum).to_list()?;
-            let index = player.get_datum(&key).int_value()?;
+    fn count(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        _: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        Self::validate_direct_ref(player, symbols, datum)?;
+        let len = player.get_datum(datum).to_list()?.len();
+        Ok(player.alloc_datum(Datum::Int(len as i32)))
+    }
 
-            // Support both 0-based and 1-based indexing
-            let actual_index = if index == 0 {
-                0
-            } else if index >= 1 {
-                (index - 1) as usize
-            } else {
-                return Err(ScriptError::new(format!("Index out of bounds: {}", index)));
-            };
+    fn get_last(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        _: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        Self::validate_direct_ref(player, symbols, datum)?;
+        Ok(player
+            .get_datum(datum)
+            .to_list()?
+            .back()
+            .cloned()
+            .unwrap_or(DatumRef::Void))
+    }
 
-            if actual_index >= items.len() {
-                return Err(ScriptError::new(format!("Index out of bounds: {}", index)));
+    fn find_equal_index(
+        player: &DirPlayer,
+        symbols: &SymbolTable,
+        list_vec: &VecDeque<DatumRef>,
+        find_ref: &DatumRef,
+        visited: &mut HashSet<usize>,
+    ) -> Result<Option<usize>, ScriptError> {
+        Self::validate_search_ref(player, symbols, find_ref, visited)?;
+        let find = player.get_datum(find_ref);
+        for (index, item_ref) in list_vec.iter().enumerate() {
+            Self::validate_search_ref(player, symbols, item_ref, visited)?;
+            if datum_equals(player.get_datum(item_ref), find, &player.allocator, symbols).unwrap() {
+                return Ok(Some(index));
             }
-
-            let result = items[actual_index].clone();
-            // If there are more keys AND the first arg was an int (nested indexing like list[a][b]),
-            // recursively resolve. Don't sub-index when args[0] was a symbol (#prop, index) pattern.
-            if args.len() >= 2 && player.get_datum(&args[0]).is_int() {
-                TypeUtils::get_sub_prop(&result, &args[1], player)
-            } else {
-                Ok(result)
-            }
-        });
-
-        result
+        }
+        Ok(None)
     }
 
-    fn count(datum: &DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let list_vec = player.get_datum(datum).to_list()?;
-            Ok(player.alloc_datum(Datum::Int(list_vec.len() as i32)))
-        })
+    pub fn get_one(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        Self::validate_direct_ref(player, symbols, datum)?;
+        let list_vec = player.get_datum(datum).to_list()?;
+        let index =
+            Self::find_equal_index(player, symbols, &list_vec, &args[0], &mut HashSet::new())?;
+        let result = index.map(|i| i as i32).unwrap_or(-1) + 1;
+        Ok(player.alloc_datum(Datum::Int(result)))
     }
 
-    fn get_last(datum: &DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let list_vec = player.get_datum(datum).to_list()?;
-            let last = list_vec.back().map(|x| x.clone()).unwrap_or(DatumRef::Void);
-            Ok(last)
-        })
+    pub fn find_pos(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        Self::get_one(player, symbols, datum, args)
     }
 
-    pub fn get_one(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let find = player.get_datum(&args[0]);
-            let list_vec = player.get_datum(datum).to_list()?;
-            let position = list_vec
-                .iter()
-                .position(|x| datum_equals(player.get_datum(&x), find, &player.allocator).unwrap())
-                .map(|x| x as i32);
-
-            Ok(player.alloc_datum(Datum::Int(position.unwrap_or(-1) + 1)))
-        })
+    pub fn find_pos_near(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        Self::validate_direct_ref(player, symbols, datum)?;
+        let (_, list_vec, is_sorted) = player.get_datum(datum).to_list_tuple()?;
+        let mut visited = HashSet::new();
+        if is_sorted {
+            Self::validate_direct_ref(player, symbols, &args[0])?;
+            let pos =
+                ListDatumUtils::find_index_to_add(&list_vec, &args[0], &player.allocator, symbols)?;
+            Ok(player.alloc_datum(Datum::Int(pos + 1)))
+        } else {
+            let index = Self::find_equal_index(player, symbols, &list_vec, &args[0], &mut visited)?;
+            Ok(player.alloc_datum(Datum::Int(index.map(|i| i as i32 + 1).unwrap_or(0))))
+        }
     }
 
-    pub fn find_pos(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        // TODO: why is this exactly the same as get_one?
-        reserve_player_mut(|player| {
-            let find = player.get_datum(&args[0]);
-            let list_vec = player.get_datum(datum).to_list()?;
-            let position = list_vec
-                .iter()
-                .position(|x| datum_equals(player.get_datum(&x), find, &player.allocator).unwrap())
-                .map(|x| x as i32);
-            let result = position.unwrap_or(-1) + 1;
-
-            Ok(player.alloc_datum(Datum::Int(result)))
-        })
-    }
-
-    pub fn find_pos_near(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let (_, list_vec, is_sorted) = player.get_datum(datum).to_list_tuple()?;
-            if is_sorted {
-                let pos = ListDatumUtils::find_index_to_add(&list_vec, &args[0], &player.allocator)?;
-                Ok(player.alloc_datum(Datum::Int(pos + 1)))
-            } else {
-                let find = player.get_datum(&args[0]);
-                let position = list_vec
-                    .iter()
-                    .position(|x| datum_equals(player.get_datum(&x), find, &player.allocator).unwrap())
-                    .map(|x| x as i32);
-                let result = position.unwrap_or(-1) + 1;
-                Ok(player.alloc_datum(Datum::Int(result)))
-            }
-        })
-    }
-
-    pub fn add(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let datum_value = player.get_datum(datum);
-            if datum_value.is_void() {
-                return Ok(DatumRef::Void);
-            }
-            if args.is_empty() {
-                // add() with no args — used by meshDeform.mesh[m].textureLayer.add()
-                // Find the meshDeform context for this list to create proper meshDeformTexLayer refs
-                let tex_layer_context: Option<(i32, i32, Symbol, usize)> = {
-                    let mut found = None;
-                    for cast in &player.movie.cast_manager.casts {
-                        for (member_num, member) in &cast.members {
-                            if let Some(w3d) = member.member_type.as_shockwave3d() {
-                                for (model_name, md) in &w3d.runtime_state.mesh_deform {
-                                    for (mesh_idx, mesh) in md.meshes.iter().enumerate() {
-                                        if let Some(ref list_ref) = mesh.texture_layer_datum_ref {
-                                            if *list_ref == *datum {
-                                                found = Some((cast.number as i32, *member_num as i32, model_name.clone(), mesh_idx));
-                                            }
-                                        }
+    pub fn add(
+        player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        Self::validate_direct_ref(player, &*symbols, datum)?;
+        if player.get_datum(datum).is_void() {
+            return Ok(DatumRef::Void);
+        }
+        if args.is_empty() {
+            let tex_layer_context: Option<(i32, i32, Symbol, usize)> = {
+                let mut found = None;
+                for cast in &player.movie.cast_manager.casts {
+                    for (member_num, member) in &cast.members {
+                        if let Some(w3d) = member.member_type.as_shockwave3d() {
+                            for (model_name, md) in &w3d.runtime_state.mesh_deform {
+                                for (mesh_idx, mesh) in md.meshes.iter().enumerate() {
+                                    if mesh.texture_layer_datum_ref.as_ref() == Some(datum) {
+                                        found = Some((
+                                            cast.number as i32,
+                                            *member_num as i32,
+                                            model_name.clone(),
+                                            mesh_idx,
+                                        ));
                                     }
                                 }
                             }
                         }
-                        if found.is_some() { break; }
                     }
-                    found
-                };
-
-                // Debug: log context search result
-                debug!(
-                    "[W3D-ADD] add() no-args on list datum_id={} context={:?}",
-                    datum.unwrap(), tex_layer_context
-                );
-
+                    if found.is_some() {
+                        break;
+                    }
+                }
+                found
+            };
+            debug!(
+                "[W3D-ADD] add() no-args on list datum_id={} context={:?}",
+                datum.unwrap(),
+                tex_layer_context
+            );
+            let new_ref =
                 if let Some((cast_lib, cast_member, model_name, mesh_idx)) = tex_layer_context {
-                    // Get current layer count to determine the new layer index
-                    let new_layer_idx = {
-                        let d = player.get_datum(datum);
-                        if let Datum::List(_, items, _) = d { items.len() } else { 0 }
-                    };
-                    // Create a meshDeformTexLayer ref so set_prop dispatches correctly
                     use crate::director::lingo::datum::Shockwave3dObjectRef;
-                    let tex_layer_ref = player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
+                    let new_layer_idx = player.get_datum(datum).to_list()?.len();
+                    let model_name = symbols
+                        .display(&model_name)
+                        .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
+                        .to_owned();
+                    let name =
+                        symbols.intern(&format!("{}:{}:{}", model_name, mesh_idx, new_layer_idx));
+                    player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
                         cast_lib,
                         cast_member,
                         object_type: BuiltInSymbol::MeshDeformTexLayer,
-                        name: Symbol::from_str(&format!("{}:{}:{}", model_name, mesh_idx, new_layer_idx)),
-                    }));
-                    let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;
-                    list_vec.push_back(tex_layer_ref);
+                        name,
+                    }))
                 } else {
-                    // Fallback: generic PropList (non-textureLayer list)
-                    let key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::TextureCoordinateList)));
+                    let key = player.alloc_datum(Datum::Symbol(Symbol::builtin(
+                        BuiltInSymbol::TextureCoordinateList,
+                    )));
                     let val = player.alloc_datum(Datum::List(
-                        crate::director::lingo::datum::DatumType::List, VecDeque::new(), false,
+                        crate::director::lingo::datum::DatumType::List,
+                        VecDeque::new(),
+                        false,
                     ));
-                    let prop_list = player.alloc_datum(Datum::PropList(VecDeque::from(vec![(key, val)]), false));
-                    let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;
-                    list_vec.push_back(prop_list);
-                }
-                player.note_actor_list_mutation(datum);
-                player.note_script_instance_list_mutation(datum);
-                return Ok(DatumRef::Void);
-            }
-
-            let item = &args[0];
-            let (_, list_vec, is_sorted) = player.get_datum(datum).to_list_tuple()?;
-            let index_to_add = if is_sorted {
-                ListDatumUtils::find_index_to_add(&list_vec, &item, &player.allocator)?
-            } else {
-                list_vec.len() as i32
-            };
-
-            let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;
-            if is_sorted {
-                list_vec.insert(index_to_add as usize, item.clone());
-            } else {
-                list_vec.push_back(item.clone());
-            }
+                    player.alloc_datum(Datum::PropList(VecDeque::from(vec![(key, val)]), false))
+                };
+            player
+                .get_datum_mut(datum)
+                .to_list_mut()?
+                .1
+                .push_back(new_ref);
             player.note_actor_list_mutation(datum);
             player.note_script_instance_list_mutation(datum);
-            Ok(DatumRef::Void)
-        })
+            return Ok(DatumRef::Void);
+        }
+        Self::validate_direct_ref(player, &*symbols, &args[0])?;
+        let (_, list_vec, is_sorted) = player.get_datum(datum).to_list_tuple()?;
+        let index = if is_sorted {
+            ListDatumUtils::find_index_to_add(list_vec, &args[0], &player.allocator, symbols)?
+        } else {
+            list_vec.len() as i32
+        };
+        let values = player.get_datum_mut(datum).to_list_mut()?.1;
+        if is_sorted {
+            values.insert(index as usize, args[0].clone());
+        } else {
+            values.push_back(args[0].clone());
+        }
+        player.note_actor_list_mutation(datum);
+        player.note_script_instance_list_mutation(datum);
+        Ok(DatumRef::Void)
     }
 
-    pub fn delete_one(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        let index = reserve_player_ref(|player| {
+    pub fn delete_one(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        Self::validate_direct_ref(player, symbols, datum)?;
+        Self::validate_direct_ref(player, symbols, &args[0])?;
+        let mut visited = HashSet::new();
+        Self::validate_search_ref(player, symbols, &args[0], &mut visited)?;
+        let index = {
             let search_ref = &args[0];
             let item = player.get_datum(search_ref);
             let list_vec = player.get_datum(datum).to_list()?;
-            let index = list_vec.iter().enumerate().find_map(|(i, list_item_ref)| {
+            let mut index = None;
+            for (i, list_item_ref) in list_vec.iter().enumerate() {
+                Self::validate_search_ref(player, symbols, list_item_ref, &mut visited)?;
                 // For script instances and other reference types, check reference equality first
                 // Direct reference comparison (important for deleteOne(me) in scripts)
                 if list_item_ref == search_ref {
-                    return Some(i);
+                    index = Some(i);
+                    break;
                 }
 
                 // Fallback to value equality for other types
                 let list_item = player.get_datum(list_item_ref);
-                if datum_equals(list_item, item, &player.allocator).unwrap_or(false) {
-                    Some(i)
-                } else {
-                    None
+                if datum_equals(list_item, item, &player.allocator, symbols).unwrap_or(false) {
+                    index = Some(i);
+                    break;
                 }
-            });
-            Ok(index)
-        })?;
+            }
+            index
+        };
 
-        reserve_player_mut(|player| {
+        {
             let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;
             if let Some(index) = index {
                 if index == 0 {
@@ -556,11 +728,18 @@ impl ListDatumHandlers {
                 player.note_script_instance_list_mutation(datum);
             }
             Ok(player.alloc_datum(datum_bool(index.is_some())))
-        })
+        }
     }
 
-    pub fn delete_at(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn delete_at(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        Self::validate_direct_ref(player, symbols, datum)?;
+        Self::validate_direct_ref(player, symbols, &args[0])?;
+        {
             let position = player.get_datum(&args[0]).int_value()?;
             let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;
             if position <= list_vec.len() as i32 {
@@ -580,21 +759,33 @@ impl ListDatumHandlers {
             } else {
                 Err(ScriptError::new("Index out of bounds".to_string()))
             }
-        })
+        }
     }
 
-    pub fn delete_all(datum: &DatumRef, _args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn delete_all(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        _args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        Self::validate_direct_ref(player, symbols, datum)?;
+        {
             let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;
             list_vec.clear();
             player.note_actor_list_mutation(datum);
             player.note_script_instance_list_mutation(datum);
             Ok(DatumRef::Void)
-        })
+        }
     }
 
-    pub fn add_at(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn add_at(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        Self::validate_direct_ref(player, symbols, datum)?;
+        {
             let datum_value = player.get_datum(datum);
             // Return void gracefully if datum is void or not a list
             // Director typically silently fails rather than erroring on wrong types
@@ -614,9 +805,12 @@ impl ListDatumHandlers {
             // in Director's message window. Habbo's spineworld_dcr Docs script
             // `getXMLItem` relies on this: `tList.addAt(tAdd)` in a repeat loop.
             let (position, item_ref) = if args.len() == 1 {
+                Self::validate_direct_ref(player, symbols, &args[0])?;
                 let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;
                 (list_vec.len(), args[0].clone())
             } else {
+                Self::validate_direct_ref(player, symbols, &args[0])?;
+                Self::validate_direct_ref(player, symbols, &args[1])?;
                 let pos = player.get_datum(&args[0]).int_value()? - 1;
                 (pos.max(0) as usize, args[1].clone())
             };
@@ -627,46 +821,63 @@ impl ListDatumHandlers {
             player.note_actor_list_mutation(datum);
             player.note_script_instance_list_mutation(datum);
             Ok(DatumRef::Void)
-        })
+        }
     }
 
-    pub fn append(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn append(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        Self::validate_direct_ref(player, symbols, datum)?;
+        {
             let datum_value = player.get_datum(datum);
             if datum_value.is_void() {
                 return Ok(DatumRef::Void);
             }
-            
+
             let item = &args[0];
+            Self::validate_direct_ref(player, symbols, item)?;
             let (_, list_vec, _) = player.get_datum_mut(datum).to_list_mut()?;
             list_vec.push_back(item.clone());
             player.note_actor_list_mutation(datum);
             player.note_script_instance_list_mutation(datum);
             Ok(DatumRef::Void)
-        })
+        }
     }
 
-    pub fn sort(datum: &DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        let sorted_list = reserve_player_ref(|player| {
+    pub fn sort(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        _: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        Self::validate_direct_ref(player, symbols, datum)?;
+        let mut visited = HashSet::new();
+        let sorted_list = {
             let list_vec = player.get_datum(datum).to_list()?;
+            for item_ref in list_vec {
+                Self::validate_search_ref(player, symbols, item_ref, &mut visited)?;
+            }
             let mut sorted_list = list_vec.clone();
             sorted_list.make_contiguous().sort_by(|a, b| {
                 let left = player.get_datum(a);
                 let right = player.get_datum(b);
 
-                if datum_equals(left, right, &player.allocator).unwrap() {
+                if datum_equals(left, right, &player.allocator, symbols).unwrap() {
                     return std::cmp::Ordering::Equal;
-                } else if datum_less_than(left, right, &player.allocator).unwrap() {
+                } else if datum_less_than(left, right, &player.allocator, symbols).unwrap() {
                     std::cmp::Ordering::Less
                 } else {
                     std::cmp::Ordering::Greater
                 }
             });
 
-            Ok(sorted_list)
-        })?;
+            sorted_list
+        };
 
-        reserve_player_mut(|player| {
+        {
             let (_, list_vec, is_sorted) = player.get_datum_mut(datum).to_list_mut()?;
             list_vec.clear();
             list_vec.extend(sorted_list);
@@ -675,16 +886,31 @@ impl ListDatumHandlers {
             player.note_script_instance_list_mutation(datum);
 
             Ok(DatumRef::Void)
-        })
+        }
     }
 
-    pub fn duplicate(datum: &DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        Ok(player_duplicate_datum(datum))
+    pub fn duplicate(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        _: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        Self::validate_direct_ref(player, symbols, datum)?;
+        player_duplicate_datum(player, symbols, datum)
     }
 
-    pub fn join(datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-        reserve_player_mut(|player| {
-            let (_, list_vec, _) = player.get_datum(datum).to_list_tuple()?;
+    pub fn join(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        Self::validate_direct_ref(player, symbols, datum)?;
+        if let Some(delimiter) = args.first() {
+            Self::validate_direct_ref(player, symbols, delimiter)?;
+        }
+        {
+            let list_len = player.get_datum(datum).to_list()?.len();
 
             // Optional delimiter argument
             // TODO: verify default delimiter
@@ -698,21 +924,808 @@ impl ListDatumHandlers {
             };
 
             // Convert each element to string safely without extra quotes
-            let pieces: Vec<String> = list_vec
-                .iter()
-                .map(|item_ref| {
-                    let datum = player.get_datum(item_ref);
-                    match datum {
-                        Datum::String(s) => s.clone(),
-                        Datum::Symbol(sym) => sym.to_string(),
-                        Datum::Int(n) => n.to_string(),
-                        _ => format!("{:?}", format_concrete_datum(&datum, player)),
-                    }
-                })
-                .collect();
+            let mut pieces = Vec::with_capacity(list_len);
+            for index in 0..list_len {
+                let item_ref = player
+                    .get_datum(datum)
+                    .to_list()?
+                    .get(index)
+                    .cloned()
+                    .unwrap();
+                Self::validate_direct_ref(player, symbols, &item_ref)?;
+                let datum = player.get_datum(&item_ref).clone();
+                let piece = match &datum {
+                    Datum::String(s) => s.clone(),
+                    Datum::Symbol(sym) => symbols
+                        .display(sym)
+                        .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
+                        .to_owned(),
+                    Datum::Int(n) => n.to_string(),
+                    _ => format!("{:?}", format_concrete_datum(&datum, symbols, player)?),
+                };
+                pieces.push(piece);
+            }
 
             let joined = pieces.join(&delimiter);
             Ok(player.alloc_datum(Datum::String(joined)))
-        })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::player::session::RuntimeSession;
+    use crate::player::symbols::symbol_table::SymbolOwner;
+    use async_std::channel;
+
+    fn session_with_two_players() -> RuntimeSession {
+        let mut session = RuntimeSession::new(SymbolOwner {
+            session: 700,
+            generation: 1,
+        });
+        assert!(session.add_player(1, channel::unbounded().0));
+        assert!(session.add_player(2, channel::unbounded().0));
+        session
+    }
+
+    #[test]
+    fn search_stops_before_later_foreign_candidate() {
+        let mut session = session_with_two_players();
+        let foreign_symbol = {
+            let mut foreign_symbols = SymbolTable::with_owner(SymbolOwner {
+                session: 701,
+                generation: 1,
+            });
+            foreign_symbols.intern("foreignCandidate")
+        };
+        let (list_ref, first) = session
+            .with_player(1, |context| {
+                let first = context.player.alloc_datum(Datum::Int(7));
+                let foreign = context
+                    .player
+                    .alloc_datum(Datum::Symbol(foreign_symbol.clone()));
+                let list = context.player.alloc_datum(Datum::List(
+                    crate::director::lingo::datum::DatumType::List,
+                    VecDeque::from([first.clone(), foreign]),
+                    false,
+                ));
+                (list, first)
+            })
+            .unwrap();
+
+        let found = session
+            .with_player(1, |mut context| {
+                let probe = context.player.alloc_datum(Datum::Int(7));
+                ListDatumHandlers::call(
+                    &mut context,
+                    &list_ref,
+                    Symbol::builtin(BuiltInSymbol::GetOne),
+                    &vec![probe],
+                )
+            })
+            .unwrap()
+            .unwrap();
+        assert!(session
+            .with_player(1, |context| matches!(
+                context.player.get_datum(&found),
+                Datum::Int(1)
+            ))
+            .unwrap());
+
+        let rejected = session
+            .with_player(1, |mut context| {
+                let probe = context.player.alloc_datum(Datum::Int(8));
+                ListDatumHandlers::call(
+                    &mut context,
+                    &list_ref,
+                    Symbol::builtin(BuiltInSymbol::GetOne),
+                    &vec![probe],
+                )
+            })
+            .unwrap();
+        assert!(rejected.is_err());
+        assert!(session
+            .with_player(1, |context| matches!(
+                context.player.get_datum(&first),
+                Datum::Int(7)
+            ))
+            .unwrap());
+    }
+
+    #[test]
+    fn rejected_foreign_mutation_preserves_cache_generation() {
+        let mut session = session_with_two_players();
+        let foreign = session
+            .with_player(2, |context| context.player.alloc_datum(Datum::Int(9)))
+            .unwrap();
+        let (list_ref, owned) = session
+            .with_player(1, |context| {
+                let owned = context.player.alloc_datum(Datum::Int(3));
+                let list = context.player.alloc_datum(Datum::List(
+                    crate::director::lingo::datum::DatumType::List,
+                    VecDeque::from([owned.clone()]),
+                    false,
+                ));
+                context
+                    .player
+                    .cache_script_instance_list(4, list.clone(), Vec::new());
+                (list, owned)
+            })
+            .unwrap();
+
+        let before = session
+            .with_player(1, |context| {
+                (
+                    context
+                        .player
+                        .script_instance_list_generation
+                        .get(&4)
+                        .copied()
+                        .unwrap(),
+                    context.player.get_datum(&list_ref).to_list().unwrap().len(),
+                )
+            })
+            .unwrap();
+        let rejected = session
+            .with_player(1, |mut context| {
+                ListDatumHandlers::call(
+                    &mut context,
+                    &list_ref,
+                    Symbol::builtin(BuiltInSymbol::Append),
+                    &vec![foreign.clone()],
+                )
+            })
+            .unwrap();
+        assert!(rejected.is_err());
+        let after_reject = session
+            .with_player(1, |context| {
+                (
+                    context
+                        .player
+                        .script_instance_list_generation
+                        .get(&4)
+                        .copied()
+                        .unwrap(),
+                    context.player.get_datum(&list_ref).to_list().unwrap().len(),
+                )
+            })
+            .unwrap();
+        assert_eq!(before, after_reject);
+
+        session
+            .with_player(1, |mut context| {
+                ListDatumHandlers::call(
+                    &mut context,
+                    &list_ref,
+                    Symbol::builtin(BuiltInSymbol::Append),
+                    &vec![owned.clone()],
+                )
+                .unwrap();
+            })
+            .unwrap();
+        assert_eq!(
+            session
+                .with_player(1, |context| context.player.script_instance_list_generation
+                    [&4])
+                .unwrap(),
+            before.0 + 1
+        );
+    }
+
+    #[test]
+    fn set_at_nonpositive_validates_receiver_but_not_unused_value() {
+        let mut session = session_with_two_players();
+        let foreign = session
+            .with_player(2, |context| context.player.alloc_datum(Datum::Int(11)))
+            .unwrap();
+        let list_ref = session
+            .with_player(1, |context| {
+                context.player.alloc_datum(Datum::List(
+                    crate::director::lingo::datum::DatumType::List,
+                    VecDeque::new(),
+                    false,
+                ))
+            })
+            .unwrap();
+        let position = session
+            .with_player(1, |context| context.player.alloc_datum(Datum::Int(0)))
+            .unwrap();
+        let result = session
+            .with_player(1, |mut context| {
+                ListDatumHandlers::call(
+                    &mut context,
+                    &list_ref,
+                    Symbol::builtin(BuiltInSymbol::SetAt),
+                    &vec![position.clone(), foreign.clone()],
+                )
+            })
+            .unwrap();
+        assert!(result.is_ok());
+        assert_eq!(
+            session
+                .with_player(1, |context| context
+                    .player
+                    .get_datum(&list_ref)
+                    .to_list()
+                    .unwrap()
+                    .len())
+                .unwrap(),
+            0
+        );
+
+        let non_list = session
+            .with_player(1, |context| context.player.alloc_datum(Datum::Int(1)))
+            .unwrap();
+        let result = session
+            .with_player(1, |mut context| {
+                ListDatumHandlers::call(
+                    &mut context,
+                    &non_list,
+                    Symbol::builtin(BuiltInSymbol::SetAt),
+                    &vec![position, foreign],
+                )
+            })
+            .unwrap();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn add_without_args_uses_generic_texture_coordinate_fallback() {
+        let mut session = session_with_two_players();
+        let list_ref = session
+            .with_player(1, |context| {
+                context.player.alloc_datum(Datum::List(
+                    crate::director::lingo::datum::DatumType::List,
+                    VecDeque::new(),
+                    false,
+                ))
+            })
+            .unwrap();
+        session
+            .with_player(1, |mut context| {
+                ListDatumHandlers::call(
+                    &mut context,
+                    &list_ref,
+                    Symbol::builtin(BuiltInSymbol::Add),
+                    &vec![],
+                )
+                .unwrap();
+            })
+            .unwrap();
+        session
+            .with_player(1, |context| {
+                let child = context.player.get_datum(&list_ref).to_list().unwrap().back().unwrap().clone();
+                let (pairs, _) = context.player.get_datum(&child).to_map_tuple().unwrap();
+                assert_eq!(pairs.len(), 1);
+                assert!(matches!(context.player.get_datum(&pairs[0].0), Datum::Symbol(symbol) if *symbol == Symbol::builtin(BuiltInSymbol::TextureCoordinateList)));
+                assert!(matches!(context.player.get_datum(&pairs[0].1), Datum::List(..)));
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn join_uses_displayed_symbols_and_debug_quotes_fallback() {
+        let mut session = session_with_two_players();
+        let list_ref = session
+            .with_player(1, |context| {
+                let symbol = context.symbols.intern("MiXeD");
+                let symbol_ref = context.player.alloc_datum(Datum::Symbol(symbol));
+                let number_ref = context.player.alloc_datum(Datum::Int(2));
+                let nested_item = context.player.alloc_datum(Datum::Int(3));
+                let nested = context.player.alloc_datum(Datum::List(
+                    crate::director::lingo::datum::DatumType::List,
+                    VecDeque::from([nested_item]),
+                    false,
+                ));
+                context.player.alloc_datum(Datum::List(
+                    crate::director::lingo::datum::DatumType::List,
+                    VecDeque::from([symbol_ref, number_ref, nested]),
+                    false,
+                ))
+            })
+            .unwrap();
+        let delimiter = session
+            .with_player(1, |context| {
+                context.player.alloc_datum(Datum::String(",".into()))
+            })
+            .unwrap();
+        let joined = session
+            .with_player(1, |mut context| {
+                ListDatumHandlers::call(
+                    &mut context,
+                    &list_ref,
+                    Symbol::builtin(BuiltInSymbol::Join),
+                    &vec![delimiter],
+                )
+            })
+            .unwrap()
+            .unwrap();
+        assert!(session
+            .with_player(1, |context| matches!(context.player.get_datum(&joined), Datum::String(value) if value == "MiXeD,2,\"[3]\""))
+            .unwrap());
+    }
+
+    #[test]
+    fn duplicate_dispatch_returns_an_independent_list_reference() {
+        let mut session = session_with_two_players();
+        let list_ref = session
+            .with_player(1, |context| {
+                let value = context.player.alloc_datum(Datum::Int(4));
+                context.player.alloc_datum(Datum::List(
+                    crate::director::lingo::datum::DatumType::List,
+                    VecDeque::from([value]),
+                    false,
+                ))
+            })
+            .unwrap();
+        let duplicate = session
+            .with_player(1, |mut context| {
+                ListDatumHandlers::call(
+                    &mut context,
+                    &list_ref,
+                    Symbol::builtin(BuiltInSymbol::Duplicate),
+                    &vec![],
+                )
+            })
+            .unwrap()
+            .unwrap();
+        assert_ne!(duplicate.unwrap(), list_ref.unwrap());
+        assert!(session
+            .with_player(1, |context| matches!(context.player.get_datum(&duplicate), Datum::List(_, values, _) if values.len() == 1))
+            .unwrap());
+    }
+
+    #[test]
+    fn ordinary_and_xml_lists_keep_their_indexing_conventions() {
+        let mut session = session_with_two_players();
+        let (ordinary, xml) = session
+            .with_player(1, |context| {
+                let first = context.player.alloc_datum(Datum::Int(10));
+                let second = context.player.alloc_datum(Datum::Int(20));
+                let ordinary = context.player.alloc_datum(Datum::List(
+                    crate::director::lingo::datum::DatumType::List,
+                    VecDeque::from([first.clone(), second.clone()]),
+                    false,
+                ));
+                let xml = context.player.alloc_datum(Datum::List(
+                    crate::director::lingo::datum::DatumType::XmlChildNodes,
+                    VecDeque::from([first, second]),
+                    false,
+                ));
+                (ordinary, xml)
+            })
+            .unwrap();
+        let ordinary_position = session
+            .with_player(1, |context| context.player.alloc_datum(Datum::Int(1)))
+            .unwrap();
+        let xml_position = session
+            .with_player(1, |context| context.player.alloc_datum(Datum::Int(0)))
+            .unwrap();
+        let ordinary_first = session
+            .with_player(1, |mut context| {
+                ListDatumHandlers::call(
+                    &mut context,
+                    &ordinary,
+                    Symbol::builtin(BuiltInSymbol::GetAt),
+                    &vec![ordinary_position],
+                )
+            })
+            .unwrap()
+            .unwrap();
+        let xml_first = session
+            .with_player(1, |mut context| {
+                ListDatumHandlers::call(
+                    &mut context,
+                    &xml,
+                    Symbol::builtin(BuiltInSymbol::GetAt),
+                    &vec![xml_position],
+                )
+            })
+            .unwrap()
+            .unwrap();
+        assert!(session
+            .with_player(1, |context| matches!(
+                context.player.get_datum(&ordinary_first),
+                Datum::Int(10)
+            ))
+            .unwrap());
+        assert!(session
+            .with_player(1, |context| matches!(
+                context.player.get_datum(&xml_first),
+                Datum::Int(10)
+            ))
+            .unwrap());
+    }
+
+    #[test]
+    fn unknown_foreign_list_property_is_rejected_before_void_fallback() {
+        let mut session = session_with_two_players();
+        let mut foreign_symbols = SymbolTable::with_owner(SymbolOwner {
+            session: 702,
+            generation: 1,
+        });
+        let foreign_name = foreign_symbols.intern("unknownLocalName");
+        let list_ref = session
+            .with_player(1, |context| {
+                context.player.alloc_datum(Datum::List(
+                    crate::director::lingo::datum::DatumType::List,
+                    VecDeque::new(),
+                    false,
+                ))
+            })
+            .unwrap();
+        let result = session
+            .with_player(1, |context| {
+                let list_vec = context.player.get_datum(&list_ref).to_list().unwrap();
+                ListDatumUtils::get_prop(
+                    list_vec,
+                    foreign_name,
+                    &context.player.allocator,
+                    context.symbols,
+                )
+            })
+            .unwrap();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sorted_add_and_stable_sort_preserve_order_and_void_comparisons() {
+        let mut session = session_with_two_players();
+        let (sorted, first_equal, second_equal) = session
+            .with_player(1, |context| {
+                let one = context.player.alloc_datum(Datum::Int(1));
+                let three = context.player.alloc_datum(Datum::Int(3));
+                let sorted = context.player.alloc_datum(Datum::List(
+                    crate::director::lingo::datum::DatumType::List,
+                    VecDeque::from([one, three]),
+                    true,
+                ));
+                let first_equal = context.player.alloc_datum(Datum::String("same".into()));
+                let second_equal = context.player.alloc_datum(Datum::String("SAME".into()));
+                (sorted, first_equal, second_equal)
+            })
+            .unwrap();
+        let two = session
+            .with_player(1, |context| context.player.alloc_datum(Datum::Int(2)))
+            .unwrap();
+        session
+            .with_player(1, |mut context| {
+                ListDatumHandlers::call(
+                    &mut context,
+                    &sorted,
+                    Symbol::builtin(BuiltInSymbol::Add),
+                    &vec![two],
+                )
+                .unwrap()
+            })
+            .unwrap();
+        let values = session
+            .with_player(1, |context| {
+                context
+                    .player
+                    .get_datum(&sorted)
+                    .to_list()
+                    .unwrap()
+                    .iter()
+                    .map(|r| context.player.get_datum(r).int_value().unwrap())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap();
+        assert_eq!(values, vec![1, 2, 3]);
+
+        let stable = session
+            .with_player(1, |context| {
+                context.player.alloc_datum(Datum::List(
+                    crate::director::lingo::datum::DatumType::List,
+                    VecDeque::from([first_equal.clone(), second_equal.clone()]),
+                    false,
+                ))
+            })
+            .unwrap();
+        session
+            .with_player(1, |mut context| {
+                ListDatumHandlers::call(
+                    &mut context,
+                    &stable,
+                    Symbol::builtin(BuiltInSymbol::Sort),
+                    &vec![],
+                )
+                .unwrap()
+            })
+            .unwrap();
+        let stable_values = session
+            .with_player(1, |context| {
+                context
+                    .player
+                    .get_datum(&stable)
+                    .to_list()
+                    .unwrap()
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap();
+        assert_eq!(stable_values[0].unwrap(), first_equal.unwrap());
+        assert_eq!(stable_values[1].unwrap(), second_equal.unwrap());
+
+        let void_probe = session
+            .with_player(1, |context| context.player.alloc_datum(Datum::Void))
+            .unwrap();
+        let near = session
+            .with_player(1, |mut context| {
+                ListDatumHandlers::call(
+                    &mut context,
+                    &sorted,
+                    Symbol::builtin(BuiltInSymbol::FindPosNear),
+                    &vec![void_probe.clone()],
+                )
+                .unwrap()
+            })
+            .unwrap();
+        assert!(session
+            .with_player(1, |context| matches!(
+                context.player.get_datum(&near),
+                Datum::Int(1)
+            ))
+            .unwrap());
+        session
+            .with_player(1, |mut context| {
+                ListDatumHandlers::call(
+                    &mut context,
+                    &sorted,
+                    Symbol::builtin(BuiltInSymbol::Add),
+                    &vec![void_probe],
+                )
+                .unwrap()
+            })
+            .unwrap();
+        assert!(session
+            .with_player(1, |context| matches!(
+                context
+                    .player
+                    .get_datum(&sorted)
+                    .to_list()
+                    .unwrap()
+                    .front()
+                    .map(|r| context.player.get_datum(r)),
+                Some(Datum::Void)
+            ))
+            .unwrap());
+    }
+
+    #[test]
+    fn foreign_sort_and_matrix_row_rejections_preserve_state() {
+        let mut session = session_with_two_players();
+        let foreign_row = session
+            .with_player(2, |context| {
+                let value = context.player.alloc_datum(Datum::Int(8));
+                context.player.alloc_datum(Datum::List(
+                    crate::director::lingo::datum::DatumType::List,
+                    VecDeque::from([value]),
+                    false,
+                ))
+            })
+            .unwrap();
+        let foreign_symbol = {
+            let mut symbols = SymbolTable::with_owner(SymbolOwner {
+                session: 703,
+                generation: 1,
+            });
+            symbols.intern("foreignSort")
+        };
+        let (matrix, sortable) = session
+            .with_player(1, |context| {
+                let row_value = context.player.alloc_datum(Datum::Int(1));
+                let row = context.player.alloc_datum(Datum::List(
+                    crate::director::lingo::datum::DatumType::List,
+                    VecDeque::from([row_value]),
+                    false,
+                ));
+                let matrix = context.player.alloc_datum(Datum::List(
+                    crate::director::lingo::datum::DatumType::List,
+                    VecDeque::from([foreign_row.clone(), row]),
+                    false,
+                ));
+                let sortable_value = context.player.alloc_datum(Datum::Int(2));
+                let foreign_sort_value = context
+                    .player
+                    .alloc_datum(Datum::Symbol(foreign_symbol.clone()));
+                let sortable = context.player.alloc_datum(Datum::List(
+                    crate::director::lingo::datum::DatumType::List,
+                    VecDeque::from([sortable_value, foreign_sort_value]),
+                    false,
+                ));
+                context
+                    .player
+                    .cache_script_instance_list(5, sortable.clone(), Vec::new());
+                (matrix, sortable)
+            })
+            .unwrap();
+        let row_index = session
+            .with_player(1, |context| context.player.alloc_datum(Datum::Int(1)))
+            .unwrap();
+        let col_index = session
+            .with_player(1, |context| context.player.alloc_datum(Datum::Int(1)))
+            .unwrap();
+        let value = session
+            .with_player(1, |context| context.player.alloc_datum(Datum::Int(9)))
+            .unwrap();
+        let before = session
+            .with_player(1, |context| {
+                (
+                    context.player.script_instance_list_generation[&5],
+                    context
+                        .player
+                        .get_datum(&sortable)
+                        .to_list_tuple()
+                        .unwrap()
+                        .2,
+                    context.player.get_datum(&matrix).to_list().unwrap().len(),
+                    context
+                        .player
+                        .get_datum(&sortable)
+                        .to_list()
+                        .unwrap()
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .unwrap();
+        assert!(session
+            .with_player(1, |mut context| ListDatumHandlers::call(
+                &mut context,
+                &matrix,
+                Symbol::builtin(BuiltInSymbol::GetVal),
+                &vec![row_index.clone(), col_index.clone()],
+            ))
+            .unwrap()
+            .is_err());
+        assert!(session
+            .with_player(1, |mut context| ListDatumHandlers::call(
+                &mut context,
+                &matrix,
+                Symbol::builtin(BuiltInSymbol::SetVal),
+                &vec![row_index, col_index, value],
+            ))
+            .unwrap()
+            .is_err());
+        assert!(session
+            .with_player(1, |mut context| ListDatumHandlers::call(
+                &mut context,
+                &sortable,
+                Symbol::builtin(BuiltInSymbol::Sort),
+                &vec![],
+            ))
+            .unwrap()
+            .is_err());
+        let after = session
+            .with_player(1, |context| {
+                (
+                    context.player.script_instance_list_generation[&5],
+                    context
+                        .player
+                        .get_datum(&sortable)
+                        .to_list_tuple()
+                        .unwrap()
+                        .2,
+                    context.player.get_datum(&matrix).to_list().unwrap().len(),
+                    context
+                        .player
+                        .get_datum(&sortable)
+                        .to_list()
+                        .unwrap()
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .unwrap();
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn w3d_texture_layer_add_uses_first_cast_context_and_interned_composite_name() {
+        let mut session = session_with_two_players();
+        let list_ref = session
+            .with_player(1, |context| {
+                context.player.alloc_datum(Datum::List(
+                    crate::director::lingo::datum::DatumType::List,
+                    VecDeque::new(),
+                    false,
+                ))
+            })
+            .unwrap();
+        session
+            .with_player(1, |mut context| {
+                use crate::director::enums::Shockwave3dInfo;
+                use crate::player::cast_lib::CastLib;
+                use crate::player::cast_member::{
+                    CastMember, CastMemberType, MeshDeformMesh, MeshDeformState, Shockwave3dMember,
+                };
+                use crate::player::sprite::ColorRef;
+                // W3D model names come from authored movie data.  Claim the
+                // display spelling before the built-in `model` symbol's
+                // canonical spelling can replace it.
+                let model_name = context.symbols.intern_authoritative("Model");
+                let mut runtime_state =
+                    crate::player::cast_member::Shockwave3dRuntimeState::default();
+                runtime_state.mesh_deform.insert(
+                    model_name.clone(),
+                    MeshDeformState {
+                        meshes: vec![MeshDeformMesh {
+                            texture_layers: Vec::new(),
+                            texture_layer_datum_ref: Some(list_ref.clone()),
+                        }],
+                    },
+                );
+                let member = CastMember {
+                    number: 1,
+                    name: "w3d".into(),
+                    comments: String::new(),
+                    member_type: CastMemberType::Shockwave3d(Shockwave3dMember {
+                        info: Shockwave3dInfo {
+                            loops: false,
+                            duration: 0,
+                            direct_to_stage: false,
+                            animation_enabled: false,
+                            preload: false,
+                            reg_point: (0, 0),
+                            default_rect: (0, 0, 320, 240),
+                            camera_position: None,
+                            camera_rotation: None,
+                            bg_color: None,
+                            ambient_color: None,
+                        },
+                        w3d_data: Vec::new(),
+                        source_scene: None,
+                        parsed_scene: None,
+                        runtime_state,
+                        converted_from_text: false,
+                        text3d_state: None,
+                        text3d_source: None,
+                    }),
+                    color: ColorRef::PaletteIndex(255),
+                    bg_color: ColorRef::PaletteIndex(0),
+                    reg_point: (0, 0),
+                };
+                context
+                    .player
+                    .movie
+                    .cast_manager
+                    .casts
+                    .push(CastLib::test_external(1, 0));
+                context.player.movie.cast_manager.casts[0]
+                    .members
+                    .insert(1, member);
+                ListDatumHandlers::call(
+                    &mut context,
+                    &list_ref,
+                    Symbol::builtin(BuiltInSymbol::Add),
+                    &vec![],
+                )
+                .unwrap();
+            })
+            .unwrap();
+        session
+            .with_player(1, |context| {
+                let child = context
+                    .player
+                    .get_datum(&list_ref)
+                    .to_list()
+                    .unwrap()
+                    .front()
+                    .unwrap()
+                    .clone();
+                match context.player.get_datum(&child) {
+                    Datum::Shockwave3dObjectRef(object) => {
+                        assert_eq!(object.object_type, BuiltInSymbol::MeshDeformTexLayer);
+                        assert_eq!(context.symbols.display(&object.name).unwrap(), "Model:0:0");
+                    }
+                    _ => panic!("W3D add did not create a texture-layer object"),
+                }
+            })
+            .unwrap();
     }
 }

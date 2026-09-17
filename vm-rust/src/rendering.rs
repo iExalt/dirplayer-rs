@@ -5,13 +5,11 @@ use std::{
     rc::Rc,
 };
 
-use async_std::task::spawn_local;
-use chrono::Local;
 use itertools::Itertools;
 use log::{debug, warn};
 use wasm_bindgen::{prelude::*, Clamped};
 
-use crate::{js_api::safe_js_string, player::{reserve_player_mut, symbols::builtin::BuiltInSymbol}};
+use crate::{js_api::safe_js_string, player::{reserve_player_mut, symbols::{builtin::BuiltInSymbol, symbol_table::SymbolTable}, ScriptError}};
 use crate::{
     console_warn,
     js_api::JsApi,
@@ -25,7 +23,6 @@ use crate::{
         cast_lib::CastMemberRef,
         cast_member::CastMemberType,
         geometry::IntRect,
-        reserve_player_ref,
         score::{
             get_concrete_sprite_rect, get_score, get_score_sprite, get_sprite_at, ScoreRef,
         },
@@ -42,6 +39,7 @@ use crate::player::handlers::datum_handlers::cast_member::font::{FontMemberHandl
 use crate::director::lingo::datum::Datum;
 use crate::player::score_keyframes::SpritePathKeyframes;
 use crate::rendering_gpu::{DynamicRenderer, Renderer};
+use crate::player::{ownership::OwnerToken, session::{PlayerId, RuntimeSessionHandle}};
 
 /// 500ms-on, 500ms-off caret blink phase derived from wall time. The renderer
 /// runs every frame so this query is cheap and needs no separate timer.
@@ -3228,6 +3226,7 @@ pub fn render_score_to_bitmap_with_offset(
                             h,
                             paused_at_start,
                             asserted_frame,
+                            &crate::player::owner_key_string(&player.owner),
                         );
                         player.flash_sprite_loaded.insert(dispatch_key);
                     }
@@ -3425,11 +3424,15 @@ impl PlayerCanvasRenderer {
         }
     }
 
-    pub fn draw_frame(&mut self, player: &mut DirPlayer) {
+    pub fn draw_frame(
+        &mut self,
+        player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
+    ) -> Result<(), ScriptError> {
         // Sync persistent Transform3d datums → node_transforms for in-place mutations
         // (e.g. model.transform.position = vector(...) used by overlay/HUD scripts)
-        crate::player::handlers::datum_handlers::shockwave3d_object::sync_persistent_transforms(player);
-        crate::player::handlers::datum_handlers::shockwave3d_object::sync_shader_texture_lists(player);
+        crate::player::handlers::datum_handlers::shockwave3d_object::sync_persistent_transforms(player, symbols)?;
+        crate::player::handlers::datum_handlers::shockwave3d_object::sync_shader_texture_lists(player, symbols)?;
 
         // let time = chrono::Utc::now().timestamp_millis() as i64;
         // let time_seconds = time as f64 / 1000.0;
@@ -3561,26 +3564,28 @@ impl PlayerCanvasRenderer {
             slice_data,
             bitmap.width.into(),
             bitmap.height.into(),
-        );
+        ).map_err(|_| ScriptError::new("Canvas2D frame image creation failed".to_string()))?;
         self.ctx2d.set_fill_style(&safe_js_string("white"));
-        match image_data {
-            Ok(image_data) => {
-                self.ctx2d.put_image_data(&image_data, 0.0, 0.0).unwrap();
-            }
-            _ => {}
-        }
+        self.ctx2d
+            .put_image_data(&image_data, 0.0, 0.0)
+            .map_err(|_| ScriptError::new("Canvas2D frame draw failed".to_string()))?;
 
         crate::cursor::update_native_cursor(player, &self.canvas, &mut self.native_cursor_cache);
+        Ok(())
     }
 
-    pub fn capture_stage_bitmap(&mut self, player: &mut DirPlayer) -> Bitmap {
-        self.draw_frame(player);
+    pub fn capture_stage_bitmap(
+        &mut self,
+        player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
+    ) -> Result<Bitmap, ScriptError> {
+        self.draw_frame(player, symbols)?;
 
         let (width, height) = self.size;
         let image_data = self
             .ctx2d
             .get_image_data(0.0, 0.0, width as f64, height as f64)
-            .expect("Canvas2D stage capture failed");
+            .map_err(|_| ScriptError::new("Canvas2D stage capture failed".to_string()))?;
         let mut bitmap = Bitmap::new(
             width as u16,
             height as u16,
@@ -3591,7 +3596,7 @@ impl PlayerCanvasRenderer {
         );
         bitmap.data = image_data.data().0;
         bitmap.use_alpha = true;
-        bitmap
+        Ok(bitmap)
     }
 
     /// Get the backend name
@@ -3601,12 +3606,20 @@ impl PlayerCanvasRenderer {
 }
 
 impl Renderer for PlayerCanvasRenderer {
-    fn draw_frame(&mut self, player: &mut DirPlayer) {
-        PlayerCanvasRenderer::draw_frame(self, player)
+    fn draw_frame(
+        &mut self,
+        player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
+    ) -> Result<(), ScriptError> {
+        PlayerCanvasRenderer::draw_frame(self, player, symbols)
     }
 
-    fn capture_stage_bitmap(&mut self, player: &mut DirPlayer) -> Bitmap {
-        PlayerCanvasRenderer::capture_stage_bitmap(self, player)
+    fn capture_stage_bitmap(
+        &mut self,
+        player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
+    ) -> Result<Bitmap, ScriptError> {
+        PlayerCanvasRenderer::capture_stage_bitmap(self, player, symbols)
     }
 
     fn draw_preview_frame(&mut self, player: &mut DirPlayer) {
@@ -3648,16 +3661,66 @@ impl Renderer for PlayerCanvasRenderer {
 
 thread_local! {
     pub static RENDERER_LOCK: RefCell<Option<DynamicRenderer>> = RefCell::new(None);
-    pub static LAST_DRAW_MS: Cell<i64> = Cell::new(0);
-    /// Whether the persistent draw loop has already been spawned. The loop
-    /// itself picks up whatever renderer is currently in RENDERER_LOCK on
-    /// each rAF, so we only need one loop across the whole WASM lifetime —
-    /// dropping and recreating the renderer between tests must not respawn it.
-    pub static DRAW_LOOP_SPAWNED: Cell<bool> = Cell::new(false);
-    /// True while the stage WebGL2 context is lost (browser reclaimed it, e.g.
-    /// the tab was backgrounded). Drawing is skipped until `webglcontextrestored`
-    /// re-initializes the renderer. See `register_webgl_context_handlers`.
-    pub static WEBGL_CONTEXT_LOST: Cell<bool> = Cell::new(false);
+}
+
+/// Renderer state owned by one browser player.  The legacy thread-local
+/// renderer remains for the old WASM exports, but new browser handles keep
+/// their canvas/backend and pacing clock here so two providers cannot draw
+/// through one another's WebGL context.
+pub(crate) struct RendererState {
+    pub(crate) renderer: RefCell<Option<DynamicRenderer>>,
+    container: RefCell<Option<web_sys::HtmlElement>>,
+    preview_container: RefCell<Option<web_sys::HtmlElement>>,
+    preview_member_ref: RefCell<Option<CastMemberRef>>,
+    preview_font_size: Cell<Option<u16>>,
+    debug_selected_channel_num: Cell<Option<i16>>,
+    webgl_listeners: RefCell<Option<WebglContextListeners>>,
+    pub(crate) loop_spawned: Cell<bool>,
+    pub(crate) last_draw_ms: Cell<i64>,
+    pub(crate) context_lost: Cell<bool>,
+    force_redraw: Cell<bool>,
+    owner_context: RefCell<Option<RendererOwnerContext>>,
+    pub(crate) role: RendererRole,
+    pub(crate) disposed: Cell<bool>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RendererRole {
+    Root,
+    Nested,
+}
+
+pub(crate) type RendererStateHandle = Rc<RendererState>;
+
+struct RendererOwnerContext {
+    session: RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: OwnerToken,
+}
+
+struct WebglContextListeners {
+    canvas: web_sys::HtmlCanvasElement,
+    lost: Closure<dyn FnMut(web_sys::Event)>,
+    restored: Closure<dyn FnMut(web_sys::Event)>,
+}
+
+pub(crate) fn new_renderer_state() -> RendererStateHandle {
+    Rc::new(RendererState {
+        renderer: RefCell::new(None),
+        container: RefCell::new(None),
+        preview_container: RefCell::new(None),
+        preview_member_ref: RefCell::new(None),
+        preview_font_size: Cell::new(None),
+        debug_selected_channel_num: Cell::new(None),
+        webgl_listeners: RefCell::new(None),
+        loop_spawned: Cell::new(false),
+        last_draw_ms: Cell::new(0),
+        context_lost: Cell::new(false),
+        force_redraw: Cell::new(false),
+        owner_context: RefCell::new(None),
+        role: RendererRole::Root,
+        disposed: Cell::new(false),
+    })
 }
 
 /// True when the document/tab is hidden (backgrounded). Rendering to a hidden
@@ -3674,17 +3737,72 @@ fn document_is_hidden() -> bool {
     { false }
 }
 
-/// Skip the stage draw when the context is lost or the tab is hidden.
-fn should_skip_stage_draw() -> bool {
-    WEBGL_CONTEXT_LOST.with(|c| c.get()) || document_is_hidden()
+fn should_skip_owned_stage_draw(state: &RendererStateHandle) -> bool {
+    state.disposed.get()
+        || state.context_lost.get()
+        || state.role == RendererRole::Nested
+        || document_is_hidden()
 }
 
-pub fn mark_frame_drawn() {
-    LAST_DRAW_MS.with(|ts| ts.set(chrono::Utc::now().timestamp_millis()));
+pub(crate) fn dispose_renderer_state(state: &RendererStateHandle) {
+    state.disposed.set(true);
+    state.context_lost.set(true);
+    clear_webgl_context_handlers_for_state(state);
+    state.owner_context.borrow_mut().take();
+    state.container.borrow_mut().take();
+    state.preview_container.borrow_mut().take();
+    state.preview_member_ref.borrow_mut().take();
+    state.preview_font_size.set(None);
+    state.debug_selected_channel_num.set(None);
+    if let Ok(mut renderer) = state.renderer.try_borrow_mut() {
+        if let Some(renderer) = renderer.take() {
+            let canvas = renderer.canvas().clone();
+            if canvas.parent_node().is_some() {
+                canvas.remove();
+            }
+        }
+    }
 }
 
-fn was_frame_drawn_recently(interval_ms: i64) -> bool {
-    LAST_DRAW_MS.with(|ts| chrono::Utc::now().timestamp_millis() - ts.get() < interval_ms)
+/// Rebind an existing browser renderer after its player owner generation
+/// changes. The backend and canvas stay in place; future draws use the new
+/// owner and force one redraw. A genuinely lost WebGL context remains lost
+/// until its restore event arrives.
+pub(crate) fn rebind_renderer_owner(
+    state: &RendererStateHandle,
+    session: RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: OwnerToken,
+) -> Result<(), ScriptError> {
+    if state.disposed.get() {
+        return Err(owned_error("renderer handle is disposed"));
+    }
+    let current_owner = session
+        .try_borrow_mut()
+        .map_err(|_| owned_error("runtime session is already borrowed"))?
+        .with_player(player_id, |context| context.player.owner.clone())
+        .ok_or_else(|| owned_error("owned renderer player is not installed"))?;
+    if !current_owner.same_identity(&owner) || !owner.is_arena_live() {
+        return Err(owned_error("renderer owner is stale"));
+    }
+    *state.owner_context.borrow_mut() = Some(RendererOwnerContext { session, player_id, owner });
+    state.last_draw_ms.set(0);
+    state.force_redraw.set(true);
+    Ok(())
+}
+
+fn clear_webgl_context_handlers_for_state(state: &RendererStateHandle) {
+    let Some(listeners) = state.webgl_listeners.borrow_mut().take() else {
+        return;
+    };
+    let _ = listeners.canvas.remove_event_listener_with_callback(
+        "webglcontextlost",
+        listeners.lost.as_ref().unchecked_ref(),
+    );
+    let _ = listeners.canvas.remove_event_listener_with_callback(
+        "webglcontextrestored",
+        listeners.restored.as_ref().unchecked_ref(),
+    );
 }
 
 #[allow(dead_code)]
@@ -3705,65 +3823,208 @@ where
     RENDERER_LOCK.with_borrow_mut(|renderer_lock| f(renderer_lock))
 }
 
-pub fn draw_frame_immediate() {
-    use crate::rendering_gpu::Renderer;
-    // A nested `#movie` sub-player is headless: its stage is composited by the
-    // HOST once per host frame via render_nested_player_stages into an
-    // off-screen FBO. If the sub calls updateStage()/nothing() (very common
-    // during keyboard movement and busy-wait loops), draw_frame here would run
-    // against the HOST's framebuffer + size, smearing the sub's sprites (wide
-    // scrolling background, off-screen tiles) across the whole host stage
-    // unclipped — flickering on every such call. Never let a sub draw directly
-    // to the host stage; leave stage_dirty so the host recomposites its FBO.
-    if unsafe { crate::player::ACTIVE_PLAYER_ID } != 0 {
-        return;
-    }
-    let (tempo, dirty) = reserve_player_ref(|player| {
-        (player.current_frame_tempo as f64, player.stage_dirty)
-    });
-    if !dirty {
-        return;
-    }
-    if should_skip_stage_draw() {
-        return;
-    }
-    let interval = if tempo > 0.0 {
-        (60000.0 / tempo) as i64
-    } else {
-        1000 // Default to 1 second interval if tempo is invalid
-    };
-    if !was_frame_drawn_recently(interval) {
-        with_renderer_mut(|renderer_lock| {
-            if let Some(renderer) = renderer_lock {
-                reserve_player_mut(|player| {
-                    renderer.draw_frame(player);
-                    player.stage_dirty = false;
-                });
-            }
-            mark_frame_drawn();
-        });
-    }
+fn owned_error(message: impl Into<String>) -> ScriptError {
+    ScriptError::new(message.into())
 }
 
-/// Draw the stage at the end of a frame cycle whose input handlers held the
-/// redraw (see `DirPlayer::draw_hold_since_ms`). Unpaced: this is the one
-/// draw Director makes for that frame.
-pub fn draw_frame_at_frame_end() {
-    if unsafe { crate::player::ACTIVE_PLAYER_ID } != 0 {
-        return;
+/// Draw one owned player's stage using that session's authoritative symbols.
+/// The session borrow ends before this function returns; no renderer state or
+/// player reference is retained across an await.
+pub(crate) fn draw_frame_owned(
+    state: &RendererStateHandle,
+    session: &RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: &OwnerToken,
+) -> Result<bool, ScriptError> {
+    if !owner.is_arena_live() || should_skip_owned_stage_draw(state) {
+        return Ok(false);
     }
-    if should_skip_stage_draw() {
-        return;
+
+    let now = chrono::Utc::now().timestamp_millis();
+    let mut renderer = state
+        .renderer
+        .try_borrow_mut()
+        .map_err(|_| owned_error("renderer is already drawing"))?;
+    let mut runtime = session
+        .try_borrow_mut()
+        .map_err(|_| owned_error("runtime session is already borrowed"))?;
+    let result = runtime
+        .with_player(player_id, |context| {
+            if !context.player.owner.same_identity(owner) {
+                return Err(owned_error("renderer owner is stale"));
+            }
+            if state.force_redraw.replace(false) {
+                context.player.stage_dirty = true;
+            }
+            if !context.player.stage_dirty {
+                return Ok(false);
+            }
+            let tempo = context.player.current_frame_tempo as f64;
+            let interval = if tempo > 0.0 {
+                (60000.0 / tempo) as i64
+            } else {
+                1000
+            };
+            if now - state.last_draw_ms.get() < interval {
+                return Ok(false);
+            }
+            let backend = renderer
+                .as_mut()
+                .ok_or_else(|| owned_error("renderer has not been created"))?;
+            backend.draw_frame(context.player, context.symbols)?;
+            context.player.stage_dirty = false;
+            Ok(true)
+        })
+        .ok_or_else(|| owned_error("owned renderer player is not installed"))?;
+    if result.as_ref().is_ok_and(|drawn| *drawn) {
+        state.last_draw_ms.set(now);
     }
-    with_renderer_mut(|renderer_lock| {
-        if let Some(renderer) = renderer_lock {
-            reserve_player_mut(|player| {
-                renderer.draw_frame(player);
-                player.stage_dirty = false;
-            });
-        }
-        mark_frame_drawn();
-    });
+    result
+}
+
+/// Resolve the weak renderer binding owned by a session player before drawing.
+/// This is the explicit presentation boundary for frame schedulers.
+pub(crate) fn draw_frame_for_owner(
+    session: &RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: &OwnerToken,
+) -> Result<bool, ScriptError> {
+    let state = session
+        .try_borrow()
+        .map_err(|_| owned_error("runtime session is already borrowed"))?
+        .renderer_state(player_id)
+        .and_then(|weak| weak.upgrade())
+        .ok_or_else(|| owned_error("owned player has no renderer"))?;
+    draw_frame_owned(&state, session, player_id, owner)
+}
+
+/// Draw the one unpaced frame Director emits after exitFrame settles.
+pub(crate) fn draw_frame_at_end_owned(
+    state: &RendererStateHandle,
+    session: &RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: &OwnerToken,
+) -> Result<bool, ScriptError> {
+    if !owner.is_arena_live() || should_skip_owned_stage_draw(state) {
+        return Ok(false);
+    }
+    let now = chrono::Utc::now().timestamp_millis();
+    let mut renderer = state
+        .renderer
+        .try_borrow_mut()
+        .map_err(|_| owned_error("renderer is already drawing"))?;
+    let mut runtime = session
+        .try_borrow_mut()
+        .map_err(|_| owned_error("runtime session is already borrowed"))?;
+    let result = runtime
+        .with_player(player_id, |context| {
+            if !context.player.owner.same_identity(owner) {
+                return Err(owned_error("renderer owner is stale"));
+            }
+            if state.force_redraw.replace(false) {
+                context.player.stage_dirty = true;
+            }
+            let backend = renderer
+                .as_mut()
+                .ok_or_else(|| owned_error("renderer has not been created"))?;
+            backend.draw_frame(context.player, context.symbols)?;
+            context.player.stage_dirty = false;
+            Ok(true)
+        })
+        .ok_or_else(|| owned_error("owned renderer player is not installed"))?;
+    if result.as_ref().is_ok_and(|drawn| *drawn) {
+        state.last_draw_ms.set(now);
+    }
+    result
+}
+
+/// Draw the unpaced end-of-frame image for an explicitly captured owner.
+/// Resolve the renderer weakly from the session immediately before drawing so
+/// a reset or disposal cannot retain the previous renderer state.
+pub(crate) fn draw_frame_at_end_for_owner(
+    session: &RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: &OwnerToken,
+) -> Result<bool, ScriptError> {
+    let state = session
+        .try_borrow()
+        .map_err(|_| owned_error("runtime session is already borrowed"))?
+        .renderer_state(player_id)
+        .and_then(|weak| weak.upgrade())
+        .ok_or_else(|| owned_error("owned player has no renderer"))?;
+    draw_frame_at_end_owned(&state, session, player_id, owner)
+}
+
+/// Draw the unpaced end-of-frame image with an already-owned renderer state.
+/// Browser handles use this form because they retain their renderer directly.
+pub(crate) fn draw_frame_at_end_owned_for_state(
+    state: &RendererStateHandle,
+    session: &RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: &OwnerToken,
+) -> Result<bool, ScriptError> {
+    draw_frame_at_end_owned(state, session, player_id, owner)
+}
+
+/// Render one sprite through an explicitly captured owner for browser test
+/// snapshots. This keeps the test path on the same checked renderer boundary
+/// as production handles.
+pub(crate) fn draw_sprite_isolated_owned(
+    state: &RendererStateHandle,
+    session: &RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: &OwnerToken,
+    sprite_num: i16,
+) -> Result<(), ScriptError> {
+    let mut renderer = state
+        .renderer
+        .try_borrow_mut()
+        .map_err(|_| owned_error("renderer is already drawing"))?;
+    let mut runtime = session
+        .try_borrow_mut()
+        .map_err(|_| owned_error("runtime session is already borrowed"))?;
+    runtime
+        .with_player(player_id, |context| {
+            if !context.player.owner.same_identity(owner) || !owner.is_arena_live() {
+                return Err(owned_error("renderer owner is stale"));
+            }
+            let backend = renderer
+                .as_mut()
+                .ok_or_else(|| owned_error("renderer has not been created"))?;
+            backend.draw_sprite_isolated(context.player, context.symbols, sprite_num)
+        })
+        .ok_or_else(|| owned_error("owned renderer player is not installed"))?
+}
+
+pub(crate) fn draw_preview_owned(
+    state: &RendererStateHandle,
+    session: &RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: &OwnerToken,
+) -> Result<bool, ScriptError> {
+    let mut renderer = state
+        .renderer
+        .try_borrow_mut()
+        .map_err(|_| owned_error("renderer is already drawing"))?;
+    let mut runtime = session
+        .try_borrow_mut()
+        .map_err(|_| owned_error("runtime session is already borrowed"))?;
+    runtime
+        .with_player(player_id, |context| {
+            if !context.player.owner.same_identity(owner) {
+                return Err(owned_error("renderer owner is stale"));
+            }
+            let Some(backend) = renderer.as_mut() else {
+                return Ok(false);
+            };
+            if !context.player.preview_dirty {
+                return Ok(false);
+            }
+            backend.draw_preview_frame(context.player);
+            context.player.preview_dirty = false;
+            Ok(true)
+        })
+        .ok_or_else(|| owned_error("owned renderer player is not installed"))?
 }
 
 /// Helper to access Canvas2D renderer for Canvas2D-specific operations
@@ -3976,62 +4237,37 @@ pub(crate) fn create_canvas2d_renderer(
 }
 
 /// Try to create a WebGL2 renderer, returns None if not supported or fails
-pub(crate) fn try_create_webgl2_renderer(
+fn try_create_webgl2_renderer_for_state(
     canvas_size: (u32, u32),
+    state: &RendererStateHandle,
 ) -> Option<crate::rendering_gpu::webgl2::WebGL2Renderer> {
     use crate::rendering_gpu::webgl2::WebGL2Renderer;
 
-    // Check if WebGL2 is supported
     if !crate::rendering_gpu::is_webgl2_supported() {
-        debug!("WebGL2 not supported, falling back to Canvas2D");
         return None;
     }
-
-    // Create canvases for WebGL2
-    let canvas = web_sys::window()
-        .unwrap()
-        .document()
-        .unwrap()
+    let canvas = web_sys::window()?
+        .document()?
         .create_element("canvas")
         .ok()?
         .dyn_into::<web_sys::HtmlCanvasElement>()
         .ok()?;
-
-    let preview_canvas = web_sys::window()
-        .unwrap()
-        .document()
-        .unwrap()
+    let preview_canvas = web_sys::window()?
+        .document()?
         .create_element("canvas")
         .ok()?
         .dyn_into::<web_sys::HtmlCanvasElement>()
         .ok()?;
-
     canvas.set_width(canvas_size.0);
     canvas.set_height(canvas_size.1);
     preview_canvas.set_width(1);
     preview_canvas.set_height(1);
-
-    // Mark the stage canvas so the Flash manager's global `getContext`
-    // monkey-patch does NOT force `preserveDrawingBuffer: true` on it (that
-    // patch is only needed for Ruffle's frame-capture readback; on the stage
-    // it just wastes GPU memory and makes background context-loss more likely).
     let _ = canvas.set_attribute("data-dp-stage", "1");
-
     set_pixelated_canvas_style(&canvas);
     set_pixelated_canvas_style(&preview_canvas);
-
-    // Try to create the WebGL2 renderer
-    match WebGL2Renderer::new(canvas, preview_canvas) {
-        Ok(renderer) => {
-            debug!("WebGL2 renderer created successfully");
-            register_webgl_context_handlers(renderer.canvas());
-            Some(renderer)
-        }
-        Err(e) => {
-            warn!("Failed to create WebGL2 renderer: {:?}, falling back to Canvas2D", e);
-            None
-        }
-    }
+    let renderer = WebGL2Renderer::new(canvas, preview_canvas).ok()?;
+    register_webgl_context_handlers_for_state(renderer.canvas(), state);
+    Some(renderer)
 }
 
 /// Register `webglcontextlost` / `webglcontextrestored` listeners on the stage
@@ -4040,92 +4276,362 @@ pub(crate) fn try_create_webgl2_renderer(
 /// stay dead after the tab regains focus. On loss we pause drawing; on restore
 /// we rebuild the renderer on the same canvas (fresh programs/buffers/textures).
 /// The closures are leaked (`forget`) so they live for the canvas's lifetime.
-fn register_webgl_context_handlers(canvas: &web_sys::HtmlCanvasElement) {
-    let lost_cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |e: web_sys::Event| {
-        // preventDefault tells the browser we will restore -> it will fire
-        // webglcontextrestored once the tab is visible again.
-        e.prevent_default();
-        WEBGL_CONTEXT_LOST.with(|c| c.set(true));
-        warn!("[webgl] stage context lost — pausing draw until restored");
+fn register_webgl_context_handlers_for_state(
+    canvas: &web_sys::HtmlCanvasElement,
+    state: &RendererStateHandle,
+) {
+    clear_webgl_context_handlers_for_state(state);
+    let lost_state = Rc::downgrade(state);
+    let lost_cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+        event.prevent_default();
+        if let Some(state) = lost_state.upgrade() {
+            state.context_lost.set(true);
+            warn!("[webgl] owned stage context lost — pausing this player");
+        }
     });
     let _ = canvas.add_event_listener_with_callback(
         "webglcontextlost",
         lost_cb.as_ref().unchecked_ref(),
     );
-    lost_cb.forget();
-
-    let restored_cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |_e: web_sys::Event| {
-        on_webgl_context_restored();
+    let restored_state = Rc::downgrade(state);
+    let restored_cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |_event: web_sys::Event| {
+        if let Some(state) = restored_state.upgrade() {
+            on_webgl_context_restored_for_state(&state);
+        }
     });
     let _ = canvas.add_event_listener_with_callback(
         "webglcontextrestored",
         restored_cb.as_ref().unchecked_ref(),
     );
-    restored_cb.forget();
+    *state.webgl_listeners.borrow_mut() = Some(WebglContextListeners {
+        canvas: canvas.clone(),
+        lost: lost_cb,
+        restored: restored_cb,
+    });
 }
 
 /// Rebuild the WebGL2 renderer on the existing (now-restored) canvas so its GL
 /// objects are recreated, then resume drawing. Caches (textures/text) start
 /// empty and re-populate on the next frame.
-fn on_webgl_context_restored() {
+fn on_webgl_context_restored_for_state(state: &RendererStateHandle) {
     use crate::rendering_gpu::webgl2::WebGL2Renderer;
-    with_renderer_mut(|renderer_lock| {
-        if let Some(DynamicRenderer::WebGL2(old)) = renderer_lock.as_ref() {
-            let canvas = old.canvas().clone();
-            let preview = old.preview_canvas().clone();
-            match WebGL2Renderer::new(canvas, preview) {
-                Ok(new_renderer) => {
-                    *renderer_lock = Some(DynamicRenderer::WebGL2(new_renderer));
-                    warn!("[webgl] stage context restored — renderer rebuilt");
-                }
-                Err(e) => {
-                    warn!("[webgl] failed to rebuild renderer after context restore: {:?}", e);
+    let Ok(mut renderer_lock) = state.renderer.try_borrow_mut() else {
+        return;
+    };
+    if let Some(DynamicRenderer::WebGL2(old)) = renderer_lock.as_ref() {
+        let canvas = old.canvas().clone();
+        let preview = old.preview_canvas().clone();
+        match WebGL2Renderer::new(canvas, preview) {
+            Ok(new_renderer) => {
+                *renderer_lock = Some(DynamicRenderer::WebGL2(new_renderer));
+                state.context_lost.set(false);
+                state.force_redraw.set(true);
+                if let Some(binding) = state.owner_context.borrow().as_ref() {
+                    if binding.owner.is_arena_live() {
+                        if let Ok(mut session) = binding.session.try_borrow_mut() {
+                            if let Some(()) = session.with_player(binding.player_id, |context| {
+                                if context.player.owner.same_identity(&binding.owner) {
+                                    context.player.stage_dirty = true;
+                                    Some(())
+                                } else {
+                                    None
+                                }
+                            }).flatten() {
+                                state.force_redraw.set(false);
+                            }
+                        }
+                    }
                 }
             }
+            Err(error) => {
+                warn!("[webgl] failed to rebuild owned renderer: {:?}", error);
+            }
         }
-    });
-    WEBGL_CONTEXT_LOST.with(|c| c.set(false));
-    // Force a full redraw on the next frame.
-    reserve_player_mut(|player| {
-        player.stage_dirty = true;
-    });
-}
-
-fn get_stage_container() -> Result<web_sys::HtmlElement, JsValue> {
-    web_sys::window()
-        .unwrap()
-        .document()
-        .unwrap()
-        .query_selector("#stage_canvas_container")
-        .unwrap()
-        .unwrap()
-        .dyn_into::<web_sys::HtmlElement>()
-        .map_err(|e| JsValue::from(e))
-}
-
-fn get_canvas_size() -> (u32, u32) {
-    with_renderer_mut(|renderer_lock| {
-        if let Some(renderer) = renderer_lock {
-            renderer.size()
-        } else {
-            reserve_player_ref(crate::player::stage::stage_canvas_dims)
-        }
-    })
-}
-
-fn create_renderer(backend: &str, canvas_size: (u32, u32)) -> Option<DynamicRenderer> {
-    match backend {
-        "WebGL2" => {
-            try_create_webgl2_renderer(canvas_size)
-                .map(DynamicRenderer::WebGL2)
-        }
-        _ => Some(DynamicRenderer::Canvas2D(create_canvas2d_renderer(canvas_size))),
     }
 }
 
-fn attach_renderer_to_container(container: &web_sys::HtmlElement) {
-    with_renderer_mut(|renderer_lock| {
-        if let Some(renderer) = renderer_lock {
+fn owned_canvas_size(
+    session: &RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: &OwnerToken,
+) -> Result<(u32, u32), JsValue> {
+    let mut runtime = session
+        .try_borrow_mut()
+        .map_err(|_| JsValue::from_str("runtime session is already borrowed"))?;
+    runtime
+        .with_player(player_id, |context| {
+            if !context.player.owner.same_identity(owner) || !owner.is_arena_live() {
+                return Err(JsValue::from_str("renderer owner is stale"));
+            }
+            Ok(crate::player::stage::stage_canvas_dims(context.player))
+        })
+        .ok_or_else(|| JsValue::from_str("owned renderer player is not installed"))?
+}
+
+pub(crate) fn player_create_canvas_for_handle(
+    state: &RendererStateHandle,
+    session: RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: OwnerToken,
+    container: &web_sys::HtmlElement,
+) -> Result<(), JsValue> {
+    if state.disposed.get() {
+        return Err(JsValue::from_str("renderer handle is disposed"));
+    }
+    let canvas_size = owned_canvas_size(&session, player_id, &owner)?;
+    *state.container.borrow_mut() = Some(container.clone());
+    clear_webgl_context_handlers_for_state(state);
+    *state.owner_context.borrow_mut() = Some(RendererOwnerContext {
+        session: session.clone(),
+        player_id,
+        owner: owner.clone(),
+    });
+    let dynamic_renderer = if let Some(webgl2_renderer) = try_create_webgl2_renderer_for_state(canvas_size, state) {
+        DynamicRenderer::WebGL2(webgl2_renderer)
+    } else {
+        DynamicRenderer::Canvas2D(create_canvas2d_renderer(canvas_size))
+    };
+    *state
+        .renderer
+        .try_borrow_mut()
+        .map_err(|_| JsValue::from_str("renderer is already borrowed"))? = Some(dynamic_renderer);
+    attach_renderer_to_container_state(container, state);
+    apply_renderer_preferences(state)?;
+    if !state.loop_spawned.replace(true) {
+        spawn_owned_draw_loop(state.clone());
+    }
+    Ok(())
+}
+
+pub(crate) fn player_set_renderer_backend_for_handle(
+    state: &RendererStateHandle,
+    session: &RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: &OwnerToken,
+    backend: &str,
+) -> Result<(), JsValue> {
+    if state.disposed.get() {
+        return Err(JsValue::from_str("renderer handle is disposed"));
+    }
+    let canvas_size = {
+        let current = state
+            .renderer
+            .try_borrow()
+            .map_err(|_| JsValue::from_str("renderer is already borrowed"))?;
+        current
+            .as_ref()
+            .map(|renderer| renderer.size())
+            .unwrap_or(owned_canvas_size(session, player_id, owner)?)
+    };
+    let container = state
+        .container
+        .borrow()
+        .clone()
+        .ok_or_else(|| JsValue::from_str("renderer container has not been created"))?;
+    while let Some(child) = container.first_child() {
+        container.remove_child(&child).map_err(JsValue::from)?;
+    }
+    *state.owner_context.borrow_mut() = Some(RendererOwnerContext {
+        session: session.clone(),
+        player_id,
+        owner: owner.clone(),
+    });
+    clear_webgl_context_handlers_for_state(state);
+    let renderer = if backend == "WebGL2" {
+        try_create_webgl2_renderer_for_state(canvas_size, state).map(DynamicRenderer::WebGL2)
+    } else {
+        Some(DynamicRenderer::Canvas2D(create_canvas2d_renderer(canvas_size)))
+    }
+    .or_else(|| (backend != "WebGL2").then(|| DynamicRenderer::Canvas2D(create_canvas2d_renderer(canvas_size))))
+        .ok_or_else(|| JsValue::from_str("requested renderer backend is unavailable"))?;
+    *state
+        .renderer
+        .try_borrow_mut()
+        .map_err(|_| JsValue::from_str("renderer is already borrowed"))? = Some(renderer);
+    attach_renderer_to_container_state(&container, state);
+    apply_renderer_preferences(state)?;
+    Ok(())
+}
+
+fn apply_renderer_preferences(state: &RendererStateHandle) -> Result<(), JsValue> {
+    let preview_container = state.preview_container.borrow().clone();
+    let preview_member_ref = state.preview_member_ref.borrow().clone();
+    let preview_font_size = state.preview_font_size.get();
+    let debug_selected_channel_num = state.debug_selected_channel_num.get();
+    let mut renderer = state
+        .renderer
+        .try_borrow_mut()
+        .map_err(|_| JsValue::from_str("renderer is already borrowed"))?;
+    if let Some(renderer) = renderer.as_mut() {
+        renderer.set_preview_container_element(preview_container);
+        renderer.set_preview_member_ref(preview_member_ref);
+        renderer.set_preview_font_size(preview_font_size);
+        if let Some(canvas2d) = renderer.as_canvas2d_mut() {
+            canvas2d.debug_selected_channel_num = debug_selected_channel_num;
+        } else if let Some(webgl2) = renderer.as_webgl2_mut() {
+            webgl2.debug_selected_channel_num = debug_selected_channel_num;
+        }
+    }
+    Ok(())
+}
+
+fn validate_owned_renderer(
+    state: &RendererStateHandle,
+    session: &RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: &OwnerToken,
+) -> Result<(), JsValue> {
+    if state.disposed.get() {
+        return Err(JsValue::from_str("renderer handle is disposed"));
+    }
+    if let Some(binding) = state.owner_context.borrow().as_ref() {
+        if !Rc::ptr_eq(&binding.session, session)
+            || binding.player_id != player_id
+            || !binding.owner.same_identity(owner)
+        {
+            return Err(JsValue::from_str("renderer owner binding is stale"));
+        }
+    }
+    let current_owner = session
+        .try_borrow_mut()
+        .map_err(|_| JsValue::from_str("runtime session is already borrowed"))?
+        .with_player(player_id, |context| context.player.owner.clone())
+        .ok_or_else(|| JsValue::from_str("owned renderer player is not installed"))?;
+    if !owner.is_arena_live() || !current_owner.same_identity(owner) {
+        return Err(JsValue::from_str("renderer owner is stale"));
+    }
+    // Preference setters may run before a canvas exists. Bind the otherwise
+    // empty renderer state on that first owner-validated operation so a later
+    // caller cannot claim the state merely by presenting another live owner.
+    if state.owner_context.borrow().is_none() {
+        *state.owner_context.borrow_mut() = Some(RendererOwnerContext {
+            session: session.clone(),
+            player_id,
+            owner: owner.clone(),
+        });
+    }
+    Ok(())
+}
+
+pub(crate) fn set_preview_parent_for_handle(
+    state: &RendererStateHandle,
+    session: &RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: &OwnerToken,
+    parent: Option<web_sys::HtmlElement>,
+) -> Result<(), JsValue> {
+    validate_owned_renderer(state, session, player_id, owner)?;
+    *state.preview_container.borrow_mut() = parent;
+    apply_renderer_preferences(state)
+}
+
+pub(crate) fn set_preview_member_ref_for_handle(
+    state: &RendererStateHandle,
+    session: &RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: &OwnerToken,
+    member_ref: CastMemberRef,
+) -> Result<(), JsValue> {
+    validate_owned_renderer(state, session, player_id, owner)?;
+    *state.preview_member_ref.borrow_mut() = Some(member_ref);
+    apply_renderer_preferences(state)?;
+    session
+        .try_borrow_mut()
+        .map_err(|_| JsValue::from_str("runtime session is already borrowed"))?
+        .with_player(player_id, |context| {
+            if !context.player.owner.same_identity(owner) {
+                return Err(JsValue::from_str("renderer owner is stale"));
+            }
+            context.player.preview_dirty = true;
+            Ok(())
+        })
+        .ok_or_else(|| JsValue::from_str("owned renderer player is not installed"))?
+}
+
+pub(crate) fn set_preview_font_size_for_handle(
+    state: &RendererStateHandle,
+    session: &RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: &OwnerToken,
+    size: u16,
+) -> Result<(), JsValue> {
+    validate_owned_renderer(state, session, player_id, owner)?;
+    state.preview_font_size.set((size > 0).then_some(size));
+    apply_renderer_preferences(state)?;
+    session
+        .try_borrow_mut()
+        .map_err(|_| JsValue::from_str("runtime session is already borrowed"))?
+        .with_player(player_id, |context| {
+            if !context.player.owner.same_identity(owner) {
+                return Err(JsValue::from_str("renderer owner is stale"));
+            }
+            context.player.preview_dirty = true;
+            Ok(())
+        })
+        .ok_or_else(|| JsValue::from_str("owned renderer player is not installed"))?
+}
+
+pub(crate) fn set_debug_selected_channel_for_handle(
+    state: &RendererStateHandle,
+    session: &RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: &OwnerToken,
+    channel_num: i16,
+) -> Result<(), JsValue> {
+    validate_owned_renderer(state, session, player_id, owner)?;
+    state.debug_selected_channel_num.set(Some(channel_num));
+    apply_renderer_preferences(state)
+}
+
+pub(crate) fn preview_state_for_handle(
+    state: &RendererStateHandle,
+) -> Result<(Option<CastMemberRef>, Option<u16>, Option<i16>), JsValue> {
+    Ok((
+        state.preview_member_ref.borrow().clone(),
+        state.preview_font_size.get(),
+        state.debug_selected_channel_num.get(),
+    ))
+}
+
+pub(crate) fn renderer_backend_for_handle(
+    state: &RendererStateHandle,
+) -> Result<String, JsValue> {
+    let renderer = state
+        .renderer
+        .try_borrow()
+        .map_err(|_| JsValue::from_str("renderer is already borrowed"))?;
+    Ok(renderer
+        .as_ref()
+        .map(|renderer| renderer.backend_name().to_string())
+        .unwrap_or_else(|| "Canvas2D".to_string()))
+}
+
+pub(crate) fn renderer_is_created(state: &RendererStateHandle) -> bool {
+    state.renderer.borrow().is_some()
+}
+
+pub(crate) fn canvas_data_url_for_handle(
+    state: &RendererStateHandle,
+) -> Result<String, JsValue> {
+    let renderer = state
+        .renderer
+        .try_borrow()
+        .map_err(|_| JsValue::from_str("renderer is already drawing"))?;
+    let renderer = renderer
+        .as_ref()
+        .ok_or_else(|| JsValue::from_str("renderer has not been created"))?;
+    renderer
+        .canvas()
+        .to_data_url_with_type("image/png")
+        .map_err(JsValue::from)
+}
+
+fn attach_renderer_to_container_state(
+    container: &web_sys::HtmlElement,
+    state: &RendererStateHandle,
+) {
+    if let Ok(mut renderer_lock) = state.renderer.try_borrow_mut() {
+        if let Some(renderer) = renderer_lock.as_mut() {
             match renderer {
                 DynamicRenderer::Canvas2D(canvas_renderer) => {
                     canvas_renderer.set_container_element(container.clone());
@@ -4134,147 +4640,51 @@ fn attach_renderer_to_container(container: &web_sys::HtmlElement) {
                     if webgl_renderer.canvas().parent_node().is_some() {
                         webgl_renderer.canvas().remove();
                     }
-                    container.append_child(webgl_renderer.canvas()).unwrap();
+                    let _ = container.append_child(webgl_renderer.canvas());
                 }
             }
         }
-    });
-}
-
-#[wasm_bindgen]
-pub fn player_create_canvas() -> Result<(), JsValue> {
-    let container = get_stage_container()?;
-
-    with_renderer_mut(|renderer_lock| {
-        if renderer_lock.is_none() {
-            let canvas_size = reserve_player_ref(crate::player::stage::stage_canvas_dims);
-
-            // Try WebGL2 first, fall back to Canvas2D
-            let dynamic_renderer = if let Some(webgl2_renderer) = try_create_webgl2_renderer(canvas_size) {
-                DynamicRenderer::WebGL2(webgl2_renderer)
-            } else {
-                DynamicRenderer::Canvas2D(create_canvas2d_renderer(canvas_size))
-            };
-
-            *renderer_lock = Some(dynamic_renderer);
-            // Only spawn the draw loop the first time. Later calls (after the
-            // renderer was dropped between movies) reuse the existing loop.
-            if !DRAW_LOOP_SPAWNED.with(|f| f.get()) {
-                DRAW_LOOP_SPAWNED.with(|f| f.set(true));
-                crate::player::spawn_player_local(async {
-                    run_draw_loop().await;
-                });
-            }
-        }
-    });
-
-    attach_renderer_to_container(&container);
-    Ok(())
-}
-
-#[wasm_bindgen]
-pub fn player_set_renderer_backend(backend: &str) -> Result<(), JsValue> {
-    let container = get_stage_container()?;
-
-    // Remove old canvas from container
-    while let Some(child) = container.first_child() {
-        container.remove_child(&child).unwrap();
     }
-
-    let canvas_size = get_canvas_size();
-    if let Some(new_renderer) = create_renderer(backend, canvas_size) {
-        with_renderer_mut(|renderer_lock| {
-            *renderer_lock = Some(new_renderer);
-        });
-    }
-
-    attach_renderer_to_container(&container);
-    Ok(())
 }
 
 fn request_animation_frame(f: &Closure<dyn FnMut()>) {
     web_sys::window()
-        .unwrap()
+        .expect("browser window is required for the owned renderer loop")
         .request_animation_frame(f.as_ref().unchecked_ref())
-        .unwrap();
+        .expect("requestAnimationFrame registration failed");
 }
 
-async fn run_draw_loop() {
+fn spawn_owned_draw_loop(state: RendererStateHandle) {
+    let weak_state = Rc::downgrade(&state);
     let rc = Rc::new(RefCell::new(None));
     let rc_clone = rc.clone();
-
-    let mut last_frame_ms = 0;
     let cb = Closure::<dyn FnMut()>::new(move || {
-        // Player may be momentarily None while a test harness tears down the
-        // old player before allocating the new one. Skip drawing instead of
-        // panicking — the next rAF will pick it back up.
-        let player = match unsafe { PLAYER_OPT.as_mut() } {
-            Some(p) => p,
-            None => {
-                if let Ok(cb) = rc.try_borrow() {
-                    if let Some(cb) = cb.as_ref() {
-                        request_animation_frame(cb);
-                    }
-                }
-                return;
-            }
+        let Some(state) = weak_state.upgrade() else {
+            return;
         };
-        let mut player = player;
-        // Pace the stage redraw to the MOVIE'S OWN TEMPO rather than a fixed
-        // rate. This used to be a hardcoded 24, so a movie authored above that
-        // — HavocCarDemo runs at 60 — advanced its playhead at full speed while
-        // the canvas only ever showed 24 of those frames per second. The
-        // simulation was right and the picture was stale.
-        //
-        // `current_frame_tempo` is the cached effective tempo (authored
-        // frame_rate, or `puppetTempo` when set), refreshed every frame by
-        // `refresh_frame_tempo` — the same value the frame loop paces from, so
-        // drawing and advancing stay in step, including when a script changes
-        // the tempo mid-movie.
-        //
-        // requestAnimationFrame is the real ceiling: the browser will not call
-        // us faster than the display refresh, so a movie asking for 100fps
-        // simply draws on every rAF (~60 on a 60Hz panel) rather than 100. The
-        // clamp only guards against a nonsense tempo; `MIN` keeps the previous
-        // 24fps as a FLOOR so nothing redraws slower than it did before, which
-        // matters for movies that change the stage without advancing a frame.
-        const MIN_DRAW_FPS: u32 = 24;
-        const MAX_DRAW_FPS: u32 = 240;
-        let draw_fps = player.current_frame_tempo.clamp(MIN_DRAW_FPS, MAX_DRAW_FPS);
-
-        let frame_interval = 1000 / draw_fps as i64;
-        if chrono::Utc::now().timestamp_millis() - last_frame_ms >= frame_interval {
-            last_frame_ms = chrono::Utc::now().timestamp_millis();
-            let skip_stage = should_skip_stage_draw();
-            with_renderer_mut(|renderer_lock| {
-                if let Some(renderer) = renderer_lock {
-                    // Between an input handler and the exitFrame that follows it the
-                    // stage is not redrawn (see `draw_hold_since_ms`). Bounded by
-                    // time so a paused or stalled frame loop cannot hold it forever.
-                    let held = player.draw_hold_since_ms.map_or(false, |since| {
-                        player.is_playing && chrono::Utc::now().timestamp_millis() - since < 250
-                    });
-                    if !skip_stage && !held && (player.is_playing || player.stage_dirty) && !was_frame_drawn_recently(frame_interval) {
-                        renderer.draw_frame(&mut player);
-                        player.stage_dirty = false;
-                    }
-                    if !skip_stage && player.preview_dirty {
-                        renderer.draw_preview_frame(&mut player);
-                        player.preview_dirty = false;
-                    }
-                }
-            });
+        if state.disposed.get() {
+            return;
         }
-
-        let cb = rc.as_ref().borrow();
-        let cb = cb.as_ref().unwrap();
-        request_animation_frame(&cb);
+        if let Some((session, player_id, owner)) = state.owner_context.borrow().as_ref().map(|context| {
+            (context.session.clone(), context.player_id, context.owner.clone())
+        }) {
+            if owner.is_arena_live() {
+                let _ = draw_frame_owned(&state, &session, player_id, &owner);
+                let _ = draw_preview_owned(&state, &session, player_id, &owner);
+            }
+        }
+        if let Ok(callback) = rc.try_borrow() {
+            if let Some(callback) = callback.as_ref() {
+                request_animation_frame(callback);
+            }
+        }
     });
     rc_clone.replace(Some(cb));
-
-    let cb = rc_clone.as_ref().borrow();
-    let cb = cb.as_ref().unwrap();
-    request_animation_frame(&cb);
+    if let Ok(callback) = rc_clone.try_borrow() {
+        if let Some(callback) = callback.as_ref() {
+            request_animation_frame(callback);
+        }
+    }
 }
 
 /// Check if data starts with a valid SWF signature (FWS, CWS, or ZWS)

@@ -4,7 +4,8 @@ use log::{debug, error, warn};
 use crate::io::reader::DirectorExt;
 
 use crate::player::datum_ref::DatumRef;
-use crate::player::eval::eval_lingo_expr_static;
+use crate::player::eval::{eval_lingo_expr_static, validate_lingo_expr_syntax};
+use crate::player::{DirPlayer, ScriptError, symbols::symbol_table::SymbolTable};
 
 
 #[allow(dead_code)]
@@ -1206,12 +1207,34 @@ impl FrameIntervalPrimary {
     }
 }
 
+/// A behavior initializer belongs to the parsed movie, not a runtime arena.
+/// Materialize it in each owning session before applying behavior properties.
+#[derive(Clone, Debug)]
+pub struct ScoreInitializer {
+    source: String,
+}
+
+impl ScoreInitializer {
+    pub fn parse(source: String) -> Result<Self, ScriptError> {
+        validate_lingo_expr_syntax(&source).map_err(ScriptError::new)?;
+        Ok(Self { source })
+    }
+
+    pub fn materialize(
+        &self,
+        player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
+    ) -> Result<DatumRef, ScriptError> {
+        eval_lingo_expr_static(self.source.clone(), player, symbols)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct FrameIntervalSecondary {
     pub cast_lib: u16,
     pub cast_member: u16,
     pub initializer_index: u32,
-    pub parameter: Vec<DatumRef>,
+    pub parameter: Vec<ScoreInitializer>,
 }
 
 impl FrameIntervalSecondary {
@@ -1277,7 +1300,7 @@ impl ScoreChunkHeader {
 pub struct SpriteBehavior {
     pub cast_lib: u16,
     pub cast_member: u16,
-    pub parameter: Vec<DatumRef>,
+    pub parameter: Vec<ScoreInitializer>,
 }
 
 /// Sprite detail info parsed from sprite detail offset (D6+)
@@ -1517,7 +1540,7 @@ impl ScoreChunk {
                             let clean = proplist_string.trim_end_matches('\0');
                             debug!("  Initializer string: {:?}", clean);
                             if clean.starts_with('[') {
-                                match eval_lingo_expr_static(clean.to_owned()) {
+                                match ScoreInitializer::parse(clean.to_owned()) {
                                     Ok(proplist) => {
                                         debug!(
                                             "[SCORE-DETAIL] Behavior {}/{}: parsed proplist OK",
@@ -1997,8 +2020,8 @@ impl ScoreChunk {
                                                                 .trim_end_matches('\0');
                                                             debug!("parsed param string: {}", clean);
                                                             if clean.starts_with('[') {
-                                                                // TODO: Replace `eval_lingo` with a parser
-                                                                match eval_lingo_expr_static(clean.to_owned()) {
+                                                                // Retain validated source until an owning session applies it.
+                                                                match ScoreInitializer::parse(clean.to_owned()) {
                                                                     Ok(proplist) => {
                                                                         debug!(
                                                                             "[SCORE-PARAM] Behavior {}/{}: parsed proplist OK",
@@ -2008,7 +2031,7 @@ impl ScoreChunk {
                                                                     }
                                                                     Err(e) => {
                                                                         warn!(
-                                                                            "[SCORE-PARAM] Behavior {}/{}: eval_lingo_expr_static FAILED: {}",
+                                                                            "[SCORE-PARAM] Behavior {}/{}: initializer syntax FAILED: {}",
                                                                             cast_lib, cast_member, e.message
                                                                         );
                                                                     }

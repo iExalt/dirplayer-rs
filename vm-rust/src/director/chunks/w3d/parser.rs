@@ -3,7 +3,11 @@
 
 use std::collections::HashMap;
 use log::debug;
-use crate::player::symbols::{builtin::BuiltInSymbol, symbol::Symbol};
+use crate::player::symbols::{
+    builtin::BuiltInSymbol,
+    symbol::Symbol,
+    symbol_table::SymbolTable,
+};
 use super::bitstream::IFXBitStreamCompressed;
 use super::block_reader::W3dBlockReader;
 use super::block_types::*;
@@ -24,7 +28,8 @@ struct W3dBlock {
     data: Vec<u8>,
 }
 
-pub struct W3dFileParser {
+pub struct W3dFileParser<'symbols> {
+    symbols: &'symbols mut SymbolTable,
     data: Vec<u8>,
     pos: usize,
     model_resources: HashMap<Symbol, ModelResourceInfo>,
@@ -33,9 +38,10 @@ pub struct W3dFileParser {
     pub scene: W3dScene,
 }
 
-impl W3dFileParser {
-    pub fn new(data: Vec<u8>) -> Self {
+impl<'symbols> W3dFileParser<'symbols> {
+    pub fn new(data: Vec<u8>, symbols: &'symbols mut SymbolTable) -> Self {
         Self {
+            symbols,
             data,
             pos: 0,
             model_resources: HashMap::new(),
@@ -43,6 +49,13 @@ impl W3dFileParser {
             clod_decoders: HashMap::new(),
             scene: W3dScene::default(),
         }
+    }
+
+    fn display_name(&self, symbol: &Symbol) -> Result<String, String> {
+        self.symbols
+            .display(symbol)
+            .map(str::to_owned)
+            .map_err(|_| "W3D parser encountered a symbol owned by another session".to_owned())
     }
 
     pub fn parse(&mut self) -> Result<(), String> {
@@ -97,8 +110,8 @@ impl W3dFileParser {
 
         // Finalize: extract decoded CLOD meshes at full resolution (all patches applied)
         for (name, decoder) in &self.clod_decoders {
-            let meshes = decoder.get_decoded_meshes_full_resolution();
-            self.scene.clod_meshes.insert(*name, meshes);
+            let meshes = decoder.get_decoded_meshes_full_resolution(self.symbols);
+            self.scene.clod_meshes.insert(name.clone(), meshes);
         }
 
         // Store CLOD decoders for runtime LOD changes
@@ -116,7 +129,8 @@ impl W3dFileParser {
         }
 
         // Director built-in "defaultmodel" plane resource (used by overlay/HUD scripts)
-        if !self.scene.clod_meshes.contains_key(&Symbol::from_str("defaultmodel")) {
+        let defaultmodel_sym = self.symbols.intern("defaultmodel");
+        if !self.scene.clod_meshes.contains_key(&defaultmodel_sym) {
             use super::types::ClodDecodedMesh;
             // Single back-face mesh with U-mirrored UVs.
             // Director's insceneoverlay/3d_textsprite rotate the model 180° around Y,
@@ -125,7 +139,7 @@ impl W3dFileParser {
             // Using only one mesh avoids Z-fighting between front/back faces.
             // UVs in IFX [-0.5, 0.5] range for CLOD remap: u_out = u_in + 0.5, v_out = 0.5 - v_in
             let plane = ClodDecodedMesh {
-                name: Symbol::from_str("defaultmodel"),
+                name: defaultmodel_sym.clone(),
                 positions: vec![[-0.5,-0.5,0.0],[0.5,-0.5,0.0],[0.5,0.5,0.0],[-0.5,0.5,0.0]],
                 normals: vec![[0.0,0.0,-1.0]; 4],
                 tex_coords: vec![vec![[0.5,-0.5],[-0.5,-0.5],[-0.5,0.5],[0.5,0.5]]],
@@ -133,11 +147,10 @@ impl W3dFileParser {
                 diffuse_colors: vec![], specular_colors: vec![],
                 bone_indices: vec![], bone_weights: vec![],
             };
-            let defaultmodel_sym = Symbol::from_str("defaultmodel");
-            self.scene.clod_meshes.insert(defaultmodel_sym, vec![plane]);
+            self.scene.clod_meshes.insert(defaultmodel_sym.clone(), vec![plane]);
             // Also register in model_resources so modelResource("defaultmodel") lookups work
             if !self.scene.model_resources.contains_key(&defaultmodel_sym) {
-                self.scene.model_resources.insert(defaultmodel_sym, ModelResourceInfo {
+                self.scene.model_resources.insert(defaultmodel_sym.clone(), ModelResourceInfo {
                     name: defaultmodel_sym,
                     shading_count: 1,
                     pos_iq: 1.0, norm_iq: 1.0, normal_crease: 1.0, tc_iq: 1.0, diff_iq: 1.0, spec_iq: 1.0,
@@ -148,9 +161,10 @@ impl W3dFileParser {
 
         // Director always creates a "UIAmbient" light (black ambient, no visual contribution)
         // so Lingo scripts can reference it by name.
-        if !self.scene.lights.iter().any(|l| l.name == Symbol::from_str("UIAmbient")) {
+        let uiambient_sym = self.symbols.intern("UIAmbient");
+        if !self.scene.lights.iter().any(|l| l.name == uiambient_sym) {
             self.scene.lights.push(W3dLight {
-                name: Symbol::from_str("UIAmbient"),
+                name: uiambient_sym.clone(),
                 light_type: W3dLightType::Ambient,
                 color: [0.0, 0.0, 0.0],
                 enabled: true,
@@ -159,7 +173,7 @@ impl W3dFileParser {
                 ..Default::default()
             });
             self.scene.nodes.push(W3dNode {
-                name: Symbol::from_str("UIAmbient"),
+                name: uiambient_sym,
                 node_type: W3dNodeType::Light,
                 parent_name: Symbol::builtin(BuiltInSymbol::World),
                 ..Default::default()
@@ -181,9 +195,10 @@ impl W3dFileParser {
             l.light_type,
             W3dLightType::Directional | W3dLightType::Spot
         ));
+        let uidirectional_sym = self.symbols.intern("UIDirectional");
         if !has_aimed_key_light {
             self.scene.lights.push(W3dLight {
-                name: Symbol::from_str(&"UIDirectional".to_string()),
+                name: uidirectional_sym.clone(),
                 light_type: W3dLightType::Directional,
                 color: [1.0, 1.0, 1.0],
                 enabled: true,
@@ -199,16 +214,16 @@ impl W3dFileParser {
             t[12] = -397.3754; t[13] = 714.7632; t[14] = -538.8293;
             t[15] = 1.0;
             self.scene.nodes.push(W3dNode {
-                name: Symbol::from_str(&"UIDirectional".to_string()),
+                name: uidirectional_sym,
                 node_type: W3dNodeType::Light,
-                parent_name: Symbol::from_str(&"World".to_string()),
+                parent_name: self.symbols.intern("World"),
                 transform: t,
                 ..Default::default()
             });
         }
 
-        self.bind_light_resources_to_nodes();
-        self.apply_root_com_to_model_nodes();
+        self.bind_light_resources_to_nodes()?;
+        self.apply_root_com_to_model_nodes()?;
 
         log(&format!("Parse complete: {} materials, {} shaders, {} nodes, {} lights, {} textures, {} skeletons, {} motions, {} mesh resources",
             self.scene.materials.len(), self.scene.shaders.len(), self.scene.nodes.len(),
@@ -237,7 +252,7 @@ impl W3dFileParser {
     ///
     /// R0 is recorded in `scene.model_root_com` so the renderer strips precisely
     /// the matrix composed here and the two sides cannot drift apart.
-    fn apply_root_com_to_model_nodes(&mut self) {
+    fn apply_root_com_to_model_nodes(&mut self) -> Result<(), String> {
         let mut fixups: Vec<(usize, [f32; 16], Option<Symbol>)> = Vec::new();
 
         for (i, node) in self.scene.nodes.iter().enumerate() {
@@ -260,23 +275,32 @@ impl W3dFileParser {
             // without the biped COM while the renderer still strips it. The robots
             // then aim correctly and render 90 degrees off, because a 3ds-Max biped
             // root sits at +90 about Z.
-            let reference = super::skeleton::import_root_com_motion(&self.scene, skel);
+            let reference = super::skeleton::import_root_com_motion(&self.scene, skel, self.symbols)?;
 
             let posed = super::skeleton::build_bone_matrices(skel, reference, 0.0);
             let Some(r0) = posed.first() else { continue };
             if is_identity_mat4(r0) { continue; }
 
-            fixups.push((i, *r0, reference.map(|m| m.name)));
+            fixups.push((i, *r0, reference.map(|m| m.name.clone())));
         }
 
         for (i, r0, reference) in fixups {
-            let name = self.scene.nodes[i].name.to_ascii_lowercase();
+            let name = self.symbols
+                .lower(&self.scene.nodes[i].name)
+                .map_err(|_| "W3D parser encountered a symbol owned by another session".to_owned())?
+                .to_owned();
+            let node_name = self.display_name(&self.scene.nodes[i].name)?;
+            let reference_name = reference
+                .as_ref()
+                .map(|n| self.display_name(n))
+                .transpose()?
+                .unwrap_or_else(|| "the rest pose".to_owned());
             log(&format!("  Root COM folded into model node {:?} (from {})",
-                self.scene.nodes[i].name,
-                reference.map(|n| n.as_str()).unwrap_or("the rest pose")));
+                node_name, reference_name));
             self.scene.nodes[i].transform = mat4_mul(&self.scene.nodes[i].transform, &r0);
             self.scene.model_root_com.insert(name, r0);
         }
+        Ok(())
     }
 
     fn parse_block(&mut self, block: &W3dBlock) -> Result<(), String> {
@@ -353,10 +377,10 @@ impl W3dFileParser {
     // ─── Block Parsers ───
 
     fn parse_material(&mut self, r: &mut W3dBlockReader) -> Result<(), String> {
-        let name = Symbol::from_str(&r.read_ifx_string()?);
+        let name = self.symbols.intern(&r.read_ifx_string()?);
         let attrs = r.read_u32()?;
 
-        let mut mat = W3dMaterial { name, ..Default::default() };
+        let mut mat = W3dMaterial { name: name.clone(), ..Default::default() };
         if (attrs & 0x01) != 0 { mat.ambient = r.read_color_rgba()?; }
         if (attrs & 0x02) != 0 { mat.diffuse = r.read_color_rgba()?; }
         if (attrs & 0x04) != 0 { mat.specular = r.read_color_rgba()?; }
@@ -366,13 +390,14 @@ impl W3dFileParser {
         if (attrs & 0x40) != 0 { let _ = r.read_f32()?; } // reserved
         if (attrs & 0x80) != 0 { mat.shininess = r.read_f32()?; }
 
-        log(&format!("  Material: \"{}\" diffuse=({:.2},{:.2},{:.2}) emissive=({:.2},{:.2},{:.2}) opacity={:.2} reflectivity={:.4} shininess={:.4} attrs=0x{:02X}", name, mat.diffuse[0], mat.diffuse[1], mat.diffuse[2], mat.emissive[0], mat.emissive[1], mat.emissive[2], mat.opacity, mat.reflectivity, mat.shininess, attrs));
+        let name_display = self.display_name(&name)?;
+        log(&format!("  Material: \"{}\" diffuse=({:.2},{:.2},{:.2}) emissive=({:.2},{:.2},{:.2}) opacity={:.2} reflectivity={:.4} shininess={:.4} attrs=0x{:02X}", name_display, mat.diffuse[0], mat.diffuse[1], mat.diffuse[2], mat.emissive[0], mat.emissive[1], mat.emissive[2], mat.opacity, mat.reflectivity, mat.shininess, attrs));
         self.scene.materials.push(mat);
         Ok(())
     }
 
     fn parse_light_resource(&mut self, r: &mut W3dBlockReader) -> Result<(), String> {
-        let name = Symbol::from_str(&r.read_ifx_string()?);
+        let name = self.symbols.intern(&r.read_ifx_string()?);
         let light_type_raw = r.read_u8()?;
         // IFX light attribute bitfield (IFXLightResource::LightAttributes):
         // bit0 ENABLED, bit1 SPECULAR, bit2 SPOTDECAY.
@@ -397,7 +422,8 @@ impl W3dFileParser {
             _ => W3dLightType::Point,
         };
 
-        log(&format!("  Light: \"{}\" type={:?} color=({:.2},{:.2},{:.2}) specular={} spotDecay={}", name, light_type, cr, cg, cb, specular, spot_decay));
+        let name_display = self.display_name(&name)?;
+        log(&format!("  Light: \"{}\" type={:?} color=({:.2},{:.2},{:.2}) specular={} spotDecay={}", name_display, light_type, cr, cg, cb, specular, spot_decay));
         self.scene.lights.push(W3dLight {
             name,
             light_type,
@@ -421,12 +447,14 @@ impl W3dFileParser {
     }
 
     fn parse_group_node(&mut self, r: &mut W3dBlockReader, has_bounds: bool) -> Result<(), String> {
-        let name = Symbol::from_str(&r.read_ifx_string()?);
-        let parent = Symbol::from_str(&r.read_ifx_string()?);
-        let resource = Symbol::from_str(&r.read_ifx_string()?);
+        let name = self.symbols.intern(&r.read_ifx_string()?);
+        let parent = self.symbols.intern(&r.read_ifx_string()?);
+        let resource = self.symbols.intern(&r.read_ifx_string()?);
         let transform = self.parse_node_header(r, has_bounds)?;
 
-        log(&format!("  GroupNode: \"{}\" parent=\"{}\"", name, parent));
+        let name_display = self.display_name(&name)?;
+        let parent_display = self.display_name(&parent)?;
+        log(&format!("  GroupNode: \"{}\" parent=\"{}\"", name_display, parent_display));
         self.scene.nodes.push(W3dNode {
             name,
             parent_name: parent,
@@ -439,9 +467,9 @@ impl W3dFileParser {
     }
 
     fn parse_light_node(&mut self, r: &mut W3dBlockReader, has_bounds: bool) -> Result<(), String> {
-        let name = Symbol::from_str(&r.read_ifx_string()?);
-        let parent = Symbol::from_str(&r.read_ifx_string()?);
-        let mut resource = Symbol::from_str(&r.read_ifx_string()?);
+        let name = self.symbols.intern(&r.read_ifx_string()?);
+        let parent = self.symbols.intern(&r.read_ifx_string()?);
+        let mut resource = self.symbols.intern(&r.read_ifx_string()?);
         let transform = self.parse_node_header(r, has_bounds)?;
         // The trailing string is the LIGHT_RESOURCE this node instantiates. It is
         // usually the node's own name, which is why dropping it went unnoticed —
@@ -451,7 +479,7 @@ impl W3dFileParser {
         if r.remaining() >= 2 {
             let light_res = r.read_ifx_string()?;
             if !light_res.trim().is_empty() {
-                resource = Symbol::from_str(&light_res);
+                resource = self.symbols.intern(&light_res);
             }
         }
 
@@ -473,7 +501,7 @@ impl W3dFileParser {
     /// resource), so a node whose resource is named differently contributed no light
     /// and could not be found from Lingo. Clone rather than rename, since several
     /// nodes may share one resource.
-    fn bind_light_resources_to_nodes(&mut self) {
+    fn bind_light_resources_to_nodes(&mut self) -> Result<(), String> {
         let mut clones: Vec<W3dLight> = Vec::new();
         for node in self.scene.nodes.iter() {
             if node.node_type != W3dNodeType::Light { continue; }
@@ -486,24 +514,27 @@ impl W3dFileParser {
             if let Some(res) = self.scene.lights.iter()
                 .find(|l| l.name == node.resource_name)
             {
+                let node_name = self.display_name(&node.name)?;
+                let resource_name = self.display_name(&node.resource_name)?;
                 log(&format!(
                     "  LightNode \"{}\" instantiates resource \"{}\" — binding a copy under the node name",
-                    node.name, node.resource_name
+                    node_name, resource_name
                 ));
                 clones.push(W3dLight { name: node.name.clone(), ..res.clone() });
             }
         }
         self.scene.lights.extend(clones);
+        Ok(())
     }
 
     fn parse_model_node(&mut self, r: &mut W3dBlockReader, has_bounds: bool) -> Result<(), String> {
-        let name = Symbol::from_str(&r.read_ifx_string()?);
-        let parent = Symbol::from_str(&r.read_ifx_string()?);
-        let resource = Symbol::from_str(&r.read_ifx_string()?);
+        let name = self.symbols.intern(&r.read_ifx_string()?);
+        let parent = self.symbols.intern(&r.read_ifx_string()?);
+        let resource = self.symbols.intern(&r.read_ifx_string()?);
         let transform = self.parse_node_header(r, has_bounds)?;
 
         let mut node = W3dNode {
-            name,
+            name: name.clone(),
             parent_name: parent,
             resource_name: resource,
             node_type: W3dNodeType::Model,
@@ -511,7 +542,7 @@ impl W3dFileParser {
             ..Default::default()
         };
 
-        if r.remaining() >= 2 { node.model_resource_name = Symbol::from_str(&r.read_ifx_string()?); }
+        if r.remaining() >= 2 { node.model_resource_name = self.symbols.intern(&r.read_ifx_string()?); }
         if r.remaining() >= 2 { let _style = r.read_ifx_string()?; } // IFXModel::SetStyleName
         // IFXModel::SetVisibility, NOT a render pass: the gs_uFrontFaceVisibility /
         // gs_uBackFaceVisibility bitmask from IFXModel.h, i.e. Director's
@@ -521,18 +552,20 @@ impl W3dFileParser {
         // CameraN" carriers, each a single triangle of bounding radius 1732 wearing a
         // pure-red untextured material, which covered the whole menu.
         if r.remaining() >= 4 { node.visibility = (r.read_u32()? & 0x3) as u8; }
-        if r.remaining() >= 2 { node.shader_name = Symbol::from_str(&r.read_ifx_string()?); }
+        if r.remaining() >= 2 { node.shader_name = self.symbols.intern(&r.read_ifx_string()?); }
 
+        let name_display = self.display_name(&name)?;
+        let resource_display = self.display_name(&node.model_resource_name)?;
         log(&format!("  ModelNode: \"{}\" resource=\"{}\" visibility={}",
-            name, node.model_resource_name, node.visibility));
+            name_display, resource_display, node.visibility));
         self.scene.nodes.push(node);
         Ok(())
     }
 
     fn parse_view_node(&mut self, r: &mut W3dBlockReader, has_bounds: bool) -> Result<(), String> {
-        let name = Symbol::from_str(&r.read_ifx_string()?);
-        let parent = Symbol::from_str(&r.read_ifx_string()?);
-        let resource = Symbol::from_str(&r.read_ifx_string()?);
+        let name = self.symbols.intern(&r.read_ifx_string()?);
+        let parent = self.symbols.intern(&r.read_ifx_string()?);
+        let resource = self.symbols.intern(&r.read_ifx_string()?);
         let transform = self.parse_node_header(r, has_bounds)?;
 
         let mut node = W3dNode {
@@ -551,9 +584,11 @@ impl W3dFileParser {
             node.fov = r.read_f32()?;
         }
 
+        let node_name = self.display_name(&node.name)?;
+        let parent_name = self.display_name(&node.parent_name)?;
         log(&format!(
             "  ViewNode: \"{}\" parent=\"{}\" viewAttrs=0x{:X} near={} far={} fov={}\n    pos: ({:.3},{:.3},{:.3})",
-            node.name, node.parent_name, view_attrs, node.near_plane, node.far_plane, node.fov,
+            node_name, parent_name, view_attrs, node.near_plane, node.far_plane, node.fov,
             transform[12], transform[13], transform[14],
         ));
 
@@ -564,24 +599,24 @@ impl W3dFileParser {
 
     fn parse_shader_lit_texture(&mut self, r: &mut W3dBlockReader, block_type: u32) -> Result<(), String> {
         let is_v200 = block_type == SHADER_LIT_TEXTURE; // -200
-        let name = Symbol::from_str(&r.read_ifx_string()?);
+        let name = self.symbols.intern(&r.read_ifx_string()?);
         let attrs = r.read_u32()?;
         let render_pass = r.read_u32()?;
 
         let mut shader = W3dShader {
-            name,
+            name: name.clone(),
             attrs,
             render_pass,
             ..Default::default()
         };
 
         if (attrs & 0x01) != 0 {
-            shader.material_name = Symbol::from_str(&r.read_ifx_string()?);
+            shader.material_name = self.symbols.intern(&r.read_ifx_string()?);
         }
 
         for layer in 0..8u32 {
             if (attrs & (1 << (16 + layer))) != 0 {
-                let tex_name = Symbol::from_str(&r.read_ifx_string()?);
+                let tex_name = self.symbols.intern(&r.read_ifx_string()?);
                 let intensity = r.read_f32()?;
                 let blend_func = r.read_u8()?;
                 let blend_src = r.read_u8()?;
@@ -607,7 +642,9 @@ impl W3dFileParser {
             }
         }
 
-        log(&format!("  Shader: \"{}\" material=\"{}\" layers={}", name, shader.material_name, shader.texture_layers.len()));
+        let name_display = self.display_name(&name)?;
+        let material_display = self.display_name(&shader.material_name)?;
+        log(&format!("  Shader: \"{}\" material=\"{}\" layers={}", name_display, material_display, shader.texture_layers.len()));
         self.scene.shaders.push(shader);
         Ok(())
     }
@@ -630,14 +667,14 @@ impl W3dFileParser {
         // NPR shaders start with the same header as LitTexture
         if r.remaining() < 4 { return Ok(()); } // too short
         let name = match r.read_ifx_string() {
-            Ok(s) => Symbol::from_str(&s),
+            Ok(s) => self.symbols.intern(&s),
             Err(_) => return Ok(()), // malformed — skip gracefully
         };
         let attrs = if r.remaining() >= 4 { r.read_u32()? } else { 0 };
         let render_pass = if r.remaining() >= 4 { r.read_u32()? } else { 0 };
 
         let mut shader = W3dShader {
-            name,
+            name: name.clone(),
             attrs,
             render_pass,
             shader_type,
@@ -646,7 +683,7 @@ impl W3dFileParser {
 
         // Try to read material name
         if (attrs & 0x01) != 0 && r.remaining() >= 2 {
-            shader.material_name = r.read_ifx_string().map(|s| Symbol::from_str(&s)).unwrap_or_default();
+            shader.material_name = r.read_ifx_string().map(|s| self.symbols.intern(&s)).unwrap_or_default();
         }
 
         // Try to read texture layers (same format as LitTexture)
@@ -655,7 +692,7 @@ impl W3dFileParser {
             if (attrs & (1 << (16 + layer))) == 0 { continue; }
             if r.remaining() < 10 { break; } // not enough data
             let tex_name = match r.read_ifx_string() {
-                Ok(s) => Symbol::from_str(&s),
+                Ok(s) => self.symbols.intern(&s),
                 Err(_) => break,
             };
             if r.remaining() < 4 + 1 + 1 + 4 + 1 + 64 + 64 + 1 { break; }
@@ -683,8 +720,10 @@ impl W3dFileParser {
             });
         }
 
+        let name_display = self.display_name(&name)?;
+        let material_display = self.display_name(&shader.material_name)?;
         log(&format!("  NPR Shader ({:?}): \"{}\" material=\"{}\" layers={}",
-            shader.shader_type, name, shader.material_name, shader.texture_layers.len()));
+            shader.shader_type, name_display, material_display, shader.texture_layers.len()));
         self.scene.shaders.push(shader);
         Ok(())
     }
@@ -695,12 +734,12 @@ impl W3dFileParser {
     }
 
     fn parse_texture_continuation(&mut self, r: &mut W3dBlockReader) -> Result<(), String> {
-        let name = Symbol::from_str(&r.read_ifx_string()?);
+        let name = self.symbols.intern(&r.read_ifx_string()?);
         let _cont_index = r.read_u8()?;
         let image_size = r.remaining();
         if image_size > 0 {
             let image_data = r.read_bytes(image_size)?;
-            let entry = self.scene.texture_images.entry(name).or_insert_with(Vec::new);
+            let entry = self.scene.texture_images.entry(name.clone()).or_insert_with(Vec::new);
             entry.extend_from_slice(&image_data);
 
             let format = if image_data.len() >= 2 && image_data[0] == 0xFF && image_data[1] == 0xD8 {
@@ -711,13 +750,14 @@ impl W3dFileParser {
                 "unknown"
             };
             let total = entry.len();
-            log(&format!("  Texture: \"{}\" cont={} chunk={} bytes total={} bytes ({})", name, _cont_index, image_size, total, format));
+            let name_display = self.display_name(&name)?;
+            log(&format!("  Texture: \"{}\" cont={} chunk={} bytes total={} bytes ({})", name_display, _cont_index, image_size, total, format));
         }
         Ok(())
     }
 
     fn parse_texture_info(&mut self, r: &mut W3dBlockReader) -> Result<(), String> {
-        let name = Symbol::from_str(&r.read_ifx_string()?);
+        let name = self.symbols.intern(&r.read_ifx_string()?);
         let render_format = r.read_u8()?;
         let mip_mode = r.read_u8()?;
         let mag_filter = r.read_u8()?;
@@ -727,13 +767,13 @@ impl W3dFileParser {
     }
 
     fn parse_model_block2(&mut self, r: &mut W3dBlockReader) -> Result<(), String> {
-        let name = Symbol::from_str(&r.read_ifx_string()?);
+        let name = self.symbols.intern(&r.read_ifx_string()?);
         let description_attrs = r.read_u32()?;
         let has_neighbor_mesh = (description_attrs & 2) != 0;
         let num_meshes = r.read_u32()?;
 
         let mut res_info = ModelResourceInfo {
-            name,
+            name: name.clone(),
             has_neighbor_mesh,
             ..Default::default()
         };
@@ -761,11 +801,11 @@ impl W3dFileParser {
         res_info.shading_count = num_shaders;
         for _ in 0..num_shaders {
             if r.remaining() < 2 { break; }
-            let shader_name = Symbol::from_str(&r.read_ifx_string()?);
+            let shader_name = self.symbols.intern(&r.read_ifx_string()?);
             let mut binding = ModelShaderBinding { name: shader_name, mesh_bindings: Vec::new() };
             for _ in 0..num_meshes {
                 if r.remaining() < 2 { break; }
-                binding.mesh_bindings.push(Symbol::from_str(&r.read_ifx_string()?));
+                binding.mesh_bindings.push(self.symbols.intern(&r.read_ifx_string()?));
             }
             res_info.shader_bindings.push(binding);
         }
@@ -792,16 +832,17 @@ impl W3dFileParser {
             res_info.max_resolution = r.read_u32()?;
         }
 
+        let name_display = self.display_name(&name)?;
         log(&format!("  ModelResource: \"{}\" meshes={} maxRes={} descAttrs=0x{:X} nbr={}",
-            name, num_meshes, res_info.max_resolution, description_attrs, has_neighbor_mesh));
+            name_display, num_meshes, res_info.max_resolution, description_attrs, has_neighbor_mesh));
 
-        self.last_model_resource_name = name;
+        self.last_model_resource_name = name.clone();
         self.model_resources.insert(name, res_info);
         Ok(())
     }
 
     fn parse_raw_mesh(&mut self, r: &mut W3dBlockReader) -> Result<(), String> {
-        let name = Symbol::from_str(&r.read_ifx_string()?);
+        let name = self.symbols.intern(&r.read_ifx_string()?);
         let chain_index = r.read_u32()?;
 
         let num_faces = r.read_u32()?;
@@ -811,8 +852,9 @@ impl W3dFileParser {
         let num_tex_coords = r.read_u32()?;
         let _num_tex_layers = r.read_u8()?;
 
+        let name_display = self.display_name(&name)?;
         log(&format!("  RawMesh: \"{}\" faces={} pos={} norm={} tc={}",
-            name, num_faces, num_positions, num_normals, num_tex_coords));
+            name_display, num_faces, num_positions, num_normals, num_tex_coords));
 
         // Read face indices (3 u32 per face for position indices)
         let mut faces = Vec::with_capacity(num_faces as usize);
@@ -865,7 +907,7 @@ impl W3dFileParser {
         }
 
         self.scene.raw_meshes.push(W3dRawMesh {
-            name,
+            name: name.clone(),
             chain_index,
             positions,
             normals,
@@ -877,14 +919,14 @@ impl W3dFileParser {
     }
 
     fn parse_bones_block(&mut self, r: &mut W3dBlockReader) -> Result<(), String> {
-        let skel_name = Symbol::from_str(&r.read_ifx_string()?);
+        let skel_name = self.symbols.intern(&r.read_ifx_string()?);
         let num_bones = r.read_u32()?;
 
-        let mut skeleton = W3dSkeleton { name: skel_name, bones: Vec::with_capacity(num_bones as usize) };
+        let mut skeleton = W3dSkeleton { name: skel_name.clone(), bones: Vec::with_capacity(num_bones as usize) };
 
         for _ in 0..num_bones {
             if r.remaining() < 2 { break; }
-            let bone_name = Symbol::from_str(&r.read_ifx_string()?);
+            let bone_name = self.symbols.intern(&r.read_ifx_string()?);
             let parent_idx = r.read_u32()?;
             let length = r.read_f32()?;
             let dx = r.read_f32()?;
@@ -912,7 +954,8 @@ impl W3dFileParser {
             });
         }
 
-        log(&format!("  Skeleton: \"{}\" bones={}", skel_name, skeleton.bones.len()));
+        let skeleton_name = self.display_name(&skel_name)?;
+        log(&format!("  Skeleton: \"{}\" bones={}", skeleton_name, skeleton.bones.len()));
         self.scene.skeletons.push(skeleton);
         Ok(())
     }
@@ -921,15 +964,15 @@ impl W3dFileParser {
         let block_data = r.read_bytes(r.remaining())?;
         let mut bs = IFXBitStreamCompressed::new(&block_data);
 
-        let motion_name = Symbol::from_str(&bs.read_ifx_string());
+        let motion_name = self.symbols.intern(&bs.read_ifx_string());
         let track_count = bs.read_u32();
         let time_iq = bs.read_f32();
         let rot_iq = bs.read_f32();
 
-        let mut motion = W3dMotion { name: motion_name, tracks: Vec::with_capacity(track_count as usize) };
+        let mut motion = W3dMotion { name: motion_name.clone(), tracks: Vec::with_capacity(track_count as usize) };
 
         for _ in 0..track_count {
-            let bone_name = Symbol::from_str(&bs.read_ifx_string());
+            let bone_name = self.symbols.intern(&bs.read_ifx_string());
             let keyframe_count = bs.read_u32();
 
             if keyframe_count > 0x5D1745D {
@@ -1050,14 +1093,16 @@ impl W3dFileParser {
             motion.tracks.push(track);
         }
 
-        log(&format!("  Motion: \"{}\" tracks={} duration={:.3}s", motion_name, motion.tracks.len(), motion.duration()));
+        let motion_name_display = self.display_name(&motion_name)?;
+        log(&format!("  Motion: \"{}\" tracks={} duration={:.3}s", motion_name_display, motion.tracks.len(), motion.duration()));
         self.scene.motions.push(motion);
         Ok(())
     }
 
     fn parse_comp_synch_table(&mut self, data: &[u8]) -> Result<(), String> {
         let mut bs = IFXBitStreamCompressed::new(data);
-        let name = Symbol::from_str(&bs.read_ifx_string());
+        let name = self.symbols.intern(&bs.read_ifx_string());
+        let name_display = self.display_name(&name)?;
 
         let res_info = match self.model_resources.get_mut(&name) {
             Some(r) => r,
@@ -1081,13 +1126,14 @@ impl W3dFileParser {
         }
 
         res_info.sync_table = Some(sync_table);
-        log(&format!("  SyncTable for \"{}\" ({} meshes)", name, num_meshes));
+        log(&format!("  SyncTable for \"{}\" ({} meshes)", name_display, num_meshes));
         Ok(())
     }
 
     fn parse_distal_edge_merge(&mut self, data: &[u8]) -> Result<(), String> {
         let mut bs = IFXBitStreamCompressed::new(data);
-        let name = Symbol::from_str(&bs.read_ifx_string());
+        let name = self.symbols.intern(&bs.read_ifx_string());
+        let name_display = self.display_name(&name)?;
 
         let res_info = match self.model_resources.get_mut(&name) {
             Some(r) => r,
@@ -1117,14 +1163,14 @@ impl W3dFileParser {
         }
 
         res_info.distal_edge_merges = Some(merges_list);
-        log(&format!("  DistalEdgeMerge for \"{}\" ({} resolutions)", name, resolution_count));
+        log(&format!("  DistalEdgeMerge for \"{}\" ({} resolutions)", name_display, resolution_count));
         Ok(())
     }
 
     fn parse_compressed_geom(&mut self, data: &[u8]) -> Result<(), String> {
         // Peek name from block data to look up correct model resource
         let mut peek_bs = IFXBitStreamCompressed::new(data);
-        let clod_name = Symbol::from_str(&peek_bs.read_ifx_string());
+        let clod_name = self.symbols.intern(&peek_bs.read_ifx_string());
 
         // Get or create decoder for this resource
         if !self.clod_decoders.contains_key(&clod_name) {
@@ -1132,7 +1178,7 @@ impl W3dFileParser {
             if let Some(res_info) = self.model_resources.get(&clod_name) {
                 decoder.set_mesh_infos(res_info);
             }
-            self.clod_decoders.insert(clod_name, decoder);
+            self.clod_decoders.insert(clod_name.clone(), decoder);
         }
 
         let decoder = self.clod_decoders.get_mut(&clod_name).unwrap();

@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 
 use crate::{
     director::lingo::datum::Datum,
-    player::{reserve_player_mut, symbols::symbol::Symbol, DatumRef, DirPlayer, ScriptError},
+    player::{session::ExecutionContext, symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable}, DatumRef, DirPlayer, ScriptError},
 };
 
 pub struct VoidDatumHandlers {}
@@ -10,16 +10,21 @@ pub struct VoidDatumHandlers {}
 impl VoidDatumHandlers {
     #[allow(dead_code, unused_variables)]
     pub fn call(
-        datum: DatumRef,
+        runtime: &mut ExecutionContext<'_>,
+        _datum: DatumRef,
         handler_name: Symbol,
-        args: &Vec<DatumRef>,
+        _args: &[DatumRef],
     ) -> Result<DatumRef, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
+        let handler_text = symbols
+            .display(&handler_name)
+            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
         // Lingo handlers are case-insensitive, and several upstream paths
         // (e.g. Coke Studios' SF gateway) hand back uninitialized AS objects
         // due to original-game bugs (e.g. setSendOn typo dropping sentOn).
         // Real Shockwave silently no-ops the resulting method calls instead
         // of throwing, so the script keeps running with empty / void output.
-        match_ci!(handler_name.as_str(), {
+        match_ci!(handler_text, {
             "addAt" | "add" | "append" | "duplicate" | "getAt" | "getOne" | "getLast" | "getFirst"
             | "distanceTo" | "getNormalized" | "normalize" | "crossProduct" | "dotProduct"
             | "cross" | "dot" | "angleBetween" | "getWorldTransform" | "addToWorld" | "removeFromWorld" | "isInWorld"
@@ -37,9 +42,7 @@ impl VoidDatumHandlers {
             },
             "count" => {
                 // count(VOID, #items) etc. should return 0
-                reserve_player_mut(|player| {
-                    Ok(player.alloc_datum(Datum::Int(0)))
-                })
+                Ok(player.alloc_datum(Datum::Int(0)))
             },
             "getProp" | "getaProp" | "getPropRef" => {
                 // getProp(#char, 1, 6) etc. on VOID should return VOID
@@ -55,19 +58,27 @@ impl VoidDatumHandlers {
             // maintaining a whitelist of handler names) mirrors Director and
             // subsumes the specific cases above.
             _ => {
-                log::debug!("Calling handler '{}' on VOID → VOID (Director-lenient no-op)", handler_name);
+                log::debug!("Calling handler '{}' on VOID → VOID (Director-lenient no-op)", handler_text);
                 Ok(DatumRef::Void)
             },
+        })
         })
     }
 
     pub fn get_prop(
         player: &mut DirPlayer,
+        symbols: &SymbolTable,
         _: &DatumRef,
         prop: Symbol,
     ) -> Result<DatumRef, ScriptError> {
-        match prop.as_lower_str() {
-            "ilk" => Ok(player.alloc_datum(Datum::Symbol(Symbol::from_str("void")))),
+        let prop_name = symbols
+            .display(&prop)
+            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+        let prop_lower = symbols
+            .lower(&prop)
+            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+        match prop_lower {
+            "ilk" => Ok(player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Void)))),
             "count" | "length" => Ok(player.alloc_datum(Datum::Int(0))),
             "x" | "y" | "z" | "magnitude" => Ok(player.alloc_datum(Datum::Float(0.0))),
             "position" | "rotation" | "scale" => Ok(player.alloc_datum(Datum::Vector([0.0, 0.0, 0.0]))),
@@ -113,7 +124,7 @@ impl VoidDatumHandlers {
             // to VOID, matching Director instead of maintaining a whitelist of
             // custom property names (previously oAvatars/oInfoStand/etc.).
             _ => {
-                log::debug!("Reading property '{}' on VOID → VOID (Director-lenient)", prop);
+                log::debug!("Reading property '{}' on VOID → VOID (Director-lenient)", prop_name);
                 Ok(player.alloc_datum(Datum::Void))
             }
         }

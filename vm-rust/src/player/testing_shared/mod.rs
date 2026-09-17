@@ -126,17 +126,130 @@ pub fn log_test_action_live(msg: &str) -> LogHandle {
     LogHandle { id }
 }
 
-use crate::director::static_datum::StaticDatum;
-use crate::player::symbols::symbol::Symbol;
+use crate::director::static_datum::{static_datum_from_datum_ref, StaticDatum};
 use crate::player::{
-    commands::{run_player_command, PlayerVMCommand},
+    commands::PlayerVMCommand,
     datum_ref::DatumRef,
-    eval::eval_lingo_command,
-    reserve_player_mut, reserve_player_ref, run_movie_init_sequence,
     ScriptError,
 };
+use crate::player::ownership::OwnerToken;
+use crate::player::session::{ExecutionContext, PlayerId, RuntimeSession, RuntimeSessionHandle};
+use crate::player::symbols::symbol_table::SymbolOwner;
+use crate::player::PlayerVMExecutionItem;
+use async_std::channel::Sender;
+use manual_future::ManualFuture;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const DEFAULT_TIMEOUT_SECS: f64 = 30.0;
+
+static TEST_SESSION_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Explicit owner and context used by a native or browser test harness.
+///
+/// The harness owns the session handle, player id, and exact player capability;
+/// every short player/symbol borrow is made through this value. It deliberately
+/// has no connection to the legacy process-global player state.
+pub struct HarnessRuntime {
+    session: RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: OwnerToken,
+    command_tx: Sender<PlayerVMExecutionItem>,
+}
+
+impl HarnessRuntime {
+    pub(crate) fn new(command_tx: Sender<PlayerVMExecutionItem>) -> Self {
+        let owner = SymbolOwner {
+            session: TEST_SESSION_ID.fetch_add(1, Ordering::Relaxed),
+            generation: 1,
+        };
+        let session = RuntimeSession::new(owner).into_handle();
+        let player_id = 1;
+        assert!(session.borrow_mut().add_player(player_id, command_tx.clone()));
+        let player_owner = session
+            .borrow_mut()
+            .with_player(player_id, |context| context.player.owner.clone())
+            .expect("new harness player must exist");
+        Self { session, player_id, owner: player_owner, command_tx }
+    }
+
+    pub(crate) fn session(&self) -> RuntimeSessionHandle { self.session.clone() }
+    pub(crate) fn player_id(&self) -> PlayerId { self.player_id }
+    pub(crate) fn owner(&self) -> &OwnerToken { &self.owner }
+    pub(crate) fn command_tx(&self) -> Sender<PlayerVMExecutionItem> { self.command_tx.clone() }
+
+    /// Retire the currently captured player at an explicit harness lifecycle
+    /// boundary. Closing the channel wakes the command loop even while sender
+    /// clones are retained by the player and harness; removing the player then
+    /// cancels its owned drivers, evaluations, and pending host work.
+    pub(crate) fn retire_current(&mut self) {
+        self.command_tx.close();
+        self.owner.mark_arena_dead();
+        let teardowns = {
+            let mut session = self.session.borrow_mut();
+            let _ = session.remove_player(self.player_id);
+            session.take_host_teardowns()
+        };
+        drop(teardowns);
+    }
+
+    /// Install a fresh player capability after the previous one was retired.
+    pub(crate) fn install_player(&mut self, command_tx: Sender<PlayerVMExecutionItem>) -> bool {
+        let mut session = self.session.borrow_mut();
+        if !session.add_player(self.player_id, command_tx.clone()) {
+            return false;
+        }
+        let Some(owner) = session.with_player(self.player_id, |context| context.player.owner.clone()) else {
+            let _ = session.remove_player(self.player_id);
+            let teardowns = session.take_host_teardowns();
+            drop(session);
+            drop(teardowns);
+            return false;
+        };
+        drop(session);
+        self.owner = owner;
+        self.command_tx = command_tx;
+        true
+    }
+
+    pub(crate) async fn dispatch(&self, command: PlayerVMCommand) -> Result<DatumRef, ScriptError> {
+        if !self.owner_valid() {
+            return Err(ScriptError::new("harness player was replaced".to_owned()));
+        }
+        let (future, completer) = ManualFuture::new();
+        self.command_tx
+            .send(PlayerVMExecutionItem { command, completer: Some(completer) })
+            .await
+            .map_err(|_| ScriptError::new("harness command loop stopped".to_owned()))?;
+        future.await
+    }
+
+    /// Replace the harness player at an explicit lifecycle boundary. The old
+    /// capability is never retargeted: removing the player invalidates it and
+    /// the replacement's exact token becomes the only token retained here.
+    pub(crate) fn reset_player(&mut self, command_tx: Sender<PlayerVMExecutionItem>) -> bool {
+        self.retire_current();
+        self.install_player(command_tx)
+    }
+
+    pub(crate) fn with_context<R>(
+        &self,
+        f: impl FnOnce(ExecutionContext<'_>) -> R,
+    ) -> Option<R> {
+        let owner = self.owner.clone();
+        self.session.borrow_mut().with_player(self.player_id, |context| {
+            if !owner.is_arena_live() || !owner.same_identity(&context.player.owner) {
+                return None;
+            }
+            Some(f(context))
+        }).flatten()
+    }
+
+    pub(crate) fn owner_valid(&self) -> bool {
+        self.with_context(|context| {
+            self.owner.same_identity(&context.player.owner) && self.owner.is_arena_live()
+        }).unwrap_or(false)
+    }
+}
 
 /// Get current time in milliseconds (works on both native and wasm).
 pub fn now_ms() -> f64 {
@@ -148,6 +261,10 @@ pub fn now_ms() -> f64 {
 
 /// Platform-specific operations implemented by each test harness.
 pub trait TestHarness {
+    /// Runtime owned by this harness. All stateful helpers use this exact
+    /// session/player capability instead of the process-wide player globals.
+    fn harness_runtime(&self) -> &HarnessRuntime;
+
     /// Resolve a relative asset path (e.g. "dcr_woodpecker/habbo.dcr") to
     /// the platform-appropriate location.
     fn asset_path(&self, relative: &str) -> String;
@@ -166,7 +283,13 @@ pub trait TestHarness {
 
     async fn init_movie(&mut self) {
         log_test_action("Init movie");
-        run_movie_init_sequence().await;
+        crate::player::run_movie_init_owned(
+            self.harness_runtime().session(),
+            self.harness_runtime().player_id(),
+            self.harness_runtime().owner().clone(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("movie initialization failed: {}", error));
     }
 
     async fn step_frames(&mut self, n: usize) {
@@ -179,29 +302,45 @@ pub trait TestHarness {
     }
 
     async fn eval(&self, command: &str) -> Result<DatumRef, ScriptError> {
-        eval_lingo_command(command.to_string()).await
+        crate::player::eval_lingo_command_owned(
+            self.harness_runtime().session(),
+            self.harness_runtime().player_id(),
+            self.harness_runtime().owner().clone(),
+            command.to_owned(),
+        )
+        .await
     }
 
     async fn eval_datum(&self, command: &str) -> Result<StaticDatum, ScriptError> {
         let result = self.eval(command).await?;
-        Ok(StaticDatum::from(&result))
+        self.harness_runtime()
+            .with_context(|context| static_datum_from_datum_ref(context.player, context.symbols, &result))
+            .unwrap_or_else(|| Err(ScriptError::new("harness player was replaced".to_owned())))
     }
 
     fn current_frame(&self) -> u32 {
-        reserve_player_ref(|player| player.movie.current_frame)
+        self.harness_runtime()
+            .with_context(|context| context.player.movie.current_frame)
+            .unwrap_or_default()
     }
 
     fn is_playing(&self) -> bool {
-        reserve_player_ref(|player| player.is_playing)
+        self.harness_runtime()
+            .with_context(|context| context.player.is_playing)
+            .unwrap_or(false)
     }
 
     fn get_global_ref(&self, name: &str) -> Option<DatumRef> {
-        reserve_player_ref(|player| player.globals.get(&Symbol::from_str(name)).cloned())
+        self.harness_runtime().with_context(|context| {
+            let symbol = context.symbols.intern(name);
+            context.player.globals.get(&symbol).cloned()
+        })?
     }
 
     /// Resolve a sprite query to a sprite number.
     fn find_sprite(&self, query: &SpriteQuery) -> Option<usize> {
-        reserve_player_ref(|player| {
+        self.harness_runtime().with_context(|context| {
+            let player = context.player;
             for channel in &player.movie.score.channels {
                 let sprite = &channel.sprite;
                 match query {
@@ -232,13 +371,14 @@ pub trait TestHarness {
                 }
             }
             None::<usize>
-        })
+        })?
     }
 
     async fn sprite_visibility(&self, sprite_num: usize) -> f64 {
-        let (stage_w, stage_h) = reserve_player_ref(|player| {
+        let (stage_w, stage_h) = self.harness_runtime().with_context(|context| {
+            let player = context.player;
             (player.movie.rect.width(), player.movie.rect.height())
-        });
+        }).unwrap_or((0, 0));
         let sprite_rect = self.eval_datum(&format!("sprite({}).rect", sprite_num)).await.unwrap_or(StaticDatum::Void);
         match sprite_rect {
             StaticDatum::IntRect(left, top, right, bottom) => {
@@ -272,54 +412,61 @@ pub trait TestHarness {
 
     async fn click(&mut self, x: i32, y: i32) {
         log_test_action(&format!("Click ({}, {})", x, y));
-        reserve_player_mut(|player| {
+        self.harness_runtime().with_context(|context| {
+            let player = context.player;
             player.mouse_loc = (x, y);
             player.movie.mouse_down = true;
         });
-        let _ = run_player_command(PlayerVMCommand::MouseDown((x, y))).await;
+        let _ = self.harness_runtime().dispatch(PlayerVMCommand::MouseDown((x, y))).await;
         self.step_frame().await;
-        reserve_player_mut(|player| {
+        self.harness_runtime().with_context(|context| {
+            let player = context.player;
             player.mouse_loc = (x, y);
             player.movie.mouse_down = false;
         });
-        let _ = run_player_command(PlayerVMCommand::MouseUp((x, y))).await;
+        let _ = self.harness_runtime().dispatch(PlayerVMCommand::MouseUp((x, y))).await;
     }
 
     async fn mouse_down(&mut self, x: i32, y: i32) {
-        reserve_player_mut(|player| {
+        self.harness_runtime().with_context(|context| {
+            let player = context.player;
             player.mouse_loc = (x, y);
             player.movie.mouse_down = true;
         });
-        let _ = run_player_command(PlayerVMCommand::MouseDown((x, y))).await;
+        let _ = self.harness_runtime().dispatch(PlayerVMCommand::MouseDown((x, y))).await;
     }
 
     async fn mouse_up(&mut self, x: i32, y: i32) {
-        reserve_player_mut(|player| {
+        self.harness_runtime().with_context(|context| {
+            let player = context.player;
             player.mouse_loc = (x, y);
             player.movie.mouse_down = false;
         });
-        let _ = run_player_command(PlayerVMCommand::MouseUp((x, y))).await;
+        let _ = self.harness_runtime().dispatch(PlayerVMCommand::MouseUp((x, y))).await;
     }
 
     async fn mouse_move(&mut self, x: i32, y: i32) {
-        reserve_player_mut(|player| {
+        self.harness_runtime().with_context(|context| {
+            let player = context.player;
             player.mouse_loc = (x, y);
         });
-        let _ = run_player_command(PlayerVMCommand::MouseMove((x, y))).await;
+        let _ = self.harness_runtime().dispatch(PlayerVMCommand::MouseMove((x, y))).await;
     }
 
     async fn key_down(&mut self, key: &str, code: u16) {
-        reserve_player_mut(|player| {
+        self.harness_runtime().with_context(|context| {
+            let player = context.player;
             player.keyboard_manager.key_down(key.to_string(), code);
         });
-        let _ = run_player_command(PlayerVMCommand::KeyDown(key.to_string(), code)).await;
+        let _ = self.harness_runtime().dispatch(PlayerVMCommand::KeyDown(key.to_string(), code)).await;
     }
 
     async fn key_up(&mut self, key: &str, code: u16) {
-        reserve_player_mut(|player| {
+        self.harness_runtime().with_context(|context| {
+            let player = context.player;
             player.keyboard_manager.key_up(key, code);
         });
-        let _ = run_player_command(PlayerVMCommand::KeyUp(key.to_string(), code)).await;
+        let _ = self.harness_runtime().dispatch(PlayerVMCommand::KeyUp(key.to_string(), code)).await;
     }
 
     async fn key_press(&mut self, key: &str, code: u16) {

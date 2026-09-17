@@ -3,29 +3,6 @@
 
 use crate::player::{cast_member::HavokPhysicsState, symbols::{builtin::BuiltInSymbol, symbol::Symbol}};
 
-thread_local! {
-    /// True while a Havok STEP CALLBACK (registerStepCallback) is executing.
-    /// A step callback fires once per sub-step (per the Xtra docs), so any force it
-    /// applies is per-sub-step and must be applied at FULL strength — NOT attenuated
-    /// by `force_scale`, which is calibrated for once-per-frame game forces. While
-    /// this is set, `applyForce`/`applyForceAtPoint` route into `rb.step_force`
-    /// instead of `rb.force`. Single-threaded wasm, so a thread-local Cell is safe.
-    pub static IN_STEP_CALLBACK: std::cell::Cell<bool> = std::cell::Cell::new(false);
-}
-
-/// Run `f` with the step-callback flag set, restoring it afterwards.
-pub fn with_step_callback_flag<R>(f: impl FnOnce() -> R) -> R {
-    IN_STEP_CALLBACK.with(|c| c.set(true));
-    let r = f();
-    IN_STEP_CALLBACK.with(|c| c.set(false));
-    r
-}
-
-/// True while a step callback is executing (see `IN_STEP_CALLBACK`).
-pub fn in_step_callback() -> bool {
-    IN_STEP_CALLBACK.with(|c| c.get())
-}
-
 // ============================================================
 // TYPE ALIASES
 // ============================================================
@@ -1239,7 +1216,7 @@ fn apply_springs(state: &mut HavokPhysicsState, _dt: f64) {
         let on_extension = spring.on_extension;
 
         let idx_a = match find_body_idx(state, rb_a_name) { Some(i) => i, None => continue };
-        let idx_b = rb_b_name.as_ref().and_then(|n| find_body_idx(state, *n));
+        let idx_b = rb_b_name.as_ref().and_then(|n| find_body_idx(state, n.clone()));
 
         // Transform points to world space
         let world_a = body_transform_point(&state.rigid_bodies[idx_a], point_a_local);
@@ -1306,7 +1283,7 @@ fn apply_linear_dashpots(state: &mut HavokPhysicsState, dt: f64) {
         let damping_coeff = dashpot.damping;
 
         let idx_a = match find_body_idx(state, rb_a_name) { Some(i) => i, None => continue };
-        let idx_b = rb_b_name.as_ref().and_then(|n| find_body_idx(state, *n));
+        let idx_b = rb_b_name.as_ref().and_then(|n| find_body_idx(state, n.clone()));
 
         let world_a = body_transform_point(&state.rigid_bodies[idx_a], point_a_local);
         let (world_b, vel_b) = if let Some(ib) = idx_b {
@@ -1368,7 +1345,7 @@ fn apply_angular_dashpots(state: &mut HavokPhysicsState, dt: f64) {
         let damping_coeff = dashpot.damping;
 
         let idx_a = match find_body_idx(state, rb_a_name) { Some(i) => i, None => continue };
-        let idx_b = rb_b_name.as_ref().and_then(|n| find_body_idx(state, *n));
+        let idx_b = rb_b_name.as_ref().and_then(|n| find_body_idx(state, n.clone()));
 
         // Target quaternion from axis-angle degrees
         let target_quat = quat_from_axis_angle_degrees(target_axis, target_angle);

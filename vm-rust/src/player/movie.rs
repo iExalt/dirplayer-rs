@@ -1,17 +1,29 @@
-use std::collections::{HashMap, VecDeque};
+use std::{collections::{HashMap, VecDeque}, rc::Rc};
 
 use chrono::Local;
 
 use crate::{
-    CastMemberRef, director::{
+    CastMemberRef,
+    director::{
         file::DirectorFile,
         lingo::datum::{Datum, datum_bool},
-    }, player::{ColorRef, ScriptInstanceRef, symbols::{builtin::{self, BuiltInSymbol}, symbol::Symbol}}, reserve_player_mut, reserve_player_ref, utils::PATH_SEPARATOR
+    },
+    player::{
+        ColorRef, ScriptInstanceRef,
+        symbols::{
+            builtin::{self, BuiltInSymbol},
+            symbol::Symbol,
+            symbol_table::SymbolTable,
+        },
+    },
+    utils::PATH_SEPARATOR,
 };
 
 use super::{
-    allocator::DatumAllocator, bitmap::manager::BitmapManager, cast_manager::CastManager,
-    geometry::IntRect, net_manager::NetManager, score::Score, ScriptError, ScriptReceiver,
+    ScriptError, ScriptReceiver, DirPlayer,
+    allocator::{DatumAllocator, DatumAllocatorTrait, ScriptInstanceAllocatorTrait},
+    bitmap::manager::BitmapManager,
+    cast_manager::CastManager, geometry::IntRect, net_manager::NetManager, score::Score,
 };
 
 pub struct Movie {
@@ -92,6 +104,21 @@ pub struct Movie {
     pub sound_device: String,
 }
 
+fn validate_script_instance_value(
+    datums: &DatumAllocator,
+    value: &Datum,
+) -> Result<(), ScriptError> {
+    if let Datum::ScriptInstanceRef(instance_ref) = value {
+        datums
+            .get_script_instance_opt(instance_ref)
+            .ok_or_else(|| ScriptError::new_code(
+                crate::player::ScriptErrorCode::InvalidReference,
+                "foreign or stale ScriptInstanceRef".to_owned(),
+            ))?;
+    }
+    Ok(())
+}
+
 impl Movie {
     /// Construct an empty movie with default state (no cast/score loaded).
     /// Used for the player's primary movie and for nested linked-movie
@@ -142,12 +169,13 @@ impl Movie {
         }
     }
 
-    pub async fn load_from_file(
+    pub fn load_from_file(
         &mut self,
         file: DirectorFile,
         net_manager: &mut NetManager,
         bitmap_manager: &mut BitmapManager,
-        dir_cache: &mut HashMap<Box<str>, DirectorFile>,
+        dir_cache: &mut HashMap<Box<str>, Rc<DirectorFile>>,
+        symbols: &mut SymbolTable,
     ) {
         self.dir_version = file.version;
         // Determine stage color based on Director version and color mode
@@ -168,7 +196,7 @@ impl Movie {
                 ColorRef::PaletteIndex(file.config.d7_stage_color_r)
             }
         };
-        
+
         // Store as RGB tuple for backward compatibility (if needed elsewhere)
         self.stage_color = (
             file.config.d7_stage_color_r,
@@ -184,8 +212,7 @@ impl Movie {
             bottom: file.config.movie_bottom as i32,
         };
         self.cast_manager
-            .load_from_dir(&file, net_manager, bitmap_manager, dir_cache)
-            .await;
+            .load_from_dir(&file, net_manager, bitmap_manager, dir_cache, symbols);
         self.score.load_from_dir(&file);
         self.file_name = file.file_name.to_string();
         self.frame_rate = file.config.frame_rate;
@@ -195,45 +222,58 @@ impl Movie {
         self.stage_color_ref = stage_color_ref;
     }
 
-    pub fn get_prop(&self, prop: Symbol) -> Result<Datum, ScriptError> {
-        let builtin_prop = prop.into_builtin_or_error()?;
+    pub fn get_prop(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        prop: Symbol,
+    ) -> Result<Datum, ScriptError> {
+        symbols
+            .lower(&prop)
+            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+        let builtin_prop = prop.into_builtin_or_error(symbols)?;
         match builtin_prop {
-            BuiltInSymbol::AlertHook => match self.alert_hook.to_owned() {
+            BuiltInSymbol::AlertHook => match player.movie.alert_hook.to_owned() {
                 Some(ScriptReceiver::Script(script_ref)) => Ok(Datum::ScriptRef(script_ref)),
                 Some(ScriptReceiver::ScriptInstance(script_instance_id)) => {
+                    validate_script_instance_value(
+                        &player.allocator,
+                        &Datum::ScriptInstanceRef(script_instance_id.clone()),
+                    )?;
                     Ok(Datum::ScriptInstanceRef(script_instance_id))
                 }
                 Some(ScriptReceiver::ScriptText(text)) => Ok(Datum::String(text)),
                 None => Ok(Datum::Int(0)),
             },
-            BuiltInSymbol::ExitLock => Ok(datum_bool(self.exit_lock)),
-            BuiltInSymbol::ItemDelimiter => Ok(Datum::String(self.item_delimiter.into())),
+            BuiltInSymbol::ExitLock => Ok(datum_bool(player.movie.exit_lock)),
+            BuiltInSymbol::ItemDelimiter => Ok(Datum::String(player.movie.item_delimiter.into())),
             BuiltInSymbol::RunMode => Ok(Datum::String("Plugin".to_string())), // Plugin / Author
             BuiltInSymbol::Date => {
                 // TODO localize formatting
                 let time = Local::now();
                 let formatted = time.format("%m/%d/%Y").to_string();
                 Ok(Datum::String(formatted))
-            },
+            }
             BuiltInSymbol::LongTime => {
                 let time = Local::now();
                 let formatted = time.format("%H:%M:%S %p").to_string();
                 Ok(Datum::String(formatted))
-            },
-            BuiltInSymbol::LastChannel => Ok(Datum::Int(self.score.get_channel_count() as i32)),
+            }
+            BuiltInSymbol::LastChannel => Ok(Datum::Int(player.movie.score.get_channel_count() as i32)),
             // Movie property, read-only: the number of the last frame in the movie.
             // A score always has at least frame 1, so fall back to 1 rather than 0
             // when the frame count couldn't be determined.
-            BuiltInSymbol::LastFrame => Ok(Datum::Int(self.score.frame_count.unwrap_or(1).max(1) as i32)),
+            BuiltInSymbol::LastFrame => {
+                Ok(Datum::Int(player.movie.score.frame_count.unwrap_or(1).max(1) as i32))
+            }
             BuiltInSymbol::MoviePath => {
-                let mut result = self.base_path.clone();
+                let mut result = player.movie.base_path.clone();
                 if !result.is_empty() && !result.ends_with(PATH_SEPARATOR) {
                     result.push_str(PATH_SEPARATOR);
                 }
                 Ok(Datum::String(result))
-            },
+            }
             BuiltInSymbol::Platform => Ok(Datum::String("Windows,32".to_string())),
-            BuiltInSymbol::Frame => Ok(Datum::Int(self.current_frame as i32)),
+            BuiltInSymbol::Frame => Ok(Datum::Int(player.movie.current_frame as i32)),
             BuiltInSymbol::ProductVersion => Ok(Datum::String("11.0".to_string())),
             // `_movie.name` is the Movie object's form of `the movieName` — the
             // Director 11.5 Scripting Dictionary uses it directly in its Window
@@ -241,70 +281,78 @@ impl Movie {
             // AreaZero's `[M] Main.InitGlobals` builds its asset base with
             // `gSystem.path & _movie.name`, and without the alias that raised
             // "Cannot get movie prop name".
-            BuiltInSymbol::MovieName | BuiltInSymbol::Movie | BuiltInSymbol::Name => Ok(Datum::String(self.file_name.to_owned())),
-            BuiltInSymbol::UpdateLock => Ok(Datum::Int(if self.update_lock { 1 } else { 0 })),
-            BuiltInSymbol::Path => Ok(Datum::String(self.base_path.to_owned())),
-            BuiltInSymbol::MouseDownScript | BuiltInSymbol::MouseUpScript | BuiltInSymbol::KeyDownScript | BuiltInSymbol::KeyUpScript | BuiltInSymbol::TimeoutScript => {
-                let script = if prop.eq_ignore_ascii_case("mouseDownScript") {
-                    &self.mouse_down_script
+            BuiltInSymbol::MovieName | BuiltInSymbol::Movie | BuiltInSymbol::Name => {
+                Ok(Datum::String(player.movie.file_name.to_owned()))
+            }
+            BuiltInSymbol::UpdateLock => Ok(Datum::Int(if player.movie.update_lock { 1 } else { 0 })),
+            BuiltInSymbol::Path => Ok(Datum::String(player.movie.base_path.to_owned())),
+            BuiltInSymbol::MouseDownScript
+            | BuiltInSymbol::MouseUpScript
+            | BuiltInSymbol::KeyDownScript
+            | BuiltInSymbol::KeyUpScript
+            | BuiltInSymbol::TimeoutScript => {
+                let script = if symbols
+                    .lower(&prop)
+                    .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
+                    .eq_ignore_ascii_case("mouseDownScript")
+                {
+                    &player.movie.mouse_down_script
                 } else if builtin_prop == BuiltInSymbol::MouseUpScript {
-                    &self.mouse_up_script
+                    &player.movie.mouse_up_script
                 } else if builtin_prop == BuiltInSymbol::KeyDownScript {
-                    &self.key_down_script
+                    &player.movie.key_down_script
                 } else if builtin_prop == BuiltInSymbol::KeyUpScript {
-                    &self.key_up_script
+                    &player.movie.key_up_script
                 } else {
-                    &self.timeout_script
+                    &player.movie.timeout_script
                 };
                 match script.to_owned() {
                     Some(ScriptReceiver::Script(script_ref)) => Ok(Datum::ScriptRef(script_ref)),
-                    Some(ScriptReceiver::ScriptInstance(id)) => Ok(Datum::ScriptInstanceRef(id)),
+                    Some(ScriptReceiver::ScriptInstance(id)) => {
+                        validate_script_instance_value(
+                            &player.allocator,
+                            &Datum::ScriptInstanceRef(id.clone()),
+                        )?;
+                        Ok(Datum::ScriptInstanceRef(id))
+                    }
                     Some(ScriptReceiver::ScriptText(text)) => Ok(Datum::String(text)),
                     None => Ok(Datum::Int(0)),
                 }
-            },
-            BuiltInSymbol::AllowCustomCaching => Ok(datum_bool(self.allow_custom_caching)),
+            }
+            BuiltInSymbol::AllowCustomCaching => Ok(datum_bool(player.movie.allow_custom_caching)),
             BuiltInSymbol::Timer => {
-                reserve_player_ref(|player| {
-                    // Utc: identical difference, without re-resolving the local
-                    // timezone offset on every call (see `the milliSeconds`).
-                    let elapsed = chrono::Utc::now().timestamp_millis()
-                        - player.start_time.timestamp_millis();
-                    // Convert to ticks (60ths of a second)
-                    let ticks = (elapsed * 60) / 1000;
-                    Ok(Datum::Int(ticks as i32))
-                })
-            },
+                // Utc: identical difference, without re-resolving the local
+                // timezone offset on every call (see `the milliSeconds`).
+                let elapsed = chrono::Utc::now().timestamp_millis()
+                    - player.start_time.timestamp_millis();
+                // Convert to ticks (60ths of a second)
+                let ticks = (elapsed * 60) / 1000;
+                Ok(Datum::Int(ticks as i32))
+            }
             BuiltInSymbol::LastKey => {
                 // `the lastKey` returns ticks (1/60 s) since the last key event.
                 // Before any key is pressed, fall back to ticks since movie start
                 // (matches Director's monotonic behaviour for these accessors).
-                reserve_player_ref(|player| {
-                    let reference = player
-                        .keyboard_manager
-                        .last_key_time
-                        .unwrap_or(player.start_time);
-                    let elapsed = chrono::Utc::now().timestamp_millis()
-                        - reference.timestamp_millis();
-                    let ticks = (elapsed * 60) / 1000;
-                    Ok(Datum::Int(ticks as i32))
-                })
-            },
-            BuiltInSymbol::MouseDown => {
-                Ok(datum_bool(self.mouse_down))
-            },
+                let reference = player
+                    .keyboard_manager
+                    .last_key_time
+                    .unwrap_or(player.start_time);
+                let elapsed =
+                    chrono::Utc::now().timestamp_millis() - reference.timestamp_millis();
+                let ticks = (elapsed * 60) / 1000;
+                Ok(Datum::Int(ticks as i32))
+            }
+            BuiltInSymbol::MouseDown => Ok(datum_bool(player.movie.mouse_down)),
             // `the mouseUp` is the inverse of `the mouseDown` — true while
             // the mouse button is in the up (released) state. Director uses
             // this in per-frame polling like storyscramble's Draggable
             // behavior (`if the mouseUp then …`) to detect button release.
-            BuiltInSymbol::MouseUp => {
-                Ok(datum_bool(!self.mouse_down))
-            },
-            BuiltInSymbol::RightMouseDown => Ok(datum_bool(self.right_mouse_down)),
-            BuiltInSymbol::RightMouseUp => Ok(datum_bool(!self.right_mouse_down)),
+            BuiltInSymbol::MouseUp => Ok(datum_bool(!player.movie.mouse_down)),
+            BuiltInSymbol::RightMouseDown => Ok(datum_bool(player.movie.right_mouse_down)),
+            BuiltInSymbol::RightMouseUp => Ok(datum_bool(!player.movie.right_mouse_down)),
             // `the trace` toggles the same Lingo-tracing facility as the Trace
             // button / `the traceScript` (Director 11.5 Scripting Dictionary).
-            BuiltInSymbol::Trace | BuiltInSymbol::TraceScript => Ok(datum_bool(self.trace_script)),
+            BuiltInSymbol::Trace | BuiltInSymbol::TraceScript => Ok(datum_bool(player.movie.trace_script)),
             BuiltInSymbol::ActiveWindow => Ok(Datum::Stage),
             // `the frontWindow` — "indicates which movie in a window (MIAW) is
             // currently frontmost on the screen… When the Stage is frontmost,
@@ -334,12 +382,15 @@ impl Movie {
                 false,
             )),
             BuiltInSymbol::Rollover => {
-                reserve_player_ref(|player| {
-                    let sprite = super::score::get_sprite_at(player, player.mouse_loc.0, player.mouse_loc.1, false);
-                    Ok(Datum::Int(sprite.unwrap_or(0) as i32))
-                })
-            },
-            BuiltInSymbol::RandomSeed => Ok(Datum::Int(self.random_seed.unwrap_or(0))),
+                let sprite = super::score::get_sprite_at(
+                    player,
+                    player.mouse_loc.0,
+                    player.mouse_loc.1,
+                    false,
+                );
+                Ok(Datum::Int(sprite.unwrap_or(0) as i32))
+            }
+            BuiltInSymbol::RandomSeed => Ok(Datum::Int(player.movie.random_seed.unwrap_or(0))),
             BuiltInSymbol::MaxInteger => Ok(Datum::Int(i32::MAX)),
             BuiltInSymbol::MemorySize => Ok(Datum::Int(256 * 1024 * 1024)), // 256 MB
             // Memory-reporting companions to `the memorySize`, in bytes.
@@ -370,54 +421,55 @@ impl Movie {
             // `[M] 3D Shaders` BlendShader took its DirectX branch and built the
             // additive material with THREE stacked copies of the same texture
             // instead of the two-layer OpenGL form.
-            BuiltInSymbol::Active3dRenderer => Ok(Datum::Symbol(Symbol::from_str("openGL"))),
+            BuiltInSymbol::Active3dRenderer => Ok(Datum::Symbol(Symbol::builtin(BuiltInSymbol::OpenGL))),
             BuiltInSymbol::ScriptExecutionStyle => Ok(Datum::Int(9)),
             BuiltInSymbol::XtraList => {
                 // Return a list of prop lists, each with #name and #fileName
                 use crate::player::xtra::manager::get_registered_xtra_names;
-                reserve_player_mut(|player| {
-                    let names = get_registered_xtra_names();
-                    let mut items = VecDeque::new();
-                    for name in names {
-                        let name_key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Name)));
-                        let name_val = player.alloc_datum(Datum::String(name.to_string()));
-                        let file_key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::FileName)));
-                        let file_val = player.alloc_datum(Datum::String(format!("{}.x32", name)));
-                        let entry = player.alloc_datum(Datum::PropList(VecDeque::from(vec![
-                            (name_key, name_val), (file_key, file_val),
-                        ]), false));
-                        items.push_back(entry);
-                    }
-                    Ok(Datum::List(
-                        crate::director::lingo::datum::DatumType::List,
-                        items,
+                let names = get_registered_xtra_names(player);
+                let mut items = VecDeque::new();
+                for name in names {
+                    let name_key =
+                        player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Name)));
+                    let name_val = player.alloc_datum(Datum::String(name.to_string()));
+                    let file_key = player
+                        .alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::FileName)));
+                    let file_val = player.alloc_datum(Datum::String(format!("{}.x32", name)));
+                    let entry = player.alloc_datum(Datum::PropList(
+                        VecDeque::from(vec![(name_key, name_val), (file_key, file_val)]),
                         false,
-                    ))
-                })
-            },
-            BuiltInSymbol::SoundDevice => Ok(Datum::String(if self.sound_device.is_empty() { "DirectSound".to_string() } else { self.sound_device.clone() })),
+                    ));
+                    items.push_back(entry);
+                }
+                Ok(Datum::List(
+                    crate::director::lingo::datum::DatumType::List,
+                    items,
+                    false,
+                ))
+            }
+            BuiltInSymbol::SoundDevice => Ok(Datum::String(if player.movie.sound_device.is_empty() {
+                "DirectSound".to_string()
+            } else {
+                player.movie.sound_device.clone()
+            })),
             BuiltInSymbol::SoundDeviceList => {
-                reserve_player_mut(|player| {
-                    let device = player.alloc_datum(Datum::String("WebAudio".to_string()));
-                    Ok(Datum::List(
-                        crate::director::lingo::datum::DatumType::List,
-                        VecDeque::from(vec![device]),
-                        false,
-                    ))
-                })
-            },
+                let device = player.alloc_datum(Datum::String("WebAudio".to_string()));
+                Ok(Datum::List(
+                    crate::director::lingo::datum::DatumType::List,
+                    VecDeque::from(vec![device]),
+                    false,
+                ))
+            }
             BuiltInSymbol::DesktopRectList => {
-                reserve_player_mut(|player| {
-                    let w = player.movie.rect.right as i32;
-                    let h = player.movie.rect.bottom as i32;
-                    let rect = player.alloc_datum(Datum::Rect([0.0, 0.0, w as f64, h as f64], 0));
-                    Ok(Datum::List(
-                        crate::director::lingo::datum::DatumType::List,
-                        VecDeque::from(vec![rect]),
-                        false,
-                    ))
-                })
-            },
+                let w = player.movie.rect.right as i32;
+                let h = player.movie.rect.bottom as i32;
+                let rect = player.alloc_datum(Datum::Rect([0.0, 0.0, w as f64, h as f64], 0));
+                Ok(Datum::List(
+                    crate::director::lingo::datum::DatumType::List,
+                    VecDeque::from(vec![rect]),
+                    false,
+                ))
+            }
             BuiltInSymbol::LabelList => {
                 // Director's `the labelList` ends each label (including the
                 // last) with a `\r`, so `the number of lines in the labelList`
@@ -430,16 +482,18 @@ impl Movie {
                 // iteration sees L = "") so downstream lists end with the
                 // same shape they would in Director.
                 let mut s = String::new();
-                for fl in &self.score.frame_labels {
+                for fl in &player.movie.score.frame_labels {
                     s.push_str(&fl.label);
                     s.push('\r');
                 }
                 Ok(Datum::String(s))
-            },
-            BuiltInSymbol::DebugPlaybackEnabled => Ok(datum_bool(self.debug_playback_enabled)),
-            BuiltInSymbol::EmulateMultibuttonMouse => Ok(datum_bool(self.emulate_multibutton_mouse)),
-            BuiltInSymbol::EditShortcutsEnabled => Ok(datum_bool(self.edit_shortcuts_enabled)),
-            BuiltInSymbol::EnableFlashLingo => Ok(datum_bool(self.enable_flash_lingo)),
+            }
+            BuiltInSymbol::DebugPlaybackEnabled => Ok(datum_bool(player.movie.debug_playback_enabled)),
+            BuiltInSymbol::EmulateMultibuttonMouse => {
+                Ok(datum_bool(player.movie.emulate_multibutton_mouse))
+            }
+            BuiltInSymbol::EditShortcutsEnabled => Ok(datum_bool(player.movie.edit_shortcuts_enabled)),
+            BuiltInSymbol::EnableFlashLingo => Ok(datum_bool(player.movie.enable_flash_lingo)),
             // No-op system prop: nothing to preload-abort in dirplayer.
             // Return the Director default (FALSE) so read-backs don't error.
             BuiltInSymbol::PreLoadEventAbort => Ok(datum_bool(false)),
@@ -451,24 +505,31 @@ impl Movie {
             // emulates Windows Shockwave playback, so report 256 — movies branch their
             // path separators and platform paths on this.
             BuiltInSymbol::MachineType => Ok(Datum::Int(256)),
-            _ => Err(ScriptError::new(format!("Cannot get movie prop {prop}")))
+            _ => Err(ScriptError::new(format!(
+                "Cannot get movie prop {}",
+                symbols.display(&prop).unwrap_or("<foreign symbol>")
+            ))),
         }
     }
 
     pub fn set_prop(
         &mut self,
+        symbols: &SymbolTable,
         prop: Symbol,
         value: Datum,
         datums: &DatumAllocator,
     ) -> Result<(), ScriptError> {
-        let builtin_prop = prop.into_builtin_or_error()?;
+        symbols
+            .lower(&prop)
+            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+        let builtin_prop = prop.into_builtin_or_error(symbols)?;
         match builtin_prop {
             BuiltInSymbol::ExitLock => {
                 self.exit_lock = value.int_value()? == 1;
                 Ok(())
             },
             BuiltInSymbol::ItemDelimiter => {
-                self.item_delimiter = (value.string_value()?).chars().next().unwrap();
+                self.item_delimiter = (value.string_value(symbols)?).chars().next().unwrap();
                 Ok(())
             },
             BuiltInSymbol::DebugPlaybackEnabled => {
@@ -500,6 +561,10 @@ impl Movie {
                         Ok(())
                     }
                     Datum::ScriptInstanceRef(script_instance_id) => {
+                        validate_script_instance_value(
+                            datums,
+                            &Datum::ScriptInstanceRef(script_instance_id.clone()),
+                        )?;
                         self.alert_hook = Some(ScriptReceiver::ScriptInstance(script_instance_id));
                         Ok(())
                     }
@@ -515,7 +580,7 @@ impl Movie {
                 Ok(())
             },
             BuiltInSymbol::TraceLogFile => {
-                self.trace_log_file = value.string_value()?;
+                self.trace_log_file = value.string_value(symbols)?;
                 Ok(())
             },
             BuiltInSymbol::UpdateLock => {
@@ -552,11 +617,18 @@ impl Movie {
                         Ok(())
                     }
                     Datum::ScriptInstanceRef(script_instance_id) => {
+                        validate_script_instance_value(
+                            datums,
+                            &Datum::ScriptInstanceRef(script_instance_id.clone()),
+                        )?;
                         *target = Some(ScriptReceiver::ScriptInstance(script_instance_id));
                         Ok(())
                     }
                     _ => Err(ScriptError::new(
-                        format!("String, object or 0 expected for {} value", prop),
+                        format!(
+                            "String, object or 0 expected for {} value",
+                            symbols.display(&prop).unwrap_or("<foreign symbol>"),
+                        ),
                     )),
                 }
             },
@@ -626,14 +698,17 @@ impl Movie {
             BuiltInSymbol::SoundDevice => {
                 // Accept the sound device setting (DirectSound, MacroMix, QT3Mix, etc.)
                 // In WASM we use WebAudio, so this is stored but not acted upon
-                self.sound_device = value.string_value().unwrap_or_default();
+                self.sound_device = value.string_value(symbols).unwrap_or_default();
                 Ok(())
             },
             BuiltInSymbol::Preferred3dRenderer | BuiltInSymbol::MilesFast => {
                 // 3D renderer preference / sound settings — accept silently in WASM
                 Ok(())
             },
-            _ => Err(ScriptError::new(format!("Cannot set movie prop {prop}")))
+            _ => Err(ScriptError::new(format!(
+                "Cannot set movie prop {}",
+                symbols.display(&prop).unwrap_or("<foreign symbol>")
+            )))
         }
     }
 
@@ -643,18 +718,19 @@ impl Movie {
             self.puppet_tempo
         } else {
             // Get tempo from current frame, or fall back to movie frame_rate
-            self.score.get_frame_tempo(self.current_frame)
+            self.score
+                .get_frame_tempo(self.current_frame)
                 .unwrap_or(self.frame_rate as u32)
         }
     }
-    
+
     /// Calculate frame delay in milliseconds based on tempo
     pub fn get_frame_delay_ms(&self) -> f64 {
         let tempo = self.get_effective_tempo();
         if tempo == 0 {
             return 1000.0 / 30.0; // Default to 30fps if tempo is 0
         }
-        
+
         // Director tempo: frames per second
         // So delay = 1000ms / tempo
         1000.0 / tempo as f64
@@ -669,5 +745,261 @@ impl Movie {
         self.random_seed = Some(next_seed as i32);
         let value = (next_seed % (max as u32)) as i32 + 1;
         Some(value)
+    }
+}
+
+#[cfg(test)]
+mod property_tests {
+    use std::collections::VecDeque;
+    use super::{Movie, ScriptReceiver};
+    use async_std::channel;
+    use crate::player::{
+        DirPlayer, ScriptErrorCode,
+        allocator::ScriptInstanceAllocatorTrait,
+        cast_lib::CastMemberRef,
+        script::ScriptInstance,
+        symbols::{builtin::BuiltInSymbol, symbol::Symbol},
+    };
+    use crate::player::ownership::OwnerToken;
+    use crate::player::symbols::symbol_table::SymbolTable;
+
+    #[test]
+    fn foreign_movie_property_symbol_is_rejected_before_dispatch() {
+        let (tx, _rx) = channel::unbounded();
+        let mut player = DirPlayer::new_with_owner(tx, OwnerToken::transitional());
+        let mut symbols = SymbolTable::new();
+        let mut foreign_symbols = SymbolTable::new();
+        let foreign_prop = foreign_symbols.intern("foreignMovieProperty");
+
+        let error = match Movie::get_prop(&mut player, &symbols, foreign_prop) {
+            Err(error) => error,
+            Ok(_) => panic!("foreign movie symbol must be rejected"),
+        };
+        assert_eq!(error.code, ScriptErrorCode::InvalidReference);
+    }
+
+    fn foreign_instance(player: &mut DirPlayer) -> super::ScriptInstanceRef {
+        player.allocator.alloc_script_instance(ScriptInstance {
+            instance_id: 1,
+            script: CastMemberRef { cast_lib: 1, cast_member: 1 },
+            ancestor: None,
+            properties: Default::default(),
+            begin_sprite_called: false,
+        })
+    }
+
+    #[test]
+    fn foreign_movie_outgoing_event_instance_is_rejected() {
+        let (tx, _rx) = channel::unbounded();
+        let mut player = DirPlayer::new_with_owner(tx, OwnerToken::transitional());
+        let mut foreign_player = DirPlayer::new_with_owner(
+            channel::unbounded().0,
+            OwnerToken::transitional(),
+        );
+        player.movie.mouse_down_script =
+            Some(ScriptReceiver::ScriptInstance(foreign_instance(&mut foreign_player)));
+        let symbols = SymbolTable::new();
+
+        let error = match Movie::get_prop(
+            &mut player,
+            &symbols,
+            Symbol::builtin(BuiltInSymbol::MouseDownScript),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("foreign outgoing event instance must be rejected"),
+        };
+        assert_eq!(error.code, ScriptErrorCode::InvalidReference);
+    }
+
+    #[test]
+    fn foreign_movie_retained_event_instance_is_rejected() {
+        let (tx, _rx) = channel::unbounded();
+        let mut player = DirPlayer::new_with_owner(tx, OwnerToken::transitional());
+        let mut foreign_player = DirPlayer::new_with_owner(
+            channel::unbounded().0,
+            OwnerToken::transitional(),
+        );
+        let value = crate::director::lingo::datum::Datum::ScriptInstanceRef(
+            foreign_instance(&mut foreign_player),
+        );
+        let symbols = SymbolTable::new();
+
+        let error = player
+            .movie
+            .set_prop(
+                &symbols,
+                Symbol::builtin(BuiltInSymbol::AlertHook),
+                value,
+                &player.allocator,
+            )
+            .expect_err("foreign retained event instance must be rejected");
+        assert_eq!(error.code, ScriptErrorCode::InvalidReference);
+        assert!(player.movie.alert_hook.is_none());
+    }
+
+    #[test]
+    fn globals_rejects_foreign_dynamic_key() {
+        let (tx, _rx) = channel::unbounded();
+        let mut player = DirPlayer::new_with_owner(tx, OwnerToken::transitional());
+        let mut symbols = SymbolTable::new();
+        let mut foreign_symbols = SymbolTable::new();
+        let foreign_name = foreign_symbols.intern("foreignGlobal");
+        player.globals.insert(foreign_name, crate::player::datum_ref::DatumRef::Void);
+
+        let error = match player.get_movie_prop(
+            &mut symbols,
+            Symbol::builtin(BuiltInSymbol::Globals),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("foreign global key must be rejected"),
+        };
+        assert_eq!(error.code, ScriptErrorCode::InvalidReference);
+    }
+
+    #[test]
+    fn globals_rejects_foreign_value_ref_without_panicking() {
+        let (tx, _rx) = channel::unbounded();
+        let mut player = DirPlayer::new_with_owner(tx, OwnerToken::transitional());
+        let mut symbols = SymbolTable::new();
+        let owned_name = symbols.intern("ownedGlobal");
+        let mut foreign_player = DirPlayer::new_with_owner(
+            channel::unbounded().0,
+            OwnerToken::transitional(),
+        );
+        let foreign_value = foreign_player.alloc_datum(crate::director::lingo::datum::Datum::Int(7));
+        player.globals.insert(owned_name, foreign_value);
+
+        let error = match player.get_movie_prop(
+            &mut symbols,
+            Symbol::builtin(BuiltInSymbol::Globals),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("foreign global value ref must be rejected"),
+        };
+        assert_eq!(error.code, ScriptErrorCode::InvalidReference);
+    }
+
+    #[test]
+    fn globals_skips_constant_before_foreign_unused_value_check() {
+        let (tx, _rx) = channel::unbounded();
+        let mut player = DirPlayer::new_with_owner(tx, OwnerToken::transitional());
+        let mut symbols = SymbolTable::new();
+        let mut foreign_player = DirPlayer::new_with_owner(
+            channel::unbounded().0,
+            OwnerToken::transitional(),
+        );
+        let foreign_value = foreign_player.alloc_datum(crate::director::lingo::datum::Datum::Int(7));
+        player
+            .globals
+            .insert(Symbol::builtin(BuiltInSymbol::Pi), foreign_value);
+
+        let globals_ref = player
+            .get_movie_prop(&mut symbols, Symbol::builtin(BuiltInSymbol::Globals))
+            .expect("constant globals are filtered before value resolution");
+        assert!(matches!(player.get_datum(&globals_ref), crate::director::lingo::datum::Datum::PropList(_, _)));
+    }
+
+    #[test]
+    fn actor_list_rejects_foreign_retained_ref() {
+        let (tx, _rx) = channel::unbounded();
+        let mut player = DirPlayer::new_with_owner(tx, OwnerToken::transitional());
+        let mut symbols = SymbolTable::new();
+        let mut foreign_player = DirPlayer::new_with_owner(
+            channel::unbounded().0,
+            OwnerToken::transitional(),
+        );
+        let foreign_list = foreign_player.alloc_datum(crate::director::lingo::datum::Datum::List(
+            crate::director::lingo::datum::DatumType::List,
+            VecDeque::new(),
+            false,
+        ));
+        player
+            .globals
+            .insert(Symbol::builtin(BuiltInSymbol::ActorList), foreign_list);
+
+        let error = match player.get_movie_prop(
+            &mut symbols,
+            Symbol::builtin(BuiltInSymbol::ActorList),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("foreign actorList ref must be rejected"),
+        };
+        assert_eq!(error.code, ScriptErrorCode::InvalidReference);
+    }
+
+    #[test]
+    fn actor_list_getter_preserves_shared_reference() {
+        let (tx, _rx) = channel::unbounded();
+        let mut player = DirPlayer::new_with_owner(tx, OwnerToken::transitional());
+        let mut symbols = SymbolTable::new();
+        let actor_list = player.alloc_datum(crate::director::lingo::datum::Datum::List(
+            crate::director::lingo::datum::DatumType::List,
+            VecDeque::new(),
+            false,
+        ));
+        player
+            .globals
+            .insert(Symbol::builtin(BuiltInSymbol::ActorList), actor_list.clone());
+
+        let returned = player
+            .get_movie_prop(&mut symbols, Symbol::builtin(BuiltInSymbol::ActorList))
+            .expect("owned actorList ref must be returned");
+        assert_eq!(returned, actor_list);
+    }
+
+    #[test]
+    fn timeout_list_ignores_foreign_payload_nested_in_non_timeout_entry() {
+        let (tx, _rx) = channel::unbounded();
+        let mut player = DirPlayer::new_with_owner(tx, OwnerToken::transitional());
+        let mut foreign_symbols = SymbolTable::new();
+        let foreign_symbol = foreign_symbols.intern("foreignNestedPayload");
+        let mut foreign_player = DirPlayer::new_with_owner(
+            channel::unbounded().0,
+            OwnerToken::transitional(),
+        );
+        let foreign_symbol_ref = foreign_player.alloc_datum(
+            crate::director::lingo::datum::Datum::Symbol(foreign_symbol),
+        );
+        let nested_entry = player.alloc_datum(crate::director::lingo::datum::Datum::List(
+            crate::director::lingo::datum::DatumType::List,
+            VecDeque::from([foreign_symbol_ref]),
+            false,
+        ));
+
+        player
+            .set_movie_prop(
+                &SymbolTable::new(),
+                Symbol::builtin(BuiltInSymbol::TimeoutList),
+                crate::director::lingo::datum::Datum::List(
+                    crate::director::lingo::datum::DatumType::List,
+                    VecDeque::from([nested_entry]),
+                    false,
+                ),
+            )
+            .expect("non-timeout entries are ignored after owning-ref resolution");
+    }
+
+    #[test]
+    fn ignored_movie_write_does_not_inspect_foreign_payload() {
+        let (tx, _rx) = channel::unbounded();
+        let mut player = DirPlayer::new_with_owner(tx, OwnerToken::transitional());
+        let mut foreign_player = DirPlayer::new_with_owner(
+            channel::unbounded().0,
+            OwnerToken::transitional(),
+        );
+        let value = crate::director::lingo::datum::Datum::ScriptInstanceRef(
+            foreign_instance(&mut foreign_player),
+        );
+        let symbols = SymbolTable::new();
+
+        player
+            .movie
+            .set_prop(
+                &symbols,
+                Symbol::builtin(BuiltInSymbol::ColorDepth),
+                value,
+                &player.allocator,
+            )
+            .expect("ignored system write must discard the payload");
     }
 }

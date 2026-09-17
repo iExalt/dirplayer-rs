@@ -1,0 +1,26 @@
+{
+  "cwd": "/private/tmp/dirplayer-combined-reviewed-20260916",
+  "command": [
+    "mise",
+    "exec",
+    "--",
+    "npm",
+    "run",
+    "e2e-test-browser",
+    "--",
+    "--reporter=line",
+    "--timeout=60000",
+    "--workers=1"
+  ],
+  "environment": {
+    "CARGO_INCREMENTAL": "0",
+    "CARGO_NET_OFFLINE": "true",
+    "CARGO_TARGET_DIR": "/private/tmp/dirplayer-parser-review-build/target",
+    "CI": "1",
+    "E2E_FILTER": "browser_player_handle,multiuser_socket_lifecycle,browser_handle_nested_input,fileio_open_remote,sysmenu,browser_player_host_tail_preservation,browser_handle_public_play,budapi,browser_handle_flash_scripted_access_owner_capabilities,browser_host_event_guard,flash_owned_evaluator_binding",
+    "E2E_REUSE_SERVER": "0",
+    "E2E_VIDEO": "retain-on-failure",
+    "BROWSER_RUNNER_PORT": "9237",
+    "E2E_CONSOLE": "1"
+  }
+}

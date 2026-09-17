@@ -2,25 +2,26 @@ use std::{cell::RefCell, cmp::max, sync::Arc};
 
 use itertools::Itertools;
 use log::{debug, warn};
+use manual_future::ManualFuture;
 use wasm_bindgen::prelude::*;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::{
     console_warn,
     director::{
-        chunks::score::{FrameLabel, ScoreFrameChannelData, SoundChannelData, TempoChannelData},
+        chunks::score::{FrameLabel, ScoreFrameChannelData, SoundChannelData, TempoChannelData, ScoreInitializer},
         file::DirectorFile,
         lingo::datum::{Datum, DatumType, datum_bool},
     },
     js_api::JsApi,
-    player::{bitmap::{bitmap::{PaletteRef, get_system_default_palette}, drawing::should_matte_hit_test, palette::SYSTEM_WIN_PALETTE}, events::dispatch_event_endsprite_for_score, handlers::datum_handlers::player_call_datum_handler, score_keyframes::{
+    player::{bitmap::{bitmap::{PaletteRef, get_system_default_palette}, drawing::should_matte_hit_test, palette::SYSTEM_WIN_PALETTE}, events::dispatch_event_endsprite_for_score, score_keyframes::{
         ChannelKeyframes, KeyframeTrack, build_all_keyframes_cache
-    }, symbols::{builtin::BuiltInSymbol, symbol::Symbol}},
+    }, symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable}},
 };
 
 use super::{
     allocator::ScriptInstanceAllocatorTrait,
-    cast_lib::{cast_member_ref, CastMemberRef, NULL_CAST_MEMBER_REF},
+    cast_lib::{cast_member_ref, CastMemberRef, NULL_CAST_MEMBER_REF, PlayerNotificationKind},
     cast_member::CastMemberType,
     datum_ref::DatumRef,
     geometry::{IntRect, IntRectTuple},
@@ -29,13 +30,58 @@ use super::{
         script::ScriptDatumHandlers,
         sound_channel::SoundStatus,
     },
+    driver::{checked_internal_datum, DriverTurn, PendingCommand},
     movie::Movie,
     reserve_player_mut, reserve_player_ref,
     script::{script_get_prop_opt, script_set_prop},
+    ownership::OwnerToken,
+    session::{ExecutionContext, RuntimeSessionHandle, PlayerId},
     script_ref::ScriptInstanceRef,
+    handlers::datum_handlers::script_instance::ScriptInstanceUtils,
     sprite::{ColorRef, CursorRef, Sprite},
     DirPlayer, ScriptError, PLAYER_OPT,
 };
+
+/// Materialize parsed score initializers in the caller's owner-bound runtime.
+/// Parsing retains source text so file loading never allocates runtime datum
+/// references; this helper is deliberately free of ambient player/session
+/// lookup and has no missing-context fallback.
+fn materialize_behavior_parameters(
+    player: &mut DirPlayer,
+    symbols: &mut SymbolTable,
+    initializers: &[ScoreInitializer],
+) -> Vec<DatumRef> {
+    initializers
+        .iter()
+        .filter_map(|initializer| match initializer.materialize(player, symbols) {
+            Ok(value) => Some(value),
+            Err(error) => {
+                warn!("behavior parameter initializer failed: {}", error.message);
+                None
+            }
+        })
+        .collect()
+}
+
+/// State retained when property-description lookup crosses an external
+/// dispatch boundary.  The score phase must not lose authored parameters or
+/// restart `on new` when the description result eventually arrives.
+#[derive(Clone)]
+pub(crate) struct BehaviorDefaultsContinuation {
+    pub(crate) script_instance_ref: ScriptInstanceRef,
+    pub(crate) sprite_num: u32,
+    pub(crate) owner: OwnerToken,
+    pub(crate) parameter_snapshot: Vec<(String, Datum)>,
+    pub(crate) phase: BehaviorDefaultsPhase,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BehaviorDefaultsPhase {
+    AwaitingPropertyDescription,
+    ApplyingDefaults,
+    CallingNew,
+    ReapplyingParameters,
+}
 
 // JS bridge names use the `dirplayer_` prefix so this fork's globals don't
 // collide with stock Ruffle if both are loaded on the same page (e.g. via a
@@ -98,7 +144,7 @@ impl SpriteChannel {
 pub struct ScoreBehaviorReference {
     pub cast_lib: u16,
     pub cast_member: u16,
-    pub parameter: Vec<DatumRef>,
+    pub parameter: Vec<ScoreInitializer>,
 }
 
 #[derive(Clone)]
@@ -355,7 +401,7 @@ impl Score {
     /// `default_cast_lib` is used to resolve cast_lib when it's 65535 or -1 (which means
     /// "use the parent's cast library", commonly used in filmloops).
     /// If the script is not found in the resolved cast library, we search all cast libraries.
-    fn create_behavior(cast_lib: i32, cast_member: i32, default_cast_lib: Option<i32>) -> Option<(ScriptInstanceRef, DatumRef)> {
+    fn create_behavior(cast_lib: i32, cast_member: i32, default_cast_lib: Option<i32>, symbols: &mut SymbolTable) -> Option<(ScriptInstanceRef, DatumRef)> {
         // Resolve cast_lib 65535 or -1 to the default (filmloop's) cast library
         let resolved_cast_lib = if cast_lib == 65535 || cast_lib == -1 {
             default_cast_lib.unwrap_or(1) // Fall back to cast lib 1 if no default provided
@@ -394,7 +440,7 @@ impl Score {
         }
 
         let (script_instance_ref, datum_ref) =
-            match ScriptDatumHandlers::create_script_instance(&script_ref) {
+            match reserve_player_mut(|player| ScriptDatumHandlers::create_script_instance(player, symbols, &script_ref)) {
                 Ok(result) => result,
 
                 Err(e) => {
@@ -412,63 +458,36 @@ impl Score {
         span.start_frame <= frame_num && span.end_frame >= frame_num
     }
 
-    pub async fn initialize_behavior_defaults_async(
-        script_instance_ref: ScriptInstanceRef,
-        sprite_num: u32,
+    async fn resume_behavior_defaults_after_description(
+        session: RuntimeSessionHandle,
+        player_id: PlayerId,
+        owner: OwnerToken,
+        continuation: BehaviorDefaultsContinuation,
+        prop_desc_ref: Option<DatumRef>,
     ) -> Result<(), ScriptError> {
-        let instance_datum_ref = reserve_player_mut(|player| {
-            player.alloc_datum(Datum::ScriptInstanceRef(script_instance_ref.clone()))
-        });
+        let script_instance_ref = continuation.script_instance_ref;
+        let param_snapshot = continuation.parameter_snapshot;
+        let phase = continuation.phase;
 
-        // Snapshot the authored Score PARAMETER values BEFORE anything else runs.
-        // Behaviour parameters (e.g. RaycastCar's Chassis="chassis", set in the
-        // Score's parameter dialog) are applied to the instance during begin-sprite
-        // attachment, which happens BEFORE this init pass — so at this point the only
-        // non-void properties are those authored params (plus spriteNum). Director's
-        // order is `on new me` (code defaults) THEN the authored parameter overrides,
-        // but this function calls `on new` below (needed for behaviours like pengapop's
-        // Sparkle01 that do ALL setup there). A behaviour whose `on new` re-seeds its
-        // own defaults — RaycastCar sets pChassisName="None" etc. — would clobber the
-        // already-applied params back to those defaults, so `rigidBody("None")` then
-        // fails and the physics car never initialises. Capture the params here and
-        // re-apply them after `on new` so the Score values win, as Director does.
-        let param_snapshot: Vec<(String, Datum)> = reserve_player_ref(|player| {
-            let prop_refs: Vec<(String, DatumRef)> = match player
-                .allocator
-                .get_script_instance_opt(&script_instance_ref)
-            {
-                Some(inst) => inst
-                    .properties
-                    .iter()
-                    .map(|(k, v)| (k.to_string(), v.clone()))
-                    .collect(),
-                None => Vec::new(),
-            };
-            prop_refs
-                .into_iter()
-                .filter_map(|(name, val_ref)| {
-                    let d = player.get_datum(&val_ref);
-                    if matches!(d, Datum::Void) {
-                        None
-                    } else {
-                        Some((name, d.clone()))
-                    }
-                })
-                .collect()
-        });
-
-        // Try to call getPropertyDescriptionList
-
-        let result = player_call_datum_handler(
-            &instance_datum_ref,
-            Symbol::builtin(BuiltInSymbol::GetPropertyDescriptionList),
-            &vec![],
-        )
-        .await;
-
-        if let Ok(prop_desc_ref) = result {
-            reserve_player_mut(|player| {
-                let prop_desc_datum = player.get_datum(&prop_desc_ref).clone();
+        if let Some(prop_desc_ref) = prop_desc_ref {
+            session
+                .borrow_mut()
+                .with_player(player_id, |mut context| {
+                if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                    return Err(crate::player::cancelled_scope_error());
+                }
+                let player = context.player;
+                let symbols = context.symbols;
+                let prop_desc_datum = player
+                    .allocator
+                    .try_get_datum(&prop_desc_ref)
+                    .ok_or_else(|| {
+                        ScriptError::new_code(
+                            crate::player::ScriptErrorCode::InvalidReference,
+                            "property description returned a foreign datum".to_owned(),
+                        )
+                    })?
+                    .clone();
 
                 if let Datum::PropList(prop_descriptions, _) = prop_desc_datum {
                     // First pass: collect all the data we need (avoiding nested borrows)
@@ -514,12 +533,12 @@ impl Score {
                     for (prop_name, _, desc_props) in prop_data {
                         // Check if property already has a non-void value
                         let should_set_default = if let Some(existing) =
-                            script_get_prop_opt(player, &script_instance_ref, prop_name)
+                            script_get_prop_opt(player, symbols, &script_instance_ref, prop_name.clone())?
                         {
                             let existing_datum = player.get_datum(&existing);
                             let is_void = matches!(existing_datum, Datum::Void);
                             debug!("  [getPropertyDescriptionList] Property '{}' exists with type {:?}, is_void: {}", 
-                                prop_name, existing_datum.type_enum(), is_void);
+                                symbols.display(&prop_name).unwrap_or("<foreign>"), existing_datum.type_enum(), is_void);
                             if !is_void {
                                 match existing_datum {
                                     Datum::String(s) => debug!("    Existing value: {:?}", s),
@@ -529,7 +548,7 @@ impl Score {
                             }
                             is_void
                         } else {
-                            debug!("  [getPropertyDescriptionList] Property '{}' does not exist, will set default", prop_name);
+                            debug!("  [getPropertyDescriptionList] Property '{}' does not exist, will set default", symbols.display(&prop_name).unwrap_or("<foreign>"));
                             true
                         };
 
@@ -539,14 +558,14 @@ impl Score {
                                 if key_name == Symbol::builtin(BuiltInSymbol::Default) {
                                     let default_value = player.get_datum(&default_value_ref);
                                     debug!("    [getPropertyDescriptionList] Will set default for '{}' to {:?}", 
-                                        prop_name, default_value.type_enum());
+                                        symbols.display(&prop_name).unwrap_or("<foreign>"), default_value.type_enum());
                                     defaults_to_set.push((prop_name.clone(), default_value_ref));
 
                                     break;
                                 }
                             }
                         } else {
-                            debug!("    [getPropertyDescriptionList] Skipping default for '{}' (already has value)", prop_name);
+                            debug!("    [getPropertyDescriptionList] Skipping default for '{}' (already has value)", symbols.display(&prop_name).unwrap_or("<foreign>"));
                         }
                     }
 
@@ -554,9 +573,10 @@ impl Score {
                     debug!("  [getPropertyDescriptionList] Setting {} default values", defaults_to_set.len());
                     for (prop_name, default_value_ref) in defaults_to_set {
                         let default_value = player.get_datum(&default_value_ref);
-                        debug!("    [getPropertyDescriptionList] Setting '{}' = {:?}", prop_name, default_value.type_enum());
+                        debug!("    [getPropertyDescriptionList] Setting '{}' = {:?}", symbols.display(&prop_name).unwrap_or("<foreign>"), default_value.type_enum());
                         let result = script_set_prop(
                             player,
+                           symbols,
                             &script_instance_ref,
                             prop_name,
                             &default_value_ref,
@@ -569,7 +589,9 @@ impl Score {
                 }
 
                 Ok::<(), ScriptError>(())
-            })?;
+            })
+            .ok_or_else(crate::player::cancelled_scope_error)??;
+
         }
 
         // Director instantiates a score BEHAVIOR as a child object and calls
@@ -590,7 +612,13 @@ impl Score {
         // gets double-initialized. Dispatched only to instances that actually
         // define `on new`, so beginSprite-only behaviors no-op; it never falls
         // through to movie-script `on new`.
-        let should_call_new = reserve_player_ref(|player| {
+        let should_call_new = session
+            .borrow_mut()
+            .with_player(player_id, |context| {
+            if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                return false;
+            }
+            let player = context.player;
             let Some(inst) = player.allocator.get_script_instance_opt(&script_instance_ref) else {
                 return false;
             };
@@ -606,19 +634,83 @@ impl Score {
             // explicitly with those args; auto-dispatching with none would run
             // it with VOID arguments and misbehave. `argument_name_ids` includes
             // the implicit `me`, so length <= 1 means "me only".
-            match script.get_own_handler(Symbol::from_str("new")) {
+            match script.get_own_handler(Symbol::builtin(BuiltInSymbol::New)) {
                 Some(h) => h.argument_name_ids.len() <= 1,
                 None => false,
             }
-        });
-        if should_call_new {
-            let receivers = vec![script_instance_ref.clone()];
-            let _ = crate::player::events::player_invoke_event_to_instances(
-                Symbol::from_str(&"new".to_string()),
-                &vec![],
-                &receivers,
-            )
-            .await;
+        })
+        .ok_or_else(crate::player::cancelled_scope_error)?;
+        if (should_call_new && phase == BehaviorDefaultsPhase::ApplyingDefaults)
+            || phase == BehaviorDefaultsPhase::CallingNew
+        {
+            if phase == BehaviorDefaultsPhase::ApplyingDefaults {
+            let new_handler = session
+                .borrow_mut()
+                .with_player(player_id, |context| {
+                    context
+                        .player
+                        .movie
+                        .cast_manager
+                        .get_script_by_ref(&context.player.allocator
+                            .get_script_instance_opt(&script_instance_ref)?.script)
+                        .and_then(|script| {
+                            script.get_own_handler_ref(Symbol::builtin(BuiltInSymbol::New))
+                        })
+                })
+                .ok_or_else(crate::player::cancelled_scope_error)?;
+
+            if let Some(new_handler) = new_handler {
+                let new_turn = {
+                    let mut runtime = session.borrow_mut();
+                    match runtime.start_handler(
+                        player_id,
+                        Some(script_instance_ref.clone()),
+                        new_handler,
+                        &[],
+                        false,
+                    ) {
+                        Ok(Some(scope)) => DriverTurn::Complete(scope),
+                        Ok(None) => loop {
+                            match runtime.turn_handler(player_id) {
+                                Some(DriverTurn::Waiting) => continue,
+                                Some(turn) => break turn,
+                                None => break DriverTurn::Error(ScriptError::new(
+                                    "score behavior on new driver disappeared".to_owned(),
+                                )),
+                            }
+                        },
+                        Err(error) => DriverTurn::Error(error),
+                    }
+                };
+
+                match new_turn {
+                    DriverTurn::Pending(action) => {
+                        let (future, completer) = ManualFuture::new();
+                        session.borrow_mut().retain_pending_command(PendingCommand {
+                            player_id,
+                            owner: owner.clone(),
+                            ticket: Some(action.ticket().clone()),
+                            action: Some(action),
+                            started: false,
+                            completer: Some(completer),
+                        event_sender: None,
+                            score_continuation: None,
+                        child_completion: None,
+                        eval_child: None,
+                        eval_sender: None,
+                        });
+                        if let Err(error) = future.await {
+                            warn!("score behavior on new failed: {}", error.message);
+                        }
+                    }
+                    DriverTurn::Error(error) => {
+                        warn!("score behavior on new failed: {}", error.message);
+                    }
+                    DriverTurn::Complete(_) => {}
+                    DriverTurn::Waiting => unreachable!("score handler turn consumes waiting"),
+                }
+            }
+            }
 
             // Re-apply the authored Score parameters captured before `on new`.
             // Director applies behaviour parameters AFTER `on new me`, so the
@@ -627,22 +719,211 @@ impl Score {
             // gPDL-only props (not authored, not in the snapshot) keep whatever
             // `on new` set, matching Director's gPDL-skips-non-void rule.
             if !param_snapshot.is_empty() {
-                reserve_player_mut(|player| {
+                session
+                    .borrow_mut()
+                    .with_player(player_id, |mut context| {
+                    if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                        return;
+                    }
+                    let player = context.player;
+                    let symbols = context.symbols;
                     for (name, datum) in &param_snapshot {
                         let value_ref = player.alloc_datum(datum.clone());
+                        let prop = symbols.intern(name);
                         let _ = script_set_prop(
                             player,
+                           symbols,
                             &script_instance_ref,
-                            Symbol::from_str(name),
+                            prop,
                             &value_ref,
                             false,
                         );
                     }
-                });
+                    });
             }
         }
 
         Ok(())
+    }
+
+    /// Resume the score initialization continuation after the owner-bound host
+    /// supplies the property-description result. The continuation owns the
+    /// authored parameter snapshot, so `on new` and reapplication occur once
+    /// and in Director's original order.
+    pub(crate) async fn resume_behavior_defaults_continuation(
+        session: RuntimeSessionHandle,
+        player_id: PlayerId,
+        continuation: BehaviorDefaultsContinuation,
+        result: Result<DatumRef, ScriptError>,
+    ) -> Result<(), ScriptError> {
+        let owner = continuation.owner.clone();
+        let valid = session
+            .borrow_mut()
+            .with_player(player_id, |context| {
+                owner.same_identity(&context.player.owner) && owner.is_arena_live()
+            })
+            .ok_or_else(crate::player::cancelled_scope_error)?;
+        if !valid {
+            return Err(crate::player::cancelled_scope_error());
+        }
+        Self::resume_behavior_defaults_after_description(
+            session.clone(),
+            player_id,
+            owner,
+            BehaviorDefaultsContinuation {
+                phase: BehaviorDefaultsPhase::ApplyingDefaults,
+                ..continuation
+            },
+            result.ok(),
+        )
+        .await
+    }
+
+    pub async fn initialize_behavior_defaults_async(
+        session: RuntimeSessionHandle,
+        player_id: PlayerId,
+        owner: OwnerToken,
+        script_instance_ref: ScriptInstanceRef,
+        sprite_num: u32,
+    ) -> Result<(), ScriptError> {
+        let instance_datum_ref = session
+            .borrow_mut()
+            .with_player(player_id, |mut context| {
+                if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                    return Err(crate::player::cancelled_scope_error());
+                }
+                Ok(context
+                    .player
+                    .alloc_datum(Datum::ScriptInstanceRef(script_instance_ref.clone())))
+            })
+            .ok_or_else(crate::player::cancelled_scope_error)??;
+
+        let param_snapshot: Vec<(String, Datum)> = session
+            .borrow_mut()
+            .with_player(player_id, |context| {
+                if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                    return Err(crate::player::cancelled_scope_error());
+                }
+                let player = context.player;
+                let symbols = context.symbols;
+                let prop_refs: Vec<(String, DatumRef)> = match player
+                    .allocator
+                    .get_script_instance_opt(&script_instance_ref)
+                {
+                    Some(inst) => inst
+                        .properties
+                        .iter()
+                        .map(|(key, value)| {
+                            (
+                                symbols.display(key).unwrap_or("<foreign symbol>").to_owned(),
+                                value.clone(),
+                            )
+                        })
+                        .collect(),
+                    None => Vec::new(),
+                };
+                Ok(prop_refs
+                    .into_iter()
+                    .filter_map(|(name, value_ref)| {
+                        let value = player.get_datum(&value_ref);
+                        (!matches!(value, Datum::Void)).then(|| (name, value.clone()))
+                    })
+                    .collect())
+            })
+            .ok_or_else(crate::player::cancelled_scope_error)??;
+
+        let gpd_handler = session
+            .borrow_mut()
+            .with_player(player_id, |context| {
+                if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                    return Err(crate::player::cancelled_scope_error());
+                }
+                ScriptInstanceUtils::get_script_instance_handler(
+                    Symbol::builtin(BuiltInSymbol::GetPropertyDescriptionList),
+                    &script_instance_ref,
+                    context.player,
+                )
+            })
+            .ok_or_else(crate::player::cancelled_scope_error)??;
+
+        let result = if let Some(gpd_handler) = gpd_handler {
+            let turn = {
+                let mut runtime = session.borrow_mut();
+                match runtime.start_handler(
+                    player_id,
+                    Some(script_instance_ref.clone()),
+                    gpd_handler,
+                    &[],
+                    false,
+                ) {
+                    Ok(Some(scope)) => DriverTurn::Complete(scope),
+                    Ok(None) => loop {
+                        match runtime.turn_handler(player_id) {
+                            Some(DriverTurn::Waiting) => continue,
+                            Some(turn) => break turn,
+                            None => break DriverTurn::Error(ScriptError::new(
+                                "property description driver disappeared".to_owned(),
+                            )),
+                        }
+                    },
+                    Err(error) => DriverTurn::Error(error),
+                }
+            };
+            match turn {
+                DriverTurn::Complete(scope) => Some(Ok(scope.return_value)),
+                DriverTurn::Error(error) => Some(Err(error)),
+                DriverTurn::Pending(action) => {
+                    let (future, completer) = ManualFuture::new();
+                    session.borrow_mut().retain_pending_command(PendingCommand {
+                        player_id,
+                        owner: owner.clone(),
+                        ticket: Some(action.ticket().clone()),
+                        action: Some(action),
+                        started: false,
+                        completer: Some(completer),
+                        event_sender: None,
+                        score_continuation: None,
+                        child_completion: None,
+                        eval_child: None,
+                        eval_sender: None,
+                    });
+                    Some(future.await)
+                }
+                DriverTurn::Waiting => unreachable!("score handler turn consumes waiting"),
+            }
+        } else {
+            Some(Err(ScriptError::new(
+                "getPropertyDescriptionList handler disappeared".to_owned(),
+            )))
+        };
+
+        Self::resume_behavior_defaults_after_description(
+            session.clone(),
+            player_id,
+            owner.clone(),
+            BehaviorDefaultsContinuation {
+                script_instance_ref,
+                sprite_num,
+                owner,
+                parameter_snapshot: param_snapshot,
+                phase: BehaviorDefaultsPhase::ApplyingDefaults,
+            },
+            match result {
+                Some(Ok(value)) => {
+                    let checked = session
+                        .borrow_mut()
+                        .with_player(player_id, |context| {
+                            checked_internal_datum(context.player, context.symbols, &value)
+                                .map(|_| ())
+                        })
+                        .ok_or_else(crate::player::cancelled_scope_error)??;
+                    let _ = checked;
+                    Some(value)
+                }
+                Some(Err(_)) | None => None,
+            },
+        )
+        .await
     }
 
     /// Deferred revert for sprites unpuppeted via `puppetSprite(N, FALSE)` that
@@ -673,7 +954,12 @@ impl Score {
         any
     }
 
-    pub fn begin_sprites(&mut self, score_ref: ScoreRef, frame_num: u32) {
+    pub fn begin_sprites(
+        &mut self,
+        score_ref: ScoreRef,
+        frame_num: u32,
+        symbols: &mut SymbolTable,
+    ) {
         // Clean up sound channel triggers - but only once per frame to prevent double-triggering
         // Check if we already processed this frame
         let already_processed = self.last_sound_clear_frame == Some(frame_num);
@@ -988,7 +1274,7 @@ impl Score {
                 // member directly since sprite_set_prop always writes to main stage score.
                 match &score_ref {
                     ScoreRef::Stage => {
-                        let _ = sprite_set_prop(sprite_num, Symbol::builtin(BuiltInSymbol::Member), Datum::CastMember(member.clone()));
+                        let _ = reserve_player_mut(|player| sprite_set_prop(player, symbols, sprite_num, Symbol::builtin(BuiltInSymbol::Member), Datum::CastMember(member.clone())));
                     }
                     ScoreRef::FilmLoop(_) => {
                         sprite.member = Some(member.clone());
@@ -1248,7 +1534,7 @@ impl Score {
                 match &score_ref {
                     ScoreRef::Stage => {
                         if current_member.as_ref() != Some(&member) {
-                            let _ = sprite_set_prop(sprite_num, Symbol::builtin(BuiltInSymbol::Member), Datum::CastMember(member.clone()));
+                            let _ = reserve_player_mut(|player| sprite_set_prop(player, symbols, sprite_num, Symbol::builtin(BuiltInSymbol::Member), Datum::CastMember(member.clone())));
                         }
                     }
                     ScoreRef::FilmLoop(_) => {
@@ -1311,14 +1597,16 @@ impl Score {
                     });
                     if !already_attached {
                         if let Some((instance_ref, _datum)) =
-                            Self::create_behavior(script_cast_lib, script_member, None)
+                            Self::create_behavior(script_cast_lib, script_member, None, symbols)
                         {
+                            let sprite_num_symbol = symbols.intern("spriteNum");
                             reserve_player_mut(|player| {
                                 let sprite_num_ref = player.alloc_datum(Datum::Int(sprite_num as i32));
-                                let _ = script_set_prop(
-                                    player,
-                                    &instance_ref,
-                                    Symbol::from_str(&"spriteNum".to_string()),
+                                            let _ = script_set_prop(
+                                                player,
+                                                symbols,
+                                                &instance_ref,
+                                                sprite_num_symbol,
                                     &sprite_num_ref,
                                     false,
                                 );
@@ -1380,7 +1668,7 @@ impl Score {
 
                     match &score_ref {
                         ScoreRef::Stage => {
-                            let _ = sprite_set_prop(sprite_num, Symbol::builtin(BuiltInSymbol::Member), Datum::CastMember(member.clone()));
+                            let _ = reserve_player_mut(|player| sprite_set_prop(player, symbols, sprite_num, Symbol::builtin(BuiltInSymbol::Member), Datum::CastMember(member.clone())));
                         }
                         ScoreRef::FilmLoop(_) => {
                             let sprite = self.get_sprite_mut(sprite_num);
@@ -1532,7 +1820,7 @@ impl Score {
             for (sprite_num, member) in member_updates {
                 match &score_ref {
                     ScoreRef::Stage => {
-                        let _ = sprite_set_prop(sprite_num, Symbol::from_str("member"), Datum::CastMember(member));
+                        let _ = reserve_player_mut(|player| sprite_set_prop(player, symbols, sprite_num, Symbol::builtin(BuiltInSymbol::Member), Datum::CastMember(member)));
                     }
                     ScoreRef::FilmLoop(_) => {
                         self.get_sprite_mut(sprite_num).member = Some(member);
@@ -1750,6 +2038,7 @@ impl Score {
                         behavior_ref.cast_lib as i32,
                         behavior_ref.cast_member as i32,
                         default_cast_lib,
+                        symbols,
                     );
 
                     // Skip this behavior if creation failed (script not found)
@@ -1777,7 +2066,8 @@ impl Score {
                         let sprite_num_ref = player.alloc_datum(Datum::Int(*channel_num as i32));
                         let _ = script_set_prop(
                             player,
-                            &actual_instance_ref,
+                            symbols,
+&actual_instance_ref,
                             Symbol::builtin(BuiltInSymbol::SpriteNum),
                             &sprite_num_ref,
                             false,
@@ -1791,7 +2081,8 @@ impl Score {
                                 "[BEHAVIOR-APPLY] frame_interval: applying {} params for cast {}/{}",
                                 behavior_ref.parameter.len(), behavior_ref.cast_lib, behavior_ref.cast_member
                             );
-                            for param_ref in &behavior_ref.parameter {
+                            let param_refs = materialize_behavior_parameters(player, symbols, &behavior_ref.parameter);
+                            for param_ref in &param_refs {
                                 let param_datum = player.get_datum(param_ref);
                                 debug!("  Parameter type: {:?}", param_datum.type_enum());
                                 if let Datum::PropList(props, _) = param_datum {
@@ -1802,7 +2093,7 @@ impl Score {
                                                 let value = player.get_datum(value_ref);
                                                 debug!(
                                                     "    prop: {} type: {:?}",
-                                                    key_name,
+                                                    symbols.display(&key_name).unwrap_or("<foreign>"),
                                                     value.type_enum()
                                                 );
 
@@ -1826,20 +2117,21 @@ impl Score {
                                             Datum::Float(f) => format!("{:.4}", f),
                                             Datum::String(s) => format!("{:?}", s),
                                             Datum::Vector(v) => format!("vector({:.2},{:.2},{:.2})", v[0], v[1], v[2]),
-                                            Datum::Symbol(s) => format!("#{}", s),
+                                            Datum::Symbol(s) => format!("#{}", symbols.display(s).unwrap_or("<foreign>")),
                                             other => format!("<{:?}>", other.type_enum()),
                                         };
                                         let result = script_set_prop(
                                             player,
-                                            &actual_instance_ref,
-                                            *prop_name,
+                                            symbols,
+&actual_instance_ref,
+                                            prop_name.clone(),
                                             value_ref,
                                             false,
                                         );
                                         if let Err(e) = &result {
                                             warn!(
                                                 "[BEHAVIOR-APPLY] FAILED {}.{} = {}: {}",
-                                                behavior_ref.cast_member, prop_name, val_str, e.message
+                                                behavior_ref.cast_member, symbols.display(prop_name).unwrap_or("<foreign>"), val_str, e.message
                                             );
                                         }
                                     }
@@ -1850,10 +2142,10 @@ impl Score {
                                             Datum::Float(f) => format!("{:.4}", f),
                                             Datum::String(s) => format!("{:?}", &s[..s.len().min(30)]),
                                             Datum::Vector(v) => format!("v({:.1},{:.1},{:.1})", v[0], v[1], v[2]),
-                                            Datum::Symbol(s) => format!("#{}", s),
+                                            Datum::Symbol(s) => format!("#{}", symbols.display(s).unwrap_or("<foreign>")),
                                             other => format!("<{:?}>", other.type_enum()),
                                         };
-                                        format!("{}={}", name, v)
+                                        format!("{}={}", symbols.display(name).unwrap_or("<foreign>"), v)
                                     }).collect();
                                     debug!(
                                         "[BEHAVIOR-APPLY] cast {}/{}: [{}]",
@@ -1972,6 +2264,7 @@ impl Score {
                             behavior.cast_lib as i32,
                             behavior.cast_member as i32,
                             default_cast_lib,
+                            symbols,
                         );
 
                         let (script_instance_ref, datum_ref) = match behavior_result {
@@ -1996,7 +2289,8 @@ impl Score {
                             let sprite_num_ref = player.alloc_datum(Datum::Int(channel_num as i32));
                             let _ = script_set_prop(
                                 player,
-                                &actual_instance_ref,
+                                symbols,
+&actual_instance_ref,
                                 Symbol::builtin(BuiltInSymbol::SpriteNum),
                                 &sprite_num_ref,
                                 false,
@@ -2010,7 +2304,8 @@ impl Score {
                                 behavior.parameter.len(), behavior.cast_lib, behavior.cast_member
                             );
                             reserve_player_mut(|player| {
-                                for param_ref in &behavior.parameter {
+                                let param_refs = materialize_behavior_parameters(player, symbols, &behavior.parameter);
+                                for param_ref in &param_refs {
                                     let param_datum = player.get_datum(param_ref);
                                     debug!("  [sprite_details] Parameter type: {:?}", param_datum.type_enum());
                                     if let Datum::PropList(props, _) = param_datum {
@@ -2019,7 +2314,7 @@ impl Score {
                                                 let key = player.get_datum(key_ref);
                                                 if let Datum::Symbol(key_name) = key {
                                                     let value = player.get_datum(value_ref);
-                                                    debug!("    [sprite_details] prop: {} type: {:?}", key_name, value.type_enum());
+                                                    debug!("    [sprite_details] prop: {} type: {:?}", symbols.display(key_name).unwrap_or("<foreign>"), value.type_enum());
                                                     match value {
                                                         Datum::String(s) => debug!("      [sprite_details] value: {:?}", s),
                                                         Datum::Int(n) => debug!("      [sprite_details] value: {}", n),
@@ -2035,15 +2330,16 @@ impl Score {
                                         for (prop_name, value_ref) in props_to_set {
                                             let result = script_set_prop(
                                                 player,
-                                                &actual_instance_ref,
-                                                prop_name,
+                                                symbols,
+&actual_instance_ref,
+                                                prop_name.clone(),
                                                 &value_ref,
                                                 false,
                                             );
                                             if let Err(e) = &result {
                                                 warn!(
                                                     "[BEHAVIOR-APPLY] FAILED to set {}: {}",
-                                                    prop_name, e.message
+                                                    symbols.display(&prop_name).unwrap_or("<foreign>"), e.message
                                                 );
                                             }
                                         }
@@ -2116,6 +2412,7 @@ impl Score {
                     resolved_cast_lib,
                     script_member,
                     default_cast_lib,
+                    symbols,
                 );
 
                 match behavior_result {
@@ -2133,7 +2430,8 @@ impl Score {
                             let sprite_num_ref = player.alloc_datum(Datum::Int(channel_num as i32));
                             let _ = script_set_prop(
                                 player,
-                                &actual_instance_ref,
+                                symbols,
+&actual_instance_ref,
                                 Symbol::builtin(BuiltInSymbol::SpriteNum),
                                 &sprite_num_ref,
                                 false,
@@ -2252,6 +2550,7 @@ impl Score {
                             behavior.cast_lib as i32,
                             behavior.cast_member as i32,
                             default_cast_lib,
+                            symbols,
                         );
 
                         let (_, datum_ref) = match behavior_result {
@@ -2272,7 +2571,8 @@ impl Score {
                             let sprite_num_ref = player.alloc_datum(Datum::Int(channel_num as i32));
                             let _ = script_set_prop(
                                 player,
-                                &actual_instance_ref,
+                                symbols,
+&actual_instance_ref,
                                 Symbol::builtin(BuiltInSymbol::SpriteNum),
                                 &sprite_num_ref,
                                 false,
@@ -2284,7 +2584,8 @@ impl Score {
                             debug!("🔧 [delta-data] Applying {} saved parameters for behavior cast {}/{}", 
                                 behavior.parameter.len(), behavior.cast_lib, behavior.cast_member);
                             reserve_player_mut(|player| {
-                                for param_ref in &behavior.parameter {
+                                let param_refs = materialize_behavior_parameters(player, symbols, &behavior.parameter);
+                                for param_ref in &param_refs {
                                     let param_datum = player.get_datum(param_ref);
                                     debug!("  [delta-data] Parameter type: {:?}", param_datum.type_enum());
                                     if let Datum::PropList(props, _) = param_datum {
@@ -2293,7 +2594,7 @@ impl Score {
                                                 let key = player.get_datum(key_ref);
                                                 if let Datum::Symbol(key_name) = key {
                                                     let value = player.get_datum(value_ref);
-                                                    debug!("    [delta-data] prop: {} type: {:?}", key_name, value.type_enum());
+                                                    debug!("    [delta-data] prop: {} type: {:?}", symbols.display(key_name).unwrap_or("<foreign>"), value.type_enum());
                                                     match value {
                                                         Datum::String(s) => debug!("      [delta-data] value: {:?}", s),
                                                         Datum::Int(n) => debug!("      [delta-data] value: {}", n),
@@ -2306,18 +2607,19 @@ impl Score {
                                             })
                                             .collect();
                                         for (prop_name, value_ref) in props_to_set {
-                                            debug!("      [delta-data] Setting property {} on script instance", prop_name);
+                                            debug!("      [delta-data] Setting property {} on script instance", symbols.display(&prop_name).unwrap_or("<foreign>"));
                                             let result = script_set_prop(
                                                 player,
-                                                &actual_instance_ref,
-                                                prop_name,
+                                                symbols,
+&actual_instance_ref,
+                                                prop_name.clone(),
                                                 &value_ref,
                                                 false,
                                             );
                                             if let Err(e) = result {
-                                                debug!("      [delta-data] ⚠️ Failed to set property {}: {}", prop_name, e.message);
+                                                debug!("      [delta-data] ⚠️ Failed to set property {}: {}", symbols.display(&prop_name).unwrap_or("<foreign>"), e.message);
                                             } else {
-                                                debug!("      [delta-data] ✅ Successfully set property {}", prop_name);
+                                                debug!("      [delta-data] ✅ Successfully set property {}", symbols.display(&prop_name).unwrap_or("<foreign>"));
                                             }
                                         }
                                     }
@@ -2417,6 +2719,7 @@ impl Score {
                     behavior_ref.cast_lib as i32,
                     behavior_ref.cast_member as i32,
                     default_cast_lib,
+                    symbols,
                 );
 
                 // Skip if creation failed (script not found)
@@ -2452,7 +2755,8 @@ impl Score {
                     let sprite_num_ref = player.alloc_datum(Datum::Int(0));
                     let _ = script_set_prop(
                         player,
-                        &actual_instance_ref,
+                        symbols,
+&actual_instance_ref,
                         Symbol::builtin(BuiltInSymbol::SpriteNum),
                         &sprite_num_ref,
                         false,
@@ -2464,7 +2768,8 @@ impl Score {
                     reserve_player_mut(|player| {
                         debug!("  Applying {} parameters", behavior_ref.parameter.len());
 
-                        for param_ref in &behavior_ref.parameter {
+                        let param_refs = materialize_behavior_parameters(player, symbols, &behavior_ref.parameter);
+                        for param_ref in &param_refs {
                             let param_datum = player.get_datum(param_ref);
 
                             if let Datum::PropList(props, _) = param_datum {
@@ -2482,10 +2787,11 @@ impl Score {
 
                                 // Then set them
                                 for (prop_name, value_ref) in props_to_set {
-                                    debug!("    Setting property: {}", prop_name);
+                                    debug!("    Setting property: {}", symbols.display(&prop_name).unwrap_or("<foreign>"));
                                     let _ = script_set_prop(
                                         player,
-                                        &actual_instance_ref,
+                                        symbols,
+&actual_instance_ref,
                                         prop_name,
                                         &value_ref,
                                         false,
@@ -2520,7 +2826,7 @@ impl Score {
                                 if let CastMemberType::FilmLoop(film_loop) = &mut filmloop_member.member_type {
                                     let current_frame = film_loop.current_frame;
                                     // Make sure filmloop sprites are entered and have data
-                                    film_loop.score.begin_sprites(filmloop_score_ref, current_frame);
+                                    film_loop.score.begin_sprites(filmloop_score_ref, current_frame, symbols);
                                     film_loop.score.apply_tween_modifiers(current_frame);
                                 }
                             }
@@ -3032,7 +3338,6 @@ impl Score {
         }
 
         self.invalidate_render_channel_cache();
-        JsApi::dispatch_score_changed();
     }
 
     /// Channel whose sprite carries `name`, for `sprite("someName")`.
@@ -3465,7 +3770,6 @@ impl Score {
         } else {
             console_warn!("No score chunk found in movie - score will be empty");
         }
-        JsApi::dispatch_score_changed();
     }
 
     pub fn reset(&mut self) {
@@ -3480,7 +3784,6 @@ impl Score {
         }
 
         self.invalidate_render_channel_cache();
-        JsApi::dispatch_score_changed();
     }
 
     pub fn get_sorted_channels(&self, frame_num: u32) -> Vec<&SpriteChannel> {
@@ -3629,7 +3932,7 @@ impl Score {
     /// transition effect channel has an entry on that exact frame. Director fires a
     /// score transition on the frame it's placed in (between the previous stage and
     /// this frame's stage).
-    pub fn get_frame_transition(&self, frame: u32) -> Option<CastMemberRef> {
+pub fn get_frame_transition(&self, frame: u32) -> Option<CastMemberRef> {
         self.transition_channel_data
             .iter()
             .find(|(f, _, member)| *f == frame && *member > 0)
@@ -3640,11 +3943,114 @@ impl Score {
     }
 }
 
+fn checked_score_datum<'a>(
+    player: &'a DirPlayer,
+    symbols: &SymbolTable,
+    datum_ref: &DatumRef,
+) -> Result<&'a Datum, ScriptError> {
+    let datum = match datum_ref {
+        DatumRef::Void => &Datum::Void,
+        _ => player.allocator.try_get_datum(datum_ref).ok_or_else(|| {
+            ScriptError::new_code(
+                crate::player::ScriptErrorCode::InvalidReference,
+                format!("invalid datum reference {datum_ref}"),
+            )
+        })?,
+    };
+    checked_score_value(player, symbols, datum)
+}
+
+fn checked_score_value<'a>(
+    player: &'a DirPlayer,
+    symbols: &SymbolTable,
+    value: &'a Datum,
+) -> Result<&'a Datum, ScriptError> {
+    crate::player::compare::validate_direct_symbol_fields(value, symbols)?;
+    if let Datum::ScriptInstanceRef(instance_ref) = value {
+        player.allocator.get_script_instance_opt(instance_ref).ok_or_else(|| {
+            ScriptError::new_code(
+                crate::player::ScriptErrorCode::InvalidReference,
+                "foreign or stale ScriptInstanceRef".to_owned(),
+            )
+        })?;
+    }
+    Ok(value)
+}
+
+/// Resolve a sprite's behavior instances through the live
+/// `scriptInstanceList` cache, validating only the datum references visited by
+/// this shallow lookup. This mirrors `DirPlayer::get_sprite_script_instance_ids`
+/// without allowing a foreign or stale cached list/item/instance reference to
+/// panic the allocator.
+pub(crate) fn get_sprite_script_instance_ids_checked(
+    player: &mut DirPlayer,
+    symbols: &SymbolTable,
+    sprite_id: i16,
+    fallback: &[ScriptInstanceRef],
+) -> Result<Vec<ScriptInstanceRef>, ScriptError> {
+    let Some(cached_ref) = player.script_instance_list_cache.get(&sprite_id).cloned() else {
+        let mut ids = Vec::with_capacity(fallback.len());
+        for instance_ref in fallback {
+            let value = Datum::ScriptInstanceRef(instance_ref.clone());
+            checked_score_value(player, symbols, &value)?;
+            ids.push(instance_ref.clone());
+        }
+        return Ok(ids);
+    };
+
+    let generation = *player
+        .script_instance_list_generation
+        .get(&sprite_id)
+        .unwrap_or(&0);
+    if let Some((cached_generation, ids)) = player.script_instance_list_ids_cache.get(&sprite_id) {
+        if *cached_generation == generation {
+            let retained_ids = ids.clone();
+            for instance_ref in &retained_ids {
+                let value = Datum::ScriptInstanceRef(instance_ref.clone());
+                checked_score_value(player, symbols, &value)?;
+            }
+            return Ok(retained_ids);
+        }
+    }
+
+    let cached = checked_score_datum(player, symbols, &cached_ref)?;
+    let ids = match cached {
+        Datum::List(_, item_refs, _) => {
+            let mut ids = Vec::new();
+            for item_ref in item_refs {
+                let item = checked_score_datum(player, symbols, item_ref)?;
+                if let Datum::ScriptInstanceRef(instance_ref) = item {
+                    ids.push(instance_ref.clone());
+                }
+            }
+            ids
+        }
+        _ => {
+            let mut ids = Vec::with_capacity(fallback.len());
+            for instance_ref in fallback {
+                let value = Datum::ScriptInstanceRef(instance_ref.clone());
+                checked_score_value(player, symbols, &value)?;
+                ids.push(instance_ref.clone());
+            }
+            ids
+        }
+    };
+
+    player
+        .script_instance_list_ids_cache
+        .insert(sprite_id, (generation, ids.clone()));
+    Ok(ids)
+}
+
 pub fn sprite_get_prop(
     player: &mut DirPlayer,
+    symbols: &mut SymbolTable,
     sprite_id: i16,
     prop_name: Symbol,
 ) -> Result<Datum, ScriptError> {
+    symbols
+        .display(&prop_name)
+        .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
     // Clear any previous cached ref. Only set for scriptInstanceList.
     player.last_sprite_prop_ref = None;
     // Use context-aware sprite lookup to support filmloop behaviors
@@ -3744,7 +4150,7 @@ pub fn sprite_get_prop(
                 Some(m) if m.is_valid() => {
                     match player.movie.cast_manager.find_member_by_ref(&m) {
                         Some(member) => {
-                            Ok(Datum::Symbol(Symbol::from_str(&member.member_type.type_string().to_string())))
+                            Ok(Datum::Symbol(symbols.intern(&member.member_type.type_string().to_string())))
                         }
                         None => Ok(Datum::Int(0)),
                     }
@@ -3763,7 +4169,7 @@ pub fn sprite_get_prop(
                 .and_then(|c| c.member)
                 .unwrap_or((member_ref.cast_lib, member_ref.cast_member));
             let cam_name = cam
-                .map(|c| crate::player::symbols::symbol::Symbol::from_str(&c.name))
+                .map(|c| symbols.intern(&c.name))
                 .unwrap_or_else(|| crate::player::symbols::builtin::BuiltInSymbol::DefaultView.into());
             Ok(Datum::Shockwave3dObjectRef(crate::director::lingo::datum::Shockwave3dObjectRef {
                 cast_lib,
@@ -3785,13 +4191,30 @@ pub fn sprite_get_prop(
             // Return cached list datum if available, so that
             // sprite.scriptInstanceList.add(x) modifies the live list.
             if let Some(cached_ref) = player.script_instance_list_cache.get(&sprite_id).cloned() {
+                let cached = checked_score_datum(player, &*symbols, &cached_ref)?;
+                if let Datum::List(_, item_refs, _) = cached {
+                    // Validate only the list's immediate item references. The
+                    // list's non-instance values remain part of the returned
+                    // Director value, and nested datums are intentionally not
+                    // traversed here.
+                    for item_ref in item_refs {
+                        checked_score_datum(player, &*symbols, item_ref)?;
+                    }
+                }
+                let cached_value = cached.clone();
                 // Set last_sprite_prop_ref so callers use this DatumRef
                 // instead of allocating a new one (which would create
                 // a separate copy that .add() wouldn't sync back).
                 player.last_sprite_prop_ref = Some(cached_ref.clone());
-                Ok(player.get_datum(&cached_ref).clone())
+                Ok(cached_value)
             } else {
                 let initial_ids = sprite.map_or(vec![], |x| x.script_instance_list.clone());
+                // Validate initial instance refs before allocating item/list
+                // datums or mutating the cache.
+                for instance_ref in &initial_ids {
+                    let value = Datum::ScriptInstanceRef(instance_ref.clone());
+                    checked_score_value(player, &*symbols, &value)?;
+                }
                 let instance_ids: VecDeque<DatumRef> = initial_ids
                     .iter()
                     .map(|x| player.alloc_datum(Datum::ScriptInstanceRef(x.clone())))
@@ -3822,17 +4245,29 @@ pub fn sprite_get_prop(
         }))),
         Some(BuiltInSymbol::ScriptNum) => {
             let fallback = sprite.map_or(vec![], |sprite| sprite.script_instance_list.clone());
-            let script_ids = player.get_sprite_script_instance_ids(
+            let script_ids = get_sprite_script_instance_ids_checked(
+                player,
+                &*symbols,
                 sprite_id,
                 fallback.as_slice(),
-            );
+            )?;
             let script_num = script_ids
                 .first()
                 .map(|script_instance_ref| {
-                    player.allocator.get_script_instance(&script_instance_ref)
+                    player
+                        .allocator
+                        .get_script_instance_opt(script_instance_ref)
+                        .ok_or_else(|| {
+                            ScriptError::new_code(
+                                crate::player::ScriptErrorCode::InvalidReference,
+                                "foreign or stale ScriptInstanceRef".to_owned(),
+                            )
+                        })
+                        .map(|script_instance| script_instance.script.cast_member)
                 })
-                .map(|script_instance| script_instance.script.cast_member);
-            Ok(Datum::Int(script_num.unwrap_or(0)))
+                .transpose()?
+                .unwrap_or(0);
+            Ok(Datum::Int(script_num))
         }
         Some(BuiltInSymbol::Visible | BuiltInSymbol::Visibility) => Ok(datum_bool(sprite.map_or(true, |sprite| sprite.visible))),
         Some(BuiltInSymbol::Puppet) => Ok(datum_bool(sprite.map_or(false, |sprite| sprite.puppet))),
@@ -3940,20 +4375,26 @@ pub fn sprite_get_prop(
             // behavior's real value was unreachable and the paired setter
             // blanked the SWF (see the setter arm). Only when no behavior owns
             // the property do we read the Flash playhead (storyscramble tiles).
-            let behavior_val = sprite.and_then(|sprite| {
-                reserve_player_mut(|player| {
-                    sprite.script_instance_list.iter().find_map(|behavior| {
-                        script_get_prop_opt(player, behavior, Symbol::from_str(&prop_name.to_string()))
-                    })
-                })
-            });
+            let behavior_refs = sprite
+                .map(|sprite| sprite.script_instance_list.clone())
+                .unwrap_or_default();
+            let has_member = sprite.and_then(|s| s.member.as_ref()).is_some();
+            let mut behavior_val = None;
+            for behavior in behavior_refs {
+                if let Some(ref_) = script_get_prop_opt(player, &*symbols, &behavior, prop_name.clone())? {
+                    checked_score_datum(player, &*symbols, &ref_)?;
+                    behavior_val = Some(ref_);
+                    break;
+                }
+            }
             match behavior_val {
                 Some(ref_) => {
+                    checked_score_datum(player, &*symbols, &ref_)?;
                     let datum_clone = player.get_datum(&ref_).clone();
                     player.last_sprite_prop_ref = Some(ref_);
                     Ok(datum_clone)
                 }
-                None if sprite.and_then(|s| s.member.as_ref()).is_some() => {
+                None if has_member => {
                     Ok(Datum::Int(ruffle_get_current_frame(sprite_id as i32)))
                 }
                 None => Ok(Datum::Int(0)),
@@ -4020,32 +4461,41 @@ pub fn sprite_get_prop(
             // attached to this sprite. Used by trigger behaviors (Mouse Left etc.)
             // for event routing.
             use crate::director::lingo::datum::DatumType;
-            let behaviors: Vec<(crate::player::cast_lib::CastMemberRef, String)> = sprite
-                .map(|s| {
-                    reserve_player_mut(|player| {
-                        s.script_instance_list.iter().filter_map(|beh_ref| {
-                            let inst = player.allocator.get_script_instance_opt(beh_ref)?;
-                            let member_ref = inst.script.clone();
-                            // Serialize properties as "[#name: value, ...]"
-                            let mut parts: Vec<String> = Vec::new();
-                            for (key, val_ref) in &inst.properties {
-                                let val = player.get_datum(val_ref);
-                                let val_str = match val {
-                                    Datum::Int(i) => i.to_string(),
-                                    Datum::Float(f) => format!("{:.4}", f),
-                                    Datum::String(s) => format!("\"{}\"", s),
-                                    Datum::Symbol(s) => format!("#{}", s),
-                                    Datum::Void => "VOID".to_string(),
-                                    _ => "VOID".to_string(),
-                                };
-                                parts.push(format!("#{}: {}", key.as_str(), val_str));
-                            }
-                            let props_str = format!("[{}]", parts.join(", "));
-                            Some((member_ref, props_str))
-                        }).collect::<Vec<_>>()
-                    })
-                })
+            let behavior_refs = sprite
+                .map(|s| s.script_instance_list.clone())
                 .unwrap_or_default();
+            let mut behaviors = Vec::new();
+            for beh_ref in behavior_refs {
+                let inst = player.allocator.get_script_instance_opt(&beh_ref).ok_or_else(|| {
+                    ScriptError::new_code(
+                        crate::player::ScriptErrorCode::InvalidReference,
+                        "foreign or stale ScriptInstanceRef".to_owned(),
+                    )
+                })?;
+                let member_ref = inst.script.clone();
+                let mut parts: Vec<String> = Vec::new();
+                for (key, val_ref) in &inst.properties {
+                    let key_text = symbols
+                        .display(key)
+                        .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+                    let val = checked_score_datum(player, &*symbols, val_ref)?;
+                    let val_str = match val {
+                        Datum::Int(i) => i.to_string(),
+                        Datum::Float(f) => format!("{:.4}", f),
+                        Datum::String(s) => format!("\"{}\"", s),
+                        Datum::Symbol(s) => format!(
+                            "#{}",
+                            symbols
+                                .display(s)
+                                .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
+                        ),
+                        Datum::Void => "VOID".to_string(),
+                        _ => "VOID".to_string(),
+                    };
+                    parts.push(format!("#{}: {}", key_text, val_str));
+                }
+                behaviors.push((member_ref, format!("[{}]", parts.join(", "))));
+            }
 
             let items: VecDeque<DatumRef> = behaviors.into_iter().map(|(member_ref, props_str)| {
                 let member_datum = player.alloc_datum(Datum::CastMember(member_ref));
@@ -4057,9 +4507,23 @@ pub fn sprite_get_prop(
             Ok(Datum::List(DatumType::List, items, false))
         }
         _ => {
-            let datum_ref = sprite.and_then(|sprite| {
-                let fallback = sprite.script_instance_list.clone();
-                reserve_player_mut(|player| {
+            // Preserve the original nonexistent-sprite guard. Runtime-added
+            // behavior caches must not make an invalid channel look like a
+            // valid sprite during custom-property lookup.
+            if sprite.is_none() {
+                return Ok(Datum::Void);
+            }
+            let fallback = sprite
+                .map(|sprite| sprite.script_instance_list.clone())
+                .unwrap_or_default();
+            let instances = get_sprite_script_instance_ids_checked(
+                player,
+                &*symbols,
+                sprite_id,
+                fallback.as_slice(),
+            )?;
+            let mut datum_ref = None;
+            for behavior in instances {
                     // Resolve through get_sprite_script_instance_ids, NOT the
                     // sprite's internal Vec. A behaviour attached at runtime
                     // with `sprite(N).scriptInstanceList.add/addAt(...)` only
@@ -4081,13 +4545,12 @@ pub fn sprite_get_prop(
                     // (a filled rect in the character's authored colour — the
                     // black squares), while the score-authored player sprite
                     // worked fine.
-                    let instances =
-                        player.get_sprite_script_instance_ids(sprite_id, fallback.as_slice());
-                    instances.iter().find_map(|behavior| {
-                        script_get_prop_opt(player, behavior, Symbol::from_str(&prop_name.to_string()))
-                    })
-                })
-            });
+                if let Some(ref_) = script_get_prop_opt(player, &*symbols, &behavior, prop_name.clone())? {
+                    checked_score_datum(player, &*symbols, &ref_)?;
+                    datum_ref = Some(ref_);
+                    break;
+                }
+            }
             match datum_ref {
                 // Some(ref_) => Ok(player.get_datum(&ref_).clone()),
 
@@ -4099,6 +4562,7 @@ pub fn sprite_get_prop(
                     // mutate a *clone*, severing the link to the script instance's
                     // storage (e.g. setaProp(sprite(N).pCustomData, key, val) would
                     // not propagate back to the behavior's pCustomData).
+                    checked_score_datum(player, &*symbols, &ref_)?;
                     let datum_clone = player.get_datum(&ref_).clone();
                     player.last_sprite_prop_ref = Some(ref_);
                     Ok(datum_clone)
@@ -4106,9 +4570,10 @@ pub fn sprite_get_prop(
 
                 None => {
                     // Unknown sprite props may be custom behavior properties — return VOID
-                    warn!(
-                        "Unknown sprite prop '{}' — returning VOID", prop_name
-                    );
+                    let prop_display = symbols
+                        .display(&prop_name)
+                        .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+                    warn!("Unknown sprite prop '{}' — returning VOID", prop_display);
                     Ok(Datum::Void)
                 }
             }
@@ -4116,13 +4581,12 @@ pub fn sprite_get_prop(
     }
 }
 
-pub fn borrow_sprite_mut<T1, F1, T2, F2>(sprite_id: i16, player_f: F2, f: F1) -> T1
+pub fn borrow_sprite_mut<T1, F1, T2, F2>(player: &mut DirPlayer, sprite_id: i16, player_f: F2, f: F1) -> T1
 where
     F1: FnOnce(&mut Sprite, T2) -> T1,
     F2: FnOnce(&DirPlayer) -> T2,
 {
-    reserve_player_mut(|player| {
-        let arg = player_f(player);
+    let arg = player_f(player);
         // Check if we're in a filmloop context
         let in_filmloop_context = !matches!(player.current_score_context, ScoreRef::Stage);
 
@@ -4136,18 +4600,18 @@ where
         } else {
             player.movie.score.get_sprite_mut(sprite_id)
         };
-        f(sprite, arg)
-    })
+    f(sprite, arg)
 }
 
 fn resolve_sprite_member_assignment(
     player: &DirPlayer,
+    symbols: &SymbolTable,
     value: &Datum,
 ) -> Result<(Option<CastMemberRef>, Option<(i32, i32)>, bool), ScriptError> {
     let mem_ref = if let Datum::CastMember(cast_member) = value {
         Some(cast_member.clone())
     } else if value.is_string() {
-        let name = value.string_value()?;
+        let name = value.string_value(symbols)?;
         player.movie.cast_manager.find_member_ref_by_name(&name)
     } else if value.is_number() {
         player
@@ -4187,58 +4651,62 @@ fn resolve_sprite_member_assignment(
 }
 
 fn sprite_set_prop_is_noop(
+    player: &DirPlayer,
+    symbols: &SymbolTable,
     sprite_id: i16,
     prop_name: Symbol,
     value: &Datum,
 ) -> Result<bool, ScriptError> {
-    reserve_player_ref(|player| {
+    let prop_name_text = symbols
+        .display(&prop_name)
+        .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
         let Some(sprite) = player.movie.score.get_sprite(sprite_id) else {
             return Ok(false);
         };
 
         match prop_name.into_builtin() {
-            Some(BuiltInSymbol::Visible | BuiltInSymbol::Visibility) => Ok(sprite.visible == value.to_bool()?),
-            Some(BuiltInSymbol::Stretch) => Ok(sprite.stretch == value.int_value()?),
-            Some(BuiltInSymbol::LocH) => Ok(sprite.loc_h == value.int_value()?),
-            Some(BuiltInSymbol::LocV) => Ok(sprite.loc_v == value.int_value()?),
+            Some(BuiltInSymbol::Visible | BuiltInSymbol::Visibility) => Ok(sprite.visible == checked_score_value(player, symbols, value)?.to_bool()?),
+            Some(BuiltInSymbol::Stretch) => Ok(sprite.stretch == checked_score_value(player, symbols, value)?.int_value()?),
+            Some(BuiltInSymbol::LocH) => Ok(sprite.loc_h == checked_score_value(player, symbols, value)?.int_value()?),
+            Some(BuiltInSymbol::LocV) => Ok(sprite.loc_v == checked_score_value(player, symbols, value)?.int_value()?),
             Some(BuiltInSymbol::LocZ) => {
                 if matches!(value, Datum::Void) {
                     Ok(true)
                 } else {
-                    Ok(sprite.loc_z == value.int_value()?)
+                    Ok(sprite.loc_z == checked_score_value(player, symbols, value)?.int_value()?)
                 }
             }
             Some(BuiltInSymbol::Width) => {
-                let width = value.int_value()?;
+                let width = checked_score_value(player, symbols, value)?.int_value()?;
                 Ok(sprite.width == width && sprite.has_size_changed)
             }
             Some(BuiltInSymbol::Height) => {
-                let height = value.int_value()?;
+                let height = checked_score_value(player, symbols, value)?.int_value()?;
                 Ok(sprite.height == height && sprite.has_size_changed)
             }
             Some(BuiltInSymbol::Left) => {
                 let (left, _, _, _) = get_sprite_rect_in_context(player, sprite_id);
-                Ok(left == value.int_value()?)
+                Ok(left == checked_score_value(player, symbols, value)?.int_value()?)
             }
             Some(BuiltInSymbol::Top) => {
                 let (_, top, _, _) = get_sprite_rect_in_context(player, sprite_id);
-                Ok(top == value.int_value()?)
+                Ok(top == checked_score_value(player, symbols, value)?.int_value()?)
             }
             Some(BuiltInSymbol::Right) => {
                 let (left, _, _, _) = get_sprite_rect_in_context(player, sprite_id);
-                let width = value.int_value()? - left;
+                let width = checked_score_value(player, symbols, value)?.int_value()? - left;
                 Ok(sprite.width == width && sprite.has_size_changed)
             }
             Some(BuiltInSymbol::Bottom) => {
                 let (_, top, _, _) = get_sprite_rect_in_context(player, sprite_id);
-                let height = value.int_value()? - top;
+                let height = checked_score_value(player, symbols, value)?.int_value()? - top;
                 Ok(sprite.height == height && sprite.has_size_changed)
             }
-            Some(BuiltInSymbol::Ink) => Ok(sprite.ink == value.int_value()?),
-            Some(BuiltInSymbol::Blend) => Ok(sprite.blend == value.int_value()?),
+            Some(BuiltInSymbol::Ink) => Ok(sprite.ink == checked_score_value(player, symbols, value)?.int_value()?),
+            Some(BuiltInSymbol::Blend) => Ok(sprite.blend == checked_score_value(player, symbols, value)?.int_value()?),
             Some(BuiltInSymbol::Rotation) => {
                 let rotation = if value.is_number() {
-                    value.to_float()?
+                    checked_score_value(player, symbols, value)?.to_float()?
                 } else {
                     0.0
                 };
@@ -4246,7 +4714,7 @@ fn sprite_set_prop_is_noop(
             }
             Some(BuiltInSymbol::Skew) => {
                 let skew = if value.is_number() {
-                    value.to_float()?
+                    checked_score_value(player, symbols, value)?.to_float()?
                 } else {
                     0.0
                 };
@@ -4254,7 +4722,7 @@ fn sprite_set_prop_is_noop(
             }
             Some(BuiltInSymbol::FlipH) => {
                 let flip_h = if value.is_number() {
-                    value.to_bool()?
+                    checked_score_value(player, symbols, value)?.to_bool()?
                 } else {
                     false
                 };
@@ -4262,14 +4730,14 @@ fn sprite_set_prop_is_noop(
             }
             Some(BuiltInSymbol::FlipV) => {
                 let flip_v = if value.is_number() {
-                    value.to_bool()?
+                    checked_score_value(player, symbols, value)?.to_bool()?
                 } else {
                     false
                 };
                 Ok(sprite.flip_v == flip_v)
             }
             Some(BuiltInSymbol::BackColor) => {
-                let back_color = value.int_value()?;
+                let back_color = checked_score_value(player, symbols, value)?.int_value()?;
                 Ok(
                     sprite.back_color == back_color
                         && sprite.bg_color == ColorRef::PaletteIndex(back_color as u8)
@@ -4277,7 +4745,7 @@ fn sprite_set_prop_is_noop(
                 )
             }
             Some(BuiltInSymbol::BgColor) => {
-                let bg_color = value.to_color_ref()?.to_owned();
+                let bg_color = checked_score_value(player, symbols, value)?.to_color_ref()?.to_owned();
                 Ok(
                     sprite.bg_color == bg_color
                         && sprite.back_color
@@ -4286,7 +4754,7 @@ fn sprite_set_prop_is_noop(
                 )
             }
             Some(BuiltInSymbol::ForeColor) => {
-                let fore_color = value.int_value()?;
+                let fore_color = checked_score_value(player, symbols, value)?.int_value()?;
                 Ok(
                     sprite.fore_color == fore_color
                         && sprite.color == ColorRef::PaletteIndex(fore_color as u8)
@@ -4294,7 +4762,7 @@ fn sprite_set_prop_is_noop(
                 )
             }
             Some(BuiltInSymbol::Color) => {
-                let color = value.to_color_ref()?.to_owned();
+                let color = checked_score_value(player, symbols, value)?.to_color_ref()?.to_owned();
                 Ok(
                     sprite.color == color
                         && sprite.fore_color == color.to_index(&SYSTEM_WIN_PALETTE) as i32
@@ -4302,11 +4770,12 @@ fn sprite_set_prop_is_noop(
                 )
             }
             Some(BuiltInSymbol::Member) => {
-                let (mem_ref, _, _) = resolve_sprite_member_assignment(player, value)?;
+                let value = checked_score_value(player, symbols, value)?;
+                let (mem_ref, _, _) = resolve_sprite_member_assignment(player, symbols, value)?;
                 Ok(sprite.member == mem_ref)
             }
             Some(BuiltInSymbol::MemberNum) => {
-                let value = value.int_value()?;
+                let value = checked_score_value(player, symbols, value)?.int_value()?;
                 let actual_member_num = if value > 65535 {
                     (value as u32 & 0xFFFF) as i32
                 } else {
@@ -4320,7 +4789,9 @@ fn sprite_set_prop_is_noop(
             }
             Some(BuiltInSymbol::CastNum) => {
                 let new_member_ref =
-                    CastMemberRefHandlers::member_ref_from_slot_number(value.int_value()? as u32);
+                    CastMemberRefHandlers::member_ref_from_slot_number(
+                        checked_score_value(player, symbols, value)?.int_value()? as u32,
+                    );
                 Ok(sprite.member.as_ref() == Some(&new_member_ref))
             }
             Some(BuiltInSymbol::Loc) => match value {
@@ -4328,8 +4799,8 @@ fn sprite_set_prop_is_noop(
                     Ok(sprite.loc_h == vals[0] as i32 && sprite.loc_v == vals[1] as i32)
                 }
                 Datum::List(_, list, _) if list.len() == 2 => {
-                    let x = player.get_datum(&list[0]).int_value()?;
-                    let y = player.get_datum(&list[1]).int_value()?;
+                    let x = checked_score_datum(player, symbols, &list[0])?.int_value()?;
+                    let y = checked_score_datum(player, symbols, &list[1])?.int_value()?;
                     Ok(sprite.loc_h == x && sprite.loc_v == y)
                 }
                 Datum::Void => Ok(true),
@@ -4347,10 +4818,10 @@ fn sprite_set_prop_is_noop(
                         vals[3] as i32,
                     ]),
                     Datum::List(_, items, _) if items.len() == 4 => Some([
-                        player.get_datum(&items[0]).int_value()?,
-                        player.get_datum(&items[1]).int_value()?,
-                        player.get_datum(&items[2]).int_value()?,
-                        player.get_datum(&items[3]).int_value()?,
+                        checked_score_datum(player, symbols, &items[0])?.int_value()?,
+                        checked_score_datum(player, symbols, &items[1])?.int_value()?,
+                        checked_score_datum(player, symbols, &items[2])?.int_value()?,
+                        checked_score_datum(player, symbols, &items[3])?.int_value()?,
                     ]),
                     Datum::Point(vals, _) => {
                         let x = vals[0] as i32;
@@ -4395,19 +4866,31 @@ fn sprite_set_prop_is_noop(
                     return Ok(false);
                 }
                 for (ref_id, existing_ref) in ref_list.iter().zip(sprite.script_instance_list.iter()) {
-                    let datum = player.get_datum(ref_id);
+                    let datum = checked_score_datum(player, symbols, ref_id)?;
+                    player.allocator.get_script_instance_opt(existing_ref).ok_or_else(|| {
+                        ScriptError::new_code(
+                            crate::player::ScriptErrorCode::InvalidReference,
+                            "foreign or stale ScriptInstanceRef".to_owned(),
+                        )
+                    })?;
                     let Datum::ScriptInstanceRef(instance_ref) = datum else {
                         return Err(ScriptError::new(
                             "Cannot set non-script to scriptInstanceList".to_string(),
                         ));
                     };
+                    player.allocator.get_script_instance_opt(instance_ref).ok_or_else(|| {
+                        ScriptError::new_code(
+                            crate::player::ScriptErrorCode::InvalidReference,
+                            "foreign or stale ScriptInstanceRef".to_owned(),
+                        )
+                    })?;
                     if instance_ref.id() != existing_ref.id() {
                         return Ok(false);
                     }
                 }
                 Ok(true)
             }
-            Some(BuiltInSymbol::Editable) => Ok(sprite.editable == value.to_bool()?),
+            Some(BuiltInSymbol::Editable) => Ok(sprite.editable == checked_score_value(player, symbols, value)?.to_bool()?),
             Some(BuiltInSymbol::Quad) => {
                 let list = value
                     .to_list()
@@ -4419,19 +4902,18 @@ fn sprite_set_prop_is_noop(
                 }
                 let mut points = Vec::new();
                 for point_ref in list {
-                    let point_datum = player.get_datum(point_ref);
+                    let point_datum = checked_score_datum(player, symbols, point_ref)?;
                     let (vals, _flags) = point_datum.to_point_inline()?;
                     points.push((vals[0] as i32, vals[1] as i32));
                 }
                 Ok(sprite.quad == Some([points[0], points[1], points[2], points[3]]))
             }
-            Some(BuiltInSymbol::Puppet) => Ok(sprite.puppet == value.to_bool()?),
-            Some(BuiltInSymbol::MoveableSprite) | Some(BuiltInSymbol::Moveable) => Ok(sprite.moveable == value.to_bool()?),
-            Some(BuiltInSymbol::Constraint) => Ok(sprite.constraint == value.int_value()?),
-            Some(BuiltInSymbol::Trails) => Ok(sprite.trails == value.to_bool()?),
+            Some(BuiltInSymbol::Puppet) => Ok(sprite.puppet == checked_score_value(player, symbols, value)?.to_bool()?),
+            Some(BuiltInSymbol::MoveableSprite) | Some(BuiltInSymbol::Moveable) => Ok(sprite.moveable == checked_score_value(player, symbols, value)?.to_bool()?),
+            Some(BuiltInSymbol::Constraint) => Ok(sprite.constraint == checked_score_value(player, symbols, value)?.int_value()?),
+            Some(BuiltInSymbol::Trails) => Ok(sprite.trails == checked_score_value(player, symbols, value)?.to_bool()?),
             _ => Ok(false),
         }
-    })
 }
 
 
@@ -4441,7 +4923,13 @@ pub fn normalise_rect([l, t, r, b]: [i32; 4]) -> [i32; 4] {
     [l.min(r), t.min(b), l.max(r), t.max(b)]
 }
 
-pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Result<(), ScriptError> {
+pub fn sprite_set_prop(
+    player: &mut DirPlayer,
+    symbols: &mut SymbolTable,
+    sprite_id: i16,
+    prop_name: Symbol,
+    value: Datum,
+) -> Result<(), ScriptError> {
     // Director silently ignores property writes to invalid sprite refs. A
     // script doing `sprite(N).prop = X` where N came from a list-lookup
     // returning -1 (not-found sentinel) is legitimate Lingo — verified in
@@ -4451,12 +4939,14 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
     if sprite_id < 0 {
         return Ok(());
     }
-    let in_range = reserve_player_ref(|player| {
-        (sprite_id as usize) < player.movie.score.channels.len()
-    });
+    let in_range = (sprite_id as usize) < player.movie.score.channels.len();
     if !in_range {
         return Ok(());
     }
+    let prop_name_lower = symbols
+        .lower(&prop_name)
+        .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
+        .to_owned();
     // Assigning VOID to an appearance property leaves it alone. VOID is not a
     // value any of these can hold, and Director neither raises nor coerces it
     // to zero — Merlin's Revenge proves both halves. Its bSpriteParams mirrors
@@ -4472,18 +4962,18 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
     // Inferred from the movie, not from the Scripting Dictionary, which does
     // not say what these setters do with VOID.
     if matches!(value, Datum::Void)
-        && (prop_name == "color"
-            || prop_name == "bgColor"
-            || prop_name == "backColor"
-            || prop_name == "blend")
+        && (prop_name_lower.eq_ignore_ascii_case("color")
+            || prop_name_lower.eq_ignore_ascii_case("bgColor")
+            || prop_name_lower.eq_ignore_ascii_case("backColor")
+            || prop_name_lower.eq_ignore_ascii_case("blend"))
     {
         return Ok(());
     }
-    if sprite_set_prop_is_noop(sprite_id, prop_name, &value)? {
+    if sprite_set_prop_is_noop(player, &*symbols, sprite_id, prop_name.clone(), &value)? {
         return Ok(());
     }
 
-    reserve_player_mut(|player| { player.stage_dirty = true; });
+    player.stage_dirty = true;
     let result = match prop_name.into_builtin() {
         // Flash (SWF) sprite frame setter — `mySprite.frame = N` on a Flash
         // member must navigate that sprite's embedded Ruffle player, not be
@@ -4501,28 +4991,37 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
             // counter being misrouted into the Flash bridge — bogey_nights sets
             // `sprite(16).frame = VOID` every frame, which was calling
             // gotoAndStop("VOID") (a nonexistent label) and blanking the SWF.
-            let declared = borrow_sprite_mut(
-                sprite_id,
-                |_| {},
-                |sprite, _| {
-                    sprite.script_instance_list.iter().find_map(|behavior| {
-                        reserve_player_mut(|player| {
-                            let value_ref = player.alloc_datum(value.clone());
-                            match script_set_prop(
-                                player,
-                                behavior,
-                                Symbol::from_str(&prop_name.to_string()),
-                                &value_ref,
-                                true, // only if the behavior already declares it
-                            ) {
-                                Ok(_) => Some(()),
-                                Err(_) => None,
-                            }
-                        })
-                    })
-                },
-            );
-            if declared.is_some() {
+            let behavior_refs = player
+                .movie
+                .score
+                .get_sprite(sprite_id)
+                .map(|sprite| sprite.script_instance_list.clone())
+                .unwrap_or_default();
+            let mut declared = false;
+            if !behavior_refs.is_empty() {
+                crate::player::compare::validate_direct_symbol_fields(&value, &*symbols)?;
+            }
+            for behavior in behavior_refs {
+                let value_ref = player.alloc_datum(value.clone());
+                match script_set_prop(
+                    player,
+                    &*symbols,
+                    &behavior,
+                    prop_name.clone(),
+                    &value_ref,
+                    true, // only if the behavior already declares it
+                ) {
+                    Ok(()) => {
+                        declared = true;
+                        break;
+                    }
+                    Err(error) if error.code == crate::player::ScriptErrorCode::InvalidReference => {
+                        return Err(error);
+                    }
+                    Err(_) => {}
+                }
+            }
+            if declared {
                 return Ok(());
             }
             // No behavior owns `frame`: this is a Flash playhead navigation.
@@ -4532,30 +5031,27 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
             if matches!(value, Datum::Void) {
                 return Ok(());
             }
-            let frame_or_label = value.string_value()?;
-            let has_member = reserve_player_ref(|player| {
-                player
-                    .movie
-                    .score
-                    .get_sprite(sprite_id)
-                    .and_then(|s| s.member.as_ref().map(|_| ()))
-                    .is_some()
-            });
+            let frame_or_label = value.string_value(&*symbols)?;
+            let has_member = player
+                .movie
+                .score
+                .get_sprite(sprite_id)
+                .and_then(|s| s.member.as_ref().map(|_| ()))
+                .is_some();
             if has_member {
                 // Record the asserted numeric frame on the SPRITE so it survives
                 // a member swap and re-projects onto a freshly-created Ruffle
                 // instance (StoryScramble poster tiles / bogeyman pre-swap
                 // frame). Non-numeric (label) targets don't set it.
                 if let Ok(n) = frame_or_label.parse::<i32>() {
-                    reserve_player_mut(|player| {
-                        player.movie.score.get_sprite_mut(sprite_id).flash_asserted_frame = Some(n);
-                    });
+                    player.movie.score.get_sprite_mut(sprite_id).flash_asserted_frame = Some(n);
                 }
                 ruffle_goto_frame_and_stop(sprite_id as i32, &frame_or_label);
             }
             Ok(())
         }
         Some(BuiltInSymbol::Visible) | Some(BuiltInSymbol::Visibility) => borrow_sprite_mut(
+            player,
             sprite_id,
             |_| {},
             |sprite, _| {
@@ -4565,6 +5061,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
             },
         ),
         Some(BuiltInSymbol::Stretch) => borrow_sprite_mut(
+            player,
             sprite_id,
             |player| value.int_value(),
             |sprite, value| {
@@ -4573,6 +5070,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
             },
         ),
         Some(BuiltInSymbol::LocH) => borrow_sprite_mut(
+            player,
             sprite_id,
             |player| value.int_value(),
             |sprite, value| {
@@ -4582,6 +5080,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
             },
         ),
         Some(BuiltInSymbol::LocV) => borrow_sprite_mut(
+            player,
             sprite_id,
             |player| value.int_value(),
             |sprite, value| {
@@ -4596,6 +5095,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
                 return Ok(());
             }
             borrow_sprite_mut(
+                player,
                 sprite_id,
                 |player| value.int_value(),
                 |sprite, value| {
@@ -4605,6 +5105,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
             )
         }
         Some(BuiltInSymbol::Width) => borrow_sprite_mut(
+            player,
             sprite_id,
             |player| value.int_value(),
             |sprite, value| {
@@ -4618,6 +5119,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
             },
         ),
         Some(BuiltInSymbol::Height) => borrow_sprite_mut(
+            player,
             sprite_id,
             |player| value.int_value(),
             |sprite, value| {
@@ -4628,6 +5130,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
             },
         ),
         Some(BuiltInSymbol::Left) => borrow_sprite_mut(
+            player,
             sprite_id,
             |player| {
                 let rect = get_sprite_rect_in_context(player, sprite_id);
@@ -4641,6 +5144,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
             },
         ),
         Some(BuiltInSymbol::Top) => borrow_sprite_mut(
+            player,
             sprite_id,
             |player| {
                 let rect = get_sprite_rect_in_context(player, sprite_id);
@@ -4654,6 +5158,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
             },
         ),
         Some(BuiltInSymbol::Right) => borrow_sprite_mut(
+            player,
             sprite_id,
             |player| {
                 let rect = get_sprite_rect_in_context(player, sprite_id);
@@ -4669,6 +5174,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
             },
         ),
         Some(BuiltInSymbol::Bottom) => borrow_sprite_mut(
+            player,
             sprite_id,
             |player| {
                 let rect = get_sprite_rect_in_context(player, sprite_id);
@@ -4684,6 +5190,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
             },
         ),
         Some(BuiltInSymbol::Ink) => borrow_sprite_mut(
+            player,
             sprite_id,
             |player| value.int_value(),
             |sprite, value| {
@@ -4692,6 +5199,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
             },
         ),
         Some(BuiltInSymbol::Blend) => borrow_sprite_mut(
+            player,
             sprite_id,
             |player| value.int_value(),
             |sprite, value| {
@@ -4701,6 +5209,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
             },
         ),
         Some(BuiltInSymbol::Rotation) => borrow_sprite_mut(
+            player,
             sprite_id,
             |_| {},
             |sprite, _| {
@@ -4713,6 +5222,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
             },
         ),
         Some(BuiltInSymbol::Skew) => borrow_sprite_mut(
+            player,
             sprite_id,
             |_| {},
             |sprite, _| {
@@ -4725,6 +5235,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
             },
         ),
         Some(BuiltInSymbol::FlipH) => borrow_sprite_mut(
+            player,
             sprite_id,
             |_| {},
             |sprite, _| {
@@ -4737,6 +5248,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
             },
         ),
         Some(BuiltInSymbol::FlipV) => borrow_sprite_mut(
+            player,
             sprite_id,
             |_| {},
             |sprite, _| {
@@ -4749,6 +5261,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
             },
         ),
         Some(BuiltInSymbol::BackColor) => borrow_sprite_mut(
+            player,
             sprite_id,
             |_| (),
             |sprite, _| {
@@ -4760,6 +5273,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
             },
         ),
         Some(BuiltInSymbol::BgColor) => borrow_sprite_mut(
+            player,
             sprite_id,
             |_| (),
             |sprite, _| {
@@ -4770,6 +5284,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
             },
         ),
         Some(BuiltInSymbol::ForeColor) => borrow_sprite_mut(
+            player,
             sprite_id,
             |_| (),
             |sprite, _| {
@@ -4781,6 +5296,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
             },
         ),
         Some(BuiltInSymbol::Color) => borrow_sprite_mut(
+            player,
             sprite_id,
             |_| (),
             |sprite, _| {
@@ -4797,7 +5313,13 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
             let cam = match &value {
                 Datum::Shockwave3dObjectRef(r) => crate::player::sprite::SpriteCamera {
                     member: Some((r.cast_lib, r.cast_member)),
-                    name: r.name.as_str().to_string(),
+                    name: symbols
+                        .display(&r.name)
+                        .map_err(|_| ScriptError::new_code(
+                            crate::player::ScriptErrorCode::InvalidReference,
+                            "foreign Shockwave3D camera name".to_owned(),
+                        ))?
+                        .to_owned(),
                 },
                 Datum::String(s) => crate::player::sprite::SpriteCamera {
                     member: None,
@@ -4809,6 +5331,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
                 },
             };
             borrow_sprite_mut(
+                player,
                 sprite_id,
                 |_player| Ok(cam.clone()),
                 |sprite, cam: Result<crate::player::sprite::SpriteCamera, ScriptError>| {
@@ -4818,14 +5341,19 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
             )
         },
         // Member properties
-        Some(BuiltInSymbol::Member) => borrow_sprite_mut(
-            sprite_id,
-            |player| resolve_sprite_member_assignment(player, &value),
-            |sprite, value| {
-                let (mem_ref, intrinsic_size, is_film_loop) = value?;
+        Some(BuiltInSymbol::Member) => {
+            let assignment = resolve_sprite_member_assignment(player, &*symbols, &value)?;
+            let film_loop_ref = if assignment.2 { assignment.0.clone() } else { None };
+            let mut member_changed = false;
+            let result = borrow_sprite_mut(
+                player,
+                sprite_id,
+                |_| Ok::<_, ScriptError>(assignment.clone()),
+                |sprite, value| {
+                let (mem_ref, intrinsic_size, _is_film_loop) = value?;
 
                 // Detect whether the member actually changed
-                let member_changed = sprite.member != mem_ref;
+                member_changed = sprite.member != mem_ref;
 
                 // Assign the new member
                 sprite.member = mem_ref.clone();
@@ -4893,34 +5421,31 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
                     }
                 }
 
-                // If the new member is a film loop, reset its frame and sound triggers
-                // This ensures sounds play when a new sprite starts using the film loop
-                if is_film_loop && member_changed {
-                    if let Some(ref r) = mem_ref {
-                        // We need to do this outside borrow_sprite_mut since we need mutable access to cast_manager
-                        // Store the member ref to reset later
-                        unsafe {
-                            if let Some(player) = PLAYER_OPT.as_mut() {
-                                if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(r) {
-                                    if let CastMemberType::FilmLoop(film_loop) = &mut member.member_type {
-                                        film_loop.current_frame = 1;
-                                        film_loop.score.sound_channel_triggered.clear();
-                                        film_loop.score.last_sound_clear_frame = None;
-                                    }
-                                }
+                Ok(())
+                },
+            );
+            if result.is_ok() {
+                if member_changed {
+                    if let Some(ref r) = film_loop_ref {
+                        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(r) {
+                            if let CastMemberType::FilmLoop(film_loop) = &mut member.member_type {
+                                film_loop.current_frame = 1;
+                                film_loop.score.sound_channel_triggered.clear();
+                                film_loop.score.last_sound_clear_frame = None;
                             }
                         }
                     }
                 }
-
-                JsApi::on_sprite_member_changed(sprite_id);
-                Ok(())
-            },
-        ),
-        Some(BuiltInSymbol::MemberNum) => borrow_sprite_mut(
-            sprite_id,
-            |player| value.int_value(),
-            |sprite, value| {
+                player.queue_player_notification(PlayerNotificationKind::ChannelNameChanged(sprite_id));
+            }
+            result
+        },
+        Some(BuiltInSymbol::MemberNum) => {
+            let result = borrow_sprite_mut(
+                player,
+                sprite_id,
+                |player| value.int_value(),
+                |sprite, value| {
                 let value = value?;
                 // Check if value looks like a slot number (cast_lib << 16 | cast_member)
                 // Director's castNum getter returns slot numbers, and some scripts
@@ -4936,113 +5461,113 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
                     None => CastMemberRefHandlers::member_ref_from_slot_number(value as u32),
                 };
                 sprite.member = Some(new_member_ref);
-                JsApi::on_sprite_member_changed(sprite_id);
                 Ok(())
-            },
-        ),
-        Some(BuiltInSymbol::CastNum) => borrow_sprite_mut(
-            sprite_id,
-            |player| value.int_value(),
-            |sprite, value| {
+                },
+            );
+            if result.is_ok() {
+                player.queue_player_notification(PlayerNotificationKind::ChannelNameChanged(sprite_id));
+            }
+            result
+        }
+        Some(BuiltInSymbol::CastNum) => {
+            let result = borrow_sprite_mut(
+                player,
+                sprite_id,
+                |player| value.int_value(),
+                |sprite, value| {
                 let value = value?;
                 let new_member_ref =
                     CastMemberRefHandlers::member_ref_from_slot_number(value as u32);
                 sprite.member = Some(new_member_ref);
-                JsApi::on_sprite_member_changed(sprite_id);
                 Ok(())
-            },
-        ),
-        Some(BuiltInSymbol::Cursor) => borrow_sprite_mut(
-            sprite_id,
-            |player| {
-                if value.is_int() {
-                    Ok(CursorRef::System(value.int_value()?))
-                } else if value.is_list() {
-                    let mut cursor_ids = vec![];
-                    for cursor_id in value.to_list()? {
-                        let datum = player.get_datum(cursor_id);
-                        let slot = match datum {
-                            Datum::CastMember(member_ref) => {
-                                CastMemberRefHandlers::get_cast_slot_number(
-                                    member_ref.cast_lib as u32,
-                                    member_ref.cast_member as u32,
-                                ) as i32
-                            }
-                            _ => datum.int_value()?,
-                        };
-                        cursor_ids.push(slot);
-                    }
-                    Ok(CursorRef::Member(cursor_ids))
-                } else {
-                    Err(ScriptError::new(
-                        "cursor must be a number or a list".to_string(),
-                    ))
-                }
-            },
-            |sprite, cursor_ref| {
-                let cr = cursor_ref?;
-                // Track hidden cursor state for pointer lock detection.
-                // Pointer lock is only activated when the game also sets _mouse.mouseLoc.
-                match &cr {
-                    crate::player::sprite::CursorRef::System(id) => {
-                        if *id == 200 || *id == -1 {
-                            reserve_player_mut(|p| { p.cursor_is_hidden = true; });
-                        } else {
-                            reserve_player_mut(|p| {
-                                p.cursor_is_hidden = false;
-                                p.wants_pointer_lock = false;
-                            });
+                },
+            );
+            if result.is_ok() {
+                player.queue_player_notification(PlayerNotificationKind::ChannelNameChanged(sprite_id));
+            }
+            result
+        }
+        Some(BuiltInSymbol::Cursor) => {
+            let cursor = if value.is_int() {
+                CursorRef::System(value.int_value()?)
+            } else if value.is_list() {
+                let mut cursor_ids = vec![];
+                for cursor_id in value.to_list()? {
+                    let datum = checked_score_datum(player, &*symbols, cursor_id)?;
+                    let slot = match datum {
+                        Datum::CastMember(member_ref) => {
+                            CastMemberRefHandlers::get_cast_slot_number(
+                                member_ref.cast_lib as u32,
+                                member_ref.cast_member as u32,
+                            ) as i32
                         }
+                        _ => datum.int_value()?,
+                    };
+                    cursor_ids.push(slot);
+                }
+                CursorRef::Member(cursor_ids)
+            } else {
+                return Err(ScriptError::new(
+                    "cursor must be a number or a list".to_string(),
+                ));
+            };
+            let result = borrow_sprite_mut(
+                player,
+                sprite_id,
+                |_| Ok::<_, ScriptError>(cursor.clone()),
+                |sprite, cursor_ref| {
+                    sprite.cursor_ref = Some(cursor_ref?);
+                    Ok(())
+                },
+            );
+            if result.is_ok() {
+                match &cursor {
+                    crate::player::sprite::CursorRef::System(id) if *id == 200 || *id == -1 => {
+                        player.cursor_is_hidden = true;
                     }
                     _ => {
                         // Member cursor (custom bitmap) = visible, not mouselook
-                        reserve_player_mut(|p| {
-                            p.cursor_is_hidden = false;
-                            p.wants_pointer_lock = false;
-                        });
+                        player.cursor_is_hidden = false;
+                        player.wants_pointer_lock = false;
                     }
                 }
-                sprite.cursor_ref = Some(cr);
-                Ok(())
-            },
-        ),
-        Some(BuiltInSymbol::Loc) => borrow_sprite_mut(
-            sprite_id,
-            // flag (D6+) so the sprite-mut closure doesn't need to re-borrow.
-            |player| Ok::<_, ScriptError>(value.clone()),
-            |sprite, prep| -> Result<(), ScriptError> {
-                let value = prep?;
-                match value {
-                    Datum::Point(vals, _) => {
-                        sprite.loc_h = vals[0] as i32;
-                        sprite.loc_v = vals[1] as i32;
-                        Ok(())
-                    }
-                    // Director auto-coerces a 2-element list to a point for loc
-                    Datum::List(_, list, _) if list.len() == 2 => {
-                        reserve_player_mut(|player| {
-                            let x = player.get_datum(&list[0]).int_value()?;
-                            let y = player.get_datum(&list[1]).int_value()?;
-                            sprite.loc_h = x;
-                            sprite.loc_v = y;
+            }
+            result
+        },
+        Some(BuiltInSymbol::Loc) => {
+            let loc_value = match &value {
+                Datum::List(_, list, _) if list.len() == 2 => {
+                    let x = checked_score_datum(player, &*symbols, &list[0])?.int_value()?;
+                    let y = checked_score_datum(player, &*symbols, &list[1])?.int_value()?;
+                    Datum::Point([x as f64, y as f64], 0)
+                }
+                _ => value.clone(),
+            };
+            borrow_sprite_mut(
+                player,
+                sprite_id,
+                |_| Ok::<_, ScriptError>(loc_value),
+                |sprite, prep| -> Result<(), ScriptError> {
+                    let value = prep?;
+                    match value {
+                        Datum::Point(vals, _) => {
+                            sprite.loc_h = vals[0] as i32;
+                            sprite.loc_v = vals[1] as i32;
                             Ok(())
-                        })
+                        }
+                        Datum::Void => Ok(()),
+                        _ => {
+                            log::warn!(
+                                "Ignoring sprite {} loc assignment with non-Point value ({})",
+                                sprite_id, value.type_str()
+                            );
+                            Ok(())
+                        }
                     }
-                    Datum::Void => Ok(()), // no-op
-                    // Director silently ignores type-mismatched assignments
-                    // here (e.g. `sprite.loc = 116`, a known script typo for
-                    // `.locV`). Mirror that — warn but keep the game running.
-                    _ => {
-                        log::warn!(
-                            "Ignoring sprite {} loc assignment with non-Point value ({})",
-                            sprite_id, value.type_str()
-                        );
-                        Ok(())
-                    }
-                }
-            },
-        ),
-        Some(BuiltInSymbol::Rect) => reserve_player_mut(|player| {
+                },
+            )
+        },
+        Some(BuiltInSymbol::Rect) => {
             // Extract the target rect from `value`.
             let rect_values = match value {
                 Datum::Rect(ref vals, _) => {
@@ -5050,10 +5575,10 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
                 }
                 Datum::List(_, ref items, _) if items.len() == 4 => {
                     Some([
-                        player.get_datum(&items[0]).int_value()?,
-                        player.get_datum(&items[1]).int_value()?,
-                        player.get_datum(&items[2]).int_value()?,
-                        player.get_datum(&items[3]).int_value()?,
+                        checked_score_datum(player, &*symbols, &items[0])?.int_value()?,
+                        checked_score_datum(player, &*symbols, &items[1])?.int_value()?,
+                        checked_score_datum(player, &*symbols, &items[2])?.int_value()?,
+                        checked_score_datum(player, &*symbols, &items[3])?.int_value()?,
                     ])
                 }
                 Datum::Point(ref vals, _) => {
@@ -5119,17 +5644,24 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
             s.has_size_changed = true;
             s.stretch = 1;
             Ok(())
-        }),
+        },
         Some(BuiltInSymbol::ScriptInstanceList) => {
             let ref_list = value.to_list()?;
             let instance_refs = borrow_sprite_mut(
+                player,
                 sprite_id,
                 |player| {
                     let mut instance_ids = vec![];
                     for ref_id in ref_list {
-                        let datum = player.get_datum(ref_id);
+                        let datum = checked_score_datum(player, &*symbols, ref_id)?;
                         match datum {
                             Datum::ScriptInstanceRef(instance_id) => {
+                                player.allocator.get_script_instance_opt(instance_id).ok_or_else(|| {
+                                    ScriptError::new_code(
+                                        crate::player::ScriptErrorCode::InvalidReference,
+                                        "foreign or stale ScriptInstanceRef".to_owned(),
+                                    )
+                                })?;
                                 instance_ids.push(instance_id.clone());
                             }
                             _ => {
@@ -5139,33 +5671,33 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
                             }
                         }
                     }
-                    Ok(instance_ids)
+                    Ok::<Vec<ScriptInstanceRef>, ScriptError>(instance_ids)
                 },
                 |sprite, value| {
                     let instance_ids = value?;
                     sprite.script_instance_list = instance_ids.to_owned();
-                    Ok(instance_ids)
+                    Ok::<Vec<ScriptInstanceRef>, ScriptError>(instance_ids)
                 },
             )?;
-            reserve_player_mut(|player| {
-                // Invalidate the cached scriptInstanceList so the next
-                // getter call rebuilds it from the updated Vec.
-                player.remove_script_instance_list_cache(sprite_id);
-                player.refresh_stage_behavior_channel_cache_entry(sprite_id);
-                let value_ref = player.alloc_datum(Datum::Int(sprite_id as i32));
-                for instance_ref in instance_refs {
-                    script_set_prop(
-                        player,
-                        &instance_ref,
-                        Symbol::builtin(BuiltInSymbol::SpriteNum),
-                        &value_ref,
-                        false,
-                    )?
-                }
-                Ok(())
-            })
+            // Invalidate the cached scriptInstanceList so the next getter
+            // call rebuilds it from the updated Vec.
+            player.remove_script_instance_list_cache(sprite_id);
+            player.refresh_stage_behavior_channel_cache_entry(sprite_id);
+            let value_ref = player.alloc_datum(Datum::Int(sprite_id as i32));
+            for instance_ref in instance_refs {
+                script_set_prop(
+                    player,
+                    &*symbols,
+                    &instance_ref,
+                    Symbol::builtin(BuiltInSymbol::SpriteNum),
+                    &value_ref,
+                    false,
+                )?
+            }
+            Ok(())
         }
         Some(BuiltInSymbol::Editable) => borrow_sprite_mut(
+            player,
             sprite_id,
             |_| {},
             |sprite, _| {
@@ -5174,6 +5706,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
             },
         ),
         Some(BuiltInSymbol::Quad) => borrow_sprite_mut(
+            player,
             sprite_id,
             |player| {
                 // quad should be a list of 4 points: [topLeft, topRight, bottomRight, bottomLeft]
@@ -5181,7 +5714,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
                     if list.len() == 4 {
                         let mut points = Vec::new();
                         for point_ref in list {
-                            let point_datum = player.get_datum(point_ref);
+                            let point_datum = checked_score_datum(player, &*symbols, point_ref)?;
                             let (vals, _flags) = point_datum.to_point_inline()?;
                             let x = vals[0] as i32;
                             let y = vals[1] as i32;
@@ -5218,11 +5751,13 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
                 Datum::Void => false,
                 Datum::Int(n) => *n != 0,
                 Datum::Symbol(s) => {
-                    !s.eq_ignore_ascii_case("none") && !s.eq_ignore_ascii_case("empty")
+                    let text = symbols.lower(s).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+                    !text.eq_ignore_ascii_case("none") && !text.eq_ignore_ascii_case("empty")
                 }
                 _ => true,
             };
             borrow_sprite_mut(
+                player,
                 sprite_id,
                 |_| {},
                 |sprite, _| {
@@ -5245,6 +5780,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
             )
         }
         Some(BuiltInSymbol::Puppet) => borrow_sprite_mut(
+            player,
             sprite_id,
             |_| {},
             |sprite, _| {
@@ -5253,6 +5789,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
             },
         ),
         Some(BuiltInSymbol::MoveableSprite) | Some(BuiltInSymbol::Moveable) => borrow_sprite_mut(
+            player,
             sprite_id,
             |_| {},
             |sprite, _| {
@@ -5261,6 +5798,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
             },
         ),
         Some(BuiltInSymbol::Constraint) => borrow_sprite_mut(
+            player,
             sprite_id,
             |player| value.int_value(),
             |sprite, value| {
@@ -5270,6 +5808,7 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
             },
         ),
         Some(BuiltInSymbol::Trails) => borrow_sprite_mut(
+            player,
             sprite_id,
             |_| {},
             |sprite, _| {
@@ -5277,87 +5816,98 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
                 Ok(())
             },
         ),       
-        _ => borrow_sprite_mut(
-            sprite_id,
-            |_| {},
-            |sprite, _| {
-                // First pass: try to set on a behavior that already declares/has the property
-                let first_pass = sprite
-                    .script_instance_list
-                    .iter()
-                    .find_map(|behavior| {
-                        reserve_player_mut(|player| {
-                            let value_ref = player.alloc_datum(value.clone());
-                            match script_set_prop(
-                                player,
-                                behavior,
-                                prop_name,
-                                &value_ref,
-                                true,
-                            ) {
-                                Ok(_) => Some(Ok(())),
-                                Err(_) => None,
-                            }
-                        })
-                    });
-                match first_pass {
-                    Some(r) => r,
-                    None => {
-                        // No behavior declares this property. Director allows dynamic
-                        // creation of behavior properties via assignment, so create it
-                        // on the first behavior (e.g. cs `sprite(N).pCustomData = ...`
-                        // on a sprite whose only behavior doesn't declare pCustomData).
-                        if let Some(first_behavior) = sprite.script_instance_list.first().cloned() {
-                            reserve_player_mut(|player| {
-                                let value_ref = player.alloc_datum(value.clone());
-                                script_set_prop(
-                                    player,
-                                    &first_behavior,
-                                    prop_name,
-                                    &value_ref,
-                                    false,
-                                )
-                            })
-                        } else {
-                            eprintln!(
-                                "Warning: Cannot set prop {} of sprite (no behaviors)",
-                                prop_name
-                            );
-                            Ok(())
-                        }
+        _ => {
+            let behavior_refs = player
+                .movie
+                .score
+                .get_sprite(sprite_id)
+                .map(|sprite| sprite.script_instance_list.clone())
+                .unwrap_or_default();
+            if !behavior_refs.is_empty() {
+                crate::player::compare::validate_direct_symbol_fields(&value, &*symbols)?;
+            }
+            let mut applied = false;
+            for behavior in &behavior_refs {
+                player.allocator.get_script_instance_opt(behavior).ok_or_else(|| {
+                    ScriptError::new_code(
+                        crate::player::ScriptErrorCode::InvalidReference,
+                        "foreign or stale ScriptInstanceRef".to_owned(),
+                    )
+                })?;
+                let value_ref = player.alloc_datum(value.clone());
+                match script_set_prop(
+                    player,
+                    &*symbols,
+                    behavior,
+                    prop_name.clone(),
+                    &value_ref,
+                        false,
+                ) {
+                    Ok(()) => {
+                        applied = true;
+                        break;
                     }
+                    Err(error) if error.code == crate::player::ScriptErrorCode::InvalidReference => {
+                        return Err(error);
+                    }
+                    Err(_) => {}
                 }
-            },
-        ),
+            }
+            if !applied {
+                // No behavior declares this property. Director allows dynamic
+                // creation of behavior properties via assignment, so create it
+                // on the first behavior.
+                if let Some(first_behavior) = behavior_refs.first() {
+                    player.allocator.get_script_instance_opt(first_behavior).ok_or_else(|| {
+                        ScriptError::new_code(
+                            crate::player::ScriptErrorCode::InvalidReference,
+                            "foreign or stale ScriptInstanceRef".to_owned(),
+                        )
+                    })?;
+                    let value_ref = player.alloc_datum(value.clone());
+                    script_set_prop(
+                        player,
+                        &*symbols,
+                        first_behavior,
+                        prop_name.clone(),
+                        &value_ref,
+                        false,
+                    )?;
+                } else {
+                    let prop_display = symbols
+                        .display(&prop_name)
+                        .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+                    eprintln!(
+                        "Warning: Cannot set prop {} of sprite (no behaviors)",
+                        prop_display
+                    );
+                }
+            }
+            Ok(())
+        }
     };
     if result.is_ok() {
         // Mark the channel as script-written. `begin_sprites` clears this right
         // after it applies Score properties, so the Score's own internal
         // `sprite_set_prop(.., "member", ..)` calls cancel themselves out and
         // only genuine Lingo writes leave it set.
-        reserve_player_mut(|player| {
-            player.movie.score.get_sprite_mut(sprite_id).script_wrote_since_span_init = true;
-        });
-        let affects_render_order = prop_name.eq_ignore_ascii_case("visible")
-            || prop_name.eq_ignore_ascii_case("visibility")
-            || prop_name.eq_ignore_ascii_case("locZ")
-            || prop_name.eq_ignore_ascii_case("member")
-            || prop_name.eq_ignore_ascii_case("memberNum")
-            || prop_name.eq_ignore_ascii_case("castNum")
-            || prop_name.eq_ignore_ascii_case("puppet")
+        player.movie.score.get_sprite_mut(sprite_id).script_wrote_since_span_init = true;
+        let affects_render_order = prop_name_lower.eq_ignore_ascii_case("visible")
+            || prop_name_lower.eq_ignore_ascii_case("visibility")
+            || prop_name_lower.eq_ignore_ascii_case("locZ")
+            || prop_name_lower.eq_ignore_ascii_case("member")
+            || prop_name_lower.eq_ignore_ascii_case("memberNum")
+            || prop_name_lower.eq_ignore_ascii_case("castNum")
+            || prop_name_lower.eq_ignore_ascii_case("puppet")
             // `type` activates/clears a channel via the puppet flag, so it
             // changes which channels render (bogey_nights' spawned splashes).
-            || prop_name.eq_ignore_ascii_case("type");
+            || prop_name_lower.eq_ignore_ascii_case("type");
         if affects_render_order {
-            reserve_player_mut(|player| {
-                player.movie.score.invalidate_render_channel_cache();
-            });
+            player.movie.score.invalidate_render_channel_cache();
         }
         let prop_name_builtin = prop_name.into_builtin();
-        if prop_name.eq_ignore_ascii_case("puppet") || prop_name.eq_ignore_ascii_case("type") {
-            reserve_player_mut(|player| {
-                player.refresh_stage_behavior_channel_cache_entry(sprite_id);
-            });
+        if prop_name_lower.eq_ignore_ascii_case("puppet") || prop_name_lower.eq_ignore_ascii_case("type") {
+            player.refresh_stage_behavior_channel_cache_entry(sprite_id);
         }
         if prop_name_builtin == Some(BuiltInSymbol::Visible)
             || prop_name_builtin == Some(BuiltInSymbol::Visibility)
@@ -5366,11 +5916,9 @@ pub fn sprite_set_prop(sprite_id: i16, prop_name: Symbol, value: Datum) -> Resul
             || prop_name_builtin == Some(BuiltInSymbol::MemberNum)
             || prop_name_builtin == Some(BuiltInSymbol::CastNum)
         {
-            reserve_player_mut(|player| {
-                player.invalidate_active_stage_filmloop_cache();
-            });
+            player.invalidate_active_stage_filmloop_cache();
         }
-        JsApi::dispatch_channel_changed(sprite_id);
+        player.queue_player_notification(PlayerNotificationKind::ChannelChanged(sprite_id));
     }
     result
 }
@@ -5601,7 +6149,12 @@ fn sprite_has_mouse_handler(player: &DirPlayer, sprite: &Sprite) -> bool {
 ///      cast level rather than per-sprite.
 pub fn sprite_has_handler(player: &DirPlayer, sprite: &Sprite, names: &[&str]) -> bool {
     let script_has_any = |script: &crate::player::script::Script| -> bool {
-        names.iter().any(|n| script.get_own_handler(Symbol::from_str(n)).is_some())
+        names.iter().any(|name| {
+            script
+                .handler_names_raw
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(name))
+        })
     };
 
     // (1) Score-authored sprite behaviours.
@@ -6959,5 +7512,375 @@ mod rect_tests {
     fn a_normal_rect_is_untouched() {
         assert_eq!(normalise_rect([10, 20, 12, 50]), [10, 20, 12, 50]);
         assert_eq!(normalise_rect([0, 0, 0, 0]), [0, 0, 0, 0]);
+    }
+}
+
+#[cfg(test)]
+mod property_tests {
+    use super::*;
+
+    #[test]
+    fn sprite_property_symbols_are_owner_checked() {
+        let mut session = crate::player::session::RuntimeSession::new(
+            crate::player::symbols::symbol_table::SymbolOwner {
+                session: 903,
+                generation: 1,
+            },
+        );
+        let (tx, _rx) = async_std::channel::unbounded();
+        assert!(session.add_player(1, tx));
+        let mut foreign_symbols = crate::player::symbols::symbol_table::SymbolTable::with_owner(
+            crate::player::symbols::symbol_table::SymbolOwner {
+                session: 904,
+                generation: 1,
+            },
+        );
+        let foreign_prop = foreign_symbols.intern("foreignScoreProperty");
+        let foreign_value = foreign_symbols.intern("foreignScoreValue");
+
+        let result = session
+            .with_player(1, |mut runtime| {
+                runtime
+                    .player
+                    .movie
+                    .score
+                    .channels
+                    .push(SpriteChannel::new(1));
+                let get = sprite_get_prop(runtime.player, runtime.symbols, 0, foreign_prop.clone());
+                let set = sprite_set_prop(
+                    runtime.player,
+                    runtime.symbols,
+                    0,
+                    foreign_prop,
+                    Datum::Int(1),
+                );
+                let foreign_value_set = sprite_set_prop(
+                    runtime.player,
+                    runtime.symbols,
+                    0,
+                    Symbol::builtin(BuiltInSymbol::Visible),
+                    Datum::Symbol(foreign_value.clone()),
+                );
+                let ignored_prop = runtime.symbols.intern("localUnknownScoreProperty");
+                let ignored_unknown = sprite_set_prop(
+                    runtime.player,
+                    runtime.symbols,
+                    0,
+                    ignored_prop,
+                    Datum::Symbol(foreign_value),
+                );
+                (get, set, foreign_value_set, ignored_unknown)
+            })
+            .unwrap();
+
+        assert_eq!(result.0.err().map(|error| error.code), Some(crate::player::ScriptErrorCode::InvalidReference));
+        assert_eq!(result.1.err().map(|error| error.code), Some(crate::player::ScriptErrorCode::InvalidReference));
+        assert_eq!(result.2.err().map(|error| error.code), Some(crate::player::ScriptErrorCode::InvalidReference));
+        assert!(result.3.is_ok());
+    }
+
+    #[test]
+    fn script_instance_list_getter_shares_cached_list_reference() {
+        let mut session = crate::player::session::RuntimeSession::new(
+            crate::player::symbols::symbol_table::SymbolOwner {
+                session: 905,
+                generation: 1,
+            },
+        );
+        let (tx, _rx) = async_std::channel::unbounded();
+        assert!(session.add_player(1, tx));
+
+        session
+            .with_player(1, |mut runtime| {
+                runtime
+                    .player
+                    .movie
+                    .score
+                    .channels
+                    .push(SpriteChannel::new(1));
+                let result = sprite_get_prop(
+                    runtime.player,
+                    runtime.symbols,
+                    0,
+                    Symbol::builtin(BuiltInSymbol::ScriptInstanceList),
+                )
+                .unwrap();
+                assert!(matches!(result, Datum::List(_, ref values, _) if values.is_empty()));
+                let cached = runtime.player.last_sprite_prop_ref.clone().unwrap();
+                let item = runtime.player.alloc_datum(Datum::Int(42));
+                if let Datum::List(_, values, _) = runtime.player.get_datum_mut(&cached) {
+                    values.push_back(item);
+                } else {
+                    panic!("scriptInstanceList cache is not a list");
+                }
+                let result = sprite_get_prop(
+                    runtime.player,
+                    runtime.symbols,
+                    0,
+                    Symbol::builtin(BuiltInSymbol::ScriptInstanceList),
+                )
+                .unwrap();
+                assert!(matches!(result, Datum::List(_, ref values, _) if values.len() == 1));
+                assert_eq!(runtime.player.last_sprite_prop_ref.as_ref(), Some(&cached));
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn script_instance_list_getter_rejects_foreign_cached_list() {
+        let mut foreign_session = crate::player::session::RuntimeSession::new(
+            crate::player::symbols::symbol_table::SymbolOwner {
+                session: 910,
+                generation: 1,
+            },
+        );
+        let (foreign_tx, _foreign_rx) = async_std::channel::unbounded();
+        assert!(foreign_session.add_player(1, foreign_tx));
+        let foreign_list = foreign_session
+            .with_player(1, |mut runtime| {
+                runtime
+                    .player
+                    .alloc_datum(Datum::List(DatumType::List, VecDeque::new(), false))
+            })
+            .unwrap();
+
+        let mut session = crate::player::session::RuntimeSession::new(
+            crate::player::symbols::symbol_table::SymbolOwner {
+                session: 911,
+                generation: 1,
+            },
+        );
+        let (tx, _rx) = async_std::channel::unbounded();
+        assert!(session.add_player(1, tx));
+        let result = session
+            .with_player(1, |mut runtime| {
+                runtime
+                    .player
+                    .movie
+                    .score
+                    .channels
+                    .push(SpriteChannel::new(1));
+                runtime
+                    .player
+                    .script_instance_list_cache
+                    .insert(0, foreign_list.clone());
+                let result = sprite_get_prop(
+                    runtime.player,
+                    runtime.symbols,
+                    0,
+                    Symbol::builtin(BuiltInSymbol::ScriptInstanceList),
+                );
+                (result, runtime.player.last_sprite_prop_ref.clone())
+            })
+            .unwrap();
+
+        assert_eq!(
+            result.0.err().map(|error| error.code),
+            Some(crate::player::ScriptErrorCode::InvalidReference)
+        );
+        assert!(result.1.is_none());
+    }
+
+    #[test]
+    fn score_getters_reject_foreign_initial_script_instance_before_cache_mutation() {
+        let mut foreign_session = crate::player::session::RuntimeSession::new(
+            crate::player::symbols::symbol_table::SymbolOwner {
+                session: 912,
+                generation: 1,
+            },
+        );
+        let (foreign_tx, _foreign_rx) = async_std::channel::unbounded();
+        assert!(foreign_session.add_player(1, foreign_tx));
+        let foreign_instance = foreign_session
+            .with_player(1, |mut runtime| {
+                runtime
+                    .player
+                    .allocator
+                    .alloc_script_instance(crate::player::script::ScriptInstance {
+                        instance_id: 1,
+                        script: CastMemberRef {
+                            cast_lib: 1,
+                            cast_member: 1,
+                        },
+                        ancestor: None,
+                        properties: fxhash::FxHashMap::default(),
+                        begin_sprite_called: false,
+                    })
+            })
+            .unwrap();
+
+        let mut session = crate::player::session::RuntimeSession::new(
+            crate::player::symbols::symbol_table::SymbolOwner {
+                session: 913,
+                generation: 1,
+            },
+        );
+        let (tx, _rx) = async_std::channel::unbounded();
+        assert!(session.add_player(1, tx));
+        let result = session
+            .with_player(1, |mut runtime| {
+                runtime
+                    .player
+                    .movie
+                    .score
+                    .channels
+                    .push(SpriteChannel::new(1));
+                runtime.player.movie.score.channels[0]
+                    .sprite
+                    .script_instance_list = vec![foreign_instance.clone()];
+                let list_result = sprite_get_prop(
+                    runtime.player,
+                    runtime.symbols,
+                    0,
+                    Symbol::builtin(BuiltInSymbol::ScriptInstanceList),
+                );
+                let num_result = sprite_get_prop(
+                    runtime.player,
+                    runtime.symbols,
+                    0,
+                    Symbol::builtin(BuiltInSymbol::ScriptNum),
+                );
+                (
+                    list_result,
+                    num_result,
+                    runtime.player.last_sprite_prop_ref.clone(),
+                    runtime.player.script_instance_list_cache.contains_key(&0),
+                )
+            })
+            .unwrap();
+
+        assert_eq!(
+            result.0.err().map(|error| error.code),
+            Some(crate::player::ScriptErrorCode::InvalidReference)
+        );
+        assert_eq!(
+            result.1.err().map(|error| error.code),
+            Some(crate::player::ScriptErrorCode::InvalidReference)
+        );
+        assert!(result.2.is_none());
+        assert!(!result.3);
+    }
+
+    #[test]
+    fn invalid_sprite_write_keeps_foreign_name_ignored() {
+        let mut session = crate::player::session::RuntimeSession::new(
+            crate::player::symbols::symbol_table::SymbolOwner {
+                session: 906,
+                generation: 1,
+            },
+        );
+        let (tx, _rx) = async_std::channel::unbounded();
+        assert!(session.add_player(1, tx));
+        let mut foreign_symbols = crate::player::symbols::symbol_table::SymbolTable::with_owner(
+            crate::player::symbols::symbol_table::SymbolOwner {
+                session: 907,
+                generation: 1,
+            },
+        );
+        let foreign_prop = foreign_symbols.intern("foreignScoreProperty");
+        session
+            .with_player(1, |mut runtime| {
+                assert!(sprite_set_prop(
+                    runtime.player,
+                    runtime.symbols,
+                    99,
+                    foreign_prop,
+                    Datum::Int(1),
+                )
+                .is_ok());
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn script_instance_list_noop_rejects_same_id_foreign_refs() {
+        let mut foreign_session = crate::player::session::RuntimeSession::new(
+            crate::player::symbols::symbol_table::SymbolOwner {
+                session: 908,
+                generation: 1,
+            },
+        );
+        let (foreign_tx, _foreign_rx) = async_std::channel::unbounded();
+        assert!(foreign_session.add_player(1, foreign_tx));
+        let foreign_ref = foreign_session
+            .with_player(1, |runtime| {
+                runtime
+                    .player
+                    .allocator
+                    .alloc_script_instance(crate::player::script::ScriptInstance {
+                        instance_id: 1,
+                        script: CastMemberRef { cast_lib: 1, cast_member: 1 },
+                        ancestor: None,
+                        properties: fxhash::FxHashMap::default(),
+                        begin_sprite_called: false,
+                    })
+            })
+            .unwrap();
+
+        let mut session = crate::player::session::RuntimeSession::new(
+            crate::player::symbols::symbol_table::SymbolOwner {
+                session: 909,
+                generation: 1,
+            },
+        );
+        let (tx, _rx) = async_std::channel::unbounded();
+        assert!(session.add_player(1, tx));
+        let result = session
+            .with_player(1, |mut runtime| {
+                runtime
+                    .player
+                    .movie
+                    .score
+                    .channels
+                    .push(SpriteChannel::new(1));
+                let local_ref = runtime
+                    .player
+                    .allocator
+                    .alloc_script_instance(crate::player::script::ScriptInstance {
+                        instance_id: 1,
+                        script: CastMemberRef { cast_lib: 1, cast_member: 1 },
+                        ancestor: None,
+                        properties: fxhash::FxHashMap::default(),
+                        begin_sprite_called: false,
+                    });
+                runtime.player.movie.score.channels[0].sprite.script_instance_list =
+                    vec![local_ref.clone()];
+                let foreign_item = runtime
+                    .player
+                    .alloc_datum(Datum::ScriptInstanceRef(foreign_ref.clone()));
+                let incoming = Datum::List(
+                    DatumType::List,
+                    VecDeque::from([foreign_item]),
+                    false,
+                );
+                let incoming_foreign = sprite_set_prop(
+                    runtime.player,
+                    runtime.symbols,
+                    0,
+                    Symbol::builtin(BuiltInSymbol::ScriptInstanceList),
+                    incoming,
+                );
+                runtime.player.movie.score.channels[0].sprite.script_instance_list =
+                    vec![foreign_ref.clone()];
+                let local_item = runtime
+                    .player
+                    .alloc_datum(Datum::ScriptInstanceRef(local_ref));
+                let incoming_local = Datum::List(
+                    DatumType::List,
+                    VecDeque::from([local_item]),
+                    false,
+                );
+                let existing_foreign = sprite_set_prop(
+                    runtime.player,
+                    runtime.symbols,
+                    0,
+                    Symbol::builtin(BuiltInSymbol::ScriptInstanceList),
+                    incoming_local,
+                );
+                (incoming_foreign, existing_foreign)
+            })
+            .unwrap();
+        assert_eq!(result.0.err().map(|error| error.code), Some(crate::player::ScriptErrorCode::InvalidReference));
+        assert_eq!(result.1.err().map(|error| error.code), Some(crate::player::ScriptErrorCode::InvalidReference));
     }
 }

@@ -5,7 +5,17 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ROOT = path.resolve(__dirname, "..", "vm-rust", "target", "browser_runner");
+const REPO_ROOT = path.resolve(__dirname, "..");
+const resolveFromRepo = (value, fallback) =>
+  path.resolve(REPO_ROOT, value || fallback);
+const configuredTarget = process.env.CARGO_TARGET_DIR;
+const targetDir = configuredTarget
+  ? resolveFromRepo(configuredTarget)
+  : path.join(REPO_ROOT, "vm-rust", "target");
+const ROOT = resolveFromRepo(
+  process.env.BROWSER_RUNNER_DIR,
+  path.join(targetDir, "browser_runner"),
+);
 const PORT = Number(process.env.BROWSER_RUNNER_PORT || 9101);
 const HOST = process.env.BROWSER_RUNNER_HOST || "127.0.0.1";
 

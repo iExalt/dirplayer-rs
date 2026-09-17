@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 
 use crate::{
     director::lingo::datum::{Datum, DatumType},
-    player::{DirPlayer, ScriptError, cast_lib::CastMemberRef, cast_member::Media, reserve_player_mut, symbols::{builtin::BuiltInSymbol, symbol::Symbol}},
+    player::{DirPlayer, ScriptError, cast_lib::CastMemberRef, cast_member::Media, symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable}},
 };
 
 pub struct SoundMemberHandlers {}
@@ -10,6 +10,7 @@ pub struct SoundMemberHandlers {}
 impl SoundMemberHandlers {
     pub fn get_prop(
         player: &mut DirPlayer,
+        symbols: &SymbolTable,
         cast_member_ref: &CastMemberRef,
         prop: Symbol,
     ) -> Result<Datum, ScriptError> {
@@ -20,6 +21,7 @@ impl SoundMemberHandlers {
             .unwrap();
         let sound = member.member_type.as_sound().unwrap();
 
+        let prop_display = symbols.display(&prop).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
         match prop.into_builtin() {
             // `the media of member` is a read/write opaque media blob
             // (Director 11.5 Scripting Dictionary, `media`). The documented
@@ -56,24 +58,28 @@ impl SoundMemberHandlers {
             }
             _ => Err(ScriptError::new(format!(
                 "Cannot get castMember property {} for sound",
-                prop
+                prop_display
             ))),
         }
     }
 
     pub fn set_prop(
+        player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
         member_ref: &CastMemberRef,
         prop: Symbol,
         value: Datum,
     ) -> Result<(), ScriptError> {
+        let prop_display = symbols.display(&prop).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
         match prop.into_builtin() {
             Some(BuiltInSymbol::Media) => {
+                crate::player::compare::validate_direct_symbol_fields(&value, symbols)?;
                 let media = value.media_value()?;
                 let new_sound = match media {
                     Media::Sound(s) => s,
                     _ => return Err(ScriptError::new("Expected a sound media".to_string())),
                 };
-                reserve_player_mut(|player| {
+                {
                     let member = player
                         .movie
                         .cast_manager
@@ -83,11 +89,12 @@ impl SoundMemberHandlers {
                         .ok_or_else(|| ScriptError::new("Cast member is not a sound".to_string()))?;
                     *sound = new_sound;
                     Ok(())
-                })
+                }
             }
             Some(BuiltInSymbol::Loop) => {
+                crate::player::compare::validate_direct_symbol_fields(&value, symbols)?;
                 let loop_enabled = value.bool_value()?;
-                reserve_player_mut(|player| {
+                {
                     let member = player
                         .movie
                         .cast_manager
@@ -97,11 +104,11 @@ impl SoundMemberHandlers {
                         .ok_or_else(|| ScriptError::new("Cast member is not a sound".to_string()))?;
                     sound.info.loop_enabled = loop_enabled;
                     Ok(())
-                })
+                }
             }
             _ => Err(ScriptError::new(format!(
                 "Cannot set castMember prop {} for sound",
-                prop
+                prop_display
             ))),
         }
     }

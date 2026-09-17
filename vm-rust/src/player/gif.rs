@@ -445,9 +445,9 @@ mod control_tests {
         assert_eq!(a.current, 1);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn a_movie_change_forgets_every_animation() {
-        crate::player::init_symbol_table();
         crate::player::testing::run_test(async {
             let _p = crate::player::testing::TestPlayer::new();
             register_pending(1, 2, anim());

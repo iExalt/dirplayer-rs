@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import styles from './styles.module.css';
-import { eval_command, request_datum, request_script_instance_snapshot, clear_debug_messages } from "vm-rust";
+import { useVMHandle } from '../../components/VMProvider';
 import { useAppSelector, useAppDispatch } from '../../store/hooks';
 import { DebugMessage, DebugMessageDatum, debugMessagesCleared, selectDebugMessages } from '../../store/vmSlice';
 import { DatumRef, ScriptInstanceId, TJsBridgeDatumList, TJsBridgeDatumScriptInstance } from '../../vm';
@@ -29,6 +29,7 @@ function BitmapCanvas({ width, height, data }: { width: number; height: number; 
 }
 
 function DatumValueDisplay({ datumRef }: { datumRef: DatumRef }) {
+  const handle = useVMHandle();
   const snapshot = useAppSelector((state) => {
     if (datumRef === 0) return { type: 'void' as const, debugDescription: '<Void>' };
     return state.vm.datumSnapshots[datumRef];
@@ -37,9 +38,9 @@ function DatumValueDisplay({ datumRef }: { datumRef: DatumRef }) {
 
   useEffect(() => {
     if (!snapshot && datumRef !== 0) {
-      request_datum(datumRef);
+      void handle.request_datum(datumRef);
     }
-  }, [snapshot, datumRef]);
+  }, [handle, snapshot, datumRef]);
 
   if (!snapshot) {
     return <span className={styles.datumLoading}>Loading...</span>;
@@ -70,14 +71,15 @@ function DatumValueDisplay({ datumRef }: { datumRef: DatumRef }) {
 }
 
 function ScriptInstanceDisplay({ instanceId }: { instanceId: ScriptInstanceId }) {
+  const handle = useVMHandle();
   const snapshot = useAppSelector((state) => state.vm.scriptInstanceSnapshots[instanceId]);
   const [isExpanded, setIsExpanded] = useState(false);
 
   useEffect(() => {
     if (!snapshot) {
-      request_script_instance_snapshot(instanceId);
+      void handle.request_script_instance_snapshot(instanceId);
     }
-  }, [snapshot, instanceId]);
+  }, [handle, snapshot, instanceId]);
 
   if (!snapshot) {
     return <span className={styles.datumLoading}>Loading...</span>;
@@ -209,6 +211,7 @@ function DebugMessageEntry({ message }: { message: DebugMessage }) {
 }
 
 export default function MessageInspector() {
+  const handle = useVMHandle();
   const [command, setCommand] = useState('');
   const [history, setHistory] = useState<string[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
@@ -221,14 +224,14 @@ export default function MessageInspector() {
   }, [debugMessages]);
 
   const handleClear = () => {
-    clear_debug_messages();
+    void handle.clear_debug_messages();
     dispatch(debugMessagesCleared());
   };
 
   const handleEvaluate = () => {
     try {
       if (command.trim()) {
-        eval_command(command);
+        void handle.eval_command(command);
         setHistory(prev => [...prev, command]);
         setHistoryIndex(-1);
       }

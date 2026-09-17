@@ -1,8 +1,7 @@
-use crate::player::symbols::symbol::Symbol;
 use core::fmt;
 use std::fmt::Display;
 
-use crate::player::{handlers::datum_handlers::symbol, symbols::symbol_table::{SYMBOL_TABLE, SymbolTable}};
+use super::symbol::Symbol;
 
 macro_rules! define_builtin_symbols {
     ( $( $keyword:literal => $variant:ident ),* $(,)? ) => {
@@ -12,22 +11,12 @@ macro_rules! define_builtin_symbols {
             $( $variant, )*
         }
 
-        pub fn init_builtin_symbols() {
-            // Intern directly against the table rather than via
-            // `get_symbol_spur`. `get_symbol_spur` now lazily calls
-            // `init_symbol_table`, and this function runs *inside* that
-            // one-time init — going back through `get_symbol_spur` would
-            // re-enter the `Once` and panic. The table is already set when
-            // this is called.
-            unsafe {
-                let table = SYMBOL_TABLE.as_mut().unwrap();
-                $(
-                    let spur = table.intern($keyword);
-                    table.spur_to_builtin.insert(spur, BuiltInSymbol::$variant);
-                    table.builtin_to_spur.insert(BuiltInSymbol::$variant, spur);
-                )*
-            }
-        }
+        pub const BUILTIN_SPECS: &[(&str, BuiltInSymbol)] = &[
+            $( ($keyword, BuiltInSymbol::$variant), )*
+        ];
+        pub const BUILTIN_DEFAULT_SPELLINGS: &[&str] = &[
+            $( $keyword, )*
+        ];
     };
 }
 
@@ -138,7 +127,7 @@ define_builtin_symbols! {
     "puppetTempo" => PuppetTempo,
     "useFastQuads" => UseFastQuads,
     "romanLingo" => RomanLingo,
-    "allowSaveLocal" => AllowSaveLocal, 
+    "allowSaveLocal" => AllowSaveLocal,
     "cpuHogTicks" => CpuHogTicks,
     "stageColor" => StageColor,
     "timeoutLength" => TimeoutLength,
@@ -1019,31 +1008,102 @@ define_builtin_symbols! {
 
 impl Display for BuiltInSymbol {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let symbol_table = unsafe { SYMBOL_TABLE.as_ref().unwrap() };
-        let spur = symbol_table.builtin_to_spur.get(self).unwrap();
-        let original_string = symbol_table.get_original_string(spur);
-        write!(f, "{}", original_string)
+        write!(f, "{}", self.default_spelling())
     }
 }
 
 impl BuiltInSymbol {
+    /// Return the canonical enum variant for a folded builtin spelling.
+    ///
+    /// The two edit-shortcuts spellings intentionally remain separate enum
+    /// variants for stable IDs, but Director treats them as one symbol. The
+    /// later registration is the canonical lookup result, matching the old
+    /// process table.
+    pub const fn canonical(self) -> Self {
+        match self {
+            Self::EditShortCutsEnabled => Self::EditShortcutsEnabled,
+            other => other,
+        }
+    }
+
+    /// Immutable baseline spelling, taken from the first registration of the
+    /// canonical folded key. Movie-specific display claims live in a session
+    /// SymbolTable and are resolved there instead.
+    pub fn default_spelling(&self) -> &'static str {
+        // The two spellings have distinct stable enum IDs but one Director
+        // symbol identity. Preserve the first spelling in O(1) lookup.
+        if matches!(
+            self,
+            Self::EditShortCutsEnabled | Self::EditShortcutsEnabled
+        ) {
+            return "editShortCutsEnabled";
+        }
+        BUILTIN_DEFAULT_SPELLINGS
+            .get(*self as usize)
+            .copied()
+            .unwrap_or("<unknown-builtin>")
+    }
+
     pub fn as_str(&self) -> &'static str {
-        let symbol_table = unsafe { SYMBOL_TABLE.as_ref().unwrap() };
-        let spur = symbol_table.builtin_to_spur.get(self).unwrap();
-        symbol_table.get_original_string(spur)
+        self.default_spelling()
     }
 }
 
 impl PartialEq<&str> for BuiltInSymbol {
-    fn eq(&self, other: &&str) -> bool { Symbol::builtin(*self).eq_ignore_ascii_case(other) }
+    fn eq(&self, other: &&str) -> bool {
+        self.default_spelling().eq_ignore_ascii_case(other)
+    }
 }
 impl PartialEq<BuiltInSymbol> for &str {
-    fn eq(&self, other: &BuiltInSymbol) -> bool { Symbol::builtin(*other).eq_ignore_ascii_case(self) }
+    fn eq(&self, other: &BuiltInSymbol) -> bool {
+        other.default_spelling().eq_ignore_ascii_case(self)
+    }
 }
 
 impl BuiltInSymbol {
     pub fn eq_ignore_ascii_case(&self, other: &str) -> bool {
-        Symbol::builtin(*self).eq_ignore_ascii_case(other)
+        self.default_spelling().eq_ignore_ascii_case(other)
     }
-    pub fn to_ascii_lowercase(&self) -> String { Symbol::builtin(*self).to_lowercase() }
+    pub fn to_ascii_lowercase(&self) -> String {
+        self.default_spelling().to_ascii_lowercase()
+    }
+}
+
+#[cfg(test)]
+mod stability_tests {
+    use super::*;
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    struct FixtureEntry {
+        discriminant: u16,
+        variant: String,
+        spelling: String,
+    }
+    #[derive(Deserialize)]
+    struct Fixture {
+        entry_count: usize,
+        entries: Vec<FixtureEntry>,
+    }
+
+    #[test]
+    fn builtin_order_and_ids_match_golden_fixture() {
+        let fixture: Fixture = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/builtin-symbols-297da4a.json"
+        ))
+        .unwrap();
+        assert_eq!(fixture.entry_count, BUILTIN_SPECS.len());
+        assert_eq!(fixture.entries.len(), BUILTIN_SPECS.len());
+        for (entry, (spelling, variant)) in fixture.entries.iter().zip(BUILTIN_SPECS.iter()) {
+            assert_eq!(
+                entry.discriminant, *variant as u16,
+                "variant {}",
+                entry.variant
+            );
+            assert_eq!(entry.variant, format!("{variant:?}"));
+            assert_eq!(&entry.spelling, spelling);
+        }
+        assert_eq!(BuiltInSymbol::EditShortCutsEnabled as u16, 53);
+        assert_eq!(BuiltInSymbol::EditShortcutsEnabled as u16, 66);
+    }
 }

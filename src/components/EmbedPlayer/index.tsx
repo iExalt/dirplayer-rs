@@ -1,10 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { RootState } from '../../store';
 import { useSelector } from 'react-redux'
-import {
-  load_movie_file, play, set_base_path, set_external_params,
-  set_startup_do, set_startup_do_before, set_startup_go,
-} from 'vm-rust';
+import { useVMHandle } from '../VMProvider';
 import { parseLaunchCommand, findLaunchCommand } from '../../utils/launchCommand';
 import { getExternalXtrasReady, resolveAndLoadMovieXtras, setXtraMovieBase, whenMovieLoaded } from 'dirplayer-js-api';
 import { getFullPathFromOrigin, getBasePath } from '../../utils/path';
@@ -34,6 +31,7 @@ type EmbedPlayerProps = {
 export default function EmbedPlayer({width, height, src, externalParams, launchCommand, requireClickToPlay, enableGestures}: EmbedPlayerProps) {
   const isVmReady = useSelector<RootState>(state => state.vm.isReady);
   const movieLoadError = useSelector<RootState, string | undefined>(state => state.vm.movieLoadError);
+  const handle = useVMHandle();
   const [userClicked, setUserClicked] = useState(!requireClickToPlay);
 
   const normalizeCssSize = useCallback((value: string) => {
@@ -59,17 +57,17 @@ export default function EmbedPlayer({width, height, src, externalParams, launchC
 
       const fullPath = getFullPathFromOrigin(src || launch?.movieUrl || '');
       const moviePath = getBasePath(fullPath);
-      set_base_path(moviePath);
+      handle.set_base_path(moviePath);
       // Bare xtra filenames resolve against this movie's directory.
       setXtraMovieBase(moviePath);
       // Embed-level params win over the launch command's: the host page's
       // `<param>` / `data-sw-…` values are the more specific statement of
       // intent, and a curator's command is the general one.
-      set_external_params({ ...(launch?.externalParams || {}), ...(externalParams || {}) });
+      handle.set_external_params({ ...(launch?.externalParams || {}), ...(externalParams || {}) });
       if (launch) {
-        if (launch.startupDoBefore) set_startup_do_before(launch.startupDoBefore);
-        if (launch.startupDo) set_startup_do(launch.startupDo);
-        if (launch.startupGo) set_startup_go(launch.startupGo);
+        if (launch.startupDoBefore) handle.set_startup_do_before(launch.startupDoBefore);
+        if (launch.startupDo) handle.set_startup_do(launch.startupDo);
+        if (launch.startupGo) handle.set_startup_go(launch.startupGo);
         if (launch.ignored.length) {
           console.warn('[DirPlayer] launch command: ignored projector-only flags:', launch.ignored.join(', '));
         }
@@ -81,15 +79,15 @@ export default function EmbedPlayer({width, height, src, externalParams, launchC
       // load_movie_file is fire-and-forget — wait on onMovieLoaded
       // before trying to read the parsed XTRl.
       const movieLoadedPromise = whenMovieLoaded();
-      await load_movie_file(fullPath, false);
+      await handle.load_movie_file(fullPath, false);
       await movieLoadedPromise;
-      await resolveAndLoadMovieXtras();
-      play();
+      await resolveAndLoadMovieXtras(handle);
+      handle.play();
     }
     if (isVmReady && userClicked) {
       loadMovie().catch(e => console.error('Failed to load movie', e))
     }
-  }, [isVmReady, userClicked]) // TODO: Update player when src/params change
+  }, [handle, isVmReady, userClicked]) // TODO: Update player when src/params change
 
   const handleClick = useCallback(() => {
     initAudioBackend();

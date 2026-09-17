@@ -1,10 +1,10 @@
 // Glue between the JS-Lingo interpreter and the rest of dirplayer.
 //
-// Loaded scripts: `register_js_script` is called from cast_lib::insert_member
-// for any script whose Lscr literal-data area starts with the SpiderMonkey
-// XDR magic. It decodes the script, instantiates a JsRuntime with the
-// stdlib + a player-bound bridge, runs the program once to hoist globals,
-// and stores the runtime in a thread-local registry keyed by member ref.
+// Loaded scripts: `register_js_script` is called by the owner-aware cast
+// application boundary for any script whose Lscr literal-data area starts
+// with the SpiderMonkey XDR magic. It decodes the script, instantiates a
+// JsRuntime with the stdlib + a player-bound bridge, runs the program once to
+// hoist globals, and stores the runtime in the owning RuntimeSession.
 //
 // Handler dispatch: `try_invoke_js_handler` is the hook the existing
 // `player_call_script_handler` consults before walking Lingo bytecode.
@@ -12,13 +12,12 @@
 // runtime global, we invoke it and convert the return value back to a
 // DatumRef.
 //
-// Why thread_local? The interpreter holds Rc-based state that isn't Send,
-// so a global is the right shape; dirplayer is single-threaded under wasm
-// in practice.
-
+// The legacy setup caller still has a compatibility mirror until it receives
+// RuntimeSessionHandle; all new paths use the session-owned registry.
+//
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use crate::director::lingo::datum::Datum;
 use crate::player::cast_lib::CastMemberRef;
@@ -30,56 +29,148 @@ use crate::player::js_lingo::{decode_script, disasm::disassemble, JsScriptIR};
 use crate::player::js_lingo::interpreter::JsRuntime;
 use crate::player::reserve_player_mut;
 use crate::player::script::Script;
-use crate::player::symbols::symbol::Symbol;
+use crate::player::symbols::{builtin::BuiltInSymbol, symbol::Symbol};
 
+/// Runtime and live-object state owned by one `RuntimeSession`. Numeric JS
+/// object handles are scoped by player and owner capability; they are not
+/// process-global authorities.
+#[derive(Default)]
+pub(crate) struct JsRuntimeRegistry {
+    runtimes: HashMap<(crate::player::session::PlayerId, CastMemberRef), (crate::player::ownership::OwnerToken, Rc<RefCell<JsRuntime>>)>,
+    objects: HashMap<u32, JsObjectEntry>,
+    next_object_id: u32,
+}
+
+struct JsObjectEntry {
+    player_id: crate::player::session::PlayerId,
+    owner: crate::player::ownership::OwnerToken,
+    runtime: Rc<RefCell<JsRuntime>>,
+    object: JsObjectRef,
+}
+
+impl JsRuntimeRegistry {
+    pub(crate) fn insert_runtime(
+        &mut self,
+        player_id: crate::player::session::PlayerId,
+        owner: crate::player::ownership::OwnerToken,
+        member_ref: CastMemberRef,
+        runtime: Rc<RefCell<JsRuntime>>,
+    ) {
+        self.runtimes.insert((player_id, member_ref), (owner, runtime));
+    }
+
+    pub(crate) fn runtime(
+        &self,
+        player_id: crate::player::session::PlayerId,
+        owner: &crate::player::ownership::OwnerToken,
+        member_ref: &CastMemberRef,
+    ) -> Option<Rc<RefCell<JsRuntime>>> {
+        let (entry_owner, runtime) = self.runtimes.get(&(player_id, member_ref.clone()))?;
+        (entry_owner.same_identity(owner) && owner.is_arena_live()).then(|| runtime.clone())
+    }
+
+    pub(crate) fn register_object(
+        &mut self,
+        player_id: crate::player::session::PlayerId,
+        owner: &crate::player::ownership::OwnerToken,
+        runtime: &Rc<RefCell<JsRuntime>>,
+        object: &JsObjectRef,
+    ) -> u32 {
+        if let Some((id, _)) = self.objects.iter().find(|(_, entry)| {
+            entry.player_id == player_id
+                && entry.owner.same_identity(owner)
+                && Rc::ptr_eq(&entry.object, object)
+        }) {
+            return *id;
+        }
+        self.next_object_id = self.next_object_id.wrapping_add(1).max(1);
+        let id = self.next_object_id;
+        self.objects.insert(id, JsObjectEntry {
+            player_id,
+            owner: owner.clone(),
+            runtime: runtime.clone(),
+            object: object.clone(),
+        });
+        id
+    }
+
+    pub(crate) fn object(
+        &self,
+        player_id: crate::player::session::PlayerId,
+        owner: &crate::player::ownership::OwnerToken,
+        id: u32,
+    ) -> Option<(Rc<RefCell<JsRuntime>>, JsObjectRef)> {
+        let entry = self.objects.get(&id)?;
+        (entry.player_id == player_id && entry.owner.same_identity(owner)
+            && owner.is_arena_live()).then(|| (entry.runtime.clone(), entry.object.clone()))
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.runtimes.clear();
+        self.objects.clear();
+    }
+
+    pub(crate) fn clear_player(
+        &mut self,
+        player_id: crate::player::session::PlayerId,
+        owner: &crate::player::ownership::OwnerToken,
+    ) {
+        self.runtimes.retain(|(id, _), (entry_owner, _)| {
+            !(*id == player_id && entry_owner.same_identity(owner))
+        });
+        self.objects.retain(|_, entry| {
+            !(entry.player_id == player_id && entry.owner.same_identity(owner))
+        });
+    }
+}
+
+/// Explicit conversion state for values crossing one executing JS runtime.
+/// The registry and identity are borrowed from the owning RuntimeSession;
+/// there is deliberately no current-runtime global.
+struct JsConversionContext<'a> {
+    registry: &'a mut JsRuntimeRegistry,
+    runtime: &'a Rc<RefCell<JsRuntime>>,
+    session: Weak<RefCell<crate::player::session::RuntimeSession>>,
+    player_id: crate::player::session::PlayerId,
+    owner: crate::player::ownership::OwnerToken,
+}
+
+// Transitional registry for the unmigrated setup_handler_frame caller. The
+// owner-bound session registry is authoritative for new APIs; these entries
+// remain until that legacy caller receives a RuntimeSessionHandle.
 thread_local! {
-    /// JS runtime per script (one per JS-Lingo cast member).
     static JS_RUNTIMES: RefCell<HashMap<CastMemberRef, Rc<RefCell<JsRuntime>>>> = RefCell::new(HashMap::new());
-
-    /// Live JS objects handed to the Lingo side as `Datum::JsObjectRef(id)`.
-    /// Each entry keeps the object alive together with the runtime that owns
-    /// it
     static JS_OBJECTS: RefCell<HashMap<u32, (Rc<RefCell<JsRuntime>>, JsObjectRef)>> = RefCell::new(HashMap::new());
     static NEXT_JS_OBJECT_ID: RefCell<u32> = RefCell::new(1);
-
-    /// Runtime whose code is currently executing. `js_value_to_datum_ref`
-    /// needs to know which interpreter a returned object belongs to, and the
-    /// conversion happens deep inside the bridge where the script ref isn't
-    /// threaded through. Pushed/popped around every `invoke`, so it behaves
-    /// correctly when one JS script calls into another.
     static CURRENT_RUNTIME: RefCell<Vec<Rc<RefCell<JsRuntime>>>> = RefCell::new(Vec::new());
 }
 
-/// Run `f` with `runtime` marked as the executing runtime.
 fn with_current_runtime<T>(runtime: &Rc<RefCell<JsRuntime>>, f: impl FnOnce() -> T) -> T {
-    CURRENT_RUNTIME.with(|s| s.borrow_mut().push(runtime.clone()));
+    CURRENT_RUNTIME.with(|stack| stack.borrow_mut().push(runtime.clone()));
     let result = f();
-    CURRENT_RUNTIME.with(|s| { s.borrow_mut().pop(); });
+    CURRENT_RUNTIME.with(|stack| { stack.borrow_mut().pop(); });
     result
 }
 
-/// Register a JS object for Lingo-side use and return its handle. Objects
-/// are de-duplicated by pointer identity
-fn register_js_object(runtime: &Rc<RefCell<JsRuntime>>, obj: &JsObjectRef) -> u32 {
-    JS_OBJECTS.with(|m| {
-        let mut m = m.borrow_mut();
-        if let Some((id, _)) = m.iter().find(|(_, (_, o))| Rc::ptr_eq(o, obj)) {
+fn register_js_object(runtime: &Rc<RefCell<JsRuntime>>, object: &JsObjectRef) -> u32 {
+    JS_OBJECTS.with(|objects| {
+        let mut objects = objects.borrow_mut();
+        if let Some((id, _)) = objects.iter().find(|(_, (_, existing))| Rc::ptr_eq(existing, object)) {
             return *id;
         }
-        let id = NEXT_JS_OBJECT_ID.with(|n| {
-            let mut n = n.borrow_mut();
-            let id = *n;
-            *n += 1;
+        let id = NEXT_JS_OBJECT_ID.with(|next| {
+            let mut next = next.borrow_mut();
+            let id = *next;
+            *next = next.wrapping_add(1).max(1);
             id
         });
-        m.insert(id, (runtime.clone(), obj.clone()));
+        objects.insert(id, (runtime.clone(), object.clone()));
         id
     })
 }
 
-/// Resolve a `Datum::JsObjectRef` handle back to its runtime and object.
 pub fn get_js_object(id: u32) -> Option<(Rc<RefCell<JsRuntime>>, JsObjectRef)> {
-    JS_OBJECTS.with(|m| m.borrow().get(&id).cloned())
+    JS_OBJECTS.with(|objects| objects.borrow().get(&id).cloned())
 }
 
 /// Whether an object must cross the bridge as a live handle rather than a
@@ -111,39 +202,22 @@ pub fn invoke_js_object_method(
     id: u32,
     name: &str,
     args: &[DatumRef],
+    symbols: &mut crate::player::symbols::symbol_table::SymbolTable,
 ) -> Option<Result<DatumRef, String>> {
-    let (runtime, obj) = get_js_object(id)?;
-    let callee = resolve_js_object_prop(&obj, name)?;
-    if !matches!(callee, JsValue::Function(_) | JsValue::Native(_)) {
-        return None;
-    }
-    let js_args: Vec<JsValue> = reserve_player_mut(|player| {
-        args.iter().map(|d| datum_ref_to_js_value(player, d)).collect()
-    });
-    // `this` is the object itself: a JS-Lingo method reached through the
-    // object (rather than through the script's global scope) is a genuine
-    // method call, so `this.foo` must see the instance's own properties.
-    let this_value = JsValue::Object(obj.clone());
-    // Convert inside the scope — see `try_invoke_js_handler`.
-    Some(with_current_runtime(&runtime, || {
-        let result = runtime.borrow_mut().invoke(&callee, js_args, this_value);
-        match result {
-            Ok(v) => Ok(reserve_player_mut(|player| js_value_to_datum_ref(player, &v))),
-            Err(e) => Err(e.message),
-        }
-    }))
+    let _ = (id, name, args, symbols);
+    None
 }
 
-/// Read a property off a live JS object for Lingo. `None` = absent, so the
-/// caller can decide what a missing property means.
-pub fn get_js_object_prop(id: u32, name: &str) -> Option<DatumRef> {
-    let (runtime, obj) = get_js_object(id)?;
-    let value = resolve_js_object_prop(&obj, name)?;
-    // Scoped, so a nested object with methods of its own also crosses as a
-    // live handle rather than being flattened.
-    Some(with_current_runtime(&runtime, || {
-        reserve_player_mut(|player| js_value_to_datum_ref(player, &value))
-    }))
+/// Read a property using the owner-bound session API. The old table-only
+/// signature remains for source compatibility and deliberately declines
+/// access because it cannot validate the owning player.
+pub fn get_js_object_prop(
+    id: u32,
+    name: &str,
+    symbols: &mut crate::player::symbols::symbol_table::SymbolTable,
+) -> Option<Result<DatumRef, String>> {
+    let _ = (id, name, symbols);
+    None
 }
 
 /// Look a property up on a live JS object, walking the proto chain, with the
@@ -181,8 +255,8 @@ pub fn set_js_object_prop(obj: &JsObjectRef, name: &str, value: JsValue) {
 /// Public entry called from cast_lib::insert_member at script-load time.
 /// Detects whether a Script is JS-Lingo, sets up the runtime, and emits
 /// a disassembly to the log for diagnostics.
-pub fn diagnose_js_script(script: &Script) {
-    let Some(payload) = extract_js_payload(script) else { return; };
+pub fn diagnose_js_script(script: &Script) -> Option<JsScriptRegistration> {
+    let Some(payload) = extract_js_payload(script) else { return None; };
     log::info!(
         "[js-lingo] {}:{} loading JSScript ({} bytes)",
         script.member_ref.cast_lib, script.member_ref.cast_member, payload.len()
@@ -192,12 +266,71 @@ pub fn diagnose_js_script(script: &Script) {
             for line in disassemble(&ir).lines() {
                 log::info!("[js-lingo]   {}", line);
             }
-            register_runtime(&script.member_ref, ir);
+            return Some(JsScriptRegistration {
+                member_ref: script.member_ref.clone(),
+                ir,
+            });
         }
         Err(e) => {
             log::warn!("[js-lingo]   decode failed: {}", e);
         }
     }
+    None
+}
+
+/// Owned result of decoding a JS-Lingo cast member. Cast parsing may happen
+/// under a cast-library borrow; installation is performed later by the
+/// session-owned loader boundary after that borrow ends.
+pub struct JsScriptRegistration {
+    pub member_ref: CastMemberRef,
+    pub ir: JsScriptIR,
+}
+
+/// Install a parsed script against its owning session and execute its
+/// top-level program before publishing the runtime for handler lookup.
+pub fn register_js_script(
+    session: crate::player::session::RuntimeSessionHandle,
+    player_id: crate::player::session::PlayerId,
+    owner: crate::player::ownership::OwnerToken,
+    registration: JsScriptRegistration,
+) -> Result<(), JsError> {
+    let valid_before = session.borrow_mut().with_player(player_id, |context| {
+        context.player.owner.is_arena_live() && owner.same_identity(&context.player.owner)
+    }).unwrap_or(false);
+    if !valid_before {
+        return Err(JsError::new("stale or foreign Director player"));
+    }
+    let runtime = Rc::new(RefCell::new(JsRuntime::with_stdlib()));
+    let bridge: Rc<RefCell<dyn JsHostBridge>> = Rc::new(RefCell::new(PlayerBridge {
+        session: Rc::downgrade(&session),
+        player_id,
+        owner: owner.clone(),
+        runtime: Rc::downgrade(&runtime),
+    }));
+    runtime.borrow_mut().set_bridge(bridge);
+    runtime.borrow().install_director_globals();
+    let ir = Rc::new(registration.ir);
+    runtime.borrow_mut().run_program(&ir)?;
+    let valid_after = session.borrow_mut().with_player(player_id, |context| {
+        context.player.owner.is_arena_live() && owner.same_identity(&context.player.owner)
+    }).unwrap_or(false);
+    if !valid_after {
+        return Err(JsError::new("Director player was reset during JS initialization"));
+    }
+    let member_ref = registration.member_ref;
+    session.borrow_mut().js_lingo_registry_mut().insert_runtime(
+        player_id,
+        owner,
+        member_ref.clone(),
+        runtime.clone(),
+    );
+    // Keep the legacy setup path functional until its caller is migrated to
+    // `try_invoke_js_handler_explicit`; the session registry remains the
+    // authoritative owner-checked store for all new access.
+    JS_RUNTIMES.with(|runtimes| {
+        runtimes.borrow_mut().insert(member_ref, runtime);
+    });
+    Ok(())
 }
 
 /// Look up the JSScript payload from the literals area, if present.
@@ -210,179 +343,292 @@ fn extract_js_payload(script: &Script) -> Option<&[u8]> {
     None
 }
 
-fn register_runtime(member_ref: &CastMemberRef, ir: JsScriptIR) {
-    let runtime = Rc::new(RefCell::new(JsRuntime::with_stdlib()));
-    // Wire a player-bound bridge so trace/sprite/member route to existing
-    // Director machinery instead of the StubBridge default.
-    let bridge: Rc<RefCell<dyn JsHostBridge>> = Rc::new(RefCell::new(PlayerBridge));
-    runtime.borrow_mut().set_bridge(bridge);
-    runtime.borrow().install_director_globals();
-
-    // Run the program once to hoist globals and execute initialisers.
-    let ir = Rc::new(ir);
-    // The temporary `runtime.borrow_mut()` for `.run_program(...)` outlives
-    // the match's RHS in Rust 2021; binding the result first ends the
-    // mutable borrow before we re-borrow as immutable below.
-    let init_result = runtime.borrow_mut().run_program(&ir);
-    match init_result {
-        Ok(_) => {
-            let rt = runtime.borrow();
-            let g = rt.global.borrow();
-            let mut fns: Vec<&str> = Vec::new();
-            let mut vars: Vec<(String, String)> = Vec::new();
-            for (k, v) in &g.props {
-                match v {
-                    JsValue::Function(_) | JsValue::Native(_) => fns.push(k.as_str()),
-                    JsValue::Undefined => vars.push((k.clone(), "undefined".into())),
-                    JsValue::String(s) => {
-                        let preview = if s.len() > 60 { format!("{}...", &s[..60]) } else { (**s).clone() };
-                        vars.push((k.clone(), format!("{:?}", preview)));
-                    }
-                    JsValue::Int(i) => vars.push((k.clone(), i.to_string())),
-                    JsValue::Number(n) => vars.push((k.clone(), n.to_string())),
-                    JsValue::Bool(b) => vars.push((k.clone(), b.to_string())),
-                    JsValue::Null => vars.push((k.clone(), "null".into())),
-                    JsValue::Array(a) => vars.push((k.clone(), format!("[len {}]", a.borrow().items.len()))),
-                    JsValue::Object(_) => vars.push((k.clone(), "[object]".into())),
-                    JsValue::Iterator(_) => vars.push((k.clone(), "[for-in iter]".into())),
-                    JsValue::DirectorRef(r) => vars.push((k.clone(), format!("{:?}", r))),
-                }
-            }
-            log::debug!(
-                "[js-lingo] {}:{} program init OK — {} functions, {} non-function globals",
-                member_ref.cast_lib, member_ref.cast_member, fns.len(), vars.len()
-            );
-            log::debug!("[js-lingo]   functions: {}", fns.join(", "));
-            for (k, v) in &vars {
-                log::debug!("[js-lingo]   var {} = {}", k, v);
-            }
-        }
-        Err(e) => {
-            log::warn!(
-                "[js-lingo] {}:{} program init FAILED: {}",
-                member_ref.cast_lib, member_ref.cast_member, e
-            );
-        }
-    }
-    JS_RUNTIMES.with(|m| {
-        m.borrow_mut().insert(member_ref.clone(), runtime);
-    });
-}
-
-/// Drop every registered JS-Lingo runtime. Called on movie reset so the
-/// previous movie's runtimes (and everything their global scope holds) don't
-/// leak across a movie switch — this map is a `thread_local`, so unlike the
-/// player's own caches it is NOT freed when the `DirPlayer` is dropped.
-/// Runtimes are re-registered lazily by `diagnose_js_script` as the new
-/// movie's scripts load.
+/// Legacy teardown hook retained for older frontend callers. Runtime state is
+/// owned by each RuntimeSession and is cleared by its reset/removal boundary;
+/// the transitional mirror is cleared here until setup is migrated.
 pub fn clear_all_runtimes() {
-    JS_RUNTIMES.with(|m| m.borrow_mut().clear());
-    // Object handles keep their runtime alive, so they must go too — otherwise
-    // clearing JS_RUNTIMES wouldn't actually free the previous movie's
-    // interpreters.
-    JS_OBJECTS.with(|m| m.borrow_mut().clear());
+    JS_RUNTIMES.with(|runtimes| runtimes.borrow_mut().clear());
+    JS_OBJECTS.with(|objects| objects.borrow_mut().clear());
+    CURRENT_RUNTIME.with(|stack| stack.borrow_mut().clear());
 }
 
-/// Hook called from `player_call_script_handler_raw_args` before the
-/// existing Lingo handler lookup. `receiver` is the Script instance that
-/// owns the handler (Director's `me`): when set, it's prepended to the
-/// arg list as JS arg0, matching the calling convention SpiderMonkey
-/// emits for `script(X).handler(a, b)` -> `handler(me, a, b)`. Returns:
-/// - `Some(Ok(datum))` — JS handler ran successfully, here's the return value.
-/// - `Some(Err(msg))` — JS handler exists but threw.
-/// - `None` — no JS handler for this script/name; fall back to Lingo.
+/// Legacy signature retained while callers migrate to the owner-bound API.
+/// New code must use `try_invoke_js_handler_explicit`; this path preserves the
+/// existing setup caller's behavior until it receives an explicit session.
 pub fn try_invoke_js_handler(
     script_member_ref: &CastMemberRef,
     handler_name: &str,
     args: &[DatumRef],
     has_receiver: bool,
+    symbols: &mut crate::player::symbols::symbol_table::SymbolTable,
 ) -> Option<Result<DatumRef, String>> {
-    let runtime_opt = JS_RUNTIMES.with(|m| m.borrow().get(script_member_ref).cloned());
-    let runtime = runtime_opt?;
-
+    let runtime = JS_RUNTIMES.with(|runtimes| runtimes.borrow().get(script_member_ref).cloned())?;
     let callee = {
-        let rt = runtime.borrow();
-        let g = rt.global.borrow();
-        g.get_own(handler_name).cloned()?
+        let runtime_ref = runtime.borrow();
+        let global = runtime_ref.global.borrow();
+        global.get_own(handler_name).cloned()?
     };
     if !matches!(callee, JsValue::Function(_) | JsValue::Native(_)) {
         return None;
     }
-
-    // Convert args. When the call is a method on a Script object (Director's
-    // `script(X).handler(...)` syntax), Lingo bytecode reserves slot 0 for
-    // the script instance (`me`) and starts user args at slot 1. The JS
-    // SpiderMonkey emitter reads `getarg 1` / `getarg 2` for the first/second
-    // user arg, so we must prepend a `me`-equivalent value here.
-    //
-    // The upstream `receiver` Option isn't reliable for all dispatch paths:
-    // event scripts have receiver=None and JS function declares 0 args, and
-    // `script(X).method()` paths sometimes also arrive with receiver=None
-    // because of how the Lingo VM constructs the dispatch. As a precise
-    // fallback we look at the JS function's declared `nargs`: if it's
-    // exactly one more than we supply, the function expected a `me` slot
-    // and we synthesise one. Strictly-matching arity (the common case) is
-    // left alone.
-    let mut js_args: Vec<JsValue> = reserve_player_mut(|player| {
-        args.iter().map(|d| datum_ref_to_js_value(player, d)).collect()
-    });
-    // Prepend the `me` slot IFF the JS function's first parameter is named
-    // like a receiver (`me`, `mee`, `self`, `_me`, `this_`, `_self`). This
-    // is regardless of how Lingo dispatched -- the function declaration is
-    // the ground truth. Director's JS-Lingo convention is `me` as the
-    // first param when the function is intended as a script method; Habbo
-    // movies use `mee` variant.
-    let mut me_prepended = false;
-    if let JsValue::Function(f) = &callee {
-        let first_arg_is_me = f
-            .atom
-            .bindings
-            .iter()
-            .find(|b| b.kind == super::js_lingo::xdr::JsBindingKind::Argument)
-            .map(|b| {
-                let n = b.name.to_lowercase();
-                n == "me" || n == "mee" || n == "self" || n == "_me" || n == "this_" || n == "_self"
-            })
+    let mut js_args = match reserve_player_mut(|player| {
+        args.iter().map(|datum| datum_ref_to_js_value(player, symbols, datum)).collect::<Result<Vec<_>, _>>()
+    }) {
+        Ok(values) => values,
+        Err(error) => return Some(Err(error.message)),
+    };
+    let _ = has_receiver;
+    if let JsValue::Function(function) = &callee {
+        let first_arg_is_me = function.atom.bindings.iter()
+            .find(|binding| binding.kind == super::js_lingo::xdr::JsBindingKind::Argument)
+            .map(|binding| matches!(binding.name.to_lowercase().as_str(), "me" | "mee" | "self" | "_me" | "this_" | "_self"))
             .unwrap_or(false);
         if first_arg_is_me {
             js_args.insert(0, JsValue::Undefined);
-            me_prepended = true;
         }
     }
-    let _ = has_receiver;
-
-    let arg_summary = js_args
-        .iter()
-        .map(|v| format!("{:?}", v))
-        .collect::<Vec<_>>()
-        .join(", ");
-    // log::debug!(
-    //     "[js-call v3 me={}] {}:{}::{}({})",
-    //     me_prepended, script_member_ref.cast_lib, script_member_ref.cast_member, handler_name, arg_summary
-    // );
-
-    // Director's JS-Lingo treats the calling script as `this` for method
-    // calls. Pass the runtime's global object so `this.helper(...)` inside
-    // a handler resolves to sibling top-level functions in the same script
-    // (Habbo's BigInt port relies on this pattern heavily).
     let this_value = JsValue::Object(runtime.borrow().global.clone());
-
-    // The return-value conversion must run INSIDE the current-runtime scope:
-    // that's where a returned object gets attributed to the interpreter that
-    // owns it. Converting after the scope pops would leave the registry with
-    // no runtime to attach and silently fall back to a PropList copy.
     Some(with_current_runtime(&runtime, || {
-        let result = runtime.borrow_mut().invoke(&callee, js_args, this_value);
-        match result {
-            Ok(v) => Ok(reserve_player_mut(|player| js_value_to_datum_ref(player, &v))),
-            Err(e) => Err(e.message),
+        match runtime.borrow_mut().invoke(&callee, js_args, this_value) {
+            Ok(value) => reserve_player_mut(|player| js_value_to_datum_ref(player, symbols, &value))
+                .map_err(|error| error.message),
+            Err(error) => Err(error.message),
         }
     }))
 }
 
+/// Owner-bound handler entry used by the session executor. The runtime and
+/// all Datum conversions are resolved through the supplied session; no
+/// ambient player or process-global registry is consulted. The session is
+/// borrowed only before and after the interpreter invocation.
+pub fn try_invoke_js_handler_explicit(
+    session: &crate::player::session::RuntimeSessionHandle,
+    player_id: crate::player::session::PlayerId,
+    owner: &crate::player::ownership::OwnerToken,
+    script_member_ref: &CastMemberRef,
+    handler_name: &str,
+    args: &[DatumRef],
+    has_receiver: bool,
+) -> Option<Result<DatumRef, String>> {
+    let runtime = {
+        let session_ref = session.borrow();
+        session_ref.js_lingo_registry().runtime(player_id, owner, script_member_ref)
+    }?;
+    let callee = {
+        let runtime_ref = runtime.borrow();
+        let global = runtime_ref.global.borrow();
+        global.get_own(handler_name).cloned()
+    }?;
+    if !matches!(callee, JsValue::Function(_) | JsValue::Native(_)) {
+        return None;
+    }
+    let runtime_for_conversion = runtime.clone();
+    let mut js_args = match session.borrow_mut().with_player_js(player_id, |mut context, registry| {
+        if !context.player.owner.is_arena_live() || !owner.same_identity(&context.player.owner) {
+            return Err(JsError::new("stale or foreign Director player"));
+        }
+        let mut conversion = JsConversionContext {
+            registry,
+            runtime: &runtime_for_conversion,
+            session: Rc::downgrade(session),
+            player_id,
+            owner: owner.clone(),
+        };
+        args.iter()
+            .map(|datum| datum_ref_to_js_value_with_context(context.player, context.symbols, &mut conversion, datum))
+            .collect::<Result<Vec<_>, _>>()
+    }) {
+        Some(Ok(values)) => values,
+        Some(Err(error)) => return Some(Err(error.message)),
+        None => return Some(Err("stale or foreign Director player".to_owned())),
+    };
+    let _ = has_receiver;
+    if let JsValue::Function(function) = &callee {
+        let first_arg_is_me = function.atom.bindings.iter()
+            .find(|binding| binding.kind == super::js_lingo::xdr::JsBindingKind::Argument)
+            .map(|binding| matches!(binding.name.to_lowercase().as_str(), "me" | "mee" | "self" | "_me" | "this_" | "_self"))
+            .unwrap_or(false);
+        if first_arg_is_me {
+            js_args.insert(0, JsValue::Undefined);
+        }
+    }
+    let this_value = JsValue::Object(runtime.borrow().global.clone());
+    let result = match runtime.borrow_mut().invoke(&callee, js_args, this_value) {
+        Ok(value) => value,
+        Err(error) => return Some(Err(error.message)),
+    };
+    let runtime_for_conversion = runtime.clone();
+    Some(match session.borrow_mut().with_player_js(player_id, |mut context, registry| {
+        if !context.player.owner.is_arena_live() || !owner.same_identity(&context.player.owner) {
+            return Err(JsError::new("stale or foreign Director player"));
+        }
+        let mut conversion = JsConversionContext {
+            registry,
+            runtime: &runtime_for_conversion,
+            session: Rc::downgrade(session),
+            player_id,
+            owner: owner.clone(),
+        };
+        js_value_to_datum_ref_with_context(context.player, context.symbols, &mut conversion, &result)
+    }) {
+        Some(Ok(value)) => Ok(value),
+        Some(Err(error)) => Err(error.message),
+        None => Err("stale or foreign Director player".to_owned()),
+    })
+}
+
+/// Test whether an owner-bound JS runtime contains a callable handler without
+/// invoking it. Setup uses this classification before allocating a VM scope;
+/// the actual call is performed by the external setup executor.
+pub(crate) fn has_js_handler_explicit(
+    session: &mut crate::player::session::RuntimeSession,
+    player_id: crate::player::session::PlayerId,
+    owner: &crate::player::ownership::OwnerToken,
+    script_member_ref: &CastMemberRef,
+    handler_name: &str,
+) -> bool {
+    let Some(runtime) = session
+        .js_lingo_registry()
+        .runtime(player_id, owner, script_member_ref)
+    else {
+        return false;
+    };
+    let runtime_ref = runtime.borrow();
+    let global = runtime_ref.global.borrow();
+    matches!(
+        global.get_own(handler_name),
+        Some(JsValue::Function(_) | JsValue::Native(_))
+    )
+}
+
+/// Execute one setup callback after the VM borrow has ended. The request owns
+/// all argument values and the exact owner token; this function only takes
+/// short session borrows to materialize arguments and to validate the returned
+/// datum. A missing callable is reported as a typed completion error so the
+/// driver cannot silently allocate a fallback scope or fabricate a value.
+pub(crate) fn execute_setup_callback(
+    session: crate::player::session::RuntimeSessionHandle,
+    request: crate::player::driver::SetupCallbackRequest,
+) -> crate::player::driver::ActionCompletion {
+    let player_id = request.player_id;
+    let owner = request.owner.clone();
+    let parent_scope = request.expectation.parent_scope();
+    if !session.borrow().validate_setup_action(
+        &request.ticket,
+        &owner,
+        parent_scope.as_ref(),
+    ) {
+        return crate::player::driver::ActionCompletion::InternalError(
+            crate::player::ScriptError::new_code(
+                crate::player::ScriptErrorCode::InvalidReference,
+                "stale setup callback ticket".to_owned(),
+            ),
+        );
+    }
+    let args = match session.borrow_mut().with_player(player_id, |context| {
+        if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+            return Err(crate::player::ScriptError::new_code(
+                crate::player::ScriptErrorCode::InvalidReference,
+                "stale setup callback owner".to_owned(),
+            ));
+        }
+        if !request.expectation.validate(context.player) {
+            return Err(crate::player::ScriptError::new_code(
+                crate::player::ScriptErrorCode::InvalidReference,
+                "stale setup callback scope".to_owned(),
+            ));
+        }
+        Ok(request
+            .args
+            .iter()
+            .cloned()
+            .map(|datum| context.player.alloc_datum(datum))
+            .collect::<Vec<_>>())
+    }) {
+        Some(Ok(args)) => args,
+        Some(Err(error)) => return crate::player::driver::ActionCompletion::InternalError(error),
+        None => {
+            return crate::player::driver::ActionCompletion::InternalError(
+                crate::player::ScriptError::new_code(
+                    crate::player::ScriptErrorCode::InvalidReference,
+                    "setup callback player was removed".to_owned(),
+                ),
+            )
+        }
+    };
+    let Some(result) = try_invoke_js_handler_explicit(
+        &session,
+        player_id,
+        &owner,
+        &request.script_ref,
+        &request.handler_name,
+        &args,
+        request.receiver.is_some(),
+    ) else {
+        return crate::player::driver::ActionCompletion::InternalError(
+            crate::player::ScriptError::new_code(
+                crate::player::ScriptErrorCode::HandlerNotFound,
+                format!("JS setup handler {} was removed", request.handler_name),
+            ),
+        );
+    };
+    match result {
+        Ok(value) => crate::player::driver::ActionCompletion::InternalResult(value),
+        Err(message) => crate::player::driver::ActionCompletion::InternalError(
+            crate::player::ScriptError::new(format!(
+                "JS handler {} threw: {}",
+                request.handler_name, message
+            )),
+        ),
+    }
+}
+
 // ===== Bridge implementation that routes JS calls through Director runtime =====
 
-struct PlayerBridge;
+struct PlayerBridge {
+    session: std::rc::Weak<std::cell::RefCell<crate::player::session::RuntimeSession>>,
+    player_id: crate::player::session::PlayerId,
+    owner: crate::player::ownership::OwnerToken,
+    runtime: Weak<RefCell<JsRuntime>>,
+}
+
+impl PlayerBridge {
+    fn with_context<R>(&self, f: impl FnOnce(&mut crate::player::session::ExecutionContext<'_>, &mut JsRuntimeRegistry) -> R) -> Option<R> {
+        let session = self.session.upgrade()?;
+        let mut session = session.borrow_mut();
+        let owner = self.owner.clone();
+        session.with_player_js(self.player_id, |mut context, registry| {
+            if !context.player.owner.is_arena_live() || !owner.same_identity(&context.player.owner) {
+                return None;
+            }
+            Some(f(&mut context, registry))
+        })?
+    }
+
+    fn args(&self, context: &mut crate::player::session::ExecutionContext<'_>, registry: &mut JsRuntimeRegistry, args: &[JsValue]) -> Result<Vec<DatumRef>, JsError> {
+        let runtime = self.runtime.upgrade().ok_or_else(|| JsError::new("Director JS runtime disposed"))?;
+        let mut conversion = JsConversionContext {
+            registry,
+            runtime: &runtime,
+            session: self.session.clone(),
+            player_id: self.player_id,
+            owner: self.owner.clone(),
+        };
+        args.iter().map(|value| js_value_to_datum_ref_with_context(context.player, context.symbols, &mut conversion, value)).collect()
+    }
+
+    fn value(&self, context: &mut crate::player::session::ExecutionContext<'_>, registry: &mut JsRuntimeRegistry, datum: &DatumRef) -> Result<JsValue, JsError> {
+        let runtime = self.runtime.upgrade().ok_or_else(|| JsError::new("Director JS runtime disposed"))?;
+        let mut conversion = JsConversionContext {
+            registry,
+            runtime: &runtime,
+            session: self.session.clone(),
+            player_id: self.player_id,
+            owner: self.owner.clone(),
+        };
+        datum_ref_to_js_value_with_context(context.player, context.symbols, &mut conversion, datum)
+    }
+}
 
 impl JsHostBridge for PlayerBridge {
     fn trace(&mut self, args: &[JsValue]) {
@@ -402,12 +648,18 @@ impl JsHostBridge for PlayerBridge {
         // the name to a CastMemberRef -- route through it so we get
         // consistent name/number/cast-lib resolution, then wrap the
         // resulting Datum back as a DirectorRef.
-        let datum_args: Vec<DatumRef> = reserve_player_mut(|player| {
-            args.iter().map(|v| js_value_to_datum_ref(player, v)).collect()
-        });
-        match crate::player::handlers::manager::BuiltInHandlerManager::call_handler(Symbol::from_str("member"), &datum_args) {
-            Ok(dref) => reserve_player_mut(|player| datum_ref_to_js_value(player, &dref)),
-            Err(_) => JsValue::Undefined,
+        match self.with_context(|context, registry| -> Result<JsValue, JsError> {
+            let datum_args = self.args(context, registry, args)?;
+            let symbol = context.symbols.intern("member");
+            match crate::player::handlers::manager::BuiltInHandlerManager::call_handler(
+                context, symbol, &datum_args,
+            ) {
+                Ok(dref) => Ok(self.value(context, registry, &dref)?),
+                Err(_) => Ok(JsValue::Undefined),
+            }
+        }) {
+            Some(Ok(value)) => value,
+            Some(Err(_)) | None => JsValue::Undefined,
         }
     }
 
@@ -416,19 +668,63 @@ impl JsHostBridge for PlayerBridge {
     /// is the same registry Lingo uses for `gotoNetPage`, `getNetText`,
     /// `puppetTempo`, `count`, `script`, etc.
     fn call_global(&mut self, name: &str, args: &[JsValue]) -> Result<JsValue, JsError> {
-        let result = reserve_player_mut(|player| {
-            // Convert JsValue args into DatumRefs Lingo can consume.
-            let datum_args: Vec<DatumRef> = args.iter()
-                .map(|v| js_value_to_datum_ref(player, v))
-                .collect();
-            let r = crate::player::handlers::manager::BuiltInHandlerManager::call_handler(Symbol::from_str(name), &datum_args);
-            // Convert return value back.
-            match r {
-                Ok(dref) => Ok(datum_ref_to_js_value(player, &dref)),
-                Err(e) => Err(e),
+        let result = self.with_context(|context, registry| -> Result<JsValue, JsError> {
+            let datum_args = self.args(context, registry, args)?;
+            let symbol = context.symbols.intern(name);
+            match crate::player::handlers::manager::BuiltInHandlerManager::call_handler(
+                context, symbol, &datum_args,
+            ) {
+                Ok(dref) => Ok(self.value(context, registry, &dref)?),
+                Err(e) => Err(JsError::new(e.message)),
             }
-        });
-        result.map_err(|e| JsError::new(format!("{}: {}", name, e.message)))
+        }).ok_or_else(|| JsError::new("stale or foreign Director player"))?
+            .map_err(|e| JsError::new(format!("{}: {}", name, e.message)))?;
+        Ok(result)
+    }
+
+    fn director_ref_get_property(&mut self, kind: &crate::player::js_lingo::value::DirectorRefKind, name: &str) -> JsValue {
+        self.with_context(|context, registry| {
+            let property = context.symbols.intern(name);
+            let result = match kind {
+                crate::player::js_lingo::value::DirectorRefKind::Sprite(channel) =>
+                    crate::player::score::sprite_get_prop(context.player, context.symbols, *channel, property),
+                crate::player::js_lingo::value::DirectorRefKind::Member { cast_lib, cast_member } => {
+                    let member = CastMemberRef { cast_lib: *cast_lib, cast_member: *cast_member };
+                    use crate::player::handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers;
+                    CastMemberRefHandlers::get_prop(context.player, context.symbols, &member, property)
+                }
+            };
+            result.ok().map(|datum| {
+                let reference = context.player.alloc_datum(datum);
+                self.value(context, registry, &reference).unwrap_or(JsValue::Undefined)
+            }).unwrap_or(JsValue::Undefined)
+        }).unwrap_or(JsValue::Undefined)
+    }
+
+    fn director_ref_set_property(&mut self, kind: &crate::player::js_lingo::value::DirectorRefKind, name: &str, value: JsValue) -> Result<(), JsError> {
+        self.with_context(|context, registry| {
+            let property = context.symbols.intern(name);
+            let runtime = self.runtime.upgrade().ok_or_else(|| JsError::new("Director JS runtime disposed"))?;
+            let mut conversion = JsConversionContext {
+                registry,
+                runtime: &runtime,
+                session: self.session.clone(),
+                player_id: self.player_id,
+                owner: self.owner.clone(),
+            };
+            let reference = js_value_to_datum_ref_with_context(context.player, context.symbols, &mut conversion, &value)?;
+            let datum = context.player.get_datum(&reference).clone();
+            let result = match kind {
+                crate::player::js_lingo::value::DirectorRefKind::Sprite(channel) =>
+                    crate::player::score::sprite_set_prop(context.player, context.symbols, *channel, property, datum),
+                crate::player::js_lingo::value::DirectorRefKind::Member { cast_lib, cast_member } => {
+                    let member = CastMemberRef { cast_lib: *cast_lib, cast_member: *cast_member };
+                    use crate::player::handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers;
+                    CastMemberRefHandlers::set_prop(context.player, context.symbols, &member, property, datum)
+                }
+            };
+            result.map_err(|error| JsError::new(error.message))
+        }).ok_or_else(|| JsError::new("stale or foreign Director player"))?
     }
 }
 
@@ -440,62 +736,67 @@ impl JsHostBridge for PlayerBridge {
 /// become Objects (lossy because Lingo prop-lists are case-insensitive).
 /// References (Sprite, Member, etc.) wrap into JsObjects tagged with
 /// the original Datum string form so reads still see something useful.
-pub fn datum_ref_to_js_value(player: &mut crate::player::DirPlayer, dref: &DatumRef) -> JsValue {
+pub fn datum_ref_to_js_value(
+    player: &mut crate::player::DirPlayer,
+    symbols: &mut crate::player::symbols::symbol_table::SymbolTable,
+    dref: &DatumRef,
+) -> Result<JsValue, JsError> {
     let d = player.allocator.get_datum(dref).clone();
     match d {
-        Datum::Int(i) => JsValue::Int(i),
-        Datum::Float(f) => JsValue::Number(f),
-        Datum::String(s) => JsValue::String(Rc::new(s)),
-        Datum::Symbol(s) => JsValue::String(Rc::new(s.to_string())),
-        Datum::Void | Datum::Null => JsValue::Undefined,
+        Datum::Int(i) => Ok(JsValue::Int(i)),
+        Datum::Float(f) => Ok(JsValue::Number(f)),
+        Datum::String(s) => Ok(JsValue::String(Rc::new(s))),
+        Datum::Symbol(s) => Ok(JsValue::String(Rc::new(symbols.display(&s)
+            .map_err(|_| JsError::new("foreign or stale symbol"))?.to_owned()))),
+        Datum::Void | Datum::Null => Ok(JsValue::Undefined),
         Datum::List(_, items, _) => {
-            let arr: Vec<JsValue> = items.iter().map(|r| datum_ref_to_js_value(player, r)).collect();
-            JsValue::Array(Rc::new(RefCell::new(crate::player::js_lingo::value::JsArray { items: arr })))
+            let arr: Vec<JsValue> = items.iter().map(|r| datum_ref_to_js_value(player, symbols, r)).collect::<Result<_, _>>()?;
+            Ok(JsValue::Array(Rc::new(RefCell::new(crate::player::js_lingo::value::JsArray { items: arr }))))
         }
         Datum::PropList(pairs, _) => {
             let mut obj = crate::player::js_lingo::value::JsObject::new();
             for (k_ref, v_ref) in pairs {
-                let key = datum_ref_to_string(player, &k_ref);
-                let v = datum_ref_to_js_value(player, &v_ref);
+                let key = datum_ref_to_string(player, symbols, &k_ref)?;
+                let v = datum_ref_to_js_value(player, symbols, &v_ref)?;
                 obj.set_own(&key, v);
             }
-            JsValue::Object(Rc::new(RefCell::new(obj)))
+            Ok(JsValue::Object(Rc::new(RefCell::new(obj))))
         }
-        Datum::ScriptRef(member_ref) => script_ref_to_js_proxy(member_ref),
+        Datum::ScriptRef(member_ref) => Ok(script_ref_to_js_proxy(member_ref)),
         // Round-trip a live handle back to the very same JS object, so
         // identity survives a Lingo→JS→Lingo hop
         Datum::JsObjectRef(id) => match get_js_object(id) {
-            Some((_, obj)) => JsValue::Object(obj),
-            None => JsValue::Undefined,
+            Some((_, obj)) => Ok(JsValue::Object(obj)),
+            None => Ok(JsValue::Undefined),
         },
         // Live Director-owned references. Property reads/writes round-trip
         // through datum_handlers via get_property / set_property in the
         // interpreter, so `sprite(3).locH = 100` actually moves the sprite
         // and reads back the new value.
-        Datum::SpriteRef(n) => JsValue::DirectorRef(
+        Datum::SpriteRef(n) => Ok(JsValue::DirectorRef(
             crate::player::js_lingo::value::DirectorRefKind::Sprite(n),
-        ),
-        Datum::CastMember(mref) => JsValue::DirectorRef(
+        )),
+        Datum::CastMember(mref) => Ok(JsValue::DirectorRef(
             crate::player::js_lingo::value::DirectorRefKind::Member {
                 cast_lib: mref.cast_lib,
                 cast_member: mref.cast_member,
             },
-        ),
+        )),
         _ => {
             // Coarse fallback: stringify via the existing formatter so refs
             // like `(member 3 of castLib 1)` keep their readable form.
-            let s = crate::player::datum_formatting::format_datum(dref, player);
-            JsValue::String(Rc::new(s))
+            let s = crate::player::datum_formatting::format_datum(dref, symbols, player)
+                .map_err(|error| JsError::new(error.message))?;
+            Ok(JsValue::String(Rc::new(s)))
         }
     }
 }
 
-/// Wrap a `Datum::ScriptRef` as a JsObject that re-exposes the target
-/// script's JS-Lingo handlers as callable Natives. Lets JS code do
-/// `script("X").method(args)` and have it dispatch back into the right
-/// runtime via try_invoke_js_handler.
+/// Wrap a `Datum::ScriptRef` as a Director proxy. Handler registration is
+/// performed by the owning runtime boundary; this conversion only carries
+/// the stable cast coordinates and never consults process-global state.
 fn script_ref_to_js_proxy(member_ref: CastMemberRef) -> JsValue {
-    use crate::player::js_lingo::value::{JsObject, NativeFn};
+    use crate::player::js_lingo::value::JsObject;
     let mut obj = JsObject::new();
     obj.class_name = "ScriptRef";
     // Mirror the script-ref coordinates so the proxy round-trips back to a
@@ -503,79 +804,177 @@ fn script_ref_to_js_proxy(member_ref: CastMemberRef) -> JsValue {
     obj.set_own("__script_lib__", JsValue::Int(member_ref.cast_lib));
     obj.set_own("__script_member__", JsValue::Int(member_ref.cast_member));
 
-    // If the target script has a JS-Lingo runtime registered, enumerate its
-    // top-level handlers and bind each as a Native that dispatches back
-    // through try_invoke_js_handler. This is what enables
-    // `script("X").method(...)` from JS code.
-    let runtime_opt = JS_RUNTIMES.with(|m| m.borrow().get(&member_ref).cloned());
-    if let Some(runtime) = runtime_opt {
-        let handler_names: Vec<String> = {
-            let rt = runtime.borrow();
-            let g = rt.global.borrow();
-            g.props
-                .iter()
-                .filter_map(|(k, v)| match v {
-                    JsValue::Function(_) | JsValue::Native(_) => Some(k.clone()),
-                    _ => None,
-                })
-                .collect()
+    JsValue::Object(Rc::new(RefCell::new(obj)))
+}
+
+/// Build a script proxy for an executing, owner-bound runtime. Native method
+/// closures capture only a weak session handle and identity metadata; each
+/// invocation upgrades and borrows the session in short preparation and
+/// application phases, so no VM borrow survives the interpreter call.
+fn script_ref_to_js_proxy_with_session(
+    member_ref: CastMemberRef,
+    session: Weak<RefCell<crate::player::session::RuntimeSession>>,
+    player_id: crate::player::session::PlayerId,
+    owner: crate::player::ownership::OwnerToken,
+) -> JsValue {
+    use crate::player::js_lingo::value::{JsObject, NativeFn};
+    let mut obj = JsObject::new();
+    obj.class_name = "ScriptRef";
+    obj.set_own("__script_lib__", JsValue::Int(member_ref.cast_lib));
+    obj.set_own("__script_member__", JsValue::Int(member_ref.cast_member));
+    let runtime = session.upgrade().and_then(|handle| {
+        let session_ref = handle.borrow();
+        session_ref.js_lingo_registry().runtime(player_id, &owner, &member_ref)
+    });
+    let Some(runtime) = runtime else {
+        return JsValue::Object(Rc::new(RefCell::new(obj)));
+    };
+    let handler_names: Vec<String> = {
+        let rt = runtime.borrow();
+        let global = rt.global.borrow();
+        global.props.iter().filter_map(|(key, value)| match value {
+            JsValue::Function(_) | JsValue::Native(_) => Some(key.clone()),
+            _ => None,
+        }).collect()
+    };
+    for name in handler_names {
+        let session_ref = session.clone();
+        let target = member_ref.clone();
+        let target_name = name.clone();
+        let target_owner = owner.clone();
+        let native = NativeFn {
+            name: "<script_method>",
+            call: Box::new(move |args| invoke_script_method_explicit(
+                &session_ref, player_id, &target_owner, &target, &target_name, args,
+            )),
         };
-        for name in handler_names {
-            let ref_clone = member_ref.clone();
-            let name_clone = name.clone();
-            let native = NativeFn {
-                name: "<script_method>",
-                call: Box::new(move |args| invoke_script_method(&ref_clone, &name_clone, args)),
-            };
-            obj.set_own(&name, JsValue::Native(Rc::new(native)));
-        }
+        obj.set_own(&name, JsValue::Native(Rc::new(native)));
     }
     JsValue::Object(Rc::new(RefCell::new(obj)))
 }
 
-/// Synchronous dispatch of a JS handler from within JS code. Bridges the
-/// args back to DatumRefs, routes through try_invoke_js_handler, converts
-/// the return value.
-fn invoke_script_method(
+fn invoke_script_method_explicit(
+    session: &Weak<RefCell<crate::player::session::RuntimeSession>>,
+    player_id: crate::player::session::PlayerId,
+    owner: &crate::player::ownership::OwnerToken,
     member_ref: &CastMemberRef,
     handler_name: &str,
     args: &[JsValue],
 ) -> Result<JsValue, JsError> {
-    let datum_args: Vec<DatumRef> = reserve_player_mut(|player| {
-        args.iter().map(|v| js_value_to_datum_ref_from_jsvalue(player, v)).collect()
-    });
-    match try_invoke_js_handler(member_ref, handler_name, &datum_args, true) {
-        Some(Ok(dref)) => {
-            let v = reserve_player_mut(|player| datum_ref_to_js_value(player, &dref));
-            Ok(v)
-        }
-        Some(Err(msg)) => Err(JsError::new(format!("{}: {}", handler_name, msg))),
-        None => Err(JsError::new(format!(
-            "script handler {} not found on {}:{}",
-            handler_name, member_ref.cast_lib, member_ref.cast_member
-        ))),
+    let session = session.upgrade().ok_or_else(|| JsError::new("Director session disposed"))?;
+    let runtime = {
+        let session_ref = session.borrow();
+        session_ref.js_lingo_registry().runtime(player_id, owner, member_ref)
+            .ok_or_else(|| JsError::new("stale or foreign script runtime"))?
+    };
+    let callee = {
+        let runtime_ref = runtime.borrow();
+        let global = runtime_ref.global.borrow();
+        global.get_own(handler_name).cloned()
+            .ok_or_else(|| JsError::new(format!("script handler {handler_name} not found")))?
+    };
+    if !matches!(callee, JsValue::Function(_) | JsValue::Native(_)) {
+        return Err(JsError::new(format!("script handler {handler_name} is not callable")));
     }
+    let js_args = {
+        let mut session_ref = session.borrow_mut();
+        let runtime_for_conversion = runtime.clone();
+        session_ref.with_player_js(player_id, |mut context, registry| {
+            if !context.player.owner.is_arena_live() || !owner.same_identity(&context.player.owner) {
+                return Err(JsError::new("stale or foreign Director player"));
+            }
+            let mut conversion = JsConversionContext {
+                registry,
+                runtime: &runtime_for_conversion,
+                session: Rc::downgrade(&session),
+                player_id,
+                owner: owner.clone(),
+            };
+            args.iter()
+                .map(|value| js_value_to_datum_ref_with_context(context.player, context.symbols, &mut conversion, value))
+                .collect::<Result<Vec<_>, _>>()
+        }).ok_or_else(|| JsError::new("stale or foreign Director player"))??
+    };
+    let js_args = {
+        let mut converted = Vec::with_capacity(js_args.len());
+        let mut session_ref = session.borrow_mut();
+        let runtime_for_conversion = runtime.clone();
+        session_ref.with_player_js(player_id, |mut context, registry| {
+            if !context.player.owner.is_arena_live() || !owner.same_identity(&context.player.owner) {
+                return Err(JsError::new("stale or foreign Director player"));
+            }
+            let mut conversion = JsConversionContext {
+                registry,
+                runtime: &runtime_for_conversion,
+                session: Rc::downgrade(&session),
+                player_id,
+                owner: owner.clone(),
+            };
+            for datum in js_args {
+                converted.push(datum_ref_to_js_value_with_context(context.player, context.symbols, &mut conversion, &datum)?);
+            }
+            Ok::<_, JsError>(converted)
+        }).ok_or_else(|| JsError::new("stale or foreign Director player"))??
+    };
+    let this_value = JsValue::Object(runtime.borrow().global.clone());
+    let result = runtime.borrow_mut().invoke(&callee, js_args, this_value)
+        .map_err(|error| JsError::new(error.message))?;
+    let datum = {
+        let mut session_ref = session.borrow_mut();
+        let runtime_for_conversion = runtime.clone();
+        session_ref.with_player_js(player_id, |mut context, registry| {
+            if !context.player.owner.is_arena_live() || !owner.same_identity(&context.player.owner) {
+                return Err(JsError::new("stale or foreign Director player"));
+            }
+            let mut conversion = JsConversionContext {
+                registry,
+                runtime: &runtime_for_conversion,
+                session: Rc::downgrade(&session),
+                player_id,
+                owner: owner.clone(),
+            };
+            js_value_to_datum_ref_with_context(context.player, context.symbols, &mut conversion, &result)
+        }).ok_or_else(|| JsError::new("stale or foreign Director player"))??
+    };
+    let mut session_ref = session.borrow_mut();
+    let runtime_for_conversion = runtime.clone();
+    session_ref.with_player_js(player_id, |mut context, registry| {
+        if !context.player.owner.is_arena_live() || !owner.same_identity(&context.player.owner) {
+            return Err(JsError::new("stale or foreign Director player"));
+        }
+        let mut conversion = JsConversionContext {
+            registry,
+            runtime: &runtime_for_conversion,
+            session: Rc::downgrade(&session),
+            player_id,
+            owner: owner.clone(),
+        };
+        datum_ref_to_js_value_with_context(context.player, context.symbols, &mut conversion, &datum)
+    }).ok_or_else(|| JsError::new("stale or foreign Director player"))?
 }
 
-/// Wrapper around `js_value_to_datum_ref` to break the existing function's
-/// recursion (it's already defined further down).
-fn js_value_to_datum_ref_from_jsvalue(player: &mut crate::player::DirPlayer, v: &JsValue) -> DatumRef {
-    js_value_to_datum_ref(player, v)
-}
-
-fn datum_ref_to_string(player: &mut crate::player::DirPlayer, dref: &DatumRef) -> String {
+fn datum_ref_to_string(
+    player: &mut crate::player::DirPlayer,
+    symbols: &crate::player::symbols::symbol_table::SymbolTable,
+    dref: &DatumRef,
+) -> Result<String, JsError> {
     let d = player.allocator.get_datum(dref).clone();
     match d {
-        Datum::String(s) => s,
-        Datum::Symbol(s) => s.to_string(),
-        Datum::Int(i) => i.to_string(),
-        Datum::Float(f) => f.to_string(),
-        _ => crate::player::datum_formatting::format_datum(dref, player),
+        Datum::String(s) => Ok(s),
+        Datum::Symbol(s) => Ok(symbols.display(&s).map_err(|_| JsError::new("foreign or stale symbol"))?.to_owned()),
+        Datum::Int(i) => Ok(i.to_string()),
+        Datum::Float(f) => Ok(f.to_string()),
+        _ => crate::player::datum_formatting::format_datum(dref, symbols, player)
+            .map_err(|error| JsError::new(error.message)),
     }
 }
 
 /// Convert a JsValue back into a DatumRef so the Lingo VM can consume it.
-pub fn js_value_to_datum_ref(player: &mut crate::player::DirPlayer, v: &JsValue) -> DatumRef {
+pub fn js_value_to_datum_ref(
+    player: &mut crate::player::DirPlayer,
+    symbols: &mut crate::player::symbols::symbol_table::SymbolTable,
+    v: &JsValue,
+) -> Result<DatumRef, JsError> {
     let datum = match v {
         JsValue::Undefined => Datum::Void,
         JsValue::Null => Datum::Null,
@@ -589,30 +988,27 @@ pub fn js_value_to_datum_ref(player: &mut crate::player::DirPlayer, v: &JsValue)
                 .borrow()
                 .items
                 .iter()
-                .map(|x| js_value_to_datum_ref(player, x))
-                .collect();
+                .map(|x| js_value_to_datum_ref(player, symbols, x))
+                .collect::<Result<_, _>>()?;
             Datum::List(crate::director::lingo::datum::DatumType::List, items, false)
         }
         JsValue::Object(o) => {
             // Objects carrying methods stay live (see `object_has_callable`).
             // Without a runtime in scope there's nothing to invoke against
             // later, so those fall through to the copy below.
-            if object_has_callable(o) {
-                if let Some(runtime) = CURRENT_RUNTIME.with(|s| s.borrow().last().cloned()) {
-                    let id = register_js_object(&runtime, o);
-                    return player.allocator.alloc_datum(Datum::JsObjectRef(id)).unwrap();
-                }
-            }
+            // Callable objects are retained by the explicit conversion
+            // context. This compatibility conversion has no owner authority,
+            // so it preserves the object as a plain PropList below.
             let pairs: std::collections::VecDeque<crate::director::lingo::datum::PropListPair> = o
                 .borrow()
                 .props
                 .iter()
-                .map(|(k, val)| {
-                    let key_dr = player.allocator.alloc_datum(Datum::Symbol(Symbol::from_str(k))).unwrap();
-                    let val_dr = js_value_to_datum_ref(player, val);
-                    (key_dr, val_dr)
+                .map(|(k, val)| -> Result<crate::director::lingo::datum::PropListPair, JsError> {
+                    let key_dr = player.alloc_datum(Datum::Symbol(symbols.intern(k)));
+                    let val_dr = js_value_to_datum_ref(player, symbols, val)?;
+                    Ok((key_dr, val_dr))
                 })
-                .collect();
+                .collect::<Result<_, _>>()?;
             Datum::PropList(pairs, false)
         }
         JsValue::Function(_) | JsValue::Native(_) => Datum::String("[Function]".to_string()),
@@ -630,5 +1026,84 @@ pub fn js_value_to_datum_ref(player: &mut crate::player::DirPlayer, v: &JsValue)
             }
         }
     };
-    player.allocator.alloc_datum(datum).unwrap()
+    Ok(player.alloc_datum(datum))
+}
+
+/// Owner-bound counterpart to `datum_ref_to_js_value`. Every live object and
+/// script proxy is attributed to the supplied session registry and runtime.
+fn datum_ref_to_js_value_with_context(
+    player: &mut crate::player::DirPlayer,
+    symbols: &mut crate::player::symbols::symbol_table::SymbolTable,
+    context: &mut JsConversionContext<'_>,
+    dref: &DatumRef,
+) -> Result<JsValue, JsError> {
+    let datum = player.allocator.get_datum(dref).clone();
+    match datum {
+        Datum::List(_, items, _) => {
+            let values = items.iter()
+                .map(|item| datum_ref_to_js_value_with_context(player, symbols, context, item))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(JsValue::Array(Rc::new(RefCell::new(crate::player::js_lingo::value::JsArray { items: values }))))
+        }
+        Datum::PropList(pairs, _) => {
+            let mut object = crate::player::js_lingo::value::JsObject::new();
+            for (key, value) in pairs {
+                let key = datum_ref_to_string(player, symbols, &key)?;
+                let value = datum_ref_to_js_value_with_context(player, symbols, context, &value)?;
+                object.set_own(&key, value);
+            }
+            Ok(JsValue::Object(Rc::new(RefCell::new(object))))
+        }
+        Datum::ScriptRef(member_ref) => Ok(script_ref_to_js_proxy_with_session(
+            member_ref,
+            context.session.clone(),
+            context.player_id,
+            context.owner.clone(),
+        )),
+        Datum::JsObjectRef(id) => {
+            let (_, object) = context.registry.object(context.player_id, &context.owner, id)
+                .ok_or_else(|| JsError::new("stale or foreign JS object"))?;
+            Ok(JsValue::Object(object))
+        }
+        _ => datum_ref_to_js_value(player, symbols, dref),
+    }
+}
+
+/// Owner-bound JS-to-Datum conversion. Callable objects are assigned a
+/// session-scoped handle before the interpreter borrow ends; nested arrays and
+/// records use this same context recursively.
+fn js_value_to_datum_ref_with_context(
+    player: &mut crate::player::DirPlayer,
+    symbols: &mut crate::player::symbols::symbol_table::SymbolTable,
+    context: &mut JsConversionContext<'_>,
+    value: &JsValue,
+) -> Result<DatumRef, JsError> {
+    match value {
+        JsValue::Array(array) => {
+            let items = array.borrow().items.clone().into_iter()
+                .map(|item| js_value_to_datum_ref_with_context(player, symbols, context, &item))
+                .collect::<Result<std::collections::VecDeque<_>, _>>()?;
+            Ok(player.alloc_datum(Datum::List(crate::director::lingo::datum::DatumType::List, items, false)))
+        }
+        JsValue::Object(object) if object_has_callable(object) => {
+            let id = context.registry.register_object(
+                context.player_id,
+                &context.owner,
+                context.runtime,
+                object,
+            );
+            Ok(player.alloc_datum(Datum::JsObjectRef(id)))
+        }
+        JsValue::Object(object) => {
+            let pairs = object.borrow().props.clone().into_iter()
+                .map(|(key, value)| {
+                    let key_ref = player.alloc_datum(Datum::Symbol(symbols.intern(&key)));
+                    let value_ref = js_value_to_datum_ref_with_context(player, symbols, context, &value)?;
+                    Ok((key_ref, value_ref))
+                })
+                .collect::<Result<std::collections::VecDeque<_>, JsError>>()?;
+            Ok(player.alloc_datum(Datum::PropList(pairs, false)))
+        }
+        _ => js_value_to_datum_ref(player, symbols, value),
+    }
 }

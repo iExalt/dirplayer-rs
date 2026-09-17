@@ -1,209 +1,223 @@
-use std::fmt::Display;
+use std::{
+    hash::{Hash, Hasher},
+    rc::Rc,
+};
 
-use itertools::Format;
-use lasso::Spur;
+use crate::player::symbols::{
+    builtin::BuiltInSymbol,
+    symbol_table::{SymbolOwnerInner, SymbolTable},
+};
 
-use crate::player::{ScriptError, symbols::{builtin::BuiltInSymbol, symbol_table::{SYMBOL_TABLE, get_symbol_spur}}};
-
-/// The default Symbol is the EMPTY symbol, not `Spur::default()`.
+/// An operation on a symbol failed after resolving it through its owning table.
 ///
-/// Deriving `Default` gave the first interned spur, which is the first entry of
-/// `init_builtin_symbols()` — literally `"forget"`. Every `..Default::default()`
-/// on a struct with Symbol fields therefore produced a NON-empty name, and
-/// `is_empty()` (which tests against `EmptyString`) reported false for it. That
-/// silently broke code branching on "has no name yet": `newShader` built shaders
-/// whose `material_name` was `"forget"`, so the `shader.blend` setter took its
-/// "update the existing material" path, looked for a material called `forget`,
-/// found none, and dropped the write — frog01's collision proxies are hidden with
-/// `shader("clearS").blend = 0` and rendered as opaque boxes.
+/// Keeping this error in the symbols module avoids coupling the symbol table to
+/// the VM's script error type. Callers at the VM boundary can convert it while
+/// preserving the resolved spelling in the diagnostic.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SymbolError {
+    /// The symbol was created by a different symbol table.
+    Foreign,
+    /// The symbol belongs to this table, but is not a builtin.
+    NotBuiltin { name: String },
+}
+
+impl SymbolError {
+    fn not_builtin(name: &str) -> Self {
+        Self::NotBuiltin {
+            name: name.to_owned(),
+        }
+    }
+}
+
+impl std::fmt::Display for SymbolError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Foreign => formatter.write_str("symbol belongs to a different table"),
+            Self::NotBuiltin { name } => {
+                write!(formatter, "Symbol '{}' is not a built-in symbol", name)
+            }
+        }
+    }
+}
+
+impl std::error::Error for SymbolError {}
+
+/// A builtin or a dynamic name tied to one SymbolTable's immutable identity.
+/// Dynamic names cannot be formatted or inspected without their owning table.
+#[derive(Clone, Debug)]
+pub struct Symbol {
+    kind: SymbolKind,
+}
+
+#[derive(Clone, Debug)]
+enum SymbolKind {
+    Builtin(BuiltInSymbol),
+    Dynamic {
+        owner: Rc<SymbolOwnerInner>,
+        id: u32,
+    },
+}
+
 impl Default for Symbol {
     fn default() -> Self {
         Self::empty()
     }
 }
-
-#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
-pub struct Symbol {
-    pub spur: Spur,
-}
-
-// impl Eq for Symbol { }
-
-// impl PartialEq for Symbol {
-//     fn eq(&self, other: &Self) -> bool {
-//         self.spur == other.spur
-//     }
-// }
-
-impl Into<&str> for Symbol {
-    fn into(self) -> &'static str {
-        let symbol_table = unsafe { SYMBOL_TABLE.as_ref().unwrap() };
-        symbol_table.get_original_string(&self.spur)
+impl PartialEq for Symbol {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.kind, &other.kind) {
+            (SymbolKind::Builtin(a), SymbolKind::Builtin(b)) => a.canonical() == b.canonical(),
+            (
+                SymbolKind::Dynamic { owner: a, id: ai },
+                SymbolKind::Dynamic { owner: b, id: bi },
+            ) => *ai == *bi && Rc::ptr_eq(a, b),
+            _ => false,
+        }
     }
 }
-
-impl Into<Symbol> for BuiltInSymbol {
-    fn into(self) -> Symbol {
-        Symbol::builtin(self)
+impl Eq for Symbol {}
+impl Hash for Symbol {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        match &self.kind {
+            SymbolKind::Builtin(builtin) => {
+                0u8.hash(state);
+                builtin.canonical().hash(state);
+            }
+            SymbolKind::Dynamic { id, .. } => {
+                1u8.hash(state);
+                id.hash(state);
+            }
+        }
     }
 }
-
-impl Into<Symbol> for &str {
-    fn into(self) -> Symbol {
-        Symbol::from_str(self)
-    }
-}
-
-impl PartialEq<BuiltInSymbol> for Symbol { 
+impl PartialEq<BuiltInSymbol> for Symbol {
     fn eq(&self, other: &BuiltInSymbol) -> bool {
-        self.into_builtin() == Some(*other)
+        self.eq_builtin(*other)
     }
 }
-
 impl PartialEq<Symbol> for BuiltInSymbol {
     fn eq(&self, other: &Symbol) -> bool {
-        other.into_builtin() == Some(*self)
+        other.eq_builtin(*self)
     }
 }
-
-impl Display for Symbol {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let symbol_table = unsafe { SYMBOL_TABLE.as_ref().unwrap() };
-        let original_string = symbol_table.get_original_string(&self.spur);
-        write!(f, "{}", original_string)
+impl From<BuiltInSymbol> for Symbol {
+    fn from(value: BuiltInSymbol) -> Self {
+        Self::builtin(value)
     }
 }
 
 impl Symbol {
-    pub fn into_builtin(&self) -> Option<BuiltInSymbol> {
-        let symbol_table = unsafe { SYMBOL_TABLE.as_ref().unwrap() };
-        symbol_table.spur_to_builtin.get(&self.spur).copied()
-    }
-
-    pub fn into_builtin_or_error(&self) -> Result<BuiltInSymbol, ScriptError> {
-        self.into_builtin().ok_or_else(|| ScriptError::new(format!("Symbol '{}' is not a built-in symbol", self)))
-    }
-
     pub fn builtin(builtin: BuiltInSymbol) -> Self {
-        // Ensure the global symbol table exists. Unlike `from_str` (which goes
-        // through `get_symbol_spur` → `init_symbol_table`), constructing a
-        // builtin needs no interning, so it could be the very first symbol op
-        // in a fresh context and would otherwise unwrap a `None` table. The
-        // `Once` makes this idempotent and it can't re-enter init
-        // (`init_builtin_symbols` interns directly, never via `builtin`).
-        crate::player::symbols::symbol_table::init_symbol_table();
-        let symbol_table = unsafe { SYMBOL_TABLE.as_ref().unwrap() };
-        let spur = symbol_table.builtin_to_spur.get(&builtin).copied().unwrap();
-        Self { spur }
+        Self {
+            kind: SymbolKind::Builtin(builtin.canonical()),
+        }
     }
-
-    pub fn into_str(&self) -> &'static str {
-        let symbol_table = unsafe { SYMBOL_TABLE.as_ref().unwrap() };
-        symbol_table.get_original_string(&self.spur)
+    pub(crate) fn dynamic(owner: Rc<SymbolOwnerInner>, id: u32) -> Self {
+        Self {
+            kind: SymbolKind::Dynamic { owner, id },
+        }
     }
-
-    pub fn from_str(s: &str) -> Self {
-        let spur = get_symbol_spur(s);
-        Self { spur }
+    pub(crate) fn owner_identity(&self) -> Option<&Rc<SymbolOwnerInner>> {
+        match &self.kind {
+            SymbolKind::Dynamic { owner, .. } => Some(owner),
+            _ => None,
+        }
     }
-
-    /// Like `from_str`, but this name CLAIMS the global display spelling even if
-    /// one was already recorded. Only for a cast's own name table (LNAM) — see
-    /// `SymbolTable::intern_authoritative` for the measured Director behaviour
-    /// this restores.
-    pub fn from_str_authoritative(s: &str) -> Self {
-        let spur = crate::player::symbols::symbol_table::get_symbol_spur_authoritative(s);
-        Self { spur }
+    pub(crate) fn dynamic_id(&self) -> Option<u32> {
+        match self.kind {
+            SymbolKind::Dynamic { id, .. } => Some(id),
+            _ => None,
+        }
     }
-
+    pub(crate) fn builtin_variant(&self) -> Option<BuiltInSymbol> {
+        match self.kind {
+            SymbolKind::Builtin(builtin) => Some(builtin.canonical()),
+            _ => None,
+        }
+    }
+    pub fn into_builtin(&self) -> Option<BuiltInSymbol> {
+        self.builtin_variant()
+    }
+    pub fn into_builtin_or_error(&self, table: &SymbolTable) -> Result<BuiltInSymbol, SymbolError> {
+        if let Some(builtin) = self.into_builtin() {
+            return Ok(builtin);
+        }
+        let name = table.display(self).map_err(|_| SymbolError::Foreign)?;
+        Err(SymbolError::not_builtin(name))
+    }
     pub fn eq_builtin(&self, builtin: BuiltInSymbol) -> bool {
-        self.into_builtin() == Some(builtin)
+        self.into_builtin() == Some(builtin.canonical())
     }
-
-    pub fn as_str(&self) -> &'static str {
-        let symbol_table = unsafe { SYMBOL_TABLE.as_ref().unwrap() };
-        symbol_table.get_original_string(&self.spur)
-    }
-
-    /// Case-normalised spelling — see `SymbolTable::get_lower_string`. Use
-    /// this (with lowercase literals) whenever matching a symbol against
-    /// string literals; `as_str` is for display only.
-    pub fn as_lower_str(&self) -> &'static str {
-        let symbol_table = unsafe { SYMBOL_TABLE.as_ref().unwrap() };
-        symbol_table.get_lower_string(&self.spur)
-    }
-
-    /// Case-insensitive compare against a plain string. `intern` lowercases,
-    /// so symbol identity is already case-insensitive; this gives the same
-    /// semantics at the many call sites that still hold a `&str`, and keeps
-    /// Director's case-insensitive name matching intact.
-    pub fn eq_ignore_ascii_case(&self, other: &str) -> bool {
-        self.as_lower_str().eq_ignore_ascii_case(other)
-    }
-
-    /// The case-normalised spelling as an owned String, for the call sites
-    /// that used to do `name.to_lowercase()` on a `String` name.
-    pub fn to_lowercase(&self) -> String {
-        self.as_lower_str().to_string()
-    }
-
-    pub fn to_ascii_lowercase(&self) -> String {
-        self.as_lower_str().to_string()
-    }
-
-    pub fn splitn(&self, n: usize, pat: char) -> std::str::SplitN<'static, char> {
-        self.as_str().splitn(n, pat)
-    }
-
-    pub fn starts_with(&self, pat: &str) -> bool {
-        self.as_lower_str().starts_with(&pat.to_ascii_lowercase())
-    }
-
     pub fn empty() -> Self {
         Self::builtin(BuiltInSymbol::EmptyString)
     }
-
     pub fn is_empty(&self) -> bool {
         self.eq_builtin(BuiltInSymbol::EmptyString)
+    }
+    pub(crate) fn as_str_in<'a>(&self, table: &'a SymbolTable) -> &'a str {
+        table
+            .display(self)
+            .expect("symbol belongs to a different table")
+    }
+    pub(crate) fn as_lower_str_in<'a>(&self, table: &'a SymbolTable) -> &'a str {
+        table
+            .lower(self)
+            .expect("symbol belongs to a different table")
+    }
+    pub(crate) fn eq_ignore_ascii_case_in(&self, table: &SymbolTable, other: &str) -> bool {
+        self.as_lower_str_in(table).eq_ignore_ascii_case(other)
+    }
+    pub(crate) fn to_lowercase_in(&self, table: &SymbolTable) -> String {
+        self.as_lower_str_in(table).to_owned()
+    }
+    pub(crate) fn to_ascii_lowercase_in(&self, table: &SymbolTable) -> String {
+        self.to_lowercase_in(table)
+    }
+    pub(crate) fn splitn_in<'a>(
+        &self,
+        table: &'a SymbolTable,
+        n: usize,
+        pat: char,
+    ) -> std::str::SplitN<'a, char> {
+        self.as_str_in(table).splitn(n, pat)
+    }
+    pub(crate) fn starts_with_in(&self, table: &SymbolTable, pat: &str) -> bool {
+        self.as_lower_str_in(table)
+            .starts_with(&pat.to_ascii_lowercase())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::player::symbols::symbol_table::SymbolTable;
+
+    #[test]
+    fn builtin_conversion_reports_local_display_spelling() {
+        let mut table = SymbolTable::new();
+        let symbol = table.intern_authoritative("MovieSpecificName");
+        let error = symbol.into_builtin_or_error(&table).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Symbol 'MovieSpecificName' is not a built-in symbol"
+        );
+    }
+
+    #[test]
+    fn builtin_conversion_rejects_foreign_symbol_without_panicking() {
+        let mut owner = SymbolTable::new();
+        let foreign_table = SymbolTable::new();
+        let symbol = owner.intern("foreignName");
+        assert_eq!(
+            symbol.into_builtin_or_error(&foreign_table),
+            Err(SymbolError::Foreign)
+        );
     }
 }
 
 #[macro_export]
 macro_rules! symbol_match {
     ($sym:expr, { $( $pat:pat => $body:expr ),+, _ => $default:expr $(,)? }) => {
-        match ($sym).into_builtin() {
-            $( Some($pat) => $body, )*
-            _ => $default,
-        }
+        match ($sym).into_builtin() { $( Some($pat) => $body, )* _ => $default, }
     };
-}
-
-// Comparing a Symbol to a string literal is case-insensitive, matching both
-// `intern`'s normalisation and Director's own name semantics.
-impl PartialEq<&str> for Symbol {
-    fn eq(&self, other: &&str) -> bool { self.as_lower_str().eq_ignore_ascii_case(other) }
-}
-impl PartialEq<str> for Symbol {
-    fn eq(&self, other: &str) -> bool { self.as_lower_str().eq_ignore_ascii_case(other) }
-}
-impl PartialEq<Symbol> for &str {
-    fn eq(&self, other: &Symbol) -> bool { other.as_lower_str().eq_ignore_ascii_case(self) }
-}
-impl PartialEq<String> for Symbol {
-    fn eq(&self, other: &String) -> bool { self.as_lower_str().eq_ignore_ascii_case(other) }
-}
-
-// Symbol is Copy, so `sym == &other` shows up wherever an iterator hands back a
-// reference. Mirror the owned comparison rather than making every call site
-// dereference.
-impl PartialEq<&Symbol> for Symbol {
-    fn eq(&self, other: &&Symbol) -> bool { self.spur == other.spur }
-}
-// The reverse direction of the &str/String comparisons defined above, so a
-// `String == Symbol` reads the same as `Symbol == String`.
-impl PartialEq<Symbol> for String {
-    fn eq(&self, other: &Symbol) -> bool { other.as_lower_str().eq_ignore_ascii_case(self) }
-}
-impl PartialEq<Symbol> for &String {
-    fn eq(&self, other: &Symbol) -> bool { other.as_lower_str().eq_ignore_ascii_case(self) }
 }

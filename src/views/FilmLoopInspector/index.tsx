@@ -5,6 +5,7 @@ import { getChannelCount, getFrameCount } from "../../utils/scoreIndex";
 import { useMemberSnapshot } from "../../store/hooks";
 import { scoreSpanSelected } from "../../store/uiSlice";
 import { ICastMemberIdentifier } from "../../vm";
+import { useVMHandle } from "../../components/VMProvider";
 import styles from "./styles.module.css";
 import { Model } from "flexlayout-react";
 import { Layout, TabNode } from "flexlayout-react";
@@ -53,7 +54,8 @@ const layoutModel = Model.fromJson({
 })
 
 export default function FilmLoopInspector({ memberId }: IMemberInspectorProps) {
-  const memberSnapshot = useMemberSnapshot(memberId);
+  const handle = useVMHandle();
+  const memberSnapshot = useMemberSnapshot(memberId, handle);
   const dispatch = useDispatch();
 
   if (memberSnapshot?.type !== "filmLoop") {

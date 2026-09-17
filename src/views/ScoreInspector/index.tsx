@@ -4,7 +4,6 @@ import { useAppDispatch, useAppSelector } from "../../store/hooks";
 import { selectScoreSnapshot } from "../../store/vmSlice";
 import styles from "./styles.module.css";
 import classNames from "classnames";
-import { player_set_debug_selected_channel, subscribe_to_channel_names, subscribe_to_score, unsubscribe_from_channel_names, unsubscribe_from_score } from "vm-rust";
 import { channelSelected, scoreSpanSelected, scoreBehaviorSelected } from "../../store/uiSlice";
 import { getScoreFrameBehaviorRef } from "../../utils/score";
 import { getChannelCount, getFrameCount } from "../../utils/scoreIndex";
@@ -12,6 +11,7 @@ import { SCORE_CHANNEL_ROW_HEIGHT } from "../../utils/scoreLayout";
 import ExpandableButton from "../../components/ExpandableButton";
 import ScoreTimeline from "../../components/ScoreTimeline";
 import { ScoreSpriteSnapshot } from "../../vm";
+import { useVMHandle } from "../../components/VMProvider";
 
 const CHANNEL_ROW_HEIGHT = SCORE_CHANNEL_ROW_HEIGHT;
 
@@ -45,6 +45,7 @@ const ChannelRow = memo(function ChannelRow({
 });
 
 export default function ScoreInspector() {
+  const handle = useVMHandle();
   const score = useAppSelector((state) => selectScoreSnapshot(state.vm));
   const selectedObject = useAppSelector((state) => state.ui.selectedObject);
   const channelSnapshots = useAppSelector((state) => state.vm.channelSnapshots);
@@ -68,20 +69,20 @@ export default function ScoreInspector() {
 
   // The score snapshot is only pushed while this inspector is mounted.
   useEffect(() => {
-    subscribe_to_score();
-    return () => unsubscribe_from_score();
-  }, []);
+    handle.subscribe_to_score();
+    return () => handle.unsubscribe_from_score();
+  }, [handle]);
 
   const shouldSubscribeToChannelNames = isShowingChannels || isShowingscoreTimeline;
   useEffect(() => {
     if (shouldSubscribeToChannelNames) {
-      subscribe_to_channel_names();
+      handle.subscribe_to_channel_names();
     }
-    return () => unsubscribe_from_channel_names();
-  }, [shouldSubscribeToChannelNames]);
+    return () => handle.unsubscribe_from_channel_names();
+  }, [handle, shouldSubscribeToChannelNames]);
 
   const onSelectChannel = (channel: number) => {
-    player_set_debug_selected_channel(channel);
+    handle.set_debug_selected_channel(channel);
     dispatch(channelSelected(channel));
   };
 

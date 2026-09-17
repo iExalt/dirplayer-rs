@@ -1,27 +1,26 @@
 import { useEffect, useState } from "react";
-import { player_set_preview_parent, player_set_preview_font_size } from "vm-rust";
+import { useVMHandle } from "../VMProvider";
 
 interface PreviewCanvasProps {
   fontSize?: number;
 }
 
 export default function PreviewCanvas({ fontSize }: PreviewCanvasProps) {
-  const [isMounted, setIsMounted] = useState(false);
+  const handle = useVMHandle();
+  const [parent, setParent] = useState<HTMLDivElement | null>(null);
   const onBitmapPreviewRef = (ref: HTMLDivElement | null) => {
-    setIsMounted(!!ref);
+    setParent(ref);
   };
   useEffect(() => {
-    if (isMounted) {
-      player_set_preview_parent("#bitmapPreview");
-    }
+    handle.set_preview_parent(parent ?? undefined);
     return () => {
-      player_set_preview_parent("");
+      handle.set_preview_parent(undefined);
     };
-  }, [isMounted]);
+  }, [handle, parent]);
 
   useEffect(() => {
-    player_set_preview_font_size(fontSize ?? 0);
-  }, [fontSize]);
+    handle.set_preview_font_size(fontSize ?? 0);
+  }, [handle, fontSize]);
 
   return <div id="bitmapPreview" ref={onBitmapPreviewRef}></div>;
 }

@@ -2,6 +2,7 @@ use crate::director::{
     chunks::handler::HandlerDef,
     lingo::{datum::Datum, opcode::OpCode, script::ScriptContext},
 };
+use crate::player::symbols::{symbol::SymbolError, symbol_table::SymbolTable};
 use std::convert::TryInto;
 
 const MAX_EXPR_LEN: usize = 120;
@@ -40,8 +41,9 @@ impl StackExpressionTracker {
         handler: &HandlerDef,
         multiplier: u32,
         literals: &[Datum],
-    ) -> String {
-        match bytecode.opcode {
+        symbols: &SymbolTable,
+    ) -> Result<String, SymbolError> {
+        let annotation = match bytecode.opcode {
             // ============================================================
             // PUSH OPERATIONS
             // ============================================================
@@ -84,7 +86,7 @@ impl StackExpressionTracker {
                 let literal_id = (bytecode.obj as u32 / multiplier) as usize;
                 
                 if let Some(literal) = literals.get(literal_id) {
-                    let expr = Self::format_literal(literal);
+                    let expr = Self::format_literal(literal, symbols)?;
                     self.push_expr(expr.clone());
                     format!("<{}>", expr)
                 } else {
@@ -743,7 +745,8 @@ impl StackExpressionTracker {
                 // For any unhandled opcode, just show the opcode name
                 String::new()
             }
-        }
+        };
+        Ok(annotation)
     }
 
     fn binary_op(&mut self, op: &str) -> String {
@@ -758,20 +761,19 @@ impl StackExpressionTracker {
         }
     }
 
-    fn format_literal(literal: &Datum) -> String {
+    fn format_literal(literal: &Datum, symbols: &SymbolTable) -> Result<String, SymbolError> {
         match literal {
-            Datum::String(s) => format!("\"{}\"", s.replace("\"", "\\\"")),
-            Datum::Symbol(s) => format!("#{}", s),
-            Datum::Int(i) => format!("{}", i),
-            Datum::Float(f) => format!("{}", f),
-            Datum::List(_, items, _) => {
-                format!("[...]")
-            }
-            Datum::PropList(items, _) => {
-                format!("[...]")
-            }
-            Datum::Void => "VOID".to_string(),
-            _ => format!("?"),
+            Datum::String(s) => Ok(format!("\"{}\"", s.replace("\"", "\\\""))),
+            Datum::Symbol(s) => Ok(format!(
+                "#{}",
+                symbols.display(s).map_err(|_| SymbolError::Foreign)?
+            )),
+            Datum::Int(i) => Ok(format!("{}", i)),
+            Datum::Float(f) => Ok(format!("{}", f)),
+            Datum::List(_, _items, _) => Ok("[...]".to_string()),
+            Datum::PropList(_items, _) => Ok("[...]".to_string()),
+            Datum::Void => Ok("VOID".to_string()),
+            _ => Ok("?".to_string()),
         }
     }
 
@@ -987,5 +989,45 @@ impl StackExpressionTracker {
 
     pub fn get_stack_top(&self) -> Option<&str> {
         self.stack.last().map(|s| s.as_str())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::director::chunks::handler::{Bytecode, HandlerDef};
+    use crate::player::symbols::symbol_table::SymbolTable;
+    use std::{cell::RefCell, collections::HashMap};
+
+    #[test]
+    fn dynamic_literal_uses_session_symbol_display() {
+        let mut symbols = SymbolTable::new();
+        let symbol = symbols.intern("MyFlag");
+        let handler = HandlerDef {
+            name_id: 0,
+            bytecode_array: vec![],
+            bytecode_index_map: fxhash::FxHashMap::default(),
+            argument_name_ids: vec![],
+            local_name_ids: vec![],
+            global_name_ids: vec![],
+            compiled_ir: RefCell::new(None),
+        };
+        let lctx = ScriptContext {
+            names: vec![],
+            scripts: HashMap::new(),
+        };
+        let mut tracker = StackExpressionTracker::new();
+        let annotation = tracker
+            .process_bytecode(
+                &Bytecode::new(OpCode::PushCons, 0, 0),
+                &lctx,
+                &handler,
+                1,
+                &[Datum::Symbol(symbol)],
+                &symbols,
+            )
+            .unwrap();
+        assert_eq!(annotation, "<#MyFlag>");
+        assert_eq!(tracker.get_stack_top(), Some("#MyFlag"));
     }
 }

@@ -7,8 +7,10 @@ use percent_encoding::percent_decode_str;
 use url::Url;
 
 use super::net_task::{fetch_net_task, NetResult, NetTask, NetTaskState};
+use super::ownership::OwnerKey;
 
 pub struct NetManager {
+    pub owner_key: OwnerKey,
     pub base_path: Option<Url>,
     /// The fake movie base path set by movie_path_override (e.g. "C:\Games\MyMovie\").
     /// When set, URLs starting with this prefix are resolved against base_path instead.
@@ -21,6 +23,17 @@ pub struct NetManager {
 pub struct NetManagerSharedState {
     pub task_states: HashMap<u32, NetTaskState>,
     pub task_completers: HashMap<u32, Vec<ManualFutureCompleter<()>>>,
+}
+
+/// A network task prepared while an owner-bound player borrow is held. The
+/// task and owner key are copied into this value so starting browser I/O can
+/// happen after the VM borrow has ended.
+#[derive(Clone)]
+pub(crate) struct PreparedNetTask {
+    pub(crate) task: NetTask,
+    pub(crate) owner_key: OwnerKey,
+    pub(crate) shared_state: Arc<Mutex<NetManagerSharedState>>,
+    pub(crate) should_start: bool,
 }
 
 impl NetManagerSharedState {
@@ -39,7 +52,9 @@ impl NetManagerSharedState {
     }
 
     pub async fn fulfill_task(&mut self, id: u32, result: NetResult) {
-        let (bytes_loaded, bytes_total) = self.task_states.get(&id)
+        let (bytes_loaded, bytes_total) = self
+            .task_states
+            .get(&id)
             .map(|s| (s.bytes_loaded, s.bytes_total))
             .unwrap_or((0, 0));
         let final_bytes = match &result {
@@ -49,7 +64,11 @@ impl NetManagerSharedState {
         let new_state = NetTaskState {
             result: Some(result),
             bytes_loaded: final_bytes,
-            bytes_total: if bytes_total > 0 { bytes_total } else { final_bytes },
+            bytes_total: if bytes_total > 0 {
+                bytes_total
+            } else {
+                final_bytes
+            },
         };
         self.task_states.insert(id, new_state);
 
@@ -75,6 +94,17 @@ impl NetManagerSharedState {
 }
 
 impl NetManager {
+    /// Retire all task state associated with the previous owner generation.
+    /// Prepared requests retain the old shared-state `Arc`, so a late fetch
+    /// can only complete that retired state and cannot satisfy a reused task
+    /// id in the fresh generation.
+    pub(crate) fn reset_owner(&mut self, owner_key: OwnerKey) {
+        self.owner_key = owner_key;
+        self.tasks.clear();
+        self.task_states.clear();
+        self.shared_state = Arc::new(Mutex::new(NetManagerSharedState::new()));
+    }
+
     pub fn set_base_path(&mut self, base_path: Url) {
         let sanitized_path = if !base_path.path().ends_with("/") {
             Url::parse(format!("{}/", base_path.to_string()).as_str()).unwrap()
@@ -125,7 +155,10 @@ impl NetManager {
     /// `gameLoaded()` false forever.
     pub fn has_in_progress_tasks(&self) -> bool {
         match self.shared_state.try_lock() {
-            Some(shared_state) => shared_state.task_states.values().any(|s| s.result.is_none()),
+            Some(shared_state) => shared_state
+                .task_states
+                .values()
+                .any(|s| s.result.is_none()),
             // Lock held == a fetch task is actively updating progress.
             None => true,
         }
@@ -190,7 +223,10 @@ impl NetManager {
         }
     }
 
-    pub fn preload_net_thing(&mut self, url: String) -> u32 {
+    /// Prepare a task without dispatching a DOM event, reading a file, or
+    /// spawning a fetch. Those effects belong to `execute_prepared_task`,
+    /// which callers invoke after releasing the player/session borrow.
+    pub(crate) fn prepare_net_thing(&mut self, url: String) -> PreparedNetTask {
         // Normalize the URL by decoding percent-encoded characters
         let url = percent_decode_str(&url)
             .decode_utf8()
@@ -225,9 +261,16 @@ impl NetManager {
         if let Some(existing_task) = find_task_with_url(&self.tasks, &url) {
             debug!(
                 "[net] preload '{}' -> REUSED task {} (url match, done={})",
-                url, existing_task.id, self.is_task_done(Some(existing_task.id))
+                url,
+                existing_task.id,
+                self.is_task_done(Some(existing_task.id))
             );
-            return existing_task.id;
+            return PreparedNetTask {
+                task: existing_task.clone(),
+                owner_key: self.owner_key,
+                shared_state: Arc::clone(&self.shared_state),
+                should_start: false,
+            };
         }
 
         // If not, construct the task outside of the borrowing scope
@@ -241,25 +284,92 @@ impl NetManager {
         };
 
         // Also check by resolved URL to catch relative vs absolute URL duplicates
-        if let Some(existing_task) = find_task_with_resolved_url(&self.tasks, &net_task.resolved_url) {
+        if let Some(existing_task) =
+            find_task_with_resolved_url(&self.tasks, &net_task.resolved_url)
+        {
             debug!(
                 "[net] preload '{}' -> REUSED task {} (resolved match, done={})",
-                url, existing_task.id, self.is_task_done(Some(existing_task.id))
+                url,
+                existing_task.id,
+                self.is_task_done(Some(existing_task.id))
             );
-            return existing_task.id;
+            return PreparedNetTask {
+                task: existing_task.clone(),
+                owner_key: self.owner_key,
+                shared_state: Arc::clone(&self.shared_state),
+                should_start: false,
+            };
         }
         let task_id = net_task.id;
-        let resolved_url_str = net_task.resolved_url.to_string();
-        let is_file_url = resolved_url_str.starts_with("file://");
-
         // Set task initial state
         {
             let mut shared_shared = self.shared_state.try_lock().unwrap();
-            shared_shared.update_task_state(task_id, NetTaskState { result: None, bytes_loaded: 0, bytes_total: 0 });
+            shared_shared.update_task_state(
+                task_id,
+                NetTaskState {
+                    result: None,
+                    bytes_loaded: 0,
+                    bytes_total: 0,
+                },
+            );
         }
 
         // Push the task
         self.tasks.insert(task_id, net_task.clone());
+
+        PreparedNetTask {
+            task: net_task,
+            owner_key: self.owner_key,
+            shared_state: Arc::clone(&self.shared_state),
+            should_start: true,
+        }
+    }
+
+    pub fn preload_net_thing(&mut self, url: String) -> u32 {
+        let prepared = self.prepare_net_thing(url);
+        let task_id = prepared.task.id;
+        if prepared.should_start {
+            #[cfg(not(target_arch = "wasm32"))]
+            if prepared.task.resolved_url.to_string().starts_with("file://") {
+                // Preserve the native compatibility path: file:// requests
+                // complete synchronously so existing preload callers can read
+                // the result immediately.
+                async_std::task::block_on(Self::execute_prepared_task(prepared));
+            } else {
+                crate::player::spawn_player_local(async move {
+                    Self::execute_prepared_task(prepared).await;
+                });
+            }
+            #[cfg(target_arch = "wasm32")]
+            crate::player::spawn_player_local(async move {
+                Self::execute_prepared_task(prepared).await;
+            });
+        }
+        task_id
+    }
+
+    /// Start a prepared task outside the VM/session borrow. This is the only
+    /// owner-aware FileIO entry point for DOM requests and browser fetches.
+    pub(crate) async fn execute_prepared_task(prepared: PreparedNetTask) {
+        let PreparedNetTask {
+            task,
+            owner_key,
+            shared_state,
+            should_start,
+        } = prepared;
+        if !should_start {
+            return;
+        }
+        let task_id = task.id;
+        let already_done = shared_state
+            .try_lock()
+            .and_then(|state| state.task_states.get(&task_id).map(|value| value.result.is_some()))
+            .unwrap_or(false);
+        if already_done {
+            return;
+        }
+        let resolved_url_str = task.resolved_url.to_string();
+        let is_file_url = resolved_url_str.starts_with("file://");
 
         // For file:// URLs, don't execute the fetch task - wait for JS to provide data
         if is_file_url {
@@ -271,11 +381,36 @@ impl NetManager {
                 let detail = js_sys::Object::new();
                 js_sys::Reflect::set(&detail, &"taskId".into(), &task_id.into()).unwrap();
                 js_sys::Reflect::set(&detail, &"url".into(), &resolved_url_str.into()).unwrap();
+                let owner_identity = format!(
+                    "{}:{}:{}",
+                    owner_key.session, owner_key.player, owner_key.generation
+                );
+                js_sys::Reflect::set(&detail, &"ownerKey".into(), &owner_identity.into()).unwrap();
+                js_sys::Reflect::set(
+                    &detail,
+                    &"ownerSession".into(),
+                    &wasm_bindgen::JsValue::from_f64(owner_key.session as f64),
+                )
+                .unwrap();
+                js_sys::Reflect::set(
+                    &detail,
+                    &"ownerPlayer".into(),
+                    &wasm_bindgen::JsValue::from_f64(owner_key.player as f64),
+                )
+                .unwrap();
+                js_sys::Reflect::set(
+                    &detail,
+                    &"ownerGeneration".into(),
+                    &wasm_bindgen::JsValue::from_f64(owner_key.generation as f64),
+                )
+                .unwrap();
                 event_init.set_detail(&detail);
 
-                let event =
-                    web_sys::CustomEvent::new_with_event_init_dict("dirplayer:netRequest", &event_init)
-                        .unwrap();
+                let event = web_sys::CustomEvent::new_with_event_init_dict(
+                    "dirplayer:netRequest",
+                    &event_init,
+                )
+                .unwrap();
                 window.dispatch_event(&event).unwrap();
             }
             #[cfg(not(target_arch = "wasm32"))]
@@ -291,7 +426,7 @@ impl NetManager {
                 // slash before the drive letter makes `fs::read` fail on Windows
                 // while working by accident on macOS/Linux. `to_file_path` decodes
                 // percent-escapes and yields a real platform path on all three.
-                let result: super::net_task::NetResult = match net_task
+                let result: super::net_task::NetResult = match task
                     .resolved_url
                     .to_file_path()
                     .map_err(|_| ())
@@ -300,27 +435,19 @@ impl NetManager {
                     Ok(bytes) => Ok(bytes),
                     Err(_) => Err(-1),
                 };
-                let mut shared_state = self.shared_state.try_lock().unwrap();
                 let final_bytes = match &result {
                     Ok(bytes) => bytes.len() as u64,
                     Err(_) => 0,
                 };
-                let new_state = super::net_task::NetTaskState {
-                    result: Some(result),
-                    bytes_loaded: final_bytes,
-                    bytes_total: final_bytes,
-                };
-                shared_state.task_states.insert(task_id, new_state);
+                let mut shared_state = shared_state.lock().await;
+                shared_state
+                    .update_task_progress(task_id, final_bytes, final_bytes);
+                shared_state.fulfill_task(task_id, result).await;
             }
         } else {
             // Execute normal HTTP fetch
-            let shared_state_arc = Arc::clone(&self.shared_state);
-            crate::player::spawn_player_local(async move {
-                Self::execute_task(task_id.clone(), net_task, shared_state_arc).await;
-            });
+            Self::execute_task(task_id, task, shared_state).await;
         }
-
-        task_id
     }
 
     async fn execute_task(
@@ -363,7 +490,14 @@ impl NetManager {
         // Set task initial state
         {
             let mut shared_shared = self.shared_state.try_lock().unwrap();
-            shared_shared.update_task_state(task_id, NetTaskState { result: None, bytes_loaded: 0, bytes_total: 0 });
+            shared_shared.update_task_state(
+                task_id,
+                NetTaskState {
+                    result: None,
+                    bytes_loaded: 0,
+                    bytes_total: 0,
+                },
+            );
         }
 
         // Push the task and execute it
@@ -376,6 +510,37 @@ impl NetManager {
 
         task_id
     }
+}
+
+pub(crate) fn resolve_preload_url(
+    url: &str,
+    base_path: Option<&Url>,
+    override_base_path: Option<&str>,
+) -> Url {
+    let decoded = percent_decode_str(url)
+        .decode_utf8()
+        .map(|value| value.into_owned())
+        .unwrap_or_else(|_| url.to_owned());
+    let effective = if let Some(override_base) = override_base_path {
+        let normalized_url = decoded.replace('\\', "/");
+        let normalized_override = override_base.replace('\\', "/");
+        let prefix = if normalized_override.ends_with('/') {
+            normalized_override
+        } else {
+            format!("{normalized_override}/")
+        };
+        if normalized_url
+            .to_lowercase()
+            .starts_with(&prefix.to_lowercase())
+        {
+            normalized_url[prefix.len()..].to_owned()
+        } else {
+            normalized_url
+        }
+    } else {
+        decoded
+    };
+    normalize_task_url(&effective, base_path)
 }
 
 fn normalize_task_url(url: &str, base_path: Option<&Url>) -> Url {
@@ -398,10 +563,7 @@ fn normalize_task_url(url: &str, base_path: Option<&Url>) -> Url {
     }
 }
 
-pub fn find_task_with_url<'a>(
-    tasks: &'a HashMap<u32, NetTask>,
-    url: &str,
-) -> Option<&'a NetTask> {
+pub fn find_task_with_url<'a>(tasks: &'a HashMap<u32, NetTask>, url: &str) -> Option<&'a NetTask> {
     let decoded_url = percent_decode_str(url)
         .decode_utf8()
         .unwrap_or_else(|_| url.into());

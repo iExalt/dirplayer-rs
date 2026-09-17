@@ -22,7 +22,7 @@ use web_sys::{HtmlCanvasElement, WebGl2RenderingContext};
 use std::collections::HashMap;
 
 use crate::player::{
-    DirPlayer, bitmap::{bitmap::{Bitmap, PaletteRef, get_system_default_palette, resolve_color_ref}, drawing::CopyPixelsParams}, cast_lib::CastMemberRef, cast_member::CastMemberType, datum_ref::DatumRef, font::{GlyphPreference, get_glyph_preference, measure_text, measure_text_wrapped}, geometry::IntRect, handlers::datum_handlers::cast_member::font::{FontMemberHandlers, HtmlStyle, StyledSpan, TextAlignment}, score::{ScoreRef, get_concrete_sprite_render_rect as get_concrete_sprite_rect, get_sprite_at}, sprite::{ColorRef, CursorRef, is_skew_flip}, symbols::{builtin::BuiltInSymbol, symbol::Symbol}
+    DirPlayer, ScriptError, ScriptErrorCode, bitmap::{bitmap::{Bitmap, PaletteRef, get_system_default_palette, resolve_color_ref}, drawing::CopyPixelsParams}, cast_lib::CastMemberRef, cast_member::CastMemberType, datum_ref::DatumRef, font::{GlyphPreference, get_glyph_preference, measure_text, measure_text_wrapped}, geometry::IntRect, handlers::datum_handlers::cast_member::font::{FontMemberHandlers, HtmlStyle, StyledSpan, TextAlignment}, score::{ScoreRef, get_concrete_sprite_render_rect as get_concrete_sprite_rect, get_sprite_at}, sprite::{ColorRef, CursorRef, is_skew_flip}, symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable}
 };
 use crate::director::lingo::datum::Datum;
 use crate::js_api::JsApi;
@@ -288,10 +288,51 @@ impl WebGL2Renderer {
     pub fn render_player_to_bitmap(
         &mut self,
         player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
         owner_id: usize,
         width: u32,
         height: u32,
-    ) -> Bitmap {
+    ) -> Result<Bitmap, ScriptError> {
+        // Save the actual GL bindings before ensure_nested_fbo: that helper may
+        // bind the default framebuffer while creating or resizing the FBO.
+        let gl = self.context.gl();
+        let framebuffer_or_default = |pname: u32, label: &str| -> Result<Option<web_sys::WebGlFramebuffer>, ScriptError> {
+            let value = gl
+                .get_parameter(pname)
+                .map_err(|_| ScriptError::new(format!("WebGL {label} query failed")))?;
+            if value.is_null() {
+                Ok(None)
+            } else {
+                value
+                    .dyn_into::<web_sys::WebGlFramebuffer>()
+                    .map(Some)
+                    .map_err(|_| ScriptError::new(format!("WebGL {label} query returned an invalid framebuffer")))
+            }
+        };
+        let saved_draw_fbo = framebuffer_or_default(
+            WebGl2RenderingContext::FRAMEBUFFER_BINDING,
+            "draw framebuffer",
+        )?;
+        let saved_read_fbo = framebuffer_or_default(
+            WebGl2RenderingContext::READ_FRAMEBUFFER_BINDING,
+            "read framebuffer",
+        )?;
+        let viewport_value = gl
+            .get_parameter(WebGl2RenderingContext::VIEWPORT)
+            .map_err(|_| ScriptError::new("WebGL viewport query failed".to_string()))?;
+        let viewport = viewport_value
+            .dyn_into::<js_sys::Int32Array>()
+            .map_err(|_| ScriptError::new("WebGL viewport query returned an invalid value".to_string()))?;
+        if viewport.length() != 4 {
+            return Err(ScriptError::new("WebGL viewport query returned an invalid shape".to_string()));
+        }
+        let saved_viewport = [
+            viewport.get_index(0),
+            viewport.get_index(1),
+            viewport.get_index(2),
+            viewport.get_index(3),
+        ];
+
         self.ensure_nested_fbo(width, height);
 
         // Swap in this sub-player's own caches + palette-version tracking so the
@@ -317,18 +358,43 @@ impl WebGL2Renderer {
         self.size = (width, height);
         self.projection_matrix = Self::create_ortho_matrix(width as f32, height as f32);
 
-        self.draw_frame(player);
+        let restore = |renderer: &mut Self| {
+            let gl = renderer.context.gl();
+            gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, saved_draw_fbo.as_ref());
+            gl.bind_framebuffer(WebGl2RenderingContext::READ_FRAMEBUFFER, saved_read_fbo.as_ref());
+            gl.viewport(
+                saved_viewport[0], saved_viewport[1], saved_viewport[2], saved_viewport[3],
+            );
+            renderer.size = saved_size;
+            renderer.projection_matrix = saved_proj;
+            let current_sub_palette = renderer.last_palette_version;
+            renderer.last_palette_version = saved_palette;
+            std::mem::swap(&mut renderer.texture_cache, &mut sub_tex);
+            std::mem::swap(&mut renderer.rendered_text_cache, &mut sub_text);
+            renderer
+                .nested_caches
+                .insert(owner_id, (sub_tex, sub_text, current_sub_palette));
+        };
+
+        if let Err(error) = self.draw_frame(player, symbols) {
+            restore(self);
+            return Err(error);
+        }
 
         // Read the rendered pixels back (RGBA, bottom-up → flip to top-down).
         let mut pixels = vec![0u8; (width * height * 4) as usize];
         {
             let gl = self.context.gl();
             gl.bind_framebuffer(WebGl2RenderingContext::READ_FRAMEBUFFER, self.nested_fbo.as_ref());
-            let _ = gl.read_pixels_with_opt_u8_array(
+            let read_result = gl.read_pixels_with_opt_u8_array(
                 0, 0, width as i32, height as i32,
                 WebGl2RenderingContext::RGBA, WebGl2RenderingContext::UNSIGNED_BYTE,
                 Some(&mut pixels),
             );
+            if read_result.is_err() {
+                restore(self);
+                return Err(ScriptError::new("WebGL nested stage readback failed".to_string()));
+            }
         }
         let row = (width * 4) as usize;
         let mut flipped = vec![0u8; pixels.len()];
@@ -338,19 +404,7 @@ impl WebGL2Renderer {
             flipped[dst..dst + row].copy_from_slice(&pixels[src..src + row]);
         }
 
-        // Restore host framebuffer / viewport / projection / caches.
-        {
-            let gl = self.context.gl();
-            gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, None);
-            gl.viewport(0, 0, saved_size.0 as i32, saved_size.1 as i32);
-        }
-        self.size = saved_size;
-        self.projection_matrix = saved_proj;
-        let sub_palette = self.last_palette_version;
-        self.last_palette_version = saved_palette;
-        std::mem::swap(&mut self.texture_cache, &mut sub_tex);
-        std::mem::swap(&mut self.rendered_text_cache, &mut sub_text);
-        self.nested_caches.insert(owner_id, (sub_tex, sub_text, sub_palette));
+        restore(self);
 
         let mut bitmap = Bitmap::new(
             width as u16,
@@ -362,7 +416,7 @@ impl WebGL2Renderer {
         );
         bitmap.data = flipped;
         bitmap.use_alpha = true;
-        bitmap
+        Ok(bitmap)
     }
 
     /// Create an orthographic projection matrix (column-major for WebGL)
@@ -768,15 +822,19 @@ impl WebGL2Renderer {
             .unwrap_or(false)
     }
 
-    pub fn draw_frame(&mut self, player: &mut DirPlayer) {
+    pub fn draw_frame(
+        &mut self,
+        player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
+    ) -> Result<(), ScriptError> {
+        // Validate and flush owner-local W3D state before changing any renderer
+        // counters, caches, transitions, or GL state.
+        crate::player::handlers::datum_handlers::shockwave3d_object::sync_persistent_transforms(player, symbols)?;
+        crate::player::handlers::datum_handlers::shockwave3d_object::sync_shader_texture_lists(player, symbols)?;
+
         self.frame_count += 1;
         // Increment sprite debug frame counter
         let df = SPRITE_DEBUG_FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-        // Sync persistent Transform3d datums → node_transforms for in-place mutations
-        // (e.g. model.transform.position = vector(...) used by overlay/HUD scripts)
-        crate::player::handlers::datum_handlers::shockwave3d_object::sync_persistent_transforms(player);
-        crate::player::handlers::datum_handlers::shockwave3d_object::sync_shader_texture_lists(player);
 
         // Check if palettes changed and clear texture cache if so
         // This handles external cast loading where palette members may load after initial render
@@ -872,7 +930,7 @@ impl WebGL2Renderer {
                 deferred_dts_3d.push(*channel_num);
                 continue;
             }
-            self.render_sprite(player, *channel_num);
+            self.render_sprite(player, symbols, *channel_num)?;
         }
 
         // Accumulate trails sprites into the trails texture via GPU-side copy.
@@ -933,7 +991,7 @@ impl WebGL2Renderer {
         // overlay (see the render loop above) so the live, animating 3D is visible
         // even when a HUD has been blitted into `(the stage).image`.
         for ch in &deferred_dts_3d {
-            self.render_sprite(player, *ch);
+            self.render_sprite(player, symbols, *ch)?;
         }
 
         // Draw external-Xtra 3D scenes (scene3d host API) onto the stage
@@ -1004,6 +1062,7 @@ impl WebGL2Renderer {
         if unsafe { crate::player::ACTIVE_PLAYER_ID } == 0 {
             self.copy_framebuffer_to_prev();
         }
+        Ok(())
     }
 
     /// Copy the current default framebuffer into `prev_frame_texture` (GPU-side,
@@ -1083,7 +1142,11 @@ impl WebGL2Renderer {
         flipped
     }
 
-    pub fn capture_stage_bitmap(&mut self, player: &mut DirPlayer) -> Bitmap {
+    pub fn capture_stage_bitmap(
+        &mut self,
+        player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
+    ) -> Result<Bitmap, ScriptError> {
         // A nested `#movie` sub-player reads `(the stage).image` while running
         // in the HOST GL context: framebuffer = host canvas, `self.size` = the
         // host stage (e.g. 1190x575). Drawing `draw_frame(sub)` here would
@@ -1096,18 +1159,32 @@ impl WebGL2Renderer {
         if active != 0 {
             let w = player.movie.rect.width().max(1) as u32;
             let h = player.movie.rect.height().max(1) as u32;
-            let mut bmp = self.render_player_to_bitmap(player, active, w, h);
+            let mut bmp = self.render_player_to_bitmap(player, symbols, active, w, h)?;
             bmp.use_alpha = true;
-            return bmp;
+            return Ok(bmp);
         }
 
-        self.draw_frame(player);
+        self.draw_frame(player, symbols)?;
 
         let (width, height) = self.size;
         let gl = self.context.gl();
+        let saved_read_fbo = {
+            let value = gl
+                .get_parameter(WebGl2RenderingContext::READ_FRAMEBUFFER_BINDING)
+                .map_err(|_| ScriptError::new("WebGL read framebuffer query failed".to_string()))?;
+            if value.is_null() {
+                None
+            } else {
+                Some(value.dyn_into::<web_sys::WebGlFramebuffer>().map_err(|_| {
+                    ScriptError::new(
+                        "WebGL read framebuffer query returned an invalid framebuffer".to_string(),
+                    )
+                })?)
+            }
+        };
         let mut pixels = vec![0u8; (width * height * 4) as usize];
         gl.bind_framebuffer(WebGl2RenderingContext::READ_FRAMEBUFFER, None);
-        let _ = gl.read_pixels_with_opt_u8_array(
+        let read_result = gl.read_pixels_with_opt_u8_array(
             0,
             0,
             width as i32,
@@ -1116,6 +1193,11 @@ impl WebGL2Renderer {
             WebGl2RenderingContext::UNSIGNED_BYTE,
             Some(&mut pixels),
         );
+        gl.bind_framebuffer(
+            WebGl2RenderingContext::READ_FRAMEBUFFER,
+            saved_read_fbo.as_ref(),
+        );
+        read_result.map_err(|_| ScriptError::new("WebGL stage readback failed".to_string()))?;
 
         let row_size = (width * 4) as usize;
         let mut flipped = vec![0u8; pixels.len()];
@@ -1136,7 +1218,7 @@ impl WebGL2Renderer {
         );
         bitmap.data = flipped;
         bitmap.use_alpha = true;
-        bitmap
+        Ok(bitmap)
     }
 
     fn update_native_cursor(&mut self, player: &mut DirPlayer) {
@@ -1527,18 +1609,23 @@ impl WebGL2Renderer {
     }
 
     /// Render a single sprite
-    fn render_sprite(&mut self, player: &mut DirPlayer, channel_num: i16) {
+    fn render_sprite(
+        &mut self,
+        player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
+        channel_num: i16,
+    ) -> Result<(), ScriptError> {
         // Get sprite and member info
         let (member_ref, mut sprite_rect, ink, mut blend, flip_h, flip_v, rotation, skew, bg_color, fg_color, has_fore_color, has_back_color, is_puppet, raw_loc, sprite_width, sprite_height, w3d_camera, w3d_extra_cams) = {
             let score = &player.movie.score;
             let sprite = match score.get_sprite(channel_num) {
                 Some(s) => s,
-                None => return,
+                None => return Ok(()),
             };
 
             let member_ref = match &sprite.member {
                 Some(m) => m.clone(),
-                None => return,
+                None => return Ok(()),
             };
 
             let rect = get_concrete_sprite_rect(player, sprite);
@@ -1556,7 +1643,7 @@ impl WebGL2Renderer {
                     || rect.left >= stage_w as i32
                     || rect.top >= stage_h as i32
                 {
-                    return;
+                    return Ok(());
                 }
             }
 
@@ -1821,6 +1908,7 @@ impl WebGL2Renderer {
                                 h,
                                 paused_at_start,
                                 asserted_frame,
+                                &crate::player::owner_key_string(&player.owner),
                             );
                             player.flash_sprite_loaded.insert(dispatch_key);
                         }
@@ -1857,9 +1945,14 @@ impl WebGL2Renderer {
                 let mut resolved: Vec<(Symbol, Vec<u8>)> = Vec::new();
                 let palettes = player.movie.cast_manager.palettes();
                 for tex_name in &placeholder_names {
-                    let tex_name_str = tex_name.to_string();
-                    let found_ref = player.movie.cast_manager.find_member_ref_by_name(&tex_name_str);
-                    if ph_log && tex_name.as_str().contains("panel") {
+                    let tex_name_str = symbols.display(tex_name).map_err(|_| {
+                        ScriptError::new_code(
+                            ScriptErrorCode::InvalidReference,
+                            "foreign or stale W3D texture symbol".to_string(),
+                        )
+                    })?;
+                    let found_ref = player.movie.cast_manager.find_member_ref_by_name(tex_name_str);
+                    if ph_log && tex_name_str.contains("panel") {
                         let status = match &found_ref {
                             Some(r) => {
                                 let m = player.movie.cast_manager.find_member_by_ref(r);
@@ -1880,7 +1973,7 @@ impl WebGL2Renderer {
                             }
                             None => "NOT_FOUND".into(),
                         };
-                        debug!("[W3D-PH] '{}' -> {}", tex_name, status);
+                        debug!("[W3D-PH] '{}' -> {}", tex_name_str, status);
                     }
                     if let Some(src_ref) = found_ref {
                         if let Some(src_member) = player.movie.cast_manager.find_member_by_ref(&src_ref) {
@@ -1962,23 +2055,55 @@ impl WebGL2Renderer {
                         // pause()/resume() buttons must act on the SAME per-model state
                         // the renderer reads — otherwise they hit a bare stub whose sync
                         // clobbered the legacy clock (pause restarted, play froze).
-                        let skinned: Vec<String> = w3d.parsed_scene.as_ref().map(|s| {
-                            s.nodes.iter()
-                                .filter(|n| n.node_type == crate::director::chunks::w3d::types::W3dNodeType::Model)
-                                .filter(|n| {
-                                    let key = if !n.model_resource_name.as_str().is_empty() {
-                                        n.model_resource_name
-                                    } else { n.resource_name };
-                                    s.skeletons.iter().any(|sk| sk.name == key && sk.bones.len() > 1)
-                                })
-                                .map(|n| n.name.to_string())
-                                .collect()
-                        }).unwrap_or_default();
+                        let skinned: Vec<Symbol> = match w3d.parsed_scene.as_ref() {
+                            Some(scene) => {
+                                let mut names = Vec::new();
+                                for n in &scene.nodes {
+                                    if n.node_type != crate::director::chunks::w3d::types::W3dNodeType::Model {
+                                        continue;
+                                    }
+                                    let model_name = symbols.display(&n.model_resource_name).map_err(|_| {
+                                        ScriptError::new_code(
+                                            ScriptErrorCode::InvalidReference,
+                                            "foreign or stale W3D model resource symbol".to_string(),
+                                        )
+                                    })?;
+                                    let key = if !model_name.is_empty() {
+                                        &n.model_resource_name
+                                    } else {
+                                        symbols.display(&n.resource_name).map_err(|_| {
+                                            ScriptError::new_code(
+                                                ScriptErrorCode::InvalidReference,
+                                                "foreign or stale W3D resource symbol".to_string(),
+                                            )
+                                        })?;
+                                        &n.resource_name
+                                    };
+                                    if scene.skeletons.iter().any(|sk| sk.name == *key && sk.bones.len() > 1) {
+                                        symbols.display(&n.name).map_err(|_| {
+                                            ScriptError::new_code(
+                                                ScriptErrorCode::InvalidReference,
+                                                "foreign or stale W3D model name symbol".to_string(),
+                                            )
+                                        })?;
+                                        names.push(n.name.clone());
+                                    }
+                                }
+                                names
+                            }
+                            None => Vec::new(),
+                        };
                         let any_skinned = !skinned.is_empty();
                         for model in &skinned {
-                            let bp = w3d.runtime_state.bones_player_mut(Symbol::from_str(model));
+                            let bp = w3d.runtime_state.bones_player_mut(model.clone());
                             if bp.current_motion.is_none() && !bp.animation_playing {
-                                bp.current_motion = Some(Symbol::from_str(&motion_name.clone().to_string()));
+                                symbols.display(&motion_name).map_err(|_| {
+                                    ScriptError::new_code(
+                                        ScriptErrorCode::InvalidReference,
+                                        "foreign or stale W3D motion symbol".to_string(),
+                                    )
+                                })?;
+                                bp.current_motion = Some(motion_name.clone());
                                 bp.animation_playing = true;
                                 bp.animation_loop = loops;
                             }
@@ -1988,6 +2113,12 @@ impl WebGL2Renderer {
                             && !w3d.runtime_state.animation_playing
                             && w3d.runtime_state.current_motion.is_none()
                         {
+                            symbols.display(&motion_name).map_err(|_| {
+                                ScriptError::new_code(
+                                    ScriptErrorCode::InvalidReference,
+                                    "foreign or stale W3D motion symbol".to_string(),
+                                )
+                            })?;
                             w3d.runtime_state.current_motion = Some(motion_name);
                             w3d.runtime_state.animation_playing = true;
                             w3d.runtime_state.animation_loop = loops;
@@ -2005,7 +2136,7 @@ impl WebGL2Renderer {
         let texture_source = {
             let member = match player.movie.cast_manager.find_member_by_ref(&member_ref) {
                 Some(m) => m,
-                None => return,
+                None => return Ok(()),
             };
 
             match &member.member_type {
@@ -2022,7 +2153,7 @@ impl WebGL2Renderer {
                     // projector). A line is skipped only when BOTH collapse.
                     let is_line = matches!(shape_member.shape_info.shape_type, crate::director::enums::ShapeType::Line);
                     if (sprite_width <= 1 || sprite_height <= 1) && !(is_line && (sprite_width > 1 || sprite_height > 1)) {
-                        return;
+                        return Ok(());
                     }
 
                     // Skip rendering shapes that use member 1:1 (placeholder) —
@@ -2031,7 +2162,7 @@ impl WebGL2Renderer {
                     // stage colour showing through. See the CPU path in rendering.rs.
                     if player.movie.dir_version >= 500
                         && member_ref.cast_lib == 1 && member_ref.cast_member == 1 {
-                        return;
+                        return Ok(());
                     }
 
                     let palettes = player.movie.cast_manager.palettes();
@@ -2101,12 +2232,12 @@ impl WebGL2Renderer {
                 }
                 CastMemberType::VectorShape(vector_member) => {
                     if sprite_width <= 1 || sprite_height <= 1 {
-                        return;
+                        return Ok(());
                     }
                     // D5+ only — see the Shape branch above.
                     if player.movie.dir_version >= 500
                         && member_ref.cast_lib == 1 && member_ref.cast_member == 1 {
-                        return;
+                        return Ok(());
                     }
                     TextureSource::VectorShapeBitmap {
                         width: sprite_width as u32,
@@ -2118,7 +2249,7 @@ impl WebGL2Renderer {
                     // Font member: render preview_text using the font
                     let text = &font_member.preview_text;
                     if text.is_empty() {
-                        return; // No text to render
+                        return Ok(()); // No text to render
                     }
 
                     // Use sprite rect dimensions for the texture (not measured text)
@@ -2198,7 +2329,7 @@ impl WebGL2Renderer {
                     // Text member: render the text using specified font
                     let text = &text_member.text;
                     if text.is_empty() {
-                        return; // No text to render
+                        return Ok(()); // No text to render
                     }
 
                     // Derive wrapping behavior from text member box type + explicit wordWrap flag.
@@ -3246,7 +3377,7 @@ impl WebGL2Renderer {
                         Some(bitmap_ref) if bitmap_ref != 0 => {
                             TextureSource::Bitmap { image_ref: bitmap_ref, is_flash: true }
                         }
-                        _ => return, // Instance not ready yet; first frame hasn't arrived.
+                        _ => return Ok(()), // Instance not ready yet; first frame hasn't arrived.
                     }
                 }
                 CastMemberType::Movie(_) => {
@@ -3258,7 +3389,7 @@ impl WebGL2Renderer {
                         Some(image_ref) if image_ref != 0 => {
                             TextureSource::Bitmap { image_ref, is_flash: false }
                         }
-                        _ => return, // Sub-player stage not rendered yet.
+                        _ => return Ok(()), // Sub-player stage not rendered yet.
                     }
                 }
                 CastMemberType::FilmLoop(film_loop) => {
@@ -3355,10 +3486,21 @@ impl WebGL2Renderer {
                                 // rather than render this member's world through it.
                                 None => continue,
                             };
-                            let exists = pass_scene.nodes.iter().any(|n| {
-                                n.node_type == W3dNodeType::View
-                                    && n.name.eq_ignore_ascii_case(&cam.name)
-                            });
+                            let mut exists = false;
+                            for n in &pass_scene.nodes {
+                                if exists || n.node_type != W3dNodeType::View {
+                                    continue;
+                                }
+                                exists = symbols
+                                    .lower(&n.name)
+                                    .map_err(|_| {
+                                        ScriptError::new_code(
+                                            ScriptErrorCode::InvalidReference,
+                                            "foreign or stale W3D camera node symbol".to_string(),
+                                        )
+                                    })?
+                                    .eq_ignore_ascii_case(&cam.name);
+                            }
                             if !exists {
                                 continue;
                             }
@@ -3366,7 +3508,7 @@ impl WebGL2Renderer {
                                 member_key: key,
                                 scene: pass_scene,
                                 runtime_state: pass_state,
-                                camera: Some(Symbol::from_str(&cam.name)),
+                                camera: Some(symbols.intern(&cam.name)),
                             });
                         }
                         if passes.is_empty() {
@@ -3376,17 +3518,17 @@ impl WebGL2Renderer {
                                 member_key: own_key,
                                 scene: parsed_scene.clone(),
                                 runtime_state: w3d.runtime_state.clone(),
-                                camera: w3d_camera.as_ref().map(|c| Symbol::from_str(&c.name)),
+                                camera: w3d_camera.as_ref().map(|c| symbols.intern(&c.name)),
                             });
                         }
                         TextureSource::Shockwave3dScene { width: w, height: h, passes }
                     } else {
-                        return;
+                        return Ok(());
                     }
                 }
                 _ => {
                     // Unhandled member types are silently skipped
-                    return;
+                    return Ok(());
                 }
             }
         };
@@ -3618,7 +3760,7 @@ impl WebGL2Renderer {
                         tex_source_size = Some((w, h));
                         tex
                     }
-                    None => return,
+                    None => return Ok(()),
                 }
             }
             TextureSource::SolidColor { r, g, b } => {
@@ -3627,7 +3769,7 @@ impl WebGL2Renderer {
                 // the entire shape would be invisible — skip rendering.
                 if ink == 3 || ink == 7 || ink == 8 || ink == 36 || ink == 40 {
                     if (r, g, b) == bg_color_rgb {
-                        return;
+                        return Ok(());
                     }
                 }
                 self.get_or_create_solid_color_texture(r, g, b)
@@ -3739,7 +3881,7 @@ impl WebGL2Renderer {
                             }
                             tex
                         }
-                        None => return,
+                        None => return Ok(()),
                     }
                 }
             }
@@ -3770,7 +3912,7 @@ impl WebGL2Renderer {
                         cached.texture.clone()
                     } else {
                         // Shouldn't happen, but fall through to render
-                        return;
+                        return Ok(());
                     }
                 } else {
                     // Render the film loop's score to an offscreen bitmap
@@ -3801,10 +3943,10 @@ impl WebGL2Renderer {
 
                     let texture = match self.context.create_texture() {
                         Ok(t) => t,
-                        Err(_) => return,
+                        Err(_) => return Ok(()),
                     };
                     if self.context.upload_texture_rgba(&texture, width, height, &filmloop_bitmap.data).is_err() {
-                        return;
+                        return Ok(());
                     }
                     let gl = self.context.gl().clone();
                     self.texture_cache.insert(&gl, cache_key, texture.clone(), width, height, filmloop_frame);
@@ -4046,10 +4188,10 @@ impl WebGL2Renderer {
                 // Upload button bitmap as texture
                 let texture = match self.context.create_texture() {
                     Ok(t) => t,
-                    Err(_) => return,
+                    Err(_) => return Ok(()),
                 };
                 if self.context.upload_texture_rgba(&texture, width, height, &btn_bitmap.data).is_err() {
-                    return;
+                    return Ok(());
                 }
                 texture
             }
@@ -4214,10 +4356,10 @@ impl WebGL2Renderer {
 
                 let texture = match self.context.create_texture() {
                     Ok(t) => t,
-                    Err(_) => return,
+                    Err(_) => return Ok(()),
                 };
                 if self.context.upload_texture_rgba(&texture, width, height, &shape_bitmap.data).is_err() {
-                    return;
+                    return Ok(());
                 }
                 texture
             }
@@ -4265,10 +4407,10 @@ impl WebGL2Renderer {
 
                 let texture = match self.context.create_texture() {
                     Ok(t) => t,
-                    Err(_) => return,
+                    Err(_) => return Ok(()),
                 };
                 if self.context.upload_texture_rgba(&texture, width, height, &shape_bitmap.data).is_err() {
-                    return;
+                    return Ok(());
                 }
                 texture
             }
@@ -4296,7 +4438,7 @@ impl WebGL2Renderer {
                     self.scene3d.active_camera = pass.camera.clone();
                     if let Err(e) = self.scene3d.render_scene_with_state_ex(
                         &self.context, pass.member_key, &pass.scene, width, height,
-                        Some(&pass.runtime_state), clear,
+                        Some(&pass.runtime_state), clear, symbols,
                     ) {
                         // One bad pass must not abandon the whole sprite — the other
                         // cameras (including the one showing the actual world) still
@@ -4326,7 +4468,7 @@ impl WebGL2Renderer {
                     Some(tex) => tex.clone(),
                     None => {
                         warn!("[3D] No FBO texture for member {:?}", member_key);
-                        return;
+                        return Ok(());
                     }
                 };
 
@@ -4394,7 +4536,7 @@ impl WebGL2Renderer {
         // Get the active program's uniform locations (use effective_ink to ensure consistency)
         let program = match self.shader_manager.get_program(effective_ink) {
             Some(p) => p,
-            None => return,
+            None => return Ok(()),
         };
         let u_projection = program.u_projection.clone();
         let u_texture = program.u_texture.clone();
@@ -4654,6 +4796,7 @@ impl WebGL2Renderer {
         if effective_ink == InkMode::SubPin || effective_ink == InkMode::Light || effective_ink == InkMode::Dark {
             self.context.reset_blend_equation();
         }
+        Ok(())
     }
 
     /// Convert bitmap data to RGBA format for GPU texture upload
@@ -7924,12 +8067,20 @@ impl WebGL2Renderer {
 }
 
 impl super::Renderer for WebGL2Renderer {
-    fn draw_frame(&mut self, player: &mut DirPlayer) {
-        WebGL2Renderer::draw_frame(self, player)
+    fn draw_frame(
+        &mut self,
+        player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
+    ) -> Result<(), ScriptError> {
+        WebGL2Renderer::draw_frame(self, player, symbols)
     }
 
-    fn capture_stage_bitmap(&mut self, player: &mut DirPlayer) -> Bitmap {
-        WebGL2Renderer::capture_stage_bitmap(self, player)
+    fn capture_stage_bitmap(
+        &mut self,
+        player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
+    ) -> Result<Bitmap, ScriptError> {
+        WebGL2Renderer::capture_stage_bitmap(self, player, symbols)
     }
 
     fn reset_for_new_movie(&mut self) {
@@ -7978,7 +8129,15 @@ impl super::Renderer for WebGL2Renderer {
         self.preview_font_size
     }
 
-    fn draw_sprite_isolated(&mut self, player: &mut DirPlayer, channel_num: i16) {
+    fn draw_sprite_isolated(
+        &mut self,
+        player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
+        channel_num: i16,
+    ) -> Result<(), ScriptError> {
+        crate::player::handlers::datum_handlers::shockwave3d_object::sync_persistent_transforms(player, symbols)?;
+        crate::player::handlers::datum_handlers::shockwave3d_object::sync_shader_texture_lists(player, symbols)?;
+
         // Clear to transparent
         let gl = self.context.gl();
         gl.clear_color(0.0, 0.0, 0.0, 0.0);
@@ -7989,6 +8148,7 @@ impl super::Renderer for WebGL2Renderer {
         self.rendered_text_cache.next_frame();
 
         self.quad.bind(self.context.gl());
-        self.render_sprite(player, channel_num);
+        self.render_sprite(player, symbols, channel_num)?;
+        Ok(())
     }
 }

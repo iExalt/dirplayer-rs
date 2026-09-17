@@ -13,10 +13,11 @@ use super::handler_manager::BytecodeHandlerContext;
 pub struct ArithmeticsBytecodeHandler {}
 
 impl ArithmeticsBytecodeHandler {
-    pub fn add(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn add(runtime: &mut crate::player::session::ExecutionContext,
+        ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
             let (lv, rv) = {
-                let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                let scope = player.scopes.get_mut(ctx.scope_ref()).unwrap();
                 let right = scope.stack.pop_value().unwrap();
                 let left = scope.stack.pop_value().unwrap();
                 (left, right)
@@ -25,40 +26,41 @@ impl ArithmeticsBytecodeHandler {
             // back inline. Mirrors add_datums' Int/Int arm exactly.
             if let (StackDatum::Int(a), StackDatum::Int(b)) = (&lv, &rv) {
                 let sum = a + b;
-                player.scopes.get_mut(ctx.scope_ref).unwrap().stack.push_int(sum);
+                player.scopes.get_mut(ctx.scope_ref()).unwrap().stack.push_int(sum);
                 return Ok(HandlerExecutionResult::Advance);
             }
-            let right = rv.into_ref();
-            let left = lv.into_ref();
+            let right = rv.into_ref_with(&mut player.allocator, &mut player.bitmap_manager);
+            let left = lv.into_ref_with(&mut player.allocator, &mut player.bitmap_manager);
             let right_d = player.get_datum(&right).to_owned();
             let left_d = player.get_datum(&left).to_owned();
-            let result = add_datums(left_d, right_d, player)?;
+            let result = add_datums(left_d, right_d, player, symbols)?;
             let result_id = player.alloc_datum(result);
-            player.scopes.get_mut(ctx.scope_ref).unwrap().stack.push(result_id);
+            player.scopes.get_mut(ctx.scope_ref()).unwrap().stack.push(result_id);
             Ok(HandlerExecutionResult::Advance)
         })
     }
 
-    pub fn sub(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn sub(runtime: &mut crate::player::session::ExecutionContext,
+        ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
             let (lv, rv) = {
-                let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                let scope = player.scopes.get_mut(ctx.scope_ref()).unwrap();
                 let right = scope.stack.pop_value().unwrap();
                 let left = scope.stack.pop_value().unwrap();
                 (left, right)
             };
             if let (StackDatum::Int(a), StackDatum::Int(b)) = (&lv, &rv) {
                 let diff = a.wrapping_sub(*b);
-                player.scopes.get_mut(ctx.scope_ref).unwrap().stack.push_int(diff);
+                player.scopes.get_mut(ctx.scope_ref()).unwrap().stack.push_int(diff);
                 return Ok(HandlerExecutionResult::Advance);
             }
-            let right = rv.into_ref();
-            let left = lv.into_ref();
+            let right = rv.into_ref_with(&mut player.allocator, &mut player.bitmap_manager);
+            let left = lv.into_ref_with(&mut player.allocator, &mut player.bitmap_manager);
             let right_d = player.get_datum(&right).to_owned();
             let left_d = player.get_datum(&left).to_owned();
-            let result = subtract_datums(left_d, right_d, player)?;
+            let result = subtract_datums(left_d, right_d, player, symbols)?;
             let result_id = player.alloc_datum(result);
-            player.scopes.get_mut(ctx.scope_ref).unwrap().stack.push(result_id);
+            player.scopes.get_mut(ctx.scope_ref()).unwrap().stack.push(result_id);
             Ok(HandlerExecutionResult::Advance)
         })
     }
@@ -92,18 +94,21 @@ impl ArithmeticsBytecodeHandler {
     }
 
     pub fn mod_handler(
+        runtime: &mut crate::player::session::ExecutionContext,
         ctx: &BytecodeHandlerContext,
     ) -> Result<HandlerExecutionResult, ScriptError> {
-        reserve_player_mut(|player| {
+        runtime.with_player_and_symbols(|player, symbols| {
             let (left, right) = {
-                let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-                let right = scope.stack.pop().unwrap();
-                let left = scope.stack.pop().unwrap();
+                let (scopes, allocator, bitmap_manager) =
+                    (&mut player.scopes, &mut player.allocator, &mut player.bitmap_manager);
+                let scope = scopes.get_mut(ctx.scope_ref()).unwrap();
+                let right = scope.stack.pop_ref_with(allocator, bitmap_manager).unwrap();
+                let left = scope.stack.pop_ref_with(allocator, bitmap_manager).unwrap();
                 (left, right)
             };
-            let result = Self::modulo_datums(&left, &right, player)?;
+            let result = Self::modulo_datums(&left, &right, player, symbols)?;
             let result_id = player.alloc_datum(result);
-            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+            let scope = player.scopes.get_mut(ctx.scope_ref()).unwrap();
             scope.stack.push(result_id);
             Ok(HandlerExecutionResult::Advance)
         })
@@ -115,6 +120,7 @@ impl ArithmeticsBytecodeHandler {
         left: &DatumRef,
         right: &DatumRef,
         player: &mut DirPlayer,
+        symbols: &crate::player::symbols::symbol_table::SymbolTable,
     ) -> Result<Datum, ScriptError> {
         {
             let right = player.get_datum(right);
@@ -153,7 +159,7 @@ impl ArithmeticsBytecodeHandler {
                         let result_datum = match item_datum {
               Datum::Int(n) => Datum::Int(Self::safe_mod_int(*n, Self::to_mod_int(*right))),
               Datum::Float(n) => Datum::Int(Self::safe_mod_int(Self::to_mod_int(*n), Self::to_mod_int(*right))),
-              _ => return Err(ScriptError::new(format!("Modulus operator in list only works with ints and floats. Given: {}", format_datum(item, player)))),
+              _ => return Err(ScriptError::new(format!("Modulus operator in list only works with ints and floats. Given: {}", format_datum(item, symbols, player)?))),
             };
                         new_list.push(result_datum);
                     }
@@ -170,7 +176,7 @@ impl ArithmeticsBytecodeHandler {
                         let result_datum = match item_datum {
               Datum::Int(n) => Datum::Int(Self::safe_mod_int(*n, *right)),
               Datum::Float(n) => Datum::Int(Self::safe_mod_int(Self::to_mod_int(*n), *right)),
-              _ => return Err(ScriptError::new(format!("Modulus operator in list only works with ints and floats. Given: {}", format_datum(item, player)))),
+              _ => return Err(ScriptError::new(format!("Modulus operator in list only works with ints and floats. Given: {}", format_datum(item, symbols, player)?))),
             };
                         new_list.push(result_datum);
                     }
@@ -192,10 +198,11 @@ impl ArithmeticsBytecodeHandler {
         }
     }
 
-    pub fn div(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn div(runtime: &mut crate::player::session::ExecutionContext,
+        ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
             let (lv, rv) = {
-                let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                let scope = player.scopes.get_mut(ctx.scope_ref()).unwrap();
                 let right = scope.stack.pop_value().unwrap();
                 let left = scope.stack.pop_value().unwrap();
                 (left, right)
@@ -204,45 +211,49 @@ impl ArithmeticsBytecodeHandler {
                 // Lingo coerces divisor 0 to 1 (matches divide_datums' Int/Int arm).
                 let d = if *b == 0 { 1 } else { *b };
                 let q = a / d;
-                player.scopes.get_mut(ctx.scope_ref).unwrap().stack.push_int(q);
+                player.scopes.get_mut(ctx.scope_ref()).unwrap().stack.push_int(q);
                 return Ok(HandlerExecutionResult::Advance);
             }
-            let right = rv.into_ref();
-            let left = lv.into_ref();
-            let result = divide_datums(left, right, player)?;
+            let right = rv.into_ref_with(&mut player.allocator, &mut player.bitmap_manager);
+            let left = lv.into_ref_with(&mut player.allocator, &mut player.bitmap_manager);
+            let result = divide_datums(left, right, player, symbols)?;
             let result_id = player.alloc_datum(result);
-            player.scopes.get_mut(ctx.scope_ref).unwrap().stack.push(result_id);
+            player.scopes.get_mut(ctx.scope_ref()).unwrap().stack.push(result_id);
             Ok(HandlerExecutionResult::Advance)
         })
     }
 
-    pub fn mul(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn mul(runtime: &mut crate::player::session::ExecutionContext,
+        ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+        runtime.with_player_and_symbols(|player, symbols| {
             let (lv, rv) = {
-                let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                let scope = player.scopes.get_mut(ctx.scope_ref()).unwrap();
                 let right = scope.stack.pop_value().unwrap();
                 let left = scope.stack.pop_value().unwrap();
                 (left, right)
             };
             if let (StackDatum::Int(a), StackDatum::Int(b)) = (&lv, &rv) {
                 let prod = a * b;
-                player.scopes.get_mut(ctx.scope_ref).unwrap().stack.push_int(prod);
+                player.scopes.get_mut(ctx.scope_ref()).unwrap().stack.push_int(prod);
                 return Ok(HandlerExecutionResult::Advance);
             }
-            let right_ref = rv.into_ref();
-            let left_ref = lv.into_ref();
-            let result = multiply_datums(left_ref, right_ref, player)?;
+            let right_ref = rv.into_ref_with(&mut player.allocator, &mut player.bitmap_manager);
+            let left_ref = lv.into_ref_with(&mut player.allocator, &mut player.bitmap_manager);
+            let result = multiply_datums(left_ref, right_ref, player, symbols)?;
             let result_id = player.alloc_datum(result);
-            player.scopes.get_mut(ctx.scope_ref).unwrap().stack.push(result_id);
+            player.scopes.get_mut(ctx.scope_ref()).unwrap().stack.push(result_id);
             Ok(HandlerExecutionResult::Advance)
         })
     }
 
-    pub fn inv(ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
-        reserve_player_mut(|player| {
+    pub fn inv(runtime: &mut crate::player::session::ExecutionContext,
+        ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+        runtime.with_player(|player| {
             let value_id = {
-                let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-                scope.stack.pop().unwrap()
+                let (scopes, allocator, bitmap_manager) =
+                    (&mut player.scopes, &mut player.allocator, &mut player.bitmap_manager);
+                let scope = scopes.get_mut(ctx.scope_ref()).unwrap();
+                scope.stack.pop_ref_with(allocator, bitmap_manager).unwrap()
             };
             let value = player.get_datum(&value_id).clone(); 
             let result_datum = match value {
@@ -280,7 +291,7 @@ impl ArithmeticsBytecodeHandler {
             };
 
             let result_id = player.alloc_datum(result_datum);
-            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+            let scope = player.scopes.get_mut(ctx.scope_ref()).unwrap();
             scope.stack.push(result_id);
             Ok(HandlerExecutionResult::Advance)
         })

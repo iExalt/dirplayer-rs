@@ -5,7 +5,7 @@ use log::{debug, warn};
 use crate::{
     director::lingo::datum::Datum,
     player::{
-        DirPlayer, HandlerExecutionResult, ScriptError, bitmap::{manager::BitmapRef, mask::BitmapMask}, datum_formatting::format_concrete_datum, reserve_player_mut, score::sprite_get_prop, symbols::{builtin::BuiltInSymbol, symbol::Symbol}
+        DatumRef, DirPlayer, HandlerExecutionResult, ScriptError, bitmap::{manager::BitmapRef, mask::BitmapMask}, datum_formatting::format_concrete_datum, score::sprite_get_prop, symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable}
     },
 };
 
@@ -15,6 +15,31 @@ use super::handler_manager::BytecodeHandlerContext;
 /// Check if an ink value requires matte (pixel-level) collision
 fn is_matte_ink(ink: i32) -> bool {
     ink == 8 || ink == 36 || ink == 33 || ink == 41 || ink == 7
+}
+
+fn diagnostic_datum(datum: &Datum, symbols: &SymbolTable, player: &DirPlayer) -> String {
+    format_concrete_datum(datum, symbols, player)
+        .unwrap_or_else(|_| format!("<unformattable {}>", datum.type_str()))
+}
+
+fn checked_sprite_operand<'a>(
+    player: &'a DirPlayer,
+    symbols: &SymbolTable,
+    datum_ref: &DatumRef,
+) -> Result<&'a Datum, ScriptError> {
+    let datum = match datum_ref {
+        DatumRef::Void => return Ok(&Datum::Void),
+        _ => player
+            .allocator
+            .try_get_datum(datum_ref)
+            .ok_or_else(|| ScriptError::new("invalid or foreign sprite reference".to_owned()))?,
+    };
+    if let Datum::Symbol(symbol) = datum {
+        symbols
+            .display(symbol)
+            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+    }
+    Ok(datum)
 }
 
 /// Get the bitmap image_ref for a sprite's cast member (if it's a bitmap).
@@ -115,24 +140,34 @@ impl SpriteCompareBytecodeHandler {
     /// - Second pop: source sprite number
     /// Pushes 1 if sprites intersect, 0 if they don't
     pub fn onto_sprite(
+        runtime: &mut crate::player::session::ExecutionContext,
         ctx: &BytecodeHandlerContext,
     ) -> Result<HandlerExecutionResult, ScriptError> {
-        reserve_player_mut(|player| {
+        let player = &mut *runtime.player;
+        let symbols = &mut *runtime.symbols;
+        {
+            if !ctx.scope.validate_top(player) {
+                return Err(crate::player::cancelled_scope_error());
+            }
             // Pop the target sprite (result from sprite() call)
             let target_sprite_ref = {
-                let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-                scope.stack.pop().unwrap()
+                let (scopes, allocator, bitmap_manager) =
+                    (&mut player.scopes, &mut player.allocator, &mut player.bitmap_manager);
+                scopes.get_mut(ctx.scope_ref()).unwrap().stack
+                    .pop_ref_with(allocator, bitmap_manager).unwrap()
             };
 
             // Pop the source sprite number
             let source_sprite_ref = {
-                let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-                scope.stack.pop().unwrap()
+                let (scopes, allocator, bitmap_manager) =
+                    (&mut player.scopes, &mut player.allocator, &mut player.bitmap_manager);
+                scopes.get_mut(ctx.scope_ref()).unwrap().stack
+                    .pop_ref_with(allocator, bitmap_manager).unwrap()
             };
 
             // Get sprite numbers - handle both sprite refs and plain integers
             let get_sprite_num = |datum_ref: &crate::player::DatumRef| -> Result<i16, ScriptError> {
-                let datum = player.get_datum(datum_ref);
+                let datum = checked_sprite_operand(player, symbols, datum_ref)?;
 
                 // Try to_sprite_ref first (proper sprite reference)
                 if let Ok(num) = datum.to_sprite_ref() {
@@ -146,7 +181,7 @@ impl SpriteCompareBytecodeHandler {
 
                 Err(ScriptError::new(format!(
                     "Expected sprite reference or integer, got {}",
-                    format_concrete_datum(datum, player)
+                    diagnostic_datum(datum, symbols, player)
                 )))
             };
 
@@ -154,14 +189,14 @@ impl SpriteCompareBytecodeHandler {
             let target_sprite_num = get_sprite_num(&target_sprite_ref)?;
 
             debug!("ontospr: Comparing sprite {} with sprite {}", source_sprite_num, target_sprite_num);
-            debug!("  source_sprite_ref datum: {}", format_concrete_datum(&player.get_datum(&source_sprite_ref), player));
-            debug!("  target_sprite_ref datum: {}", format_concrete_datum(&player.get_datum(&target_sprite_ref), player));
+            debug!("  source_sprite_ref datum: {}", diagnostic_datum(player.get_datum(&source_sprite_ref), symbols, player));
+            debug!("  target_sprite_ref datum: {}", diagnostic_datum(player.get_datum(&target_sprite_ref), symbols, player));
 
             // Helper function to get rect bounds
             let mut get_rect_bounds = |sprite_num: i16| -> Result<(i32, i32, i32, i32), ScriptError> {
-                let rect_datum = sprite_get_prop(player, sprite_num, Symbol::builtin(BuiltInSymbol::Rect))?;
+                let rect_datum = sprite_get_prop(player, symbols, sprite_num, Symbol::builtin(BuiltInSymbol::Rect))?;
 
-                debug!("  sprite {} rect datum: {}", sprite_num, format_concrete_datum(&rect_datum, player));
+                debug!("  sprite {} rect datum: {}", sprite_num, diagnostic_datum(&rect_datum, symbols, player));
 
                 // Extract rect coordinates - rect is stored as Datum::Rect([left, top, right, bottom])
                 match rect_datum {
@@ -191,7 +226,7 @@ impl SpriteCompareBytecodeHandler {
                     _ => {
                         Err(ScriptError::new(format!(
                             "Sprite {} rect is not a rect or list: {}",
-                            sprite_num, format_concrete_datum(&rect_datum, player)
+                            sprite_num, diagnostic_datum(&rect_datum, symbols, player)
                         )))
                     }
                 }
@@ -204,7 +239,7 @@ impl SpriteCompareBytecodeHandler {
                     warn!("WARNING: Failed to get rect for source sprite {}: {:?}", source_sprite_num, e);
                     // Sprite doesn't exist or has no rect, return 0 (no collision)
                     let result_ref = player.alloc_datum(Datum::Int(0));
-                    let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                    let scope = player.scopes.get_mut(ctx.scope_ref()).unwrap();
                     scope.stack.push(result_ref);
                     return Ok(HandlerExecutionResult::Advance);
                 }
@@ -216,7 +251,7 @@ impl SpriteCompareBytecodeHandler {
                     warn!("WARNING: Failed to get rect for target sprite {}: {:?}", target_sprite_num, e);
                     // Sprite doesn't exist or has no rect, return 0 (no collision)
                     let result_ref = player.alloc_datum(Datum::Int(0));
-                    let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                    let scope = player.scopes.get_mut(ctx.scope_ref()).unwrap();
                     scope.stack.push(result_ref);
                     return Ok(HandlerExecutionResult::Advance);
                 }
@@ -286,11 +321,11 @@ impl SpriteCompareBytecodeHandler {
             let result = if intersects { 1 } else { 0 };
             let result_ref = player.alloc_datum(Datum::Int(result));
 
-            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+            let scope = player.scopes.get_mut(ctx.scope_ref()).unwrap();
             scope.stack.push(result_ref);
 
             Ok(HandlerExecutionResult::Advance)
-        })
+        }
     }
 
     /// intospr - Check if one sprite is completely within another sprite
@@ -299,24 +334,34 @@ impl SpriteCompareBytecodeHandler {
     /// - Second pop: source sprite number (the sprite to check if within)
     /// Pushes 1 if source is completely within target, 0 otherwise
     pub fn into_sprite(
+        runtime: &mut crate::player::session::ExecutionContext,
         ctx: &BytecodeHandlerContext,
     ) -> Result<HandlerExecutionResult, ScriptError> {
-        reserve_player_mut(|player| {
+        let player = &mut *runtime.player;
+        let symbols = &mut *runtime.symbols;
+        {
+            if !ctx.scope.validate_top(player) {
+                return Err(crate::player::cancelled_scope_error());
+            }
             // Pop the target sprite (the container)
             let target_sprite_ref = {
-                let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-                scope.stack.pop().unwrap()
+                let (scopes, allocator, bitmap_manager) =
+                    (&mut player.scopes, &mut player.allocator, &mut player.bitmap_manager);
+                scopes.get_mut(ctx.scope_ref()).unwrap().stack
+                    .pop_ref_with(allocator, bitmap_manager).unwrap()
             };
 
             // Pop the source sprite number (the one to check if within)
             let source_sprite_ref = {
-                let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
-                scope.stack.pop().unwrap()
+                let (scopes, allocator, bitmap_manager) =
+                    (&mut player.scopes, &mut player.allocator, &mut player.bitmap_manager);
+                scopes.get_mut(ctx.scope_ref()).unwrap().stack
+                    .pop_ref_with(allocator, bitmap_manager).unwrap()
             };
 
             // Get sprite numbers - handle both sprite refs and plain integers
             let get_sprite_num = |datum_ref: &crate::player::DatumRef| -> Result<i16, ScriptError> {
-                let datum = player.get_datum(datum_ref);
+                let datum = checked_sprite_operand(player, symbols, datum_ref)?;
 
                 // Try to_sprite_ref first (proper sprite reference)
                 if let Ok(num) = datum.to_sprite_ref() {
@@ -330,7 +375,7 @@ impl SpriteCompareBytecodeHandler {
 
                 Err(ScriptError::new(format!(
                     "Expected sprite reference or integer, got {}",
-                    format_concrete_datum(datum, player)
+                    diagnostic_datum(datum, symbols, player)
                 )))
             };
 
@@ -341,7 +386,7 @@ impl SpriteCompareBytecodeHandler {
 
             // Helper function to get rect bounds
             let mut get_rect_bounds = |sprite_num: i16| -> Result<(i32, i32, i32, i32), ScriptError> {
-                let rect_datum = sprite_get_prop(player, sprite_num, Symbol::builtin(BuiltInSymbol::Rect))?;
+                let rect_datum = sprite_get_prop(player, symbols, sprite_num, Symbol::builtin(BuiltInSymbol::Rect))?;
 
                 match rect_datum {
                     Datum::Rect(vals, _flags) => {
@@ -367,7 +412,7 @@ impl SpriteCompareBytecodeHandler {
                     _ => {
                         Err(ScriptError::new(format!(
                             "Sprite {} rect is not a rect or list: {}",
-                            sprite_num, format_concrete_datum(&rect_datum, player)
+                            sprite_num, diagnostic_datum(&rect_datum, symbols, player)
                         )))
                     }
                 }
@@ -379,7 +424,7 @@ impl SpriteCompareBytecodeHandler {
                 Err(e) => {
                     warn!("WARNING: Failed to get rect for source sprite {}: {:?}", source_sprite_num, e);
                     let result_ref = player.alloc_datum(Datum::Int(0));
-                    let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                    let scope = player.scopes.get_mut(ctx.scope_ref()).unwrap();
                     scope.stack.push(result_ref);
                     return Ok(HandlerExecutionResult::Advance);
                 }
@@ -390,7 +435,7 @@ impl SpriteCompareBytecodeHandler {
                 Err(e) => {
                     warn!("WARNING: Failed to get rect for target sprite {}: {:?}", target_sprite_num, e);
                     let result_ref = player.alloc_datum(Datum::Int(0));
-                    let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+                    let scope = player.scopes.get_mut(ctx.scope_ref()).unwrap();
                     scope.stack.push(result_ref);
                     return Ok(HandlerExecutionResult::Advance);
                 }
@@ -417,10 +462,283 @@ impl SpriteCompareBytecodeHandler {
             let result = if is_within { 1 } else { 0 };
             let result_ref = player.alloc_datum(Datum::Int(result));
 
-            let scope = player.scopes.get_mut(ctx.scope_ref).unwrap();
+            let scope = player.scopes.get_mut(ctx.scope_ref()).unwrap();
             scope.stack.push(result_ref);
 
             Ok(HandlerExecutionResult::Advance)
-        })
+        }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use std::{cell::RefCell, collections::{HashMap, VecDeque}, rc::Rc};
+
+    use crate::{
+        director::{
+            chunks::{handler::{Bytecode, HandlerDef}, script::ScriptChunk},
+            enums::ScriptType,
+            lingo::opcode::OpCode,
+        },
+        player::{
+            bytecode::handler_manager::{BytecodeHandlerContext, HandlerCode},
+            cast_lib::CastMemberRef,
+            ownership::{OwnerKey, OwnerToken},
+            scope::ScopeRef,
+            script::Script,
+            session::ExecutionContext,
+            symbols::{symbol::Symbol, symbol_table::SymbolTable},
+            DatumType, ScopeToken, DirPlayer, ScriptErrorCode,
+        },
+    };
+
+    fn make_player(player_id: u64) -> DirPlayer {
+        let (tx, _rx) = async_std::channel::unbounded();
+        DirPlayer::new_with_owner(
+            tx,
+            OwnerToken::new(OwnerKey { session: 79, player: player_id, generation: 1 }),
+        )
+    }
+
+    fn make_context(
+        player: &DirPlayer,
+        slot: ScopeRef,
+        opcode: OpCode,
+    ) -> BytecodeHandlerContext {
+        let handler = Rc::new(HandlerDef {
+            name_id: 0,
+            bytecode_array: vec![Bytecode::new(opcode, 0, 0)],
+            bytecode_index_map: fxhash::FxHashMap::default(),
+            argument_name_ids: vec![],
+            local_name_ids: vec![],
+            global_name_ids: vec![],
+            compiled_ir: RefCell::new(None),
+        });
+        let script = Rc::new(Script {
+            member_ref: CastMemberRef { cast_lib: 0, cast_member: 0 },
+            name: String::new(),
+            chunk: ScriptChunk {
+                script_number: 0,
+                literals: vec![],
+                handlers: vec![],
+                property_name_ids: vec![],
+                property_defaults: HashMap::new(),
+            },
+            script_type: ScriptType::Movie,
+            handlers: fxhash::FxHashMap::default(),
+            handler_names_raw: vec![],
+            handler_names: vec![],
+            properties: RefCell::new(fxhash::FxHashMap::default()),
+        });
+        let scope = &player.scopes[slot];
+        BytecodeHandlerContext {
+            scope: ScopeToken {
+                owner: player.owner.clone(),
+                slot,
+                generation: scope.generation,
+                epoch: player.scope_invalidation_epoch,
+            },
+            code: HandlerCode {
+                script,
+                handler,
+                names: Rc::from(Vec::<Symbol>::new()),
+            },
+            multiplier: 1,
+        }
+    }
+
+    fn pop_int(player: &mut DirPlayer, slot: ScopeRef) -> i32 {
+        let result_ref = {
+            let (scopes, allocator, bitmap_manager) =
+                (&mut player.scopes, &mut player.allocator, &mut player.bitmap_manager);
+            scopes[slot]
+                .stack
+                .pop_ref_with(allocator, bitmap_manager)
+                .unwrap()
+        };
+        player.get_datum(&result_ref).int_value().unwrap()
+    }
+
+    fn add_test_channels(player: &mut DirPlayer) {
+        player.movie.score.channels = vec![
+            crate::player::score::SpriteChannel::new(0),
+            crate::player::score::SpriteChannel::new(1),
+            crate::player::score::SpriteChannel::new(2),
+        ];
+    }
+
+    #[test]
+    fn onto_and_into_use_real_sprite_channels_with_explicit_context() {
+        let mut player = make_player(1);
+        add_test_channels(&mut player);
+        player.movie.score.channels[1].sprite.loc_h = 5;
+        player.movie.score.channels[1].sprite.loc_v = 5;
+        player.movie.score.channels[1].sprite.width = 10;
+        player.movie.score.channels[1].sprite.height = 10;
+        player.movie.score.channels[2].sprite.width = 20;
+        player.movie.score.channels[2].sprite.height = 20;
+        let slot = player.push_scope();
+        let source = player.alloc_datum(Datum::Int(1));
+        let target = player.alloc_datum(Datum::Int(2));
+        player.scopes[slot].stack.push(source);
+        player.scopes[slot].stack.push(target);
+        let onto_ctx = make_context(&player, slot, OpCode::OntoSpr);
+        let mut symbols = SymbolTable::new();
+        {
+            let mut runtime = ExecutionContext {
+                player_id: 1,
+                symbols: &mut symbols,
+                player: &mut player,
+            };
+            SpriteCompareBytecodeHandler::onto_sprite(&mut runtime, &onto_ctx).unwrap();
+        }
+        assert_eq!(pop_int(&mut player, slot), 1);
+
+        player.movie.score.channels[1].sprite.loc_h = 2;
+        player.movie.score.channels[1].sprite.loc_v = 2;
+        player.movie.score.channels[1].sprite.width = 4;
+        player.movie.score.channels[1].sprite.height = 4;
+        let source = player.alloc_datum(Datum::Int(1));
+        let target = player.alloc_datum(Datum::Int(2));
+        player.scopes[slot].stack.push(source);
+        player.scopes[slot].stack.push(target);
+        let into_ctx = make_context(&player, slot, OpCode::IntoSpr);
+        {
+            let mut runtime = ExecutionContext {
+                player_id: 1,
+                symbols: &mut symbols,
+                player: &mut player,
+            };
+            SpriteCompareBytecodeHandler::into_sprite(&mut runtime, &into_ctx).unwrap();
+        }
+        assert_eq!(pop_int(&mut player, slot), 1);
+        player.pop_scope();
+    }
+
+    #[test]
+    fn sprite_operands_reject_foreign_symbols_and_outer_refs() {
+        let mut player = make_player(1);
+        add_test_channels(&mut player);
+        player.movie.score.channels[2].sprite.width = 10;
+        player.movie.score.channels[2].sprite.height = 10;
+        let slot = player.push_scope();
+        let mut foreign_symbols = SymbolTable::new();
+        let foreign_symbol = player.alloc_datum(Datum::Symbol(
+            foreign_symbols.intern("foreignSprite"),
+        ));
+        let target = player.alloc_datum(Datum::Int(2));
+        player.scopes[slot].stack.push(foreign_symbol);
+        player.scopes[slot].stack.push(target);
+        let ctx = make_context(&player, slot, OpCode::OntoSpr);
+        let mut symbols = SymbolTable::new();
+        let result = {
+            let mut runtime = ExecutionContext {
+                player_id: 1,
+                symbols: &mut symbols,
+                player: &mut player,
+            };
+            SpriteCompareBytecodeHandler::onto_sprite(&mut runtime, &ctx)
+        };
+        assert!(result.is_err());
+
+        let local_symbol = player.alloc_datum(Datum::Symbol(symbols.intern("localSprite")));
+        let target = player.alloc_datum(Datum::Int(2));
+        player.scopes[slot].stack.push(local_symbol);
+        player.scopes[slot].stack.push(target);
+        let ctx = make_context(&player, slot, OpCode::OntoSpr);
+        {
+            let mut runtime = ExecutionContext {
+                player_id: 1,
+                symbols: &mut symbols,
+                player: &mut player,
+            };
+            SpriteCompareBytecodeHandler::onto_sprite(&mut runtime, &ctx).unwrap();
+        }
+        assert_eq!(pop_int(&mut player, slot), 0);
+
+        let mut other = make_player(2);
+        let foreign_outer = other.alloc_datum(Datum::Int(1));
+        let target = player.alloc_datum(Datum::Int(2));
+        player.scopes[slot].stack.push(foreign_outer);
+        player.scopes[slot].stack.push(target);
+        let ctx = make_context(&player, slot, OpCode::IntoSpr);
+        let result = {
+            let mut runtime = ExecutionContext {
+                player_id: 1,
+                symbols: &mut symbols,
+                player: &mut player,
+            };
+            SpriteCompareBytecodeHandler::into_sprite(&mut runtime, &ctx)
+        };
+        assert!(result.is_err());
+        assert_eq!(player.movie.score.channels[1].sprite.loc_h, 0);
+        player.pop_scope();
+    }
+
+    #[test]
+    fn stale_sprite_scope_aborts_before_stack_pop() {
+        let mut player = make_player(1);
+        add_test_channels(&mut player);
+        let slot = player.push_scope();
+        let onto_ctx = make_context(&player, slot, OpCode::OntoSpr);
+        let into_ctx = make_context(&player, slot, OpCode::IntoSpr);
+        player.pop_scope();
+        assert_eq!(player.push_scope(), slot);
+        player.scopes[slot].stack.push_value(crate::player::scope::StackDatum::Int(7));
+        let mut symbols = SymbolTable::new();
+        let onto_result = {
+            let mut runtime = ExecutionContext {
+                player_id: 1,
+                symbols: &mut symbols,
+                player: &mut player,
+            };
+            SpriteCompareBytecodeHandler::onto_sprite(&mut runtime, &onto_ctx)
+        };
+        assert_eq!(onto_result.err().unwrap().code, ScriptErrorCode::Abort);
+        assert_eq!(player.scopes[slot].stack.len(), 1);
+
+        let into_result = {
+            let mut runtime = ExecutionContext {
+                player_id: 1,
+                symbols: &mut symbols,
+                player: &mut player,
+            };
+            SpriteCompareBytecodeHandler::into_sprite(&mut runtime, &into_ctx)
+        };
+        assert_eq!(into_result.err().unwrap().code, ScriptErrorCode::Abort);
+        assert_eq!(player.scopes[slot].stack.len(), 1);
+        player.pop_scope();
+    }
+
+    #[test]
+    fn diagnostic_fallback_does_not_propagate_formatter_failure() {
+        let mut player = make_player(1);
+        add_test_channels(&mut player);
+        let slot = player.push_scope();
+        let mut foreign_symbols = SymbolTable::new();
+        let nested_foreign = player.alloc_datum(Datum::Symbol(
+            foreign_symbols.intern("nestedForeign"),
+        ));
+        let malformed = player.alloc_datum(Datum::List(
+            DatumType::List,
+            VecDeque::from([nested_foreign]),
+            false,
+        ));
+        let target = player.alloc_datum(Datum::Int(2));
+        player.scopes[slot].stack.push(malformed);
+        player.scopes[slot].stack.push(target);
+        let ctx = make_context(&player, slot, OpCode::OntoSpr);
+        let mut symbols = SymbolTable::new();
+        let result = {
+            let mut runtime = ExecutionContext {
+                player_id: 1,
+                symbols: &mut symbols,
+                player: &mut player,
+            };
+            SpriteCompareBytecodeHandler::onto_sprite(&mut runtime, &ctx)
+        };
+        assert!(result.err().unwrap().message.contains("<unformattable list>"));
+        player.pop_scope();
     }
 }

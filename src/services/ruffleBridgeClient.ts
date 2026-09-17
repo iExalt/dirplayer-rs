@@ -85,9 +85,10 @@ export async function waitForBridge(timeoutMs = 5000): Promise<boolean> {
   return false;
 }
 
-export async function bridgeCreatePlayer(): Promise<string> {
+export async function bridgeCreatePlayer(ownerKey: string): Promise<string> {
   const { playerId } = await bridgeCall<{ playerId: string }>({
     method: 'createPlayer',
+    ownerKey,
   });
   return playerId;
 }
@@ -125,8 +126,11 @@ export function bridgeDestroyPlayer(playerId: string): Promise<void> {
  * invocation back as a bridge event (subscribe via bridgeOnEvent). Needed
  * because the callback functions themselves can't cross the world boundary.
  */
-export function bridgeRegisterCallbackForwarders(playerId: string): Promise<void> {
-  return bridgeCall({ method: 'registerCallbackForwarders', playerId });
+export function bridgeRegisterCallbackForwarders(playerId: string, ownerKey: string): Promise<void> {
+  // The main-world forwarder must echo this generation on every event. The
+  // isolated-world listener rejects events without the exact owner key, so a
+  // second runtime cannot consume callbacks from this player.
+  return bridgeCall({ method: 'registerCallbackForwarders', playerId, ownerKey });
 }
 
 // ---------------------------------------------------------------------------

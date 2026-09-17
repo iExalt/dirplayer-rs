@@ -19,7 +19,8 @@ use std::collections::{HashMap, HashSet};
 use web_sys::{WebGl2RenderingContext, WebGlProgram, WebGlTexture, WebGlUniformLocation};
 
 use crate::player::cast_member::CastMemberType;
-use crate::player::xtra::scene3d::with_store_mut;
+use crate::player::ownership::OwnerToken;
+use crate::player::xtra::scene3d::Scene3dStore;
 use crate::player::DirPlayer;
 
 use super::{context::WebGL2Context, mesh3d::Mesh3dBuffers};
@@ -160,6 +161,9 @@ struct GlBatch {
 pub struct XtraSceneRenderer {
     shader: Option<ShaderProgram>,
     overlay: Option<OverlayShader>,
+    /// Owner identity for the GPU caches. Numeric scene ids are local to a
+    /// player and may overlap across players or before/after a reset.
+    cache_owner: Option<OwnerToken>,
     /// Uploaded mesh buffers keyed by (scene_id, mesh_id): (store generation, batches).
     meshes: HashMap<(i32, u32), (u64, Vec<GlBatch>)>,
     /// GL textures keyed by (scene_id, name): (source generation, texture). For a
@@ -176,8 +180,68 @@ impl XtraSceneRenderer {
         XtraSceneRenderer {
             shader: None,
             overlay: None,
+            cache_owner: None,
             meshes: HashMap::new(),
             textures: HashMap::new(),
+        }
+    }
+
+    fn cache_owner_matches(&self, owner: &OwnerToken) -> bool {
+        self.cache_owner
+            .as_ref()
+            .map(|cached| cached.same_identity(owner))
+            .unwrap_or(false)
+    }
+
+    fn clear_gpu_cache(&mut self, context: &WebGL2Context) {
+        let gl = context.gl();
+        for (_, (_, batches)) in self.meshes.drain() {
+            for batch in batches {
+                batch.mesh.delete(gl);
+            }
+        }
+        for (_, (_, texture)) in self.textures.drain() {
+            if let Some(texture) = texture {
+                gl.delete_texture(Some(&texture));
+            }
+        }
+    }
+
+    fn prune_removed_scenes(&mut self, context: &WebGL2Context, store: &Scene3dStore) {
+        let live_scene_ids: HashSet<i32> = store.scenes.keys().copied().collect();
+        let live_mesh_keys: HashSet<(i32, u32)> = store
+            .scenes
+            .iter()
+            .flat_map(|(scene_id, scene)| {
+                scene.meshes.keys().map(move |mesh_id| (*scene_id, *mesh_id))
+            })
+            .collect();
+        let stale_meshes: Vec<(i32, u32)> = self
+            .meshes
+            .keys()
+            .filter(|key| !live_mesh_keys.contains(key))
+            .copied()
+            .collect();
+        let gl = context.gl();
+        for key in stale_meshes {
+            if let Some((_, batches)) = self.meshes.remove(&key) {
+                for batch in batches {
+                    batch.mesh.delete(gl);
+                }
+            }
+        }
+        let stale_textures: Vec<(i32, String)> = self
+            .textures
+            .keys()
+            .filter(|(scene_id, _)| !live_scene_ids.contains(scene_id))
+            .cloned()
+            .collect();
+        for key in stale_textures {
+            if let Some((_, texture)) = self.textures.remove(&key) {
+                if let Some(texture) = texture {
+                    gl.delete_texture(Some(&texture));
+                }
+            }
         }
     }
 
@@ -262,11 +326,24 @@ impl XtraSceneRenderer {
     }
 
     /// Composite every active scene in the store.
-    pub fn draw(&mut self, context: &WebGL2Context, player: &DirPlayer, viewport_w: i32, viewport_h: i32) {
+    pub fn draw(
+        &mut self,
+        context: &WebGL2Context,
+        player: &mut DirPlayer,
+        viewport_w: i32,
+        viewport_h: i32,
+    ) {
+        if !self.cache_owner_matches(&player.owner) {
+            self.clear_gpu_cache(context);
+            self.cache_owner = Some(player.owner.clone());
+        }
+        self.prune_removed_scenes(context, &player.scene3d_store);
+
         // Collect the scene ids to draw, gating on staleness. We bump
         // `draws_since_submit` here (a store write) then release the store
         // borrow so the GL work below can freely re-borrow it read-only.
-        let scene_ids: Vec<i32> = with_store_mut(|store| {
+        let scene_ids: Vec<i32> = {
+            let store = &mut player.scene3d_store;
             let mut ids = Vec::new();
             for (id, scene) in store.scenes.iter_mut() {
                 // Composite the last submitted frame, and keep compositing it for a
@@ -292,7 +369,7 @@ impl XtraSceneRenderer {
                 ids.push(*id);
             }
             ids
-        });
+        };
         if scene_ids.is_empty() {
             return;
         }
@@ -315,9 +392,12 @@ impl XtraSceneRenderer {
         // Snapshot the frame + the mesh/texture upload work needed, all while
         // holding the store, then drop the borrow before issuing GL draws that
         // read `self` mutably. Cloning FrameData is cheap (draws are matrices).
-        let frame = match with_store_mut(|store| {
-            store.scenes.get(&scene_id).and_then(|s| s.frame.clone())
-        }) {
+        let frame = match player
+            .scene3d_store
+            .scenes
+            .get(&scene_id)
+            .and_then(|scene| scene.frame.clone())
+        {
             Some(f) => f,
             None => return,
         };
@@ -347,7 +427,7 @@ impl XtraSceneRenderer {
             }
         }
         for &mesh_id in &mesh_ids {
-            self.ensure_mesh(context, scene_id, mesh_id);
+            self.ensure_mesh(context, &player.scene3d_store, scene_id, mesh_id);
         }
         // (2) Ensure textures for every name referenced this frame: each unique
         // mesh's batch names, plus any per-object tex_override. Collected first
@@ -370,7 +450,7 @@ impl XtraSceneRenderer {
             }
         }
         for name in &tex_names {
-            self.ensure_texture(context, player, scene_id, name, false);
+            self.ensure_texture(context, &player.scene3d_store, player, scene_id, name, false);
         }
 
         let gl = context.gl();
@@ -555,31 +635,43 @@ impl XtraSceneRenderer {
     }
 
     /// Build/refresh the GL buffers for one mesh if the store's generation advanced.
-    fn ensure_mesh(&mut self, context: &WebGL2Context, scene_id: i32, mesh_id: u32) {
-        let store_gen = with_store_mut(|store| {
-            store.scenes.get(&scene_id).and_then(|s| s.meshes.get(&mesh_id)).map(|m| m.generation)
-        });
+    fn ensure_mesh(
+        &mut self,
+        context: &WebGL2Context,
+        store: &Scene3dStore,
+        scene_id: i32,
+        mesh_id: u32,
+    ) {
+        let store_gen = store
+            .scenes
+            .get(&scene_id)
+            .and_then(|scene| scene.meshes.get(&mesh_id))
+            .map(|mesh| mesh.generation);
         let Some(store_gen) = store_gen else { return };
         if self.meshes.get(&(scene_id, mesh_id)).map(|(g, _)| *g) == Some(store_gen) {
             return;
         }
         // Rebuild from the store's CPU batches.
-        let batches = with_store_mut(|store| {
+        let batches = {
             let mut out: Vec<(String, Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<[f32; 4]>)> =
                 Vec::new();
-            if let Some(m) = store.scenes.get(&scene_id).and_then(|s| s.meshes.get(&mesh_id)) {
-                for b in &m.data.batches {
+            if let Some(mesh) = store
+                .scenes
+                .get(&scene_id)
+                .and_then(|scene| scene.meshes.get(&mesh_id))
+            {
+                for batch in &mesh.data.batches {
                     out.push((
-                        b.tex_name.clone(),
-                        chunk3(&b.positions),
-                        chunk3(&b.normals),
-                        chunk2(&b.uvs),
-                        chunk4(&b.colors),
+                        batch.tex_name.clone(),
+                        chunk3(&batch.positions),
+                        chunk3(&batch.normals),
+                        chunk2(&batch.uvs),
+                        chunk4(&batch.colors),
                     ));
                 }
             }
             out
-        });
+        };
         let mut gl_batches = Vec::new();
         for (tex_name, positions, normals, uvs, colors) in batches {
             let n_tris = positions.len() / 3;
@@ -593,7 +685,12 @@ impl XtraSceneRenderer {
                 gl_batches.push(GlBatch { tex_name, mesh });
             }
         }
-        self.meshes.insert((scene_id, mesh_id), (store_gen, gl_batches));
+        if let Some((_, old_batches)) = self.meshes.insert((scene_id, mesh_id), (store_gen, gl_batches)) {
+            let gl = context.gl();
+            for batch in old_batches {
+                batch.mesh.delete(gl);
+            }
+        }
     }
 
     /// Ensure a GL texture for `name` in `scene_id`. Prefers a plugin-uploaded
@@ -606,26 +703,29 @@ impl XtraSceneRenderer {
     fn ensure_texture(
         &mut self,
         context: &WebGL2Context,
+        store: &Scene3dStore,
         player: &DirPlayer,
         scene_id: i32,
         name: &str,
         for_overlay: bool,
     ) {
         // Plugin-uploaded texture? Check the store's generation.
-        let uploaded = with_store_mut(|store| {
-            store
-                .scenes
-                .get(&scene_id)
-                .and_then(|s| s.textures.get(name))
-                .map(|t| (t.generation, t.w, t.h, t.rgba.clone()))
-        });
+        let uploaded = store
+            .scenes
+            .get(&scene_id)
+            .and_then(|scene| scene.textures.get(name))
+            .map(|texture| (texture.generation, texture.w, texture.h, texture.rgba.clone()));
         let key = (scene_id, name.to_string());
         if let Some((generation, w, h, rgba)) = uploaded {
             if self.textures.get(&key).map(|(g, _)| *g) == Some(generation) {
                 return; // up to date
             }
             let tex = upload_rgba(context, w, h, &rgba);
-            self.textures.insert(key, (generation, tex));
+            if let Some((_, old_texture)) = self.textures.insert(key, (generation, tex)) {
+                if let Some(old_texture) = old_texture {
+                    context.gl().delete_texture(Some(&old_texture));
+                }
+            }
             return;
         }
         // Cast-member texture: resolve once, cache with the sentinel generation.
@@ -638,14 +738,18 @@ impl XtraSceneRenderer {
 
     /// Native pixel size of an overlay's texture — a plugin-uploaded sprite
     /// (store) or a movie bitmap cast member resolved by name.
-    fn overlay_texture_size(&self, player: &DirPlayer, scene_id: i32, name: &str) -> Option<(i32, i32)> {
-        let store_size = with_store_mut(|store| {
-            store
-                .scenes
-                .get(&scene_id)
-                .and_then(|s| s.textures.get(name))
-                .map(|t| (t.w as i32, t.h as i32))
-        });
+    fn overlay_texture_size(
+        &self,
+        store: &Scene3dStore,
+        player: &DirPlayer,
+        scene_id: i32,
+        name: &str,
+    ) -> Option<(i32, i32)> {
+        let store_size = store
+            .scenes
+            .get(&scene_id)
+            .and_then(|scene| scene.textures.get(name))
+            .map(|texture| (texture.w as i32, texture.h as i32));
         if let Some((w, h)) = store_size {
             if w > 0 && h > 0 {
                 return Some((w, h));
@@ -678,7 +782,14 @@ impl XtraSceneRenderer {
         // Resolve every overlay's texture + native size first (mutates self).
         for ov in overlays {
             if !ov.tex_name.is_empty() {
-                self.ensure_texture(context, player, scene_id, &ov.tex_name, true);
+                self.ensure_texture(
+                    context,
+                    &player.scene3d_store,
+                    player,
+                    scene_id,
+                    &ov.tex_name,
+                    true,
+                );
             }
         }
         let gl = context.gl();
@@ -699,7 +810,9 @@ impl XtraSceneRenderer {
                 .get(&(scene_id, ov.tex_name.clone()))
                 .and_then(|(_, t)| t.as_ref());
             let Some(tex) = tex else { continue };
-            let (nw, nh) = self.overlay_texture_size(player, scene_id, &ov.tex_name).unwrap_or((0, 0));
+            let (nw, nh) = self
+                .overlay_texture_size(&player.scene3d_store, player, scene_id, &ov.tex_name)
+                .unwrap_or((0, 0));
             let w = if ov.size[0] > 0 { ov.size[0] } else { nw };
             let h = if ov.size[1] > 0 { ov.size[1] } else { nh };
             if w <= 0 || h <= 0 {
@@ -966,4 +1079,22 @@ fn dot(a: [f32; 3], b: [f32; 3]) -> f32 { a[0] * b[0] + a[1] * b[1] + a[2] * b[2
 fn normalize(a: [f32; 3]) -> [f32; 3] {
     let l = dot(a, a).sqrt();
     if l > 1e-8 { [a[0] / l, a[1] / l, a[2] / l] } else { [0.0, 0.0, 1.0] }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::XtraSceneRenderer;
+    use crate::player::ownership::{OwnerKey, OwnerToken};
+
+    #[test]
+    fn renderer_cache_binding_uses_owner_identity_not_equal_keys() {
+        let first = OwnerToken::new(OwnerKey { session: 7, player: 3, generation: 1 });
+        let second = OwnerToken::new(OwnerKey { session: 7, player: 3, generation: 1 });
+        let mut renderer = XtraSceneRenderer::new();
+
+        assert!(!renderer.cache_owner_matches(&first));
+        renderer.cache_owner = Some(first.clone());
+        assert!(renderer.cache_owner_matches(&first));
+        assert!(!renderer.cache_owner_matches(&second));
+    }
 }

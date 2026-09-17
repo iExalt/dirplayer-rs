@@ -2,9 +2,10 @@ use crate::{
     director::lingo::datum::Datum,
     player::{
         bitmap::bitmap::{get_system_default_palette, nearest_palette_index, resolve_color_ref, PaletteRef},
-        reserve_player_mut,
+        compare::validate_direct_symbol_fields,
+        session::ExecutionContext,
         sprite::ColorRef,
-        symbols::symbol::Symbol,
+        symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable},
         DatumRef, DirPlayer, ScriptError,
     },
 };
@@ -13,13 +14,22 @@ pub struct ColorDatumHandlers {}
 
 impl ColorDatumHandlers {
     pub fn call(
-        datum: &DatumRef,
+        runtime: &mut ExecutionContext<'_>,
+        datum: DatumRef,
         handler_name: Symbol,
-        _args: &Vec<DatumRef>,
+        _args: &[DatumRef],
     ) -> Result<DatumRef, ScriptError> {
-        match handler_name.as_lower_str() {
-            "hexstring" => reserve_player_mut(|player| {
-                let color_ref = player.get_datum(datum).to_color_ref()?;
+        runtime.with_player_and_symbols(|player, symbols| {
+            let handler_name_display = symbols
+                .display(&handler_name)
+                .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+            let handler_name_lower = symbols
+                .lower(&handler_name)
+                .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+            let datum_value = checked_datum(player, &datum, symbols)?;
+            match handler_name_lower {
+            "hexstring" => {
+                let color_ref = datum_value.to_color_ref()?;
                 let (r, g, b) = resolve_color_ref(
                     &player.movie.cast_manager.palettes(),
                     color_ref,
@@ -28,21 +38,36 @@ impl ColorDatumHandlers {
                 );
                 let hex_string = format!("#{:02X}{:02X}{:02X}", r, g, b);
                 Ok(player.alloc_datum(Datum::String(hex_string)))
-            }),
+            }
             "duplicate" => Ok(datum.clone()),
             _ => Err(ScriptError::new(format!(
-                "no handler {handler_name} for color"
+                "no handler {handler_name_display} for color"
             ))),
-        }
+            }
+        })
     }
 
     pub fn get_prop(
         player: &mut DirPlayer,
+        symbols: &SymbolTable,
         datum: &DatumRef,
         prop: Symbol,
     ) -> Result<DatumRef, ScriptError> {
-        let color_ref = player.get_datum(datum).to_color_ref()?;
-        match prop.as_lower_str() {
+        let datum = match datum {
+            DatumRef::Void => &Datum::Void,
+            _ => player
+                .allocator
+                .try_get_datum(datum)
+                .ok_or_else(|| ScriptError::new(format!("invalid datum reference {datum}")))?,
+        };
+        let color_ref = datum.to_color_ref()?;
+        let prop_name = symbols
+            .display(&prop)
+            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+        let prop_lower = symbols
+            .lower(&prop)
+            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+        match prop_lower {
             "red" => match color_ref {
                 ColorRef::Rgb(r, _, _) => Ok(player.alloc_datum(Datum::Int(*r as i32))),
                 ColorRef::PaletteIndex(i) => match i {
@@ -67,10 +92,10 @@ impl ColorDatumHandlers {
                     _ => Ok(player.alloc_datum(Datum::Int(255))),
                 },
             },
-            "ilk" => Ok(player.alloc_datum(Datum::Symbol(Symbol::from_str("color")))),
+            "ilk" => Ok(player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Color)))),
             "colortype" => match color_ref {
-                ColorRef::Rgb(..) => Ok(player.alloc_datum(Datum::Symbol(Symbol::from_str("rgb")))),
-                ColorRef::PaletteIndex(_) => Ok(player.alloc_datum(Datum::Symbol(Symbol::from_str("paletteIndex")))),
+                ColorRef::Rgb(..) => Ok(player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Rgb)))),
+                ColorRef::PaletteIndex(_) => Ok(player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::PaletteIndex)))),
             },
             "paletteindex" => match color_ref {
                 ColorRef::PaletteIndex(i) => Ok(player.alloc_datum(Datum::Int(*i as i32))),
@@ -84,18 +109,22 @@ impl ColorDatumHandlers {
             },
             _ => Err(ScriptError::new(format!(
                 "Cannot get color property {}",
-                prop
+                prop_name
             ))),
         }
     }
 
     pub fn set_prop(
         player: &mut DirPlayer,
+        symbols: &SymbolTable,
         datum: &DatumRef,
         prop: Symbol,
         value: &DatumRef,
     ) -> Result<(), ScriptError> {
-        match prop.as_lower_str() {
+        let prop_name = symbols
+            .lower(&prop)
+            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+        match prop_name {
             "red" => {
                 let r = player.get_datum(value).int_value()?;
                 let color_ref = player.get_datum_mut(datum).to_color_ref_mut()?;
@@ -139,7 +168,7 @@ impl ColorDatumHandlers {
                 }
             }
             "colortype" => {
-                let symbol = player.get_datum(value).string_value()?;
+                let symbol = player.get_datum(value).string_value(symbols)?;
                 let color_ref = player.get_datum(datum).to_color_ref()?.clone();
                 // `the colorType of c = #paletteIndex` — the symbol's display
                 // spelling is whichever casing was interned first, so compare
@@ -174,8 +203,24 @@ impl ColorDatumHandlers {
             }
             _ => Err(ScriptError::new(format!(
                 "Cannot set color property {}",
-                prop
+                symbols.display(&prop).unwrap_or("<foreign symbol>")
             ))),
         }
     }
+}
+
+fn checked_datum<'a>(
+    player: &'a DirPlayer,
+    datum: &DatumRef,
+    symbols: &SymbolTable,
+) -> Result<&'a Datum, ScriptError> {
+    let value = match datum {
+        DatumRef::Void => &Datum::Void,
+        _ => player
+            .allocator
+            .try_get_datum(datum)
+            .ok_or_else(|| ScriptError::new(format!("invalid datum reference {datum}")))?,
+    };
+    validate_direct_symbol_fields(value, symbols)?;
+    Ok(value)
 }
