@@ -1,0 +1,10 @@
+
+running 6 tests
+test player::datum_duplicate::tests::duplicate_bitmap_copy_is_independent ... ok
+test player::datum_duplicate::tests::duplicate_copies_repeated_children_per_occurrence ... ok
+test player::datum_duplicate::tests::duplicate_preserves_void_children_and_sorted_proplist_order ... ok
+test player::datum_duplicate::tests::duplicate_deep_acyclic_list_is_iterative ... ok
+test player::datum_duplicate::tests::duplicate_rejects_self_cycle_before_destination_mutation ... ok
+test player::datum_duplicate::tests::duplicate_rejects_indirect_list_proplist_cycle ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 548 filtered out; finished in 0.01s

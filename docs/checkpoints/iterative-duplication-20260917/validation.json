@@ -1,0 +1,41 @@
+{
+  "published_base": "4e103fdf4c501a7ff43864fa2a25045884651e0f",
+  "source_hashes": {
+    "vm-rust/src/player/datum_duplicate.rs": "b706d49be733d1c298efe2774898b2501aa4e86be2c0f70592941cd302607805",
+    "vm-rust/src/player/mod.rs": "b8a5bf79177feed8cf072efcd539fa8df53ebb3721605b4c4b982aa02a762c68"
+  },
+  "native_artifact_sha256": "84d9cf9b016e61ea3246d2615db5828760f68260814b9cee7bdb432d51eee055",
+  "focused_tests": {
+    "passed": 6,
+    "failed": 0,
+    "exit": 0
+  },
+  "full_native_suite": {
+    "passed": 554,
+    "failed": 0,
+    "exit": 0
+  },
+  "commands": {
+    "list": [
+      "/private/tmp/dirplayer-parser-review-build/target/debug/deps/vm_rust-6c8ff607dfc83df9",
+      "--list"
+    ],
+    "duplicate": [
+      "/private/tmp/dirplayer-parser-review-build/target/debug/deps/vm_rust-6c8ff607dfc83df9",
+      "player::datum_duplicate::tests::"
+    ],
+    "full": [
+      "/private/tmp/dirplayer-parser-review-build/target/debug/deps/vm_rust-6c8ff607dfc83df9"
+    ]
+  },
+  "wasm_browser_status": "WASM tests check passed; combined Flash browser gate remains pending",
+  "local_evidence": "/private/tmp/dirplayer-stage2-6-resume/native-verified",
+  "wasm_tests_check": {
+    "exit": 0,
+    "command": "env CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true CARGO_TARGET_DIR=/private/tmp/dirplayer-parser-review-build/target mise exec -- cargo check --manifest-path vm-rust/Cargo.toml --tests --target wasm32-unknown-unknown --locked --offline --message-format=json --target-dir /private/tmp/dirplayer-parser-review-build/target"
+  },
+  "source_manifest_verification": {
+    "checked": 378,
+    "mismatches": 0
+  }
+}

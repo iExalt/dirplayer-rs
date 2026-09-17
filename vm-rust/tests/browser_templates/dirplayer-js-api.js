@@ -158,17 +158,56 @@ let _flashManagerPromise = null;
 // The FlashOwnerHost itself remains captured by each registration closure.
 const _flashOwnerCallbacks = new Map();
 const _pendingFlashOwnerActions = new Map();
+const _cancelledFlashOwnerActions = new Set();
+const _drainingFlashOwnerActions = new Set();
 
 function dispatchFlashOwnerAction(ownerKey, method, ...args) {
   if (typeof ownerKey !== 'string' || ownerKey.length === 0) return;
+  if (_cancelledFlashOwnerActions.has(ownerKey)) return;
   const callbacks = _flashOwnerCallbacks.get(ownerKey);
   if (callbacks) {
     callbacks[method]?.(...args);
     return;
   }
   const pending = _pendingFlashOwnerActions.get(ownerKey) ?? [];
+  if (pending.length >= 128) {
+    _pendingFlashOwnerActions.delete(ownerKey);
+    _cancelledFlashOwnerActions.add(ownerKey);
+    console.error(`[Flash] browser prepared action queue overflow for owner ${ownerKey}`);
+    return;
+  }
   pending.push({ method, args });
   _pendingFlashOwnerActions.set(ownerKey, pending);
+}
+
+function flushFlashOwnerActions(callbacks, ownerKey) {
+  if (_drainingFlashOwnerActions.has(ownerKey)) return;
+  _drainingFlashOwnerActions.add(ownerKey);
+  try {
+    let activeCallbacks = callbacks;
+    let pending = _pendingFlashOwnerActions.get(ownerKey) ?? [];
+    _pendingFlashOwnerActions.delete(ownerKey);
+    let index = 0;
+    for (;;) {
+      while (index < pending.length) {
+        if (_cancelledFlashOwnerActions.has(ownerKey)) return;
+        const currentCallbacks = _flashOwnerCallbacks.get(ownerKey);
+        if (!currentCallbacks) {
+          _pendingFlashOwnerActions.set(ownerKey, pending.slice(index));
+          return;
+        }
+        if (currentCallbacks !== activeCallbacks) activeCallbacks = currentCallbacks;
+        const action = pending[index++];
+        activeCallbacks[action.method]?.(...action.args);
+      }
+      pending = _pendingFlashOwnerActions.get(ownerKey) ?? [];
+      _pendingFlashOwnerActions.delete(ownerKey);
+      if (pending.length === 0) return;
+      index = 0;
+    }
+  } finally {
+    _drainingFlashOwnerActions.delete(ownerKey);
+  }
 }
 
 // BrowserTestPlayer registers a non-owning, exact-generation capability here.
@@ -191,10 +230,19 @@ export function dirplayer_registerFlashOwner(ownerKey, capability) {
   const callbacks = {
     onLoaded: (...args) => {
       if (disposed) return;
-      registrationReady.then(reg => {
+      const create = (reg) => {
         if (!reg || reg.host.disposed) return;
-        return flashManager().then(m => m.createFlashInstanceForOwner?.(reg.host, ...args));
-      }).catch(e => console.error('createFlashInstance failed:', e));
+        return _flashManager?.createFlashInstanceForOwner?.(reg.host, ...args)
+          ?? flashManager().then(m => m.createFlashInstanceForOwner?.(reg.host, ...args));
+      };
+      if (registration) {
+        try {
+          const pendingCreate = create(registration);
+          pendingCreate?.catch(e => console.error('createFlashInstance failed:', e));
+        } catch (e) { console.error('createFlashInstance failed:', e); }
+      } else {
+        registrationReady.then(create).catch(e => console.error('createFlashInstance failed:', e));
+      }
     },
     onUnloaded: (spriteNum) => {
       if (disposed) return;
@@ -234,11 +282,7 @@ export function dirplayer_registerFlashOwner(ownerKey, capability) {
     },
   };
   _flashOwnerCallbacks.set(ownerKey, callbacks);
-  const pending = _pendingFlashOwnerActions.get(ownerKey);
-  if (pending) {
-    _pendingFlashOwnerActions.delete(ownerKey);
-    for (const action of pending) callbacks[action.method]?.(...action.args);
-  }
+  flushFlashOwnerActions(callbacks, ownerKey);
   // These routers are stable for the page lifetime and resolve the exact
   // owner closure, so registering a later player cannot replace an earlier
   // owner's play callback. The unqualified legacy LocalConnection function
@@ -248,12 +292,14 @@ export function dirplayer_registerFlashOwner(ownerKey, capability) {
     _flashOwnerCallbacks.get(requestedOwnerKey)?.onPlayOwned(spriteNum);
   window.dirplayer_localConnectionSendOwned = (requestedOwnerKey, name, method, argsJson) =>
     _flashOwnerCallbacks.get(requestedOwnerKey)?.onLocalConnectionSendOwned(name, method, argsJson) ?? false;
+  return registrationReady;
 }
 export function dirplayer_unregisterFlashOwner(ownerKey) {
   if (typeof ownerKey !== 'string') return;
   const callbacks = _flashOwnerCallbacks.get(ownerKey);
   _flashOwnerCallbacks.delete(ownerKey);
   _pendingFlashOwnerActions.delete(ownerKey);
+  _cancelledFlashOwnerActions.add(ownerKey);
   callbacks?.dispose();
 }
 
@@ -333,6 +379,8 @@ export function onFlashResetAll(ownerKey) {
   // Only tear down if the Flash bundle was actually loaded by a prior movie;
   // don't import it just to reset nothing on a pure non-Flash test run.
   if (typeof ownerKey !== 'string' || ownerKey.length === 0) return;
+  _pendingFlashOwnerActions.delete(ownerKey);
+  _cancelledFlashOwnerActions.add(ownerKey);
   _flashOwnerCallbacks.get(ownerKey)?.onReset();
 }
 export function onStageSizeChanged() {}

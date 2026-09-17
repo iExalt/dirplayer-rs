@@ -36,4 +36,45 @@ Raw receipt: `/private/tmp/dirplayer-js-object-validation-20260917/final-freeze-
 
 The follow-up source audit found no general cross-owner Datum-copy API; existing explicit inter-player copying is bitmap-specific. Same-owner `player_duplicate_datum_inner` recursively walks Lists/PropLists after the iterative graph validator accepts them. A self-referential List can be constructed by the existing `driver.rs` graph-validation fixture, so passing that graph to duplication has no termination condition. This is a source-proven uncontrolled-recursion path; the audit did not execute an intentional process-crashing test.
 
-An explicit value-transfer module is being authored separately with source preflight, owned graph snapshots, symbol remapping, alias preservation, iterative traversal and typed cycle rejection. It remains unintegrated and unverified. Existing `duplicate` supports bitmap and object cases outside the transferable-value allowlist, so replacing it wholesale with the new API would be a compatibility regression. Its cycle repair must preserve those existing cases and receive a dedicated regression before Stage 2.1 acceptance.
+The explicit `player::value_transfer` module is integrated in checkpoint `4e103fdf`, with source preflight, owned graph snapshots, symbol remapping, alias preservation, iterative traversal and typed cycle rejection. Its eight focused native tests passed against the compiler-4 artifact; the later compiler-5 full suite also passed these tests but failed an unrelated Flash fixture (543 passed, one failed overall). This verifies the bounded value-transfer component, not the complete Stage 2.1 gate. Existing `duplicate` supports bitmap and object cases outside the transferable-value allowlist, so replacing it wholesale with the new API would be a compatibility regression. Its cycle repair must preserve those existing cases and receive a dedicated regression before Stage 2.1 acceptance.
+
+
+## Value-transfer component evidence
+
+The focused receipt at `/private/tmp/dirplayer-stage2-6-validation/value-transfer/run.stdout`
+reports eight passed, zero failed; `run.exit` records zero. Source
+`vm-rust/src/player/value_transfer.rs` has SHA-256
+`90b80dd2842a1fbda0b2886ed97b29fe69fecaf815f7140f56d8566a2ce40784`.
+Coverage includes destination symbol remapping, builtins, independent imported
+storage, DAG aliases, sorted property-list keys and values, datum-backed string
+chunks, self/indirect cycles, deep acyclic graphs, foreign nested capabilities,
+unsupported references, source reset after snapshot and destination owner death.
+
+Snapshot preflight rejects invalid source graphs before destination mutation.
+Import does not promise rollback of symbol interning or OOM/panic recovery.
+Bitmap/object copying keeps its separate existing semantics; the same-owner
+recursive `duplicate` path still requires the repair described above.
+
+
+## Complete Datum payload shape inventory
+
+A follow-up read of the complete `Datum` enum at checkpoint `4e103fdf` adds the
+following shapes to the earlier retained-capability table. This is a payload
+inventory, not proof that every manager consumer has completed its owner cutover.
+
+| Remaining variants | Retained data and required boundary |
+| --- | --- |
+| Int, Float, String, Void, Null, Rect, Point, ColorRef, Vector, Transform3d, JavaScript | Owned scalar/byte/value payloads; no nested arena capability. |
+| CastLib, Stage, SoundRef, SoundChannel, CursorRef, TimeoutRef, TimeoutFactory, Xtra, XtraInstance, PlayerRef, MouseRef, XmlRef, DateRef, MathRef | Markers, names or local IDs. The enclosing DatumRef is owned; the target manager must resolve them from the explicit execution context. Manager completion remains Stage 2.2/2.5/2.9 work. |
+| PaletteRef | Builtin/default palette or local CastMemberRef coordinates; palette consumers still require owner-local movie resolution. |
+| Matte | Arc of owned BitmapMask width/height/bit data; no DatumRef or interior mutable cell in the payload. |
+| Media | Owned Field, Bitmap, Palette or Sound payload. Bitmap embeds a palette coordinate and optional shared mask; its palette meaning remains movie-local. General value transfer intentionally rejects Media. |
+| Shockwave3dObjectRef, HavokObjectRef, PhysXObjectRef | Member coordinates, builtin object type, local ID where applicable, and a Symbol name. `validate_direct_symbol_fields` validates those name symbols; scene lookup must use the explicit player's member. |
+| VectorVertexRef | Local member coordinate plus vertex index. Owner authority comes from its enclosing DatumRef and explicit member lookup. |
+
+The graph validator traverses List, PropList, datum-backed StringChunk and
+TimeoutInstance children. It separately validates ScriptInstanceRef and
+BitmapHandle leaves. JS and Flash object capabilities have additional checks at
+their host-operation boundary; the generic graph validator alone is not proof
+of their host liveness. This distinction must be retained in the final Stage 2
+acceptance audit.

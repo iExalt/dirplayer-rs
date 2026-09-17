@@ -5,6 +5,7 @@ const vmCallbacksByOwner = new Map();
 // initial Flash access cannot be lost during registration.
 const pendingPreparedFlashActions = new Map();
 const cancelledPreparedFlashOwners = new Set();
+const drainingPreparedFlashOwners = new Set();
 const MAX_PENDING_PREPARED_FLASH_ACTIONS = 128;
 
 function enqueuePreparedFlashAction(ownerKey, action) {
@@ -22,23 +23,61 @@ function enqueuePreparedFlashAction(ownerKey, action) {
   pendingPreparedFlashActions.set(ownerKey, pending);
 }
 
-function flushPreparedFlashActions(callbacks, ownerKey) {
-  const pending = pendingPreparedFlashActions.get(ownerKey);
-  if (!pending) return;
+function retirePreparedFlashOwner(ownerKey, reason) {
   pendingPreparedFlashActions.delete(ownerKey);
-  for (let index = 0; index < pending.length; index += 1) {
-    if (cancelledPreparedFlashOwners.has(ownerKey) || vmCallbacksByOwner.get(ownerKey) !== callbacks) {
-      if (!cancelledPreparedFlashOwners.has(ownerKey)) {
-        pendingPreparedFlashActions.set(ownerKey, pending.slice(index));
+  cancelledPreparedFlashOwners.add(ownerKey);
+  if (reason) console.error(`[Flash] ${reason} for owner ${ownerKey}`);
+}
+
+function flushPreparedFlashActions(callbacks, ownerKey) {
+  if (drainingPreparedFlashOwners.has(ownerKey)) return;
+  drainingPreparedFlashOwners.add(ownerKey);
+  try {
+    let activeCallbacks = callbacks;
+    let pending = pendingPreparedFlashActions.get(ownerKey) ?? [];
+    pendingPreparedFlashActions.delete(ownerKey);
+    let index = 0;
+    let work = 0;
+    for (;;) {
+      while (index < pending.length) {
+        if (cancelledPreparedFlashOwners.has(ownerKey)) return;
+        if (work >= MAX_PENDING_PREPARED_FLASH_ACTIONS) {
+          retirePreparedFlashOwner(ownerKey, 'prepared action drain budget exceeded');
+          return;
+        }
+        const currentCallbacks = vmCallbacksByOwner.get(ownerKey);
+        if (!currentCallbacks) {
+          const queued = pendingPreparedFlashActions.get(ownerKey) ?? [];
+          const tail = pending.slice(index).concat(queued);
+          pendingPreparedFlashActions.delete(ownerKey);
+          if (tail.length > MAX_PENDING_PREPARED_FLASH_ACTIONS) {
+            retirePreparedFlashOwner(ownerKey, 'prepared action queue overflow');
+          } else if (tail.length > 0) {
+            pendingPreparedFlashActions.set(ownerKey, tail);
+          }
+          return;
+        }
+        if (currentCallbacks !== activeCallbacks) activeCallbacks = currentCallbacks;
+        const action = pending[index++];
+        work += 1;
+        switch (action.kind) {
+          case 'load': activeCallbacks.onFlashMemberLoaded?.(...action.args); break;
+          case 'resize': activeCallbacks.onFlashMemberResized?.(...action.args); break;
+          case 'unload': activeCallbacks.onFlashMemberUnloadedAtGeneration?.(...action.args); break;
+        }
       }
-      return;
+      const queued = pendingPreparedFlashActions.get(ownerKey) ?? [];
+      pendingPreparedFlashActions.delete(ownerKey);
+      if (queued.length === 0) return;
+      pending = queued;
+      if (pending.length > MAX_PENDING_PREPARED_FLASH_ACTIONS) {
+        retirePreparedFlashOwner(ownerKey, 'prepared action queue overflow');
+        return;
+      }
+      index = 0;
     }
-    const action = pending[index];
-    switch (action.kind) {
-      case 'load': callbacks.onFlashMemberLoaded?.(...action.args); break;
-      case 'resize': callbacks.onFlashMemberResized?.(...action.args); break;
-      case 'unload': callbacks.onFlashMemberUnloadedAtGeneration?.(...action.args); break;
-    }
+  } finally {
+    drainingPreparedFlashOwners.delete(ownerKey);
   }
 }
 
@@ -338,9 +377,10 @@ export function onFlashMemberLoaded(spriteNum, castLib, castMember, swfData, wid
 
 export function onFlashMemberLoadedPrepared(spriteNum, castLib, castMember, swfData, width, height, pausedAtStart, assertedFrame, ownerKey, generation) {
   if (!ownerKey) return;
+  if (cancelledPreparedFlashOwners.has(ownerKey)) return;
   const callbacks = vmCallbacksByOwner.get(ownerKey);
   const args = [spriteNum, castLib, castMember, new Uint8Array(swfData), width, height, pausedAtStart, assertedFrame, ownerKey, generation];
-  if (!callbacks) {
+  if (!callbacks || drainingPreparedFlashOwners.has(ownerKey)) {
     enqueuePreparedFlashAction(ownerKey, { kind: 'load', args });
     return;
   }
@@ -349,8 +389,9 @@ export function onFlashMemberLoadedPrepared(spriteNum, castLib, castMember, swfD
 
 export function onFlashMemberResized(spriteNum, generation, width, height, ownerKey) {
   if (!ownerKey) return;
+  if (cancelledPreparedFlashOwners.has(ownerKey)) return;
   const callbacks = vmCallbacksByOwner.get(ownerKey);
-  if (!callbacks) {
+  if (!callbacks || drainingPreparedFlashOwners.has(ownerKey)) {
     enqueuePreparedFlashAction(ownerKey, { kind: 'resize', args: [spriteNum, generation, width, height, ownerKey] });
     return;
   }
@@ -369,8 +410,9 @@ export function onFlashMemberUnloaded(spriteNum, ownerKey) {
 
 export function onFlashMemberUnloadedAtGeneration(spriteNum, generation, ownerKey) {
   if (!ownerKey) return;
+  if (cancelledPreparedFlashOwners.has(ownerKey)) return;
   const callbacks = vmCallbacksByOwner.get(ownerKey);
-  if (!callbacks) {
+  if (!callbacks || drainingPreparedFlashOwners.has(ownerKey)) {
     enqueuePreparedFlashAction(ownerKey, { kind: 'unload', args: [spriteNum, generation, ownerKey] });
     return;
   }

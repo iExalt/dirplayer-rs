@@ -50,6 +50,7 @@ pub mod script;
 pub mod script_ref;
 pub mod session;
 pub mod driver;
+pub(crate) mod datum_duplicate;
 pub mod sprite;
 pub mod stage;
 pub mod stream_status;
@@ -472,6 +473,189 @@ mod flash_binding_state_tests {
         assert!(old_state.borrow_mut().invalidate(3, replacement_generation));
         assert!(new_state.borrow().is_current(3, replacement_generation));
         assert!(replacement.is_arena_live());
+    }
+
+    #[test]
+    fn root_player_ids_stay_local_and_legacy_children_use_synthetic_flash_keys() {
+        let mut session = RuntimeSession::new(SymbolOwner { session: 92, generation: 1 });
+        let (parent_tx, _parent_rx) = channel::unbounded();
+        assert!(session.add_player(17, parent_tx));
+        let parent_owner = session
+            .with_player(17, |context| {
+                assert!(!context.player.flash_host_is_nested);
+                context.player.owner.clone()
+            })
+            .expect("nonzero root player must exist");
+
+        let (child_tx, _child_rx) = channel::unbounded();
+        let (child_event_tx, _child_event_rx) = channel::unbounded();
+        let (child_id, _child_owner) = session
+            .register_nested_player(
+                17,
+                &parent_owner,
+                super::cast_lib::CastMemberRef { cast_lib: 1, cast_member: 1 },
+                child_tx,
+                child_event_tx,
+            )
+            .expect("nested child must register");
+        session
+            .with_player(child_id, |context| {
+                assert!(context.player.flash_host_is_nested);
+            })
+            .expect("nested child must be present");
+
+        let synthetic = super::nested_flash_key(child_id as usize, 7);
+        assert_eq!(super::flash_host_sprite_key(false, 17, 7), 7);
+        assert_eq!(super::flash_host_sprite_key(true, child_id as usize, 7), synthetic);
+        assert_ne!(synthetic, 7);
+        assert_eq!(super::decode_nested_flash_key(synthetic), Some((child_id as usize, 7)));
+    }
+
+    #[test]
+    fn captured_flash_cast_pair_replacement_is_rejected_before_native_transport() {
+        let session = RuntimeSession::new(SymbolOwner { session: 93, generation: 1 }).into_handle();
+        assert!(session.borrow_mut().add_player(1, channel::unbounded().0));
+        let (owner, binding, generation) = session
+            .borrow_mut()
+            .with_player(1, |context| {
+                context.player.movie.score.channels = vec![
+                    super::score::SpriteChannel::new(0),
+                    super::score::SpriteChannel::new(1),
+                ];
+                context.player.movie.score.channels[1].sprite.member =
+                    Some(super::cast_lib::CastMemberRef { cast_lib: 1, cast_member: 1 });
+                let generation = context
+                    .player
+                    .reserve_flash_instance_generation(1)
+                    .expect("generation");
+                (
+                    context.player.owner.clone(),
+                    context.player.flash_binding_state.clone(),
+                    generation,
+                )
+            })
+            .expect("fixture player must exist");
+        session.borrow_mut().with_player(1, |context| {
+            context.player.movie.score.channels[1].sprite.member =
+                Some(super::cast_lib::CastMemberRef { cast_lib: 1, cast_member: 2 });
+        });
+        let action = super::FlashHostAction::Load {
+            fence: super::FlashActionFence::owned(owner, binding, session.clone(), 1),
+            host_sprite: 1,
+            local_sprite: 1,
+            cast_lib: 1,
+            cast_member: 1,
+            data: Vec::new(),
+            width: 1,
+            height: 1,
+            paused_at_start: false,
+            asserted_frame: -1,
+            generation,
+        };
+        let error = action.emit().expect_err("replaced cast pair must reject");
+        assert_eq!(error.code, crate::player::ScriptErrorCode::InvalidReference);
+    }
+
+    #[test]
+    fn stale_flash_generation_is_rejected_before_native_transport() {
+        let session = RuntimeSession::new(SymbolOwner { session: 94, generation: 1 }).into_handle();
+        assert!(session.borrow_mut().add_player(1, channel::unbounded().0));
+        let (owner, binding, generation) = session
+            .borrow_mut()
+            .with_player(1, |context| {
+                context.player.movie.score.channels = vec![
+                    super::score::SpriteChannel::new(0),
+                    super::score::SpriteChannel::new(1),
+                ];
+                context.player.movie.score.channels[1].sprite.member =
+                    Some(super::cast_lib::CastMemberRef { cast_lib: 1, cast_member: 1 });
+                let generation = context
+                    .player
+                    .reserve_flash_instance_generation(1)
+                    .expect("generation");
+                (
+                    context.player.owner.clone(),
+                    context.player.flash_binding_state.clone(),
+                    generation,
+                )
+            })
+            .expect("fixture player must exist");
+        binding.borrow_mut().invalidate(1, generation);
+        let action = super::FlashHostAction::Resize {
+            fence: super::FlashActionFence::owned(owner, binding, session, 1),
+            host_sprite: 1,
+            local_sprite: 1,
+            cast_lib: 1,
+            cast_member: 1,
+            generation,
+            width: 2,
+            height: 2,
+        };
+        let error = action.emit().expect_err("stale generation must reject");
+        assert_eq!(error.code, crate::player::ScriptErrorCode::InvalidReference);
+    }
+
+    #[test]
+    fn stale_flash_action_does_not_drop_a_live_tail_action() {
+        let session = RuntimeSession::new(SymbolOwner { session: 95, generation: 1 }).into_handle();
+        assert!(session.borrow_mut().add_player(1, channel::unbounded().0));
+        let (owner, binding, stale_generation, live_generation) = session
+            .borrow_mut()
+            .with_player(1, |context| {
+                context.player.movie.score.channels = vec![
+                    super::score::SpriteChannel::new(0),
+                    super::score::SpriteChannel::new(1),
+                    super::score::SpriteChannel::new(2),
+                ];
+                context.player.movie.score.channels[1].sprite.member =
+                    Some(super::cast_lib::CastMemberRef { cast_lib: 1, cast_member: 1 });
+                context.player.movie.score.channels[2].sprite.member =
+                    Some(super::cast_lib::CastMemberRef { cast_lib: 1, cast_member: 2 });
+                let stale_generation = context
+                    .player
+                    .reserve_flash_instance_generation(1)
+                    .expect("stale generation");
+                let live_generation = context
+                    .player
+                    .reserve_flash_instance_generation(2)
+                    .expect("live generation");
+                (
+                    context.player.owner.clone(),
+                    context.player.flash_binding_state.clone(),
+                    stale_generation,
+                    live_generation,
+                )
+            })
+            .expect("fixture player must exist");
+        binding.borrow_mut().invalidate(1, stale_generation);
+        let stale = super::FlashHostAction::Resize {
+            fence: super::FlashActionFence::owned(
+                owner.clone(),
+                binding.clone(),
+                session.clone(),
+                1,
+            ),
+            host_sprite: 1,
+            local_sprite: 1,
+            cast_lib: 1,
+            cast_member: 1,
+            generation: stale_generation,
+            width: 2,
+            height: 2,
+        };
+        let tail = super::FlashHostAction::Resize {
+            fence: super::FlashActionFence::owned(owner, binding, session, 1),
+            host_sprite: 2,
+            local_sprite: 2,
+            cast_lib: 1,
+            cast_member: 2,
+            generation: live_generation,
+            width: 2,
+            height: 2,
+        };
+        let error = super::emit_flash_host_actions(vec![stale, tail])
+            .expect_err("live tail must reach the explicit native unsupported boundary");
+        assert!(error.message.contains("Flash host is unavailable on native"));
     }
 }
 
@@ -1663,13 +1847,7 @@ impl DirPlayer {
         // sub's `flash_frame_buffers` (see NESTED_FLASH_BASE / update_flash_frame).
         let active = unsafe { ACTIVE_PLAYER_ID };
         let is_nested_host = self.flash_host_is_nested;
-        let js_flash_key = |ch: i16| -> i32 {
-            if !is_nested_host {
-                ch as i32
-            } else {
-                nested_flash_key(active, ch)
-            }
-        };
+        let js_flash_key = |ch: i16| flash_host_sprite_key(is_nested_host, active, ch);
         // UNLOAD pass FIRST: tear down any Ruffle instance whose channel no
         // longer holds that exact Flash member — BEFORE the load pass below, so
         // a member swap is deterministically unload(old) → load(new). If the
@@ -2076,6 +2254,12 @@ impl DirPlayer {
             // Legacy callers reach this path through the retained session;
             // PLAYER_OPT no longer has a standalone production writer.
             assert!(session_handle.borrow_mut().add_player(id as u32, tx.clone()));
+            session_handle
+                .borrow_mut()
+                .with_player(id as u32, |context| {
+                    context.player.flash_host_is_nested = true;
+                })
+                .expect("legacy nested player must be present in RuntimeSession");
             NESTED_PLAYERS.push(None);
             NESTED_PLAYER_KEYS.push(Some(member_ref.clone()));
             NESTED_EVENT_TX.push(Some(event_tx));
@@ -6304,6 +6488,16 @@ pub fn active_event_tx() -> Option<Sender<PlayerVMEvent>> {
 /// the synthetic keys clear of real channels.
 pub const NESTED_FLASH_BASE: i32 = 100_000;
 pub const NESTED_FLASH_STRIDE: i32 = 1_000;
+
+/// Root players, including nonzero session player IDs, retain their local
+/// channel key. Only classified legacy nested players use synthetic keys.
+pub(crate) fn flash_host_sprite_key(is_nested_host: bool, player_id: usize, channel: i16) -> i32 {
+    if is_nested_host {
+        nested_flash_key(player_id, channel)
+    } else {
+        channel as i32
+    }
+}
 
 /// Encode a nested sub-player's Flash dispatch key (see `NESTED_FLASH_BASE`).
 pub fn nested_flash_key(player_id: usize, channel: i16) -> i32 {
@@ -12095,62 +12289,7 @@ fn player_duplicate_datum(
     symbols: &crate::player::symbols::symbol_table::SymbolTable,
     datum: &DatumRef,
 ) -> Result<DatumRef, ScriptError> {
-    crate::player::driver::validate_owned_datum_graph(player, symbols, datum)?;
-    player_duplicate_datum_inner(player, datum)
-}
-
-fn player_duplicate_datum_inner(
-    player: &mut DirPlayer,
-    datum: &DatumRef,
-) -> Result<DatumRef, ScriptError> {
-    let datum_type = player.get_datum(datum).type_enum();
-    let new_datum = match datum_type {
-        DatumType::PropList => {
-            let (props, sorted) = {
-                let (props, sorted) = player.get_datum(datum).to_map_tuple()?;
-                (props.clone(), sorted)
-            };
-            let mut new_props = VecDeque::new();
-            for (key, value) in props {
-                let new_key = player_duplicate_datum_inner(player, &key)?;
-                let new_value = player_duplicate_datum_inner(player, &value)?;
-                new_props.push_back((new_key, new_value));
-            }
-            Datum::PropList(new_props, sorted)
-        }
-        DatumType::List => {
-            let (list_type, list, sorted) = {
-                let (list_type, list, sorted) = player.get_datum(datum).to_list_tuple()?;
-                (list_type.clone(), list.clone(), sorted)
-            };
-            let mut new_list = VecDeque::new();
-            for item in list {
-                let new_item = player_duplicate_datum_inner(player, &item)?;
-                new_list.push_back(new_item);
-            }
-            Datum::List(list_type.clone(), new_list, sorted)
-        }
-        DatumType::BitmapRef => {
-            let bitmap_ref = player.get_datum(datum).to_bitmap_ref()?.clone();
-            let bitmap = player
-                .bitmap_manager
-                .get_bitmap_handle(&bitmap_ref)
-                .ok_or_else(|| ScriptError::new("bitmap not found".to_owned()))?;
-            let new_bitmap = bitmap.clone();
-            // `duplicate(...)` on a Datum::BitmapRef produces an unowned copy.
-            // It is freed once the wrapping DatumRef goes away (or persists
-            // for as long as something holds it via refcount).
-            let new_bitmap_ref = player
-                .bitmap_manager
-                .add_ephemeral_bitmap_handle(new_bitmap)
-                .map_err(|error| {
-                    ScriptError::new(format!("bitmap allocation failed: {error:?}"))
-                })?;
-            Datum::BitmapRef(new_bitmap_ref)
-        }
-        _ => player.get_datum(datum).clone(),
-    };
-    Ok(player.alloc_datum(new_datum))
+    crate::player::datum_duplicate::duplicate_datum(player, symbols, datum)
 }
 
 // ---------------------------------------------------------------------------

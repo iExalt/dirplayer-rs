@@ -20,12 +20,14 @@ use crate::{
     },
     player::{
         cast_lib::{CastLib, CastMemberRef},
+        cast_member::{CastMember, CastMemberType, FlashMember},
         driver::{ActionCompletion, BroadcastPlan, DriverTurn, GlobalDispatch, InternalVmRequest, PendingAction, PendingCommand},
         eval::{EvalPending, EvalTurn, LingoExpr},
         ownership::OwnerToken,
         script::{Script, ScriptHandlerRef},
         session::{EvalRequestTurn, RuntimeSession},
         symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolOwner},
+        score::SpriteChannel,
         DatumRef,
     },
 };
@@ -884,6 +886,28 @@ fn evaluator_flash_request_uses_owned_transport_and_consumes_native_failure() {
     let owner = session
         .with_player(1, |context| context.player.owner.clone())
         .expect("Flash fixture player exists");
+    let swf = include_bytes!("../../tests/fixtures/flash_initial_access.swf").to_vec();
+    session
+        .with_player(1, |context| {
+            let mut cast = CastLib::test_external(1, 0);
+            cast.insert_member(
+                1,
+                CastMember::new(
+                    1,
+                    CastMemberType::Flash(FlashMember {
+                        data: swf,
+                        reg_point: (0, 0),
+                        flash_info: None,
+                    }),
+                ),
+                context.symbols,
+            );
+            context.player.movie.cast_manager.casts.push(cast);
+            let mut channel = SpriteChannel::new(1);
+            channel.sprite.member = Some(CastMemberRef { cast_lib: 1, cast_member: 1 });
+            context.player.movie.score.channels = vec![SpriteChannel::new(0), channel];
+        })
+        .expect("Flash fixture cast/member must be installed");
     let request = InternalVmRequest::Flash(
         crate::player::handlers::datum_handlers::flash_object::FlashRequest {
             player_id: 1,
@@ -894,8 +918,8 @@ fn evaluator_flash_request_uses_owned_transport_and_consumes_native_failure() {
             operation: crate::player::handlers::datum_handlers::flash_object::FlashOperation::BindGet {
                 return_mode: crate::player::handlers::datum_handlers::flash_object::FlashReturnMode::Scalar,
             },
-            cast_lib: 0,
-            cast_member: 0,
+            cast_lib: 1,
+            cast_member: 1,
         },
     );
     let session = Rc::new(RefCell::new(session));

@@ -971,8 +971,25 @@ impl BrowserTestPlayer {
     /// is manually reserved; the first BindGet must therefore use the
     /// prepared load generation and later access must use that same owner
     /// route.
-    pub async fn test_flash_initial_access_before_reservation(&self) -> Result<(), String> {
+    pub async fn test_flash_initial_access_before_reservation(&mut self) -> Result<(), String> {
         let swf = include_bytes!("../../tests/fixtures/flash_initial_access.swf").to_vec();
+        let read_global_int = |player: &BrowserTestPlayer, name: &str| {
+            player
+                .harness_runtime()
+                .with_context(|context| {
+                    let symbol = context.symbols.intern(name);
+                    context
+                        .player
+                        .globals
+                        .get(&symbol)
+                        .and_then(|value| match context.player.get_datum(value) {
+                            Datum::Int(value) => Some(*value),
+                            _ => None,
+                        })
+                })
+                .flatten()
+                .ok_or_else(|| format!("global {name} was not an integer"))
+        };
         self.harness_runtime().with_context(|context| {
             let mut cast = CastLib::test_external(1, 0);
             cast.insert_member(
@@ -1007,23 +1024,17 @@ impl BrowserTestPlayer {
         )
         .await
         .map_err(|error| format!("real Flash startup failed: {error}"))?;
-        let initial = self
-            .eval_datum("flashInitialValue")
-            .await
-            .map_err(|error| format!("initial Flash value read failed: {error:?}"))?;
-        if !matches!(initial, crate::director::static_datum::StaticDatum::Int(7)) {
-            return Err(format!("unexpected initial Flash value: {initial:?}"));
+        let initial = read_global_int(self, "flashInitialValue")?;
+        if initial != 7 {
+            return Err(format!("unexpected initial Flash value: {initial}"));
         }
 
         self.eval("put getVariable(sprite(1), \"_root.fixture\", 1) into flashLaterValue")
             .await
             .map_err(|error| format!("later Flash value read failed: {error:?}"))?;
-        let later = self
-            .eval_datum("flashLaterValue")
-            .await
-            .map_err(|error| format!("later Flash value lookup failed: {error:?}"))?;
-        if !matches!(later, crate::director::static_datum::StaticDatum::Int(7)) {
-            return Err(format!("unexpected later Flash value: {later:?}"));
+        let later = read_global_int(self, "flashLaterValue")?;
+        if later != 7 {
+            return Err(format!("unexpected later Flash value: {later}"));
         }
 
         // Replace the member after startup. This exercises the lazy first
@@ -1052,12 +1063,55 @@ impl BrowserTestPlayer {
         self.eval("put getVariable(sprite(1), \"_root.fixture\", 1) into flashReplacementValue")
             .await
             .map_err(|error| format!("replacement Flash value read failed: {error:?}"))?;
-        let replacement = self
-            .eval_datum("flashReplacementValue")
-            .await
-            .map_err(|error| format!("replacement Flash value lookup failed: {error:?}"))?;
-        if !matches!(replacement, crate::director::static_datum::StaticDatum::Int(7)) {
-            return Err(format!("unexpected replacement Flash value: {replacement:?}"));
+        let replacement = read_global_int(self, "flashReplacementValue")?;
+        if replacement != 7 {
+            return Err(format!("unexpected replacement Flash value: {replacement}"));
+        }
+
+        // Retire the owner and install the same authored member on the fresh
+        // player. The old capability must be dead before the replacement can
+        // publish or answer a Flash access.
+        let old_owner = self.harness_runtime().owner().clone();
+        self.reset_player().await;
+        if old_owner.is_arena_live() {
+            return Err("old Flash owner remained live after reset".to_owned());
+        }
+        self.harness_runtime().with_context(|context| {
+            let mut cast = CastLib::test_external(1, 0);
+            cast.insert_member(
+                1,
+                CastMember::new(
+                    1,
+                    CastMemberType::Flash(FlashMember {
+                        data: swf.clone(),
+                        reg_point: (0, 0),
+                        flash_info: None,
+                    }),
+                ),
+                context.symbols,
+            );
+            context.player.movie.cast_manager.casts.push(cast);
+            let mut channel = SpriteChannel::new(1);
+            channel.sprite.member = Some(CastMemberRef { cast_lib: 1, cast_member: 1 });
+            channel.sprite.width = 1;
+            channel.sprite.height = 1;
+            context.player.movie.score.channels = vec![SpriteChannel::new(0), channel];
+            context.player.movie.score.invalidate_render_channel_cache();
+            context.player.startup_do = Some(
+                "put getVariable(sprite(1), \"_root.fixture\", 1) into flashResetValue"
+                    .to_owned(),
+            );
+        });
+        crate::player::run_movie_init_owned(
+            self.harness_runtime().session(),
+            self.harness_runtime().player_id(),
+            self.harness_runtime().owner().clone(),
+        )
+        .await
+        .map_err(|error| format!("reset replacement Flash startup failed: {error}"))?;
+        let reset_value = read_global_int(self, "flashResetValue")?;
+        if reset_value != 7 {
+            return Err(format!("unexpected reset replacement Flash value: {reset_value}"));
         }
         Ok(())
     }
@@ -1069,8 +1123,29 @@ impl BrowserTestPlayer {
     /// The second host callback replaces the sprite generation before its
     /// response is applied, so the late result must be rejected and a fresh
     /// bind must still work.
-    pub async fn test_flash_owned_evaluator_binding(&self) -> Result<(), String> {
+    pub async fn test_flash_owned_evaluator_binding(&mut self) -> Result<(), String> {
         let window = web_sys::window().ok_or_else(|| "browser window is unavailable".to_owned())?;
+        let swf = include_bytes!("../../tests/fixtures/flash_initial_access.swf").to_vec();
+        self.harness_runtime().with_context(|context| {
+            let mut cast = CastLib::test_external(1, 0);
+            cast.insert_member(
+                1,
+                CastMember::new(
+                    1,
+                    CastMemberType::Flash(FlashMember {
+                        data: swf.clone(),
+                        reg_point: (0, 0),
+                        flash_info: None,
+                    }),
+                ),
+                context.symbols,
+            );
+            context.player.movie.cast_manager.casts.push(cast);
+            let mut channel = SpriteChannel::new(1);
+            channel.sprite.member = Some(CastMemberRef { cast_lib: 1, cast_member: 1 });
+            context.player.movie.score.channels = vec![SpriteChannel::new(0), channel];
+            context.player.movie.score.invalidate_render_channel_cache();
+        });
         // `dirplayer_registerFlashOwner` loads the production manager lazily.
         // Prime that existing helper before replacing only the two transport
         // globals; this prevents a late bundle import from overwriting the
@@ -1080,9 +1155,14 @@ impl BrowserTestPlayer {
             let key = owner.key();
             format!("{}:{}:{}", key.session, key.player, key.generation)
         };
-        let pending_cell = self
+        let (pending_cell, flash_binding_state) = self
             .harness_runtime()
-            .with_context(|context| context.player.flash_scripted_access_pending.clone())
+            .with_context(|context| {
+                (
+                    context.player.flash_scripted_access_pending.clone(),
+                    context.player.flash_binding_state.clone(),
+                )
+            })
             .ok_or_else(|| "Flash readiness state is unavailable".to_owned())?;
         let capability = BrowserFlashCapability::new(
             self.harness_runtime().session(),
@@ -1145,19 +1225,19 @@ impl BrowserTestPlayer {
             pending_cell,
             self.command_tx.clone(),
         );
-        let initial_generation = route_capability
-            .reserve_flash_instance_generation(1.0)
-            .map_err(|error| format!("initial Flash generation reservation failed: {error:?}"))?;
         let calls = Rc::new(RefCell::new(Vec::<String>::new()));
         let route_error = Rc::new(RefCell::new(None::<String>));
         let replace_on_get = Rc::new(Cell::new(false));
-        let replacement_generation = Rc::new(Cell::new(initial_generation));
+        let replacement_generation = Rc::new(Cell::new(0.0));
+        let bound_generation = Rc::new(Cell::new(None::<f64>));
         let successful_get_generation = Rc::new(Cell::new(None::<f64>));
 
 
         let bind_calls = calls.clone();
         let bind_error = route_error.clone();
         let bind_generation = replacement_generation.clone();
+        let bind_bound_generation = bound_generation.clone();
+        let bind_binding = flash_binding_state;
         let bind_owner_key = owner_key.clone();
         let bind_response = Closure::wrap(Box::new(
             move |requested_owner: JsValue,
@@ -1169,10 +1249,25 @@ impl BrowserTestPlayer {
                 let sprite_matches = sprite.as_f64() == Some(1.0);
                 let path = path.as_string().unwrap_or_default();
                 let object_mode = return_as_object.as_bool().unwrap_or(false);
-                bind_calls.borrow_mut().push(format!(
-                    "bind:{path}:{}",
-                    bind_generation.get()
-                ));
+                let current_generation = bind_binding
+                    .borrow()
+                    .generations
+                    .get(&1)
+                    .copied()
+                    .map(|generation| generation as f64);
+                let Some(current_generation) = current_generation else {
+                    *bind_error.borrow_mut() =
+                        Some("BindGet did not observe a current sprite generation".to_owned());
+                    return flash_owned_test_error(
+                        "invalid-generation",
+                        "BindGet did not observe a current sprite generation",
+                    );
+                };
+                bind_generation.set(current_generation);
+                bind_bound_generation.set(Some(current_generation));
+                bind_calls
+                    .borrow_mut()
+                    .push(format!("bind:{path}:{current_generation}"));
                 if !owner_matches || !sprite_matches || !object_mode {
                     *bind_error.borrow_mut() = Some(format!(
                         "invalid BindGet arguments owner={owner_matches} sprite={sprite_matches} object={object_mode}"
@@ -1185,7 +1280,7 @@ impl BrowserTestPlayer {
                     &JsValue::from_str("__dirplayer_stored_path"),
                     &JsValue::from_str("_root.fixture"),
                 );
-                flash_owned_test_response(bind_generation.get(), value.into())
+                flash_owned_test_response(current_generation, value.into())
             },
         ) as Box<dyn FnMut(JsValue, JsValue, JsValue, JsValue) -> JsValue>);
 
@@ -1252,6 +1347,9 @@ impl BrowserTestPlayer {
         self.eval("put getVariable(sprite(1), \"_root.fixture\", 0) into bound")
             .await
             .map_err(|error| format!("BindGet evaluator turn failed: {error:?}"))?;
+        let initial_generation = bound_generation
+            .get()
+            .ok_or_else(|| "BindGet did not capture a current sprite generation".to_owned())?;
         let current_value = self
             .eval_datum("bound.value")
             .await
@@ -2168,7 +2266,7 @@ impl BrowserTestPlayer {
         format!("{}:{}:{}", key.session, key.player, key.generation)
     }
 
-    fn register_flash_owner(&mut self) {
+    fn register_flash_owner(&mut self) -> Option<js_sys::Promise> {
         let flash_scripted_access_pending = self
             .runtime
             .session()
@@ -2197,15 +2295,20 @@ impl BrowserTestPlayer {
             self.command_tx.clone(),
         );
         let owner_key = capability.owner_identity();
+        let mut registration_ready = None;
         if let Some(window) = web_sys::window() {
             if let Ok(value) = js_sys::Reflect::get(&window, &JsValue::from_str("dirplayer_registerFlashOwner")) {
                 if let Ok(function) = value.dyn_into::<js_sys::Function>() {
                     let js_capability: JsValue = js_capability.into();
-                    let _ = function.call2(&window, &JsValue::from_str(&owner_key), &js_capability);
+                    registration_ready = function
+                        .call2(&window, &JsValue::from_str(&owner_key), &js_capability)
+                        .ok()
+                        .and_then(|value| value.dyn_into::<js_sys::Promise>().ok());
                 }
             }
         }
         self.flash_capability = Some(capability);
+        registration_ready
     }
 
     fn unregister_flash_owner(&mut self, owner_key: &str) {
@@ -2303,7 +2406,9 @@ impl BrowserTestPlayer {
         crate::player::spawn_player_local(async move {
             crate::player::commands::run_command_loop(rx, command_session, command_player_id, command_owner).await;
         });
-        self.register_flash_owner();
+        if let Some(registration_ready) = self.register_flash_owner() {
+            let _ = JsFuture::from(registration_ready).await;
+        }
 
         // Init logger (normally done by init_player which we skip in test mode)
         let _ = console_log::init_with_level(log::Level::Warn);

@@ -129,7 +129,9 @@ verification and integration separately; its complete exit gate controls accepta
   integration checkpoint above.
 - [x] **2.1 typed mutation component:** checked vector/transform replacement,
   pooled/resource-value preservation and owner-collision tests.
-- [ ] **2.1 remaining work:** audit all remaining reference kinds and
+- [x] **2.1 explicit value-transfer component:** owned snapshots/import, symbol remapping, DAG alias preservation and controlled cycle/unsupported-value rejection; eight focused native tests pass. See the [retained-reference audit](checkpoints/retained-reference-audit-20260917.md) for source identity and limits.
+- [x] **2.1 iterative duplication native component:** cycle preflight and iterative per-occurrence copying, six focused tests and 554-test native suite pass; [receipt](checkpoints/iterative-duplication-20260917/README.md). WASM test compilation passes; the combined Flash browser gate remains pending.
+- [ ] **2.1 remaining work:** audit all remaining reference consumers and
   transfer/reclamation boundaries.
 - [ ] **2.2–2.5:** remove legacy execution/browser routes, audit every async
   producer and extension completion, and verify dispatch precedence, cancellation,

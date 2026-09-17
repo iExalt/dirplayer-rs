@@ -1220,7 +1220,7 @@ test('prepared actions retain load resize unload order through registration dela
   dispose();
 });
 
-test('prepared action tail survives callback rebind, while reset and overflow retire it', () => {
+test('prepared action tail survives one callback rebind, while reset and overflow retire it', () => {
   const rebindKey = 'owner-prepared-rebind:g1';
   const swf = swfFixture();
   vmApi.onFlashMemberLoadedPrepared(7, 1, 1, swf, 2, 2, false, -1, rebindKey, 1);
@@ -1238,13 +1238,40 @@ test('prepared action tail survives callback rebind, while reset and overflow re
     },
   }, rebindKey);
   firstDispose();
+  assert.deepEqual(seen, ['load', 'resize', 'unload']);
   reboundDispose();
-  const finalDispose = vmApi.registerVmCallbacks({
-    onFlashMemberResized: () => seen.push('resize-final'),
-    onFlashMemberUnloadedAtGeneration: () => seen.push('unload-final'),
-  }, rebindKey);
-  assert.deepEqual(seen, ['load', 'resize-final', 'unload-final']);
-  finalDispose();
+
+  const enqueueDuringDrainKey = 'owner-prepared-enqueue-during-drain:g1';
+  const enqueueSeen = [];
+  vmApi.onFlashMemberLoadedPrepared(7, 1, 1, swf, 2, 2, false, -1, enqueueDuringDrainKey, 1);
+  const enqueueDispose = vmApi.registerVmCallbacks({
+    onFlashMemberLoaded: () => {
+      enqueueSeen.push('load');
+      vmApi.onFlashMemberResized(7, 1, 4, 5, enqueueDuringDrainKey);
+    },
+    onFlashMemberResized: () => enqueueSeen.push('resize'),
+  }, enqueueDuringDrainKey);
+  assert.deepEqual(enqueueSeen, ['load', 'resize']);
+  enqueueDispose();
+
+  const boundedKey = 'owner-prepared-drain-budget:g1';
+  const boundedSeen = [];
+  vmApi.onFlashMemberLoadedPrepared(7, 1, 1, swf, 2, 2, false, -1, boundedKey, 1);
+  const boundedDispose = vmApi.registerVmCallbacks({
+    onFlashMemberLoaded: () => {
+      boundedSeen.push('load');
+      vmApi.onFlashMemberLoadedPrepared(7, 1, 1, swf, 2, 2, false, -1, boundedKey, 1);
+    },
+  }, boundedKey);
+  assert.equal(boundedSeen.length, 128, 'self-feeding drain stops at its work budget');
+  const boundedLate = [];
+  vmApi.onFlashMemberLoadedPrepared(7, 1, 1, swf, 2, 2, false, -1, boundedKey, 1);
+  const boundedLateDispose = vmApi.registerVmCallbacks({
+    onFlashMemberLoaded: () => boundedLate.push('unexpected'),
+  }, boundedKey);
+  assert.deepEqual(boundedLate, []);
+  boundedLateDispose();
+  boundedDispose();
 
   const resetKey = 'owner-prepared-reset:g1';
   vmApi.onFlashMemberLoadedPrepared(7, 1, 1, swf, 2, 2, false, -1, resetKey, 1);
