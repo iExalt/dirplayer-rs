@@ -613,6 +613,38 @@ impl RuntimeSession {
         result
     }
 
+    pub(crate) fn start_owned_value_request(
+        &mut self,
+        player_id: PlayerId,
+        owner: OwnerToken,
+        source: DatumRef,
+        mode: super::driver::ValueEvaluationMode,
+    ) -> Result<(crate::player::eval::EvalId, crate::player::eval::EvalTurn), ScriptError> {
+        let valid = self
+            .with_player(player_id, |context| {
+                owner.same_identity(&context.player.owner) && owner.is_arena_live()
+            })
+            .unwrap_or(false);
+        if !valid {
+            return Err(super::cancelled_scope_error());
+        }
+        let id = crate::player::eval::EvalId::new(self.next_eval_id);
+        self.next_eval_id = self.next_eval_id.wrapping_add(1).max(1);
+        let mut continuation = crate::player::eval::EvalContinuation::new(
+            self,
+            player_id,
+            id.clone(),
+            crate::player::eval::LingoExpr::VoidLiteral,
+        )?;
+        let turn = continuation.start_value_request(self, source, mode);
+        if matches!(&turn, crate::player::eval::EvalTurn::Pending { .. })
+            || matches!(&continuation.state, crate::player::eval::EvalState::Waiting)
+        {
+            self.evals.insert(id.clone(), continuation);
+        }
+        Ok((id, turn))
+    }
+
     fn eval_parent_valid(&mut self, child: &EvalChildContinuation) -> bool {
         self.with_player(child.driver.player_id, |context| {
             child.owner.same_identity(&context.player.owner)
@@ -1154,6 +1186,7 @@ impl RuntimeSession {
                         crate::player::driver::InternalVmRequest::CastMemberAsync(_)
                             | crate::player::driver::InternalVmRequest::Flash(_)
                             | crate::player::driver::InternalVmRequest::ObjectProperty { .. }
+                            | crate::player::driver::InternalVmRequest::EvaluateValue { .. }
                     )
                 {
                     let pending_reason = existing_reason
@@ -1958,7 +1991,12 @@ impl RuntimeSession {
         }
         let player_id = continuation.player_id;
         let turn = if let Some(error) = error {
-            crate::player::eval::EvalTurn::Complete(Err(error))
+            match &continuation.state {
+                crate::player::eval::EvalState::Completed(Ok(value)) => {
+                    crate::player::eval::EvalTurn::Complete(Ok(value.clone()))
+                }
+                _ => crate::player::eval::EvalTurn::Complete(Err(error)),
+            }
         } else {
             continuation.turn(self)
         };
@@ -1972,6 +2010,26 @@ impl RuntimeSession {
             self.evals.insert(id, continuation);
         }
         turn
+    }
+
+    /// Drop one exact owner/action continuation after a stale preflight or
+    /// completion fence. A mismatched action remains resident so forged or
+    /// duplicate callers cannot cancel a live evaluator.
+    pub(crate) fn cancel_eval_action(
+        &mut self,
+        id: &crate::player::eval::EvalId,
+        action: &crate::player::eval::EvalAction,
+        owner: &OwnerToken,
+    ) -> bool {
+        let Some(continuation) = self.evals.remove(id) else {
+            return false;
+        };
+        if continuation.waiting_for(action) && continuation.owner.same_identity(owner) {
+            true
+        } else {
+            self.evals.insert(id.clone(), continuation);
+            false
+        }
     }
 
     pub fn symbols(&self) -> &SymbolTable {
@@ -4556,6 +4614,22 @@ impl RuntimeSession {
                     ));
                 }
                 Some(BuiltInSymbol::Value) => {
+                    if let Some(source) = args.first() {
+                        if super::handlers::types::value_source_text(
+                            context.player,
+                            context.symbols,
+                            source,
+                        )?.is_some()
+                        {
+                            return Ok(GlobalDispatch::PendingRequest {
+                                request: super::driver::InternalVmRequest::EvaluateValue {
+                                    source: source.clone(),
+                                    mode: super::driver::ValueEvaluationMode::GlobalVoid,
+                                },
+                                reason: "value() requires owner-bound static evaluation".to_owned(),
+                            });
+                        }
+                    }
                     return Ok(GlobalDispatch::SyncResult(
                         super::handlers::types::TypeHandlers::value(&mut context, &args.to_vec()),
                     ));

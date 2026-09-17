@@ -11,6 +11,7 @@ use crate::player::{
     cast_member::Media,
     datum_ref::DatumRef,
     handlers::types::TypeHandlers,
+    js_lingo_loader::JsObjectHandle,
     script_ref::ScriptInstanceRef,
     sprite::{ColorRef, CursorRef},
     symbols::{
@@ -358,7 +359,7 @@ pub enum Datum {
     /// `.vertex` reads and writes resolve straight back into the member's
     /// vertex list (Director 11.5 Scripting Dictionary, `vertex`).
     VectorVertexRef(CastMemberRef, usize),
-    JsObjectRef(u32),
+    JsObjectRef(JsObjectHandle),
 }
 
 impl DatumType {

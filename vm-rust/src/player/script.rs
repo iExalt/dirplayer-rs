@@ -614,6 +614,11 @@ pub enum SetObjPropOutcome {
     Applied,
     AwaitCastLoad(CastLoadRequest),
     FlashSet(crate::player::handlers::datum_handlers::flash_object::FlashSetPropertyRequest),
+    JsObject {
+        receiver: DatumRef,
+        name: Symbol,
+        value: DatumRef,
+    },
 }
 
 fn checked_set_value(
@@ -790,11 +795,11 @@ pub fn set_obj_prop_sync(
             checked_set_value(player, symbols, value_ref)?;
             applied(XmlDatumHandlers::set_prop(player, symbols, obj_ref, prop_name, value_ref))
         }
-        Datum::JsObjectRef(_) => {
-            applied(crate::player::handlers::datum_handlers::js_object::JsObjectDatumHandlers::set_prop(
-                player, symbols, obj_ref, prop_name, value_ref,
-            ))
-        }
+        Datum::JsObjectRef(_) => Ok(SetObjPropOutcome::JsObject {
+            receiver: obj_ref.clone(),
+            name: prop_name,
+            value: value_ref.clone(),
+        }),
         Datum::DateRef(_) => {
             checked_set_value(player, symbols, value_ref)?;
             applied(DateDatumHandlers::set_prop(
@@ -1432,11 +1437,9 @@ pub fn get_obj_prop(
         Datum::PlayerRef => player.get_player_prop(symbols, prop_name),
         Datum::MouseRef => player.get_mouse_prop(prop_name),
         Datum::XmlRef(_) => XmlDatumHandlers::get_prop(player, symbols, obj_ref, prop_name),
-        Datum::JsObjectRef(_) => {
-            crate::player::handlers::datum_handlers::js_object::JsObjectDatumHandlers::get_prop(
-                player, symbols, obj_ref, prop_name,
-            )
-        }
+        Datum::JsObjectRef(_) => Err(ScriptError::new(
+            "owner-bound JS object property requires the pending executor".to_owned(),
+        )),
         Datum::DateRef(_) => DateDatumHandlers::get_prop(player, symbols, obj_ref, prop_name),
         Datum::MathRef(_) => MathDatumHandlers::get_prop(player, symbols, obj_ref, prop_name),
         Datum::Vector(_) => {

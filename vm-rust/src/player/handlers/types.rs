@@ -540,6 +540,23 @@ fn checked_datum<'a>(
     Ok(datum)
 }
 
+/// Extract the source text accepted by Director's `value()` builtin.  The
+/// caller owns the player and symbol table for this short check; the returned
+/// text is copied before any evaluator request can suspend.
+pub(crate) fn value_source_text(
+    player: &DirPlayer,
+    symbols: &SymbolTable,
+    datum_ref: &DatumRef,
+) -> Result<Option<String>, ScriptError> {
+    crate::player::driver::validate_owned_datum_graph(player, symbols, datum_ref)?;
+    let datum = checked_datum(player, symbols, datum_ref)?;
+    match datum {
+        Datum::String(value) => Ok(Some(value.clone())),
+        Datum::StringChunk(..) => Ok(Some(datum.string_value(symbols)?)),
+        _ => Ok(None),
+    }
+}
+
 fn get_script_instance_prop_explicit(
     player: &mut DirPlayer,
     symbols: &mut SymbolTable,

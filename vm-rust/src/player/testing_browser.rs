@@ -225,6 +225,340 @@ impl BrowserTestPlayer {
         harness
     }
 
+    /// Exercise the owner-bound JS bridge and its evaluator continuation with
+    /// a synthetic object, so browser coverage does not depend on a licensed
+    /// movie asset. The nested value and global object reads use the same
+    /// owner scheduler as production pending requests.
+    pub async fn test_js_object_owner_bridge(&self) -> Result<(), String> {
+        let session = self.runtime.session();
+        let player_id = self.runtime.player_id();
+        let owner = self.runtime.owner().clone();
+        let object = Rc::new(RefCell::new(crate::player::js_lingo::value::JsObject::new()));
+        object.borrow_mut().set_own("value", crate::player::js_lingo::value::JsValue::Int(7));
+        let interpreted_atom = Rc::new(crate::player::js_lingo::xdr::JsFunctionAtom {
+            name: Some("interpretedThis".to_owned()),
+            nargs: 0,
+            extra: 0,
+            nvars: 0,
+            flags: 0,
+            bindings: Vec::new(),
+            script: crate::player::js_lingo::xdr::JsScriptIR {
+                magic: 0,
+                bytecode: vec![
+                    crate::player::js_lingo::opcodes::JsOp::This as u8,
+                    crate::player::js_lingo::opcodes::JsOp::Getprop as u8,
+                    0,
+                    0,
+                    crate::player::js_lingo::opcodes::JsOp::Return as u8,
+                ],
+                prolog_length: 0,
+                version: 150,
+                atoms: vec![crate::player::js_lingo::xdr::JsAtom::String("value".to_owned())],
+                source_notes: Vec::new(),
+                filename: None,
+                lineno: 1,
+                max_stack_depth: 2,
+                try_notes: Vec::new(),
+            },
+        });
+        object.borrow_mut().set_own(
+            "interpretedThis",
+            crate::player::js_lingo::value::JsValue::Function(Rc::new(
+                crate::player::js_lingo::value::JsFunction {
+                    atom: interpreted_atom,
+                    captured_scope: None,
+                },
+            )),
+        );
+        let factory_atom = Rc::new(crate::player::js_lingo::xdr::JsFunctionAtom {
+            name: Some("factory".to_owned()),
+            nargs: 0,
+            extra: 0,
+            nvars: 0,
+            flags: 0,
+            bindings: Vec::new(),
+            script: crate::player::js_lingo::xdr::JsScriptIR {
+                magic: 0,
+                bytecode: vec![
+                    crate::player::js_lingo::opcodes::JsOp::This as u8,
+                    crate::player::js_lingo::opcodes::JsOp::Return as u8,
+                ],
+                prolog_length: 0,
+                version: 150,
+                atoms: Vec::new(),
+                source_notes: Vec::new(),
+                filename: None,
+                lineno: 1,
+                max_stack_depth: 1,
+                try_notes: Vec::new(),
+            },
+        });
+        object.borrow_mut().set_own(
+            "factory",
+            crate::player::js_lingo::value::JsValue::Function(Rc::new(
+                crate::player::js_lingo::value::JsFunction {
+                    atom: factory_atom,
+                    captured_scope: None,
+                },
+            )),
+        );
+        object.borrow_mut().set_own(
+            "echo",
+            crate::player::js_lingo::value::JsValue::Native(Rc::new(
+                crate::player::js_lingo::value::NativeFn {
+                    name: "echo",
+                    call: Box::new(|args| Ok(args.first().cloned().unwrap_or(crate::player::js_lingo::value::JsValue::Undefined))),
+                },
+            )),
+        );
+        let handle = session
+            .borrow_mut()
+            .with_player_js(player_id, |context, registry| {
+                let runtime = Rc::new(RefCell::new(crate::player::js_lingo::interpreter::JsRuntime::new()));
+                registry
+                    .register_object(player_id, &context.player.owner, &runtime, &object)
+                    .map_err(|error| error.message)
+            })
+            .ok_or_else(|| "browser fixture player disappeared".to_owned())??;
+        let mut receiver = session
+            .borrow_mut()
+            .with_player(player_id, |context| context.player.alloc_datum(crate::director::lingo::datum::Datum::JsObjectRef(handle.clone())))
+            .ok_or_else(|| "browser fixture player disappeared".to_owned())?;
+        let (_, _, read_receiver) = session
+            .borrow_mut()
+            .start_eval_request(
+                player_id,
+                crate::player::driver::InternalVmRequest::ObjectProperty {
+                    receiver: receiver.clone(),
+                    name: crate::player::symbols::symbol::Symbol::builtin(
+                        crate::player::symbols::builtin::BuiltInSymbol::Value,
+                    ),
+                },
+            )
+            .map_err(|error| error.message)?;
+        crate::player::commands::drive_pending_owner(&session, player_id, &owner).await;
+        let read = read_receiver
+            .recv()
+            .await
+            .map_err(|_| "synthetic JS getter completion was dropped".to_owned())??;
+        let read_value = session
+            .borrow_mut()
+            .with_player(player_id, |context| context.player.get_datum(&read).clone())
+            .ok_or_else(|| "browser fixture player disappeared".to_owned())?;
+        if !matches!(read_value, crate::director::lingo::datum::Datum::Int(7)) {
+            return Err("synthetic JS getter returned the wrong value".to_owned());
+        }
+        let replacement = session
+            .borrow_mut()
+            .with_player(player_id, |context| context.player.alloc_datum(crate::director::lingo::datum::Datum::Int(9)))
+            .ok_or_else(|| "browser fixture player disappeared".to_owned())?;
+        let (_, _, set_receiver) = session
+            .borrow_mut()
+            .start_eval_request(
+                player_id,
+                crate::player::driver::InternalVmRequest::SetProperty {
+                    receiver: receiver.clone(),
+                    name: crate::player::symbols::symbol::Symbol::builtin(
+                        crate::player::symbols::builtin::BuiltInSymbol::Value,
+                    ),
+                    value: replacement.clone(),
+                },
+            )
+            .map_err(|error| error.message)?;
+        crate::player::commands::drive_pending_owner(&session, player_id, &owner).await;
+        set_receiver
+            .recv()
+            .await
+            .map_err(|_| "synthetic JS setter completion was dropped".to_owned())??;
+        let echo = session.borrow_mut().symbols_mut().intern("echo");
+        let (_, _, call_receiver) = session
+            .borrow_mut()
+            .start_eval_request(
+                player_id,
+                crate::player::driver::InternalVmRequest::Object {
+                    receiver: receiver.clone(),
+                    name: echo,
+                    args: vec![replacement.clone()],
+                },
+            )
+            .map_err(|error| error.message)?;
+        crate::player::commands::drive_pending_owner(&session, player_id, &owner).await;
+        let echoed = call_receiver
+            .recv()
+            .await
+            .map_err(|_| "synthetic JS call completion was dropped".to_owned())??;
+        let echoed_value = session
+            .borrow_mut()
+            .with_player(player_id, |context| context.player.get_datum(&echoed).clone())
+            .ok_or_else(|| "browser fixture player disappeared".to_owned())?;
+        if !matches!(echoed_value, crate::director::lingo::datum::Datum::Int(9)) {
+            return Err("synthetic JS call returned the wrong value".to_owned());
+        }
+        let interpreted_name = session.borrow_mut().symbols_mut().intern("interpretedThis");
+        let (_, _, interpreted_receiver) = session
+            .borrow_mut()
+            .start_eval_request(
+                player_id,
+                crate::player::driver::InternalVmRequest::Object {
+                    receiver: receiver.clone(),
+                    name: interpreted_name,
+                    args: Vec::new(),
+                },
+            )
+            .map_err(|error| error.message)?;
+        crate::player::commands::drive_pending_owner(&session, player_id, &owner).await;
+        let interpreted = interpreted_receiver
+            .recv()
+            .await
+            .map_err(|_| "synthetic interpreted call completion was dropped".to_owned())??;
+        let interpreted_value = session
+            .borrow_mut()
+            .with_player(player_id, |context| context.player.get_datum(&interpreted).clone())
+            .ok_or_else(|| "browser fixture player disappeared".to_owned())?;
+        if !matches!(interpreted_value, crate::director::lingo::datum::Datum::Int(9)) {
+            return Err("interpreted this receiver returned the wrong value".to_owned());
+        }
+        let factory_name = session.borrow_mut().symbols_mut().intern("factory");
+        let (_, _, factory_receiver) = session
+            .borrow_mut()
+            .start_eval_request(
+                player_id,
+                crate::player::driver::InternalVmRequest::Object {
+                    receiver: receiver.clone(),
+                    name: factory_name,
+                    args: Vec::new(),
+                },
+            )
+            .map_err(|error| error.message)?;
+        crate::player::commands::drive_pending_owner(&session, player_id, &owner).await;
+        let factory_result = factory_receiver
+            .recv()
+            .await
+            .map_err(|_| "synthetic factory completion was dropped".to_owned())??;
+        let factory_is_object = session
+            .borrow_mut()
+            .with_player(player_id, |context| {
+                matches!(context.player.get_datum(&factory_result), crate::director::lingo::datum::Datum::JsObjectRef(_))
+            })
+            .ok_or_else(|| "browser fixture player disappeared".to_owned())?;
+        if !factory_is_object {
+            return Err("interpreted factory did not return a retained JS object".to_owned());
+        }
+        receiver = factory_result;
+        session
+            .borrow_mut()
+            .with_player(player_id, |context| {
+                let global = context.symbols.intern("g");
+                context.player.globals.insert(global, receiver);
+            })
+            .ok_or_else(|| "browser fixture player disappeared".to_owned())?;
+        let source = session
+            .borrow_mut()
+            .with_player(player_id, |context| {
+                context.player.alloc_datum(crate::director::lingo::datum::Datum::String(
+                    "1 + \"2\".value".to_owned(),
+                ))
+            })
+            .ok_or_else(|| "browser fixture player disappeared".to_owned())?;
+        let nested = crate::player::eval::invoke_value_request_owned(
+            session.clone(),
+            player_id,
+            owner.clone(),
+            source,
+            crate::player::driver::ValueEvaluationMode::GlobalVoid,
+        )
+        .await
+        .map_err(|error| error.message)?;
+        let nested_value = session
+            .borrow_mut()
+            .with_player(player_id, |context| context.player.get_datum(&nested).clone())
+            .ok_or_else(|| "browser fixture player disappeared".to_owned())?;
+        if !matches!(nested_value, crate::director::lingo::datum::Datum::Int(3)) {
+            return Err("synthetic nested value expression returned the wrong value".to_owned());
+        }
+        let list_source = session
+            .borrow_mut()
+            .with_player(player_id, |context| {
+                context.player.alloc_datum(crate::director::lingo::datum::Datum::String(
+                    "[\"2\".value, 3]".to_owned(),
+                ))
+            })
+            .ok_or_else(|| "browser fixture player disappeared".to_owned())?;
+        let list = crate::player::eval::invoke_value_request_owned(
+            session.clone(),
+            player_id,
+            owner.clone(),
+            list_source,
+            crate::player::driver::ValueEvaluationMode::GlobalVoid,
+        )
+        .await
+        .map_err(|error| error.message)?;
+        let list_value = session
+            .borrow_mut()
+            .with_player(player_id, |context| context.player.get_datum(&list).clone())
+            .ok_or_else(|| "browser fixture player disappeared".to_owned())?;
+        let crate::director::lingo::datum::Datum::List(_, values, _) = list_value else {
+            return Err("synthetic nested list value expression returned the wrong type".to_owned());
+        };
+        if values.len() != 2
+            || !self.runtime.with_context(|context| {
+                matches!(context.player.get_datum(&values[0]), crate::director::lingo::datum::Datum::Int(2))
+                    && matches!(context.player.get_datum(&values[1]), crate::director::lingo::datum::Datum::Int(3))
+            }).unwrap_or(false)
+        {
+            return Err("synthetic nested list value expression returned the wrong values".to_owned());
+        }
+        let global_source = session
+            .borrow_mut()
+            .with_player(player_id, |context| {
+                context.player.alloc_datum(crate::director::lingo::datum::Datum::String(
+                    "g.value".to_owned(),
+                ))
+            })
+            .ok_or_else(|| "browser fixture player disappeared".to_owned())?;
+        let global_value = crate::player::eval::invoke_value_request_owned(
+            session,
+            player_id,
+            owner,
+            global_source,
+            crate::player::driver::ValueEvaluationMode::GlobalVoid,
+        )
+        .await
+        .map_err(|error| error.message)?;
+        let global_datum = self
+            .runtime
+            .with_context(|context| context.player.get_datum(&global_value).clone())
+            .ok_or_else(|| "browser fixture player disappeared".to_owned())?;
+        if !matches!(global_datum, crate::director::lingo::datum::Datum::Int(9)) {
+            return Err("synthetic JS global value returned the wrong value".to_owned());
+        }
+        let fallback_source = self
+            .runtime
+            .with_context(|context| {
+                context.player.alloc_datum(crate::director::lingo::datum::Datum::String(
+                    "g.value".to_owned(),
+                ))
+            })
+            .ok_or_else(|| "browser fixture player disappeared".to_owned())?;
+        let fallback = crate::player::eval::invoke_value_request_owned(
+            self.runtime.session(),
+            player_id,
+            self.runtime.owner().clone(),
+            fallback_source,
+            crate::player::driver::ValueEvaluationMode::StringPropertyFallback,
+        )
+        .await
+        .map_err(|error| error.message)?;
+        let fallback_datum = self
+            .runtime
+            .with_context(|context| context.player.get_datum(&fallback).clone())
+            .ok_or_else(|| "browser fixture player disappeared".to_owned())?;
+        if !matches!(fallback_datum, crate::director::lingo::datum::Datum::Int(9)) {
+            return Err("synthetic JS global fallback value returned the wrong value".to_owned());
+        }
+        Ok(())
+    }
+
     /// Exercise the public BrowserPlayerHandle input boundary with a
     /// synthetic linked movie.  This stays in the browser test harness so no
     /// production API or DCR asset is needed to validate owner-bound routing.
@@ -1839,10 +2173,6 @@ impl BrowserTestPlayer {
         let owner_key = format!("{}:{}:{}", key.session, key.player, key.generation);
         crate::js_api::JsApi::dispatch_flash_reset_all(&owner_key);
         self.unregister_flash_owner(&owner_key);
-        // JS-Lingo runtimes live in a thread_local, so dropping the old player
-        // below does NOT free them — clear them explicitly.
-        crate::player::js_lingo_loader::clear_all_runtimes();
-
         // Retire the owner before yielding so no in-flight handler can resume
         // against the replacement player. Keep the original RAF drain: these
         // yields let stale browser tasks observe retirement and exit without

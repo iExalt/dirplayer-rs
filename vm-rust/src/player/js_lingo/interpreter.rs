@@ -241,8 +241,8 @@ impl JsRuntime {
     /// Run the top-level program of an IR. `function`-declared atoms get
     /// hoisted into the global object so they can be looked up as functions
     /// later via NAME atom_idx.
-    pub fn run_program(&mut self, ir: &Rc<JsScriptIR>) -> Result<JsValue, JsError> {
-        self.reset_invocation_budget();
+    pub fn run_program(&self, ir: &Rc<JsScriptIR>) -> Result<JsValue, JsError> {
+        let _scope = InvocationScope::enter(self)?;
         let frame = self.build_program_frame(ir);
         self.run_frame(frame)
     }
@@ -251,19 +251,18 @@ impl JsRuntime {
     /// NEW (with proper construction wrapping), and the public host-call
     /// entry point.
     pub fn call_function(
-        &mut self,
+        &self,
         f: &JsFunctionRef,
         args: Vec<JsValue>,
         this_value: JsValue,
     ) -> Result<JsValue, JsError> {
-        self.reset_invocation_budget();
+        let _scope = InvocationScope::enter(self)?;
         let frame = build_function_frame(f, args, this_value, self.global.clone());
         self.run_frame(frame)
     }
 
     fn reset_invocation_budget(&self) {
         self.instruction_budget.set(MAX_INSTRUCTIONS_PER_INVOCATION);
-        self.call_depth.set(0);
     }
 
     fn build_program_frame(&self, ir: &Rc<JsScriptIR>) -> JsFrame {
@@ -305,7 +304,7 @@ impl JsRuntime {
     /// Dispatch loop. Walks the current frame until it returns, errors,
     /// or hits an unimplemented op. CALL is the only op that pushes a
     /// new frame — implemented inline so we don't need a true frame stack.
-    fn run_frame(&mut self, mut frame: JsFrame) -> Result<JsValue, JsError> {
+    fn run_frame(&self, mut frame: JsFrame) -> Result<JsValue, JsError> {
         // Try-note stack depth snapshots: the frame.stack depth at the
         // moment we entered each try region currently in effect. SpiderMonkey
         // 1.5's compiler ALSO emits a Setsp to fix stack depth at catch
@@ -401,7 +400,7 @@ impl JsRuntime {
     }
 
     fn dispatch(
-        &mut self,
+        &self,
         frame: &mut JsFrame,
         op: JsOp,
         operand: &[u8],
@@ -1429,29 +1428,60 @@ impl JsRuntime {
     /// Call any callable JsValue. Routes to JsFunction (interpreted) or
     /// NativeFn (Rust closure).
     pub fn invoke(
-        &mut self,
+        &self,
         callee: &JsValue,
         args: Vec<JsValue>,
         this_value: JsValue,
     ) -> Result<JsValue, JsError> {
-        let depth = self.call_depth.get();
-        if depth >= MAX_CALL_DEPTH {
-            return Err(JsError::new(format!(
-                "call depth {} exceeds limit ({}) — likely infinite recursion",
-                depth, MAX_CALL_DEPTH
-            )));
-        }
-        self.call_depth.set(depth + 1);
-        let result = match callee {
+        let _scope = InvocationScope::enter(self)?;
+        match callee {
             JsValue::Function(f) => {
                 let frame = build_function_frame(f, args, this_value, self.global.clone());
                 self.run_frame(frame)
             }
             JsValue::Native(f) => (f.call)(&args),
             other => Err(JsError::new(format!("not callable: {:?}", other))),
-        };
-        self.call_depth.set(depth);
-        result
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn invocation_state_for_test(&self) -> (u32, u64, u64) {
+        (
+            self.call_depth.get(),
+            self.instruction_budget.get(),
+            MAX_INSTRUCTIONS_PER_INVOCATION,
+        )
+    }
+}
+
+struct InvocationScope<'a> {
+    cell: &'a Cell<u32>,
+    previous: u32,
+}
+
+impl<'a> InvocationScope<'a> {
+    fn enter(runtime: &'a JsRuntime) -> Result<Self, JsError> {
+        let previous = runtime.call_depth.get();
+        if previous >= MAX_CALL_DEPTH {
+            return Err(JsError::new(format!(
+                "call depth {} exceeds limit ({}) — likely infinite recursion",
+                previous, MAX_CALL_DEPTH
+            )));
+        }
+        if previous == 0 {
+            runtime.reset_invocation_budget();
+        }
+        runtime.call_depth.set(previous + 1);
+        Ok(Self {
+            cell: &runtime.call_depth,
+            previous,
+        })
+    }
+}
+
+impl Drop for InvocationScope<'_> {
+    fn drop(&mut self) {
+        self.cell.set(self.previous);
     }
 }
 

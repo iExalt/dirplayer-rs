@@ -1,0 +1,72 @@
+Base HEAD: 6b0a0a3dcdfed502ad0e43eb4a699bc76588cf0a
+Acceptance is for the recorded working-tree source, not a published commit.
+
+Native full library suite
+Command: perl -e 'alarm 120; exec @ARGV' '/private/tmp/dirplayer-parser-review-build/target/debug/deps/vm_rust-6c8ff607dfc83df9' --test-threads=1 --nocapture
+Exit: 0
+Raw evidence: /private/tmp/dirplayer-js-object-validation-20260917/final-freeze-2
+Output tail:
+test player::xtra::sysmenu::tests::manager_owner_must_match_player_before_dispatch ... ok
+test player::xtra::sysmenu::tests::menu_state_is_owner_local_and_reset_does_not_touch_other_owner ... ok
+test rendering_gpu::webgl2::xtra_scene::tests::renderer_cache_binding_uses_owner_identity_not_equal_keys ... ok
+
+test result: ok. 536 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.53s
+
+
+WASM test compilation
+Command: env CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true CARGO_TARGET_DIR=/private/tmp/dirplayer-parser-review-build/target mise exec -- cargo check --manifest-path vm-rust/Cargo.toml --tests --target wasm32-unknown-unknown --locked --offline --message-format=json --target-dir /private/tmp/dirplayer-parser-review-build/target
+Exit: 0
+Raw evidence: /private/tmp/dirplayer-js-object-validation-20260917/final-freeze-2/wasm
+Output tail:
+mise WARN  failed to write cache file: /Users/clliaw/Library/Caches/mise/gcloud/583.0.0/exec_env_f9003207cf9e4d4c-e1546.msgpack.z Operation not permitted (os error 1)
+    Checking vm-rust v0.1.0 (/Users/clliaw/Projects/dirplayer-rs/vm-rust)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 12.70s
+
+Frontend tests
+Command: mise exec -- bun test scripts/flash-owner-lifecycle.test.mjs
+Exit: 0
+Raw evidence: /private/tmp/dirplayer-js-object-validation-20260917/final-freeze/frontend
+Output tail:
+[Flash] Instance direct-owner-b:g1:11 creation started (pending: 1)
+Flash data first 50 bytes for 2:3: [70, 87, 83, 9]
+Flash data as string: "FWS	"
+Found SWF signature at offset 0: FWS
+[Flash] Instance direct-owner-b:g1:11 loaded, waiting for SWF ActionScript to initialize...
+[Flash] Instance direct-owner-b:g1:11 fully ready (pending: 0)
+
+Existing browser fixtures
+Command: env CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true CARGO_TARGET_DIR=/private/tmp/dirplayer-parser-review-build/target CI=1 E2E_FILTER='browser_player_handle,multiuser_socket_lifecycle,browser_handle_nested_input,fileio_open_remote,sysmenu,browser_player_host_tail_preservation,browser_handle_public_play,budapi,browser_handle_flash_scripted_access_owner_capabilities,browser_host_event_guard,flash_owned_evaluator_binding' E2E_REUSE_SERVER=0 E2E_VIDEO=retain-on-failure BROWSER_RUNNER_PORT=9237 E2E_CONSOLE=1 BROWSER_RUNNER_DIR=/private/tmp/dirplayer-parser-review-build/target/browser_runner mise exec -- npm run e2e-test-browser -- --reporter=line --timeout=60000 --workers=1
+Exit: 0
+Raw evidence: /private/tmp/dirplayer-js-object-validation-20260917/final-freeze/browser
+Output tail:
+[1A[2K✓ test_sysmenu_host_effects
+
+[1A[2K13 passed, 0 failed
+
+[1A[2K  1 passed (2.2s)
+Report written to /Users/clliaw/Projects/dirplayer-rs/test-results/snapshot-report (1 suites, 0 changed, 1 snapshots)
+
+New JS object browser fixture
+Command: env CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true CARGO_TARGET_DIR=/private/tmp/dirplayer-parser-review-build/target CI=1 E2E_FILTER='js_object_owner_bridge' E2E_REUSE_SERVER=0 E2E_VIDEO=retain-on-failure BROWSER_RUNNER_PORT=9237 E2E_CONSOLE=1 BROWSER_RUNNER_DIR=/private/tmp/dirplayer-parser-review-build/target/browser_runner mise exec -- npm run e2e-test-browser -- --reporter=line --timeout=60000 --workers=1
+Exit: 0
+Raw evidence: /private/tmp/dirplayer-js-object-validation-20260917/final-freeze/browser-js-object
+Output tail:
+[1A[2K✓ test_js_object_owner_bridge
+
+[1A[2K1 passed, 0 failed
+
+[1A[2K  1 passed (827ms)
+Report written to /Users/clliaw/Projects/dirplayer-rs/test-results/snapshot-report (1 suites, 0 changed, 1 snapshots)
+
+Native no-run command and JSON: /private/tmp/dirplayer-js-object-validation-20260917/budget-compile-3
+Selected library artifact SHA256: 6b7b734b9d5b620146407453c9f4d9958b80694b1c315acf5f6bc56253bd8d21  /private/tmp/dirplayer-parser-review-build/target/debug/deps/vm_rust-6c8ff607dfc83df9
+Final manifest SHA256: a1097f92d914b875e9a25077e55a8eb7214e8470c7473878d19171f2aeabc111
+All 374 final source/e2e files independently verified after validation.
+Ruffle HEAD 79d1ca0f45d79e28c3a0658bbc6b8430d26ef308 and seven existing dirty file hashes match ../native-ownership-20260917/ruffle-working-tree-manifest.json.
+Stage 1 mise.toml SHA256 remains a8d10548ed3a7fbe794a851d546c3367af6f1618e617769f726868c6b086e4e4.
+
+Frontend summary (Bun writes test results to stderr):
+
+ 34 pass
+ 0 fail
+Ran 34 tests across 1 file. [4.42s]

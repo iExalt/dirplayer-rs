@@ -2541,10 +2541,6 @@ impl DirPlayer {
         self.flash_scripted_access_pending.set(false);
         JsApi::dispatch_flash_reset_all(&owner_key_string(&self.owner));
         self.scene3d_store.reset();
-        if global_resources {
-            // The owner-scoped session path clears only its own JS registry.
-            crate::player::js_lingo_loader::clear_all_runtimes();
-        }
         // Tear down player-owned Xtra instances before allocator reset. Any
         // pending intent retains the old owner and cannot reach a replacement
         // instance with the same numeric id.
@@ -5212,24 +5208,16 @@ pub(crate) fn start_eval_lingo_command_owned(
     Ok((eval_id, turn))
 }
 
-/// Evaluate a command for a captured session owner.  Synchronous turns and
-/// prepared evaluator children are advanced in the owned session; an
-/// unprepared external request is retained with its original request payload
-/// and leaves this future suspended until the host resumes the evaluator.
-/// Suspension is therefore represented by the retained continuation rather
-/// than by a fabricated error or `Void` result.
-pub(crate) async fn eval_lingo_command_owned(
+/// Drive one owner-bound evaluator turn to completion. Nested value and
+/// command evaluators share this pump so a pending child gets a fresh
+/// evaluator identity while its parent remains retained for resumption.
+pub(crate) async fn drive_eval_owned(
     session: RuntimeSessionHandle,
     player_id: u32,
     owner: OwnerToken,
-    source: String,
+    eval_id: crate::player::eval::EvalId,
+    mut turn: crate::player::eval::EvalTurn,
 ) -> Result<DatumRef, ScriptError> {
-    let (eval_id, mut turn) = start_eval_lingo_command_owned(
-        session.clone(),
-        player_id,
-        owner.clone(),
-        source,
-    )?;
     loop {
         match turn {
             crate::player::eval::EvalTurn::Complete(result) => return result,
@@ -5319,6 +5307,23 @@ pub(crate) async fn eval_lingo_command_owned(
                     crate::player::session::EvalRequestTurn::Evaluator(next) => match next {
                         crate::player::eval::EvalTurn::Complete(result) => return result,
                         crate::player::eval::EvalTurn::Pending { request } => {
+                            if let Some((action, internal_request)) =
+                                crate::player::commands::eval_pending_internal_request(&request)
+                            {
+                                if let Some(crate::player::session::EvalRequestTurn::Evaluator(next)) =
+                                    Box::pin(crate::player::commands::execute_eval_internal_request(
+                                        &session,
+                                        eval_id.clone(),
+                                        action,
+                                        owner.clone(),
+                                        internal_request,
+                                    ))
+                                    .await
+                                {
+                                    turn = next;
+                                    continue;
+                                }
+                            }
                             session.borrow_mut().retain_pending_eval_request(
                                 eval_id.clone(),
                                 player_id,
@@ -5395,9 +5400,23 @@ pub(crate) async fn eval_lingo_command_owned(
     }
 }
 
-/// Resume a previously returned evaluator turn after the host has completed
-/// the exact capability.  The session validates the evaluator owner and
-/// capability before consuming either, then continues the saved frame stack.
+/// Evaluate a command for a captured session owner. Synchronous turns and
+/// prepared evaluator children use the shared owner-bound evaluation pump.
+pub(crate) async fn eval_lingo_command_owned(
+    session: RuntimeSessionHandle,
+    player_id: u32,
+    owner: OwnerToken,
+    source: String,
+) -> Result<DatumRef, ScriptError> {
+    let (eval_id, turn) = start_eval_lingo_command_owned(
+        session.clone(),
+        player_id,
+        owner.clone(),
+        source,
+    )?;
+    drive_eval_owned(session, player_id, owner, eval_id, turn).await
+}
+
 pub(crate) fn resume_eval_owned(
     session: RuntimeSessionHandle,
     eval_id: crate::player::eval::EvalId,

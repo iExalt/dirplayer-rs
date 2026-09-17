@@ -154,6 +154,12 @@ pub(crate) enum InternalVmRequest {
         name: Symbol,
         value: DatumRef,
     },
+    /// Owner-bound evaluation of a String/Chunk `.value` expression. The
+    /// evaluator owns the source and returns through the existing EvalId pump.
+    EvaluateValue {
+        source: DatumRef,
+        mode: ValueEvaluationMode,
+    },
     /// A prepared external Xtra call executed after releasing the VM borrow.
     ExternalXtra(crate::player::xtra::external::ExternalXtraRequest),
     /// A pending owner-local Xtra load whose continuation remains in the VM.
@@ -166,6 +172,12 @@ pub(crate) enum InternalVmRequest {
         name: Symbol,
         args: Vec<DatumRef>,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ValueEvaluationMode {
+    StringPropertyFallback,
+    GlobalVoid,
 }
 
 /// Owned Flash action data.  `sprite_num` is copied before the request leaves
@@ -232,6 +244,7 @@ pub(crate) fn eval_request_kind(request: &InternalVmRequest) -> ActionKind {
         | InternalVmRequest::MovieAsync(_)
         | InternalVmRequest::XtraPending(_) => ActionKind::InternalInvocation,
         InternalVmRequest::SetProperty { .. } => ActionKind::InternalInvocation,
+        InternalVmRequest::EvaluateValue { .. } => ActionKind::InternalInvocation,
         InternalVmRequest::Construct { .. } | InternalVmRequest::Tell { .. } => ActionKind::InternalInvocation,
         InternalVmRequest::ExternalXtra(_) | InternalVmRequest::ExternalXtraLoad(_) => {
             ActionKind::InternalInvocation
@@ -760,6 +773,69 @@ pub(crate) struct DriverContinuation {
     setup_expectation: Option<super::SetupExpectation>,
 }
 
+fn prepare_chained_owner_request(
+    runtime: &mut super::session::ExecutionContext<'_>,
+    frame_ctx: &BytecodeHandlerContext,
+) -> Result<Option<InternalVmRequest>, ScriptError> {
+    if !frame_ctx.scope.validate_top(runtime.player) {
+        return Err(super::cancelled_scope_error());
+    }
+    let bytecode = runtime.player.get_ctx_current_bytecode(frame_ctx);
+    let property = checked_context_name(frame_ctx, bytecode.obj as u16)?;
+    let receiver = {
+        let scope = runtime
+            .player
+            .scopes
+            .get_mut(frame_ctx.scope.slot())
+            .ok_or_else(super::cancelled_scope_error)?;
+        scope
+            .stack
+            .last_ref_with(&mut runtime.player.allocator, &mut runtime.player.bitmap_manager)
+            .unwrap_or(DatumRef::Void)
+    };
+    let receiver_type = checked_internal_datum(runtime.player, runtime.symbols, &receiver)?.type_enum();
+    let request_kind = if matches!(
+        receiver_type,
+        crate::director::lingo::datum::DatumType::JsObjectRef
+    ) {
+        Some(None)
+    } else if matches!(
+        receiver_type,
+        crate::director::lingo::datum::DatumType::String
+            | crate::director::lingo::datum::DatumType::StringChunk
+    ) && property == Symbol::builtin(BuiltInSymbol::Value)
+    {
+        Some(Some(ValueEvaluationMode::StringPropertyFallback))
+    } else {
+        None
+    };
+    let Some(mode) = request_kind else {
+        return Ok(None);
+    };
+    let receiver = {
+        let scope = runtime
+            .player
+            .scopes
+            .get_mut(frame_ctx.scope.slot())
+            .ok_or_else(super::cancelled_scope_error)?;
+        scope
+            .stack
+            .pop_ref_with(&mut runtime.player.allocator, &mut runtime.player.bitmap_manager)
+            .unwrap_or(DatumRef::Void)
+    };
+    Ok(Some(if let Some(mode) = mode {
+        InternalVmRequest::EvaluateValue {
+            source: receiver,
+            mode,
+        }
+    } else {
+        InternalVmRequest::ObjectProperty {
+            receiver,
+            name: property,
+        }
+    }))
+}
+
 impl DriverContinuation {
     fn release_static_event_guard(&mut self, session: &mut RuntimeSession) {
         if let Some(guard) = self.static_event_guard.take() {
@@ -1219,6 +1295,30 @@ impl DriverContinuation {
 
         if opcode == OpCode::ObjCall {
             return self.turn_obj_call(session, frame_ctx, token);
+        }
+
+        if opcode == OpCode::GetChainedProp {
+            let pending = Self::with_context(session, self.player_id, |runtime| {
+                prepare_chained_owner_request(runtime, &frame_ctx)
+            });
+            let Some(pending) = pending else {
+                self.release_all_ext_call_layers(session);
+                self.phase = DriverPhase::Cancelled;
+                return DriverTurn::Error(super::cancelled_scope_error());
+            };
+            match pending {
+                Ok(Some(request)) => {
+                    return self.prepare_pending_obj_request(
+                        session,
+                        frame_ctx,
+                        request,
+                        "owner-bound chained property requires deferred execution".to_owned(),
+                        true,
+                    );
+                }
+                Ok(None) => {}
+                Err(error) => return self.fail_current_frame(session, error),
+            }
         }
 
         let result = Self::with_context(session, self.player_id, |runtime| {
@@ -1812,6 +1912,36 @@ impl DriverContinuation {
             SetObjPropOutcome::Applied => {
                 self.advance_current_opcode(session, frame_ctx, &frame_ctx.scope)
             }
+            SetObjPropOutcome::JsObject { receiver, name, value } => {
+                let Some(owner) = Self::with_context(session, self.player_id, |runtime| {
+                    runtime.player.owner.clone()
+                }) else {
+                    return self.fail_current_frame(session, super::cancelled_scope_error());
+                };
+                let Some(ticket) = session.allocate_action(
+                    &owner,
+                    &frame_ctx.scope,
+                    ActionKind::InternalInvocation,
+                    ResumePhase::ApplyOpcode,
+                ) else {
+                    return self.fail_current_frame(
+                        session,
+                        ScriptError::new("driver action sequence exhausted".to_owned()),
+                    );
+                };
+                self.internal_effect = Some(InternalResultEffect::SetProperty);
+                self.phase = DriverPhase::Awaiting {
+                    ticket: ticket.clone(),
+                    resume: ResumePhase::ApplyOpcode,
+                };
+                DriverTurn::Pending(PendingAction::Internal(InternalInvocationRequest {
+                    ticket,
+                    scope: frame_ctx.scope.clone(),
+                    request: InternalVmRequest::SetProperty { receiver, name, value },
+                    pending_reason: Some("JS object property setter requires owner-bound runtime execution".to_owned()),
+                    effect: Some(InternalResultEffect::SetProperty),
+                }))
+            }
             SetObjPropOutcome::FlashSet(request) => {
                 let owner_live = Self::with_context(session, self.player_id, |runtime| {
                     runtime.player.owner.same_identity(&request.owner)
@@ -2323,6 +2453,14 @@ impl DriverContinuation {
                     let receiver = pop_internal_ref(runtime, &frame_ctx, "get_obj_prop receiver")?;
                     let receiver_value = checked_internal_datum(runtime.player, runtime.symbols, &receiver)?.clone();
                     let request = match receiver_value {
+                        Datum::String(_) | Datum::StringChunk(..)
+                            if name == Symbol::builtin(BuiltInSymbol::Value) =>
+                        {
+                            InternalVmRequest::EvaluateValue {
+                                source: receiver,
+                                mode: ValueEvaluationMode::StringPropertyFallback,
+                            }
+                        }
                         Datum::FlashObjectRef(_) => InternalVmRequest::Flash(
                             crate::player::handlers::datum_handlers::flash_object::FlashObjectDatumHandlers::prepare_get_prop(
                                 runtime.player,
@@ -2475,7 +2613,9 @@ impl DriverContinuation {
                     }
                     let is_object_receiver = matches!(
                         checked_internal_datum(runtime.player, runtime.symbols, &receiver)?,
-                        Datum::ScriptInstanceRef(_) | Datum::ScriptRef(_)
+                        Datum::ScriptInstanceRef(_)
+                            | Datum::ScriptRef(_)
+                            | Datum::JsObjectRef(_)
                     );
                     let route_to_global = !is_object_receiver
                         && global_handler_exists(
@@ -6567,6 +6707,114 @@ mod tests {
             assert!(matches!(ctx.player.get_datum(&ctx.player.last_handler_result), Datum::Int(6)));
             assert_eq!(ctx.player.scopes[0].stack.len(), 1);
         });
+    }
+
+    #[test]
+    fn internal_obj_call_v4_js_receiver_wins_over_same_named_global_once() {
+        let (mut session, mut driver) = prepared_running_driver(vec![
+            Bytecode::new(OpCode::ObjCallV4, 999, 0),
+            Bytecode::new(OpCode::Ret, 0, 1),
+        ]);
+        let handler = session.symbols_mut().intern("child");
+        let handler_ref = session
+            .with_player(1, |ctx| ctx.player.alloc_datum(Datum::Symbol(handler.clone())))
+            .unwrap();
+        let object = Rc::new(RefCell::new(crate::player::js_lingo::value::JsObject::new()));
+        let handle = session
+            .with_player_js(1, |context, registry| {
+                let runtime = Rc::new(RefCell::new(crate::player::js_lingo::interpreter::JsRuntime::new()));
+                registry.register_object(1, &context.player.owner, &runtime, &object).unwrap()
+            })
+            .unwrap();
+        let receiver = session
+            .with_player(1, |ctx| ctx.player.alloc_datum(Datum::JsObjectRef(handle)))
+            .unwrap();
+        let argument = session
+            .with_player(1, |ctx| ctx.player.alloc_datum(Datum::Int(5)))
+            .unwrap();
+        session.with_player(1, |ctx| {
+            let scope = &mut ctx.player.scopes[0];
+            scope.stack.push_value(StackDatum::Ref(receiver.clone()));
+            scope.stack.push_value(StackDatum::Ref(argument.clone()));
+            scope.stack.push_value(StackDatum::ArgMarker { count: 2, no_ret: false });
+            scope.stack.push_value(StackDatum::Ref(handler_ref));
+        });
+
+        let pending = match driver.turn(&mut session) {
+            DriverTurn::Pending(PendingAction::Internal(request)) => request,
+            _ => panic!("ObjCallV4 JS receiver did not produce an internal request"),
+        };
+        match &pending.request {
+            InternalVmRequest::ObjectV4 { receiver: actual, name, args } => {
+                assert_eq!(actual, &receiver);
+                assert_eq!(name, &handler);
+                assert_eq!(args, &vec![argument]);
+            }
+            _ => panic!("ObjCallV4 JS receiver used the wrong request"),
+        }
+        assert!(matches!(driver.turn(&mut session), DriverTurn::Waiting));
+    }
+
+    #[test]
+    fn get_chained_prop_defers_only_owner_bound_receivers_once() {
+        let (mut session, mut driver) = prepared_running_driver(vec![
+            Bytecode::new(OpCode::GetChainedProp, 2, 0),
+            Bytecode::new(OpCode::Ret, 0, 1),
+        ]);
+        Rc::make_mut(&mut driver.frames[0].ctx.code.names)[2] =
+            Symbol::builtin(BuiltInSymbol::Value);
+        let object = Rc::new(RefCell::new(crate::player::js_lingo::value::JsObject::new()));
+        object.borrow_mut().set_own("value", crate::player::js_lingo::value::JsValue::Int(4));
+        let handle = session
+            .with_player_js(1, |context, registry| {
+                let owner = context.player.owner.clone();
+                let runtime = Rc::new(RefCell::new(crate::player::js_lingo::interpreter::JsRuntime::new()));
+                registry.register_object(1, &owner, &runtime, &object).unwrap()
+            })
+            .unwrap();
+        let receiver = session
+            .with_player(1, |ctx| ctx.player.alloc_datum(Datum::JsObjectRef(handle)))
+            .unwrap();
+        session.with_player(1, |ctx| {
+            ctx.player.scopes[0].stack.push_value(StackDatum::Ref(receiver.clone()));
+        });
+
+        let pending = match driver.turn(&mut session) {
+            DriverTurn::Pending(PendingAction::Internal(request)) => request,
+            _ => panic!("GetChainedProp did not defer JS receiver"),
+        };
+        match pending.request {
+            InternalVmRequest::ObjectProperty { receiver: actual, name } => {
+                assert_eq!(actual, receiver);
+                assert_eq!(name, Symbol::builtin(BuiltInSymbol::Value));
+            }
+            _ => panic!("GetChainedProp used the wrong owner-bound request"),
+        }
+        assert!(matches!(driver.phase, DriverPhase::Awaiting { .. }));
+
+        let (mut string_session, mut string_driver) = prepared_running_driver(vec![
+            Bytecode::new(OpCode::GetChainedProp, 2, 0),
+            Bytecode::new(OpCode::Ret, 0, 1),
+        ]);
+        Rc::make_mut(&mut string_driver.frames[0].ctx.code.names)[2] =
+            Symbol::builtin(BuiltInSymbol::Value);
+        let string_ref = string_session
+            .with_player(1, |ctx| ctx.player.alloc_datum(Datum::String("g.x".to_owned())))
+            .unwrap();
+        string_session.with_player(1, |ctx| {
+            ctx.player.scopes[0].stack.push_value(StackDatum::Ref(string_ref));
+        });
+        let pending = match string_driver.turn(&mut string_session) {
+            DriverTurn::Pending(PendingAction::Internal(request)) => request,
+            _ => panic!("GetChainedProp did not defer String.Value"),
+        };
+        assert!(matches!(
+            pending.request,
+            InternalVmRequest::EvaluateValue {
+                mode: ValueEvaluationMode::StringPropertyFallback,
+                ..
+            }
+        ));
     }
 
     #[test]

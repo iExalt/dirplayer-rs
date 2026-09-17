@@ -197,6 +197,109 @@ fn run_synth(bytecode: Vec<u8>, atoms: Vec<JsAtom>) -> Result<JsValue, super::va
     rt.call_function(&Rc::new(f), Vec::new(), JsValue::Undefined)
 }
 
+fn interpreted_inner_function(bytecode: Vec<u8>, name: &str) -> JsValue {
+    JsValue::Function(Rc::new(super::value::JsFunction {
+        atom: Rc::new(super::xdr::JsFunctionAtom {
+            name: Some(name.to_owned()),
+            nargs: 0,
+            extra: 0,
+            nvars: 0,
+            flags: 0,
+            bindings: Vec::new(),
+            script: super::xdr::JsScriptIR {
+                magic: 0xdead_0003,
+                bytecode,
+                prolog_length: 0,
+                version: 150,
+                atoms: Vec::new(),
+                source_notes: Vec::new(),
+                filename: None,
+                lineno: 1,
+                max_stack_depth: 4,
+                try_notes: Vec::new(),
+            },
+        }),
+        captured_scope: None,
+    }))
+}
+
+fn interpreted_outer_function() -> JsValue {
+    JsValue::Function(Rc::new(super::value::JsFunction {
+        atom: Rc::new(super::xdr::JsFunctionAtom {
+            name: Some("outer_budget_test".to_owned()),
+            nargs: 0,
+            extra: 0,
+            nvars: 0,
+            flags: 0,
+            bindings: Vec::new(),
+            script: super::xdr::JsScriptIR {
+                magic: 0xdead_0003,
+                // One, Pop, Name(inner), Pushobj, Call(0), Pop, One, Return.
+                bytecode: vec![
+                    JsOp::One as u8,
+                    JsOp::Pop as u8,
+                    JsOp::Name as u8,
+                    0,
+                    0,
+                    JsOp::Pushobj as u8,
+                    JsOp::Call as u8,
+                    0,
+                    0,
+                    JsOp::Pop as u8,
+                    JsOp::One as u8,
+                    JsOp::Return as u8,
+                ],
+                prolog_length: 0,
+                version: 150,
+                atoms: vec![JsAtom::String("inner".to_owned())],
+                source_notes: Vec::new(),
+                filename: None,
+                lineno: 1,
+                max_stack_depth: 4,
+                try_notes: Vec::new(),
+            },
+        }),
+        captured_scope: None,
+    }))
+}
+
+#[test]
+fn nested_interpreted_call_shares_budget_and_restores_depth_after_throw() {
+    let mut rt = JsRuntime::new();
+    let outer = interpreted_outer_function();
+    rt.global
+        .borrow_mut()
+        .set_own("inner", interpreted_inner_function(vec![JsOp::One as u8, JsOp::Return as u8], "inner"));
+
+    let result = rt
+        .invoke(&outer, Vec::new(), JsValue::Undefined)
+        .expect("outer interpreted call");
+    assert!(matches!(result, JsValue::Int(1)));
+    let (depth, remaining, max) = rt.invocation_state_for_test();
+    assert_eq!(depth, 0);
+    assert_eq!(remaining, max - 10, "nested invoke must share the outer budget");
+
+    rt.global.borrow_mut().set_own(
+        "inner",
+        interpreted_inner_function(
+            vec![JsOp::Push as u8, JsOp::Throw as u8],
+            "throwing_inner",
+        ),
+    );
+    let error = rt.invoke(&outer, Vec::new(), JsValue::Undefined);
+    assert!(error.is_err());
+    assert_eq!(rt.invocation_state_for_test().0, 0);
+
+    rt.global
+        .borrow_mut()
+        .set_own("inner", interpreted_inner_function(vec![JsOp::One as u8, JsOp::Return as u8], "inner"));
+    rt.invoke(&outer, Vec::new(), JsValue::Undefined)
+        .expect("outer call after throw");
+    let (depth, remaining, max) = rt.invocation_state_for_test();
+    assert_eq!(depth, 0);
+    assert_eq!(remaining, max - 10, "a fresh outer call must reset the budget");
+}
+
 fn u16_be(v: u16) -> [u8; 2] { v.to_be_bytes() }
 fn i16_be(v: i16) -> [u8; 2] { v.to_be_bytes() }
 

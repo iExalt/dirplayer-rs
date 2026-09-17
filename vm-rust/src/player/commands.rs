@@ -1496,9 +1496,25 @@ pub(crate) async fn pump_pending_eval_requests(
         let action = request.action.clone();
         let owner = request.owner.clone();
         let request_player = request.player_id;
-        let turn = session
-            .borrow_mut()
-            .execute_eval_request(id.clone(), request.request);
+        let turn = if let Some((_, internal_request)) = eval_pending_internal_request(&request.request) {
+            execute_eval_internal_request(
+                session,
+                id.clone(),
+                action.clone(),
+                owner.clone(),
+                internal_request,
+            )
+            .await
+            .unwrap_or_else(|| {
+                session
+                    .borrow_mut()
+                    .execute_eval_request(id.clone(), request.request)
+            })
+        } else {
+            session
+                .borrow_mut()
+                .execute_eval_request(id.clone(), request.request)
+        };
         advanced |= finish_pending_eval_request_turn(
             session,
             id,
@@ -1513,6 +1529,205 @@ pub(crate) async fn pump_pending_eval_requests(
     }
     drain_host_teardowns(session);
     advanced
+}
+
+pub(crate) fn eval_pending_internal_request(
+    pending: &super::eval::EvalPending,
+) -> Option<(super::eval::EvalAction, super::driver::InternalVmRequest)> {
+    let (capability, request) = match pending {
+        super::eval::EvalPending::Global {
+            capability,
+            request,
+            prepared_child: None,
+            ..
+        }
+        | super::eval::EvalPending::Object {
+            capability,
+            request,
+            ..
+        }
+        | super::eval::EvalPending::SetProperty { capability, request } => {
+            (capability, request)
+        }
+        _ => return None,
+    };
+    matches!(
+        request,
+        super::driver::InternalVmRequest::Object { .. }
+            | super::driver::InternalVmRequest::ObjectV4 { .. }
+            | super::driver::InternalVmRequest::ObjectProperty { .. }
+            | super::driver::InternalVmRequest::SetProperty { .. }
+            | super::driver::InternalVmRequest::EvaluateValue { .. }
+    )
+    .then(|| (capability.clone(), request.clone()))
+}
+
+/// Execute the evaluator's owner-bound internal requests after the session
+/// borrow has ended. Returning `None` leaves legacy handler/child requests on
+/// the established evaluator path; the supported JS/value requests resume the
+/// exact action that produced them.
+pub(crate) async fn execute_eval_internal_request(
+    session: &Rc<RefCell<RuntimeSession>>,
+    id: super::eval::EvalId,
+    action: super::eval::EvalAction,
+    owner: super::ownership::OwnerToken,
+    request: super::driver::InternalVmRequest,
+) -> Option<super::session::EvalRequestTurn> {
+    let Some((player_id, anchored_owner)) = session.borrow_mut().eval_action_anchor(&id, &action) else {
+        session.borrow_mut().cancel_eval_action(&id, &action, &owner);
+        return Some(super::session::EvalRequestTurn::Evaluator(
+            super::eval::EvalTurn::Complete(Err(super::cancelled_scope_error())),
+        ));
+    };
+    if !anchored_owner.same_identity(&owner) {
+        return Some(super::session::EvalRequestTurn::Evaluator(
+            super::eval::EvalTurn::Complete(Err(super::cancelled_scope_error())),
+        ));
+    }
+    if !eval_action_is_current(session, &id, &action, player_id, &owner) {
+        session.borrow_mut().cancel_eval_action(&id, &action, &owner);
+        return Some(super::session::EvalRequestTurn::Evaluator(
+            super::eval::EvalTurn::Complete(Err(super::cancelled_scope_error())),
+        ));
+    }
+
+    let result = match request {
+        super::driver::InternalVmRequest::EvaluateValue { source, mode } => {
+            Box::pin(super::eval::invoke_value_request_owned(
+                session.clone(),
+                player_id,
+                owner.clone(),
+                source,
+                mode,
+            ))
+            .await
+        }
+        super::driver::InternalVmRequest::ObjectProperty { receiver, name } => {
+            let target = session.borrow_mut().with_player(player_id, |context| {
+                let datum = context.player.allocator.try_get_datum(&receiver)?;
+                match datum {
+                    super::Datum::JsObjectRef(handle) => Some(
+                        context
+                            .symbols
+                            .display(&name)
+                            .map(|display| (handle.clone(), display.to_owned()))
+                            .map_err(|_| super::ScriptError::new_code(
+                                super::ScriptErrorCode::InvalidReference,
+                                "foreign or stale JS object property symbol".to_owned(),
+                            )),
+                    ),
+                    _ => None,
+                }
+            });
+            match target {
+                Some(Some(Ok((handle, property)))) => super::js_lingo_loader::get_js_object_prop_explicit(
+                    session,
+                    player_id,
+                    &owner,
+                    &handle,
+                    &property,
+                ),
+                Some(Some(Err(error))) => Err(error),
+                Some(None) => return None,
+                None => Err(super::cancelled_scope_error()),
+            }
+        }
+        super::driver::InternalVmRequest::SetProperty { receiver, name, value } => {
+            let target = session.borrow_mut().with_player(player_id, |context| {
+                let datum = context.player.allocator.try_get_datum(&receiver)?;
+                match datum {
+                    super::Datum::JsObjectRef(handle) => Some(
+                        context
+                            .symbols
+                            .display(&name)
+                            .map(|display| (handle.clone(), display.to_owned()))
+                            .map_err(|_| super::ScriptError::new_code(
+                                super::ScriptErrorCode::InvalidReference,
+                                "foreign or stale JS object property symbol".to_owned(),
+                            )),
+                    ),
+                    _ => None,
+                }
+            });
+            match target {
+                Some(Some(Ok((handle, property)))) => super::js_lingo_loader::set_js_object_prop_explicit(
+                    session,
+                    player_id,
+                    &owner,
+                    &handle,
+                    &property,
+                    &value,
+                )
+                .map(|()| super::DatumRef::Void),
+                Some(Some(Err(error))) => Err(error),
+                Some(None) => return None,
+                None => Err(super::cancelled_scope_error()),
+            }
+        }
+        super::driver::InternalVmRequest::Object { receiver, name, args }
+        | super::driver::InternalVmRequest::ObjectV4 { receiver, name, args } => {
+            let target = session.borrow_mut().with_player(player_id, |context| {
+                let datum = context.player.allocator.try_get_datum(&receiver)?;
+                match datum {
+                    super::Datum::JsObjectRef(handle) => Some(
+                        context
+                            .symbols
+                            .display(&name)
+                            .map(|display| (handle.clone(), display.to_owned()))
+                            .map_err(|_| super::ScriptError::new_code(
+                                super::ScriptErrorCode::InvalidReference,
+                                "foreign or stale JS object handler symbol".to_owned(),
+                            )),
+                    ),
+                    _ => None,
+                }
+            });
+            let Some(target) = target else { return None };
+            let target = match target {
+                Some(Ok(target)) => target,
+                Some(Err(error)) => {
+                    let resumed = resume_eval_internal(
+                        session,
+                        id,
+                        action,
+                        owner,
+                        Err(error),
+                    );
+                    return Some(super::session::EvalRequestTurn::Evaluator(resumed));
+                }
+                None => return None,
+            };
+            super::js_lingo_loader::invoke_js_object_method_explicit(
+                session,
+                player_id,
+                &owner,
+                &target.0,
+                &target.1,
+                &args,
+            )
+        }
+        _ => return None,
+    };
+    let resumed = resume_eval_internal(session, id, action, owner, result);
+    Some(super::session::EvalRequestTurn::Evaluator(resumed))
+}
+
+fn resume_eval_internal(
+    session: &Rc<RefCell<RuntimeSession>>,
+    id: super::eval::EvalId,
+    action: super::eval::EvalAction,
+    owner: super::ownership::OwnerToken,
+    result: Result<super::DatumRef, super::ScriptError>,
+) -> super::eval::EvalTurn {
+    let resumed = session
+        .borrow_mut()
+        .resume_eval(id.clone(), &action, &owner, result);
+    if matches!(resumed, super::eval::EvalTurn::Complete(Err(_))) {
+        session
+            .borrow_mut()
+            .cancel_eval_action(&id, &action, &owner);
+    }
+    resumed
 }
 
 pub(crate) fn pump_pending_commands(
@@ -1945,6 +2160,40 @@ async fn execute_internal_action(
     match request {
         InternalVmRequest::Object { receiver, name, args }
         | InternalVmRequest::ObjectV4 { receiver, name, args } => {
+            let js_target = session.borrow_mut().with_player(player_id, |context| {
+                let datum = context.player.allocator.try_get_datum(&receiver)?;
+                match datum {
+                    crate::director::lingo::datum::Datum::JsObjectRef(handle) => Some(
+                        context.symbols.display(&name)
+                            .map(|display| (handle.clone(), display.to_owned()))
+                            .map_err(|_| super::ScriptError::new_code(
+                                super::ScriptErrorCode::InvalidReference,
+                                "foreign or stale JS object handler symbol".to_owned(),
+                            )),
+                    ),
+                    _ => None,
+                }
+            }).flatten();
+            if let Some(js_target) = js_target {
+                let (handle, handler_name) = match js_target {
+                    Ok(target) => target,
+                    Err(error) => return PendingActionExecution::Complete(
+                        ActionCompletion::InternalError(error),
+                    ),
+                };
+                let result = super::js_lingo_loader::invoke_js_object_method_explicit(
+                    session,
+                    player_id,
+                    owner,
+                    &handle,
+                    &handler_name,
+                    &args,
+                );
+                return PendingActionExecution::Complete(match result {
+                    Ok(value) => ActionCompletion::InternalResult(value),
+                    Err(error) => ActionCompletion::InternalError(error),
+                });
+            }
             let dispatch = session.borrow_mut().with_player(player_id, |mut context| {
                 super::handlers::datum_handlers::player_call_datum_handler(
                     &mut context, &receiver, name.clone(), &args,
@@ -2028,6 +2277,39 @@ async fn execute_internal_action(
             }
         }
         InternalVmRequest::ObjectProperty { receiver, name } => {
+            let js_target = session.borrow_mut().with_player(player_id, |context| {
+                let datum = context.player.allocator.try_get_datum(&receiver)?;
+                match datum {
+                    crate::director::lingo::datum::Datum::JsObjectRef(handle) => Some(
+                        context.symbols.display(&name)
+                            .map(|display| (handle.clone(), display.to_owned()))
+                            .map_err(|_| super::ScriptError::new_code(
+                                super::ScriptErrorCode::InvalidReference,
+                                "foreign or stale JS object property symbol".to_owned(),
+                            )),
+                    ),
+                    _ => None,
+                }
+            }).flatten();
+            if let Some(js_target) = js_target {
+                let (handle, property_name) = match js_target {
+                    Ok(target) => target,
+                    Err(error) => return PendingActionExecution::Complete(
+                        ActionCompletion::InternalError(error),
+                    ),
+                };
+                let result = super::js_lingo_loader::get_js_object_prop_explicit(
+                    session,
+                    player_id,
+                    owner,
+                    &handle,
+                    &property_name,
+                );
+                return PendingActionExecution::Complete(match result {
+                    Ok(value) => ActionCompletion::InternalResult(value),
+                    Err(error) => ActionCompletion::InternalError(error),
+                });
+            }
             let result = session.borrow_mut().with_player(player_id, |mut context| {
                 super::script::get_obj_prop(context.player, context.symbols, &receiver, name)
             });
@@ -2058,6 +2340,38 @@ async fn execute_internal_action(
                         crate::player::datum_ref::DatumRef::Void,
                     ))
                 }
+                Some(Ok(super::script::SetObjPropOutcome::JsObject { receiver, name, value })) => {
+                    let js_target = session.borrow_mut().with_player(player_id, |context| {
+                        match context.player.allocator.try_get_datum(&receiver) {
+                            Some(crate::director::lingo::datum::Datum::JsObjectRef(handle)) => {
+                                Some(context.symbols.display(&name)
+                                    .map(|display| (handle.clone(), display.to_owned())))
+                            }
+                            _ => None,
+                        }
+                    }).flatten();
+                    let result = js_target.map_or_else(
+                        || Err(super::ScriptError::new_code(
+                            super::ScriptErrorCode::InvalidReference,
+                            "stale or foreign JS object".to_owned(),
+                        )),
+                        |target| target.map_or_else(
+                            |_| Err(super::ScriptError::new_code(
+                                super::ScriptErrorCode::InvalidReference,
+                                "foreign or stale JS object property symbol".to_owned(),
+                            )),
+                            |(handle, property_name)| super::js_lingo_loader::set_js_object_prop_explicit(
+                                session, player_id, owner, &handle, &property_name, &value,
+                            ),
+                        ),
+                    );
+                    PendingActionExecution::Complete(match result {
+                        Ok(()) => ActionCompletion::InternalResult(
+                            crate::player::datum_ref::DatumRef::Void,
+                        ),
+                        Err(error) => ActionCompletion::InternalError(error),
+                    })
+                }
                 Some(Ok(super::script::SetObjPropOutcome::FlashSet(request))) => {
                     match execute_owned_flash_request(session, player_id, owner, request).await {
                         Ok(_) => PendingActionExecution::Complete(ActionCompletion::InternalResult(
@@ -2074,6 +2388,23 @@ async fn execute_internal_action(
                     super::cancelled_scope_error(),
                 )),
             }
+        }
+        InternalVmRequest::EvaluateValue { source, mode } => {
+            // Value expressions use the evaluator's strict value-mode
+            // continuation. Do not requeue this request through the generic
+            // request pump: that would redispatch EvaluateValue here.
+            let result = super::eval::invoke_value_request_owned(
+                session.clone(),
+                player_id,
+                owner.clone(),
+                source,
+                mode,
+            )
+            .await;
+            PendingActionExecution::Complete(match result {
+                Ok(value) => ActionCompletion::InternalResult(value),
+                Err(error) => ActionCompletion::InternalError(error),
+            })
         }
         InternalVmRequest::Flash(request) => {
             match execute_owned_flash_request(session, player_id, owner, request).await {
@@ -4387,5 +4718,74 @@ mod multiuser_socket_command_tests {
             })
             .expect("test player exists");
         assert_eq!(state_after_discarded, state_after_current);
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod eval_cleanup_tests {
+    use super::resume_eval_internal;
+    use async_std::channel;
+
+    use crate::player::{
+        datum_ref::DatumRef,
+        driver::InternalVmRequest,
+        ownership::OwnerToken,
+        session::RuntimeSession,
+        symbols::symbol_table::SymbolOwner,
+        ScriptError,
+    };
+
+    fn pending_value_request(session_id: u64) -> (RuntimeSession, crate::player::eval::EvalId, crate::player::eval::EvalAction, OwnerToken) {
+        let mut session = RuntimeSession::new(SymbolOwner { session: session_id, generation: 1 });
+        assert!(session.add_player(1, channel::unbounded().0));
+        let (id, action, _receiver) = session
+            .start_eval_request(
+                1,
+                InternalVmRequest::ObjectProperty {
+                    receiver: DatumRef::Void,
+                    name: crate::player::symbols::symbol::Symbol::builtin(
+                        crate::player::symbols::builtin::BuiltInSymbol::Value,
+                    ),
+                },
+            )
+            .expect("value request should be retained");
+        let owner = session
+            .with_player(1, |context| context.player.owner.clone())
+            .expect("test player exists");
+        (session, id, action, owner)
+    }
+
+    #[test]
+    fn stale_after_work_completion_cancels_exact_eval_action() {
+        let (session, id, action, owner) = pending_value_request(9_901);
+        let handle = std::rc::Rc::new(std::cell::RefCell::new(session));
+        owner.begin_reset();
+
+        let turn = resume_eval_internal(
+            &handle,
+            id.clone(),
+            action.clone(),
+            owner.clone(),
+            Err(ScriptError::new("stale completion".to_owned())),
+        );
+        assert!(matches!(turn, crate::player::eval::EvalTurn::Complete(Err(_))));
+        assert!(!handle.borrow_mut().cancel_eval_action(&id, &action, &owner));
+    }
+
+    #[test]
+    fn forged_eval_action_is_preserved_for_the_real_completion() {
+        let (session, id, real_action, owner) = pending_value_request(9_902);
+        let handle = std::rc::Rc::new(std::cell::RefCell::new(session));
+        let (_foreign_session, _foreign_id, forged, _foreign_owner) = pending_value_request(9_903);
+
+        let turn = resume_eval_internal(
+            &handle,
+            id.clone(),
+            forged,
+            owner.clone(),
+            Err(ScriptError::new("forged completion".to_owned())),
+        );
+        assert!(matches!(turn, crate::player::eval::EvalTurn::Complete(Err(_))));
+        assert!(handle.borrow_mut().cancel_eval_action(&id, &real_action, &owner));
     }
 }

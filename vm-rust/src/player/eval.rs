@@ -137,6 +137,8 @@ pub(crate) struct EvalContinuation {
     waiting_action: Option<EvalAction>,
     waiting_discards_result: bool,
     callback_sender: Option<async_std::channel::Sender<Result<crate::player::scope::ScopeResult, ScriptError>>>,
+    value_mode: Option<crate::player::driver::ValueEvaluationMode>,
+    value_fallback: Option<DatumRef>,
 }
 
 impl EvalContinuation {
@@ -186,6 +188,8 @@ impl EvalContinuation {
             callback_sender: None,
             command_lines: None,
             next_command_line: 0,
+            value_mode: None,
+            value_fallback: None,
         })
     }
 
@@ -258,6 +262,101 @@ impl EvalContinuation {
         Ok((continuation, pending))
     }
 
+    /// Prepare a String/Chunk `value` request and run it through the normal
+    /// evaluator pump.  The source text and fallback datum are copied while
+    /// the owner is borrowed; no player or symbol-table reference survives a
+    /// pending object-property request.
+    pub(crate) fn start_value_request(
+        &mut self,
+        session: &mut crate::player::session::RuntimeSession,
+        source: DatumRef,
+        mode: crate::player::driver::ValueEvaluationMode,
+    ) -> EvalTurn {
+        let source_text = session
+            .with_player(self.player_id, |context| {
+                crate::player::handlers::types::value_source_text(
+                    context.player,
+                    context.symbols,
+                    &source,
+                )
+            })
+            .ok_or_else(crate::player::cancelled_scope_error)
+            .and_then(|result| result);
+        let source_text = match source_text {
+            Ok(Some(text)) => text,
+            Ok(None) => {
+                return self.finish_value_error(ScriptError::new(
+                    "value() requires a string or string chunk".to_owned(),
+                ));
+            }
+            Err(error) => return self.finish_value_error(error),
+        };
+        let fallback = match session.with_player(self.player_id, |context| {
+            Ok::<_, ScriptError>(match mode {
+                crate::player::driver::ValueEvaluationMode::StringPropertyFallback => {
+                    context.player.alloc_datum(Datum::String(source_text.clone()))
+                }
+                crate::player::driver::ValueEvaluationMode::GlobalVoid => DatumRef::Void,
+            })
+        }) {
+            Some(Ok(value)) => value,
+            Some(Err(error)) => return self.finish_value_error(error),
+            None => return self.finish_value_error(crate::player::cancelled_scope_error()),
+        };
+        self.value_mode = Some(mode);
+        self.value_fallback = Some(fallback);
+        if source_text.trim().is_empty() {
+            return match mode {
+                crate::player::driver::ValueEvaluationMode::StringPropertyFallback => {
+                    self.state = EvalState::Completed(Ok(self.value_fallback.clone().unwrap_or(DatumRef::Void)));
+                    EvalTurn::Complete(self.state_result())
+                }
+                crate::player::driver::ValueEvaluationMode::GlobalVoid => {
+                    let result = session.with_player(self.player_id, |context| {
+                        Ok::<_, ScriptError>(context.player.alloc_datum(Datum::Int(0)))
+                    });
+                    match result {
+                        Some(Ok(value)) => {
+                            self.state = EvalState::Completed(Ok(value.clone()));
+                            EvalTurn::Complete(Ok(value))
+                        }
+                        Some(Err(error)) => self.finish_value_error(error),
+                        None => self.finish_value_error(crate::player::cancelled_scope_error()),
+                    }
+                }
+            };
+        }
+        let cleaned = crate::player::handlers::datum_handlers::string::normalise_lingo_expr_for_value(&source_text);
+        let cleaned = crate::player::handlers::types::truncate_to_first_balanced_list(&cleaned);
+        let expression = match parse_lingo_expr_ast_runtime(Rule::eval_expr, cleaned) {
+            Ok(expression) => expression,
+            Err(error) => return self.finish_value_error(error),
+        };
+        self.frames.clear();
+        self.values.clear();
+        self.frames.push(EvalFrame::Evaluate(expression));
+        self.state = EvalState::Ready;
+        self.turn(session)
+    }
+
+    fn state_result(&self) -> Result<DatumRef, ScriptError> {
+        match &self.state {
+            EvalState::Completed(result) => result.clone(),
+            _ => Err(ScriptError::new("value evaluator did not complete".to_owned())),
+        }
+    }
+
+    fn finish_value_error(&mut self, error: ScriptError) -> EvalTurn {
+        if error.code == crate::player::ScriptErrorCode::Generic {
+            if let Some(fallback) = self.value_fallback.clone() {
+                self.state = EvalState::Completed(Ok(fallback.clone()));
+                return EvalTurn::Complete(Ok(fallback));
+            }
+        }
+        self.state = EvalState::Completed(Err(error.clone()));
+        EvalTurn::Complete(Err(error))
+    }
+
     pub(crate) fn set_callback_sender(
         &mut self,
         sender: async_std::channel::Sender<Result<crate::player::scope::ScopeResult, ScriptError>>,
@@ -325,8 +424,7 @@ impl EvalContinuation {
                     return EvalTurn::Pending { request };
                 }
                 EvalTurn::Complete(Err(error)) => {
-                    self.state = EvalState::Completed(Err(error.clone()));
-                    return EvalTurn::Complete(Err(error));
+                    return self.finish_value_error(error);
                 }
                 EvalTurn::Complete(Ok(value)) => {
                     if self.command_lines.as_ref().is_some_and(|lines| self.next_command_line < lines.len()) {
@@ -381,6 +479,12 @@ impl EvalContinuation {
         let value = match result {
             Ok(value) => value,
             Err(error) => {
+                if error.code == crate::player::ScriptErrorCode::Generic {
+                    if let Some(fallback) = self.value_fallback.clone() {
+                        self.state = EvalState::Completed(Ok(fallback));
+                        return true;
+                    }
+                }
                 self.state = EvalState::Completed(Err(error));
                 return true;
             }
@@ -2177,6 +2281,19 @@ pub(crate) async fn invoke_request_owned(
         .and_then(|result| result)
 }
 
+pub(crate) async fn invoke_value_request_owned(
+    session: crate::player::session::RuntimeSessionHandle,
+    player_id: crate::player::session::PlayerId,
+    owner: crate::player::ownership::OwnerToken,
+    source: DatumRef,
+    mode: crate::player::driver::ValueEvaluationMode,
+) -> Result<DatumRef, ScriptError> {
+    let (id, turn) = session
+        .borrow_mut()
+        .start_owned_value_request(player_id, owner.clone(), source, mode)?;
+    crate::player::drive_eval_owned(session, player_id, owner, id, turn).await
+}
+
 /// Invoke a nested script handler while retaining the caller's real driver.
 /// The subordinate evaluator owns the child capability; this wrapper only
 /// schedules a pending child action and awaits the callback channel outside
@@ -2327,12 +2444,18 @@ enum EvalFrame {
     ApplyObjProp(String),
     ApplySetProperty(String),
     ApplyHandler { name: String, argc: usize },
+    ApplyValueHandler { name: String, argc: usize },
     ApplyObjHandler { name: String, argc: usize },
     ApplyListAccess,
     ApplyChunkAccess { property: String, target: LingoExpr },
     ApplyAssignment(LingoExpr),
     ProbeIndexedAssignment { value: DatumRef, target: LingoExpr },
     ApplyIndexedAssignment { value: DatumRef, property: Option<String> },
+    ApplyIndexedAssignmentResult {
+        value: DatumRef,
+        index: DatumRef,
+        receiver: Option<(DatumRef, Symbol)>,
+    },
     ApplySetAtResult(DatumRef),
     ApplyPut { kind: u8, target: LingoExpr },
     ApplyPutChunk { kind: u8, target: LingoExpr, value: DatumRef },
@@ -2408,6 +2531,21 @@ impl EvalContinuation {
             self.frames.push(frame);
             return None;
         };
+        if self.value_mode.is_some()
+            && matches!(
+                &expr,
+                LingoExpr::Assignment(..)
+                    | LingoExpr::PutBefore(..)
+                    | LingoExpr::PutAfter(..)
+                    | LingoExpr::PutInto(..)
+                    | LingoExpr::PutDisplay(..)
+                    | LingoExpr::DeleteChunk(..)
+            )
+        {
+            return Some(EvalTurn::Complete(Err(ScriptError::new(
+                "side-effecting expression is not supported by value()".to_owned(),
+            ))));
+        }
         match expr {
             LingoExpr::SymbolLiteral(name) => {
                 let result = Self::intern(session, self.player_id, &name).and_then(|symbol| {
@@ -2462,8 +2600,20 @@ impl EvalContinuation {
                 }
             }
             LingoExpr::HandlerCall(name, args) => {
+                if self.value_mode.is_some()
+                    && !name.eq_ignore_ascii_case("vector")
+                    && !name.eq_ignore_ascii_case("rect")
+                {
+                    return Some(EvalTurn::Complete(Err(ScriptError::new(
+                        format!("handler '{}' is not supported by value()", name),
+                    ))));
+                }
                 let argc = args.len();
-                self.frames.push(EvalFrame::ApplyHandler { name, argc });
+                if self.value_mode.is_some() {
+                    self.frames.push(EvalFrame::ApplyValueHandler { name, argc });
+                } else {
+                    self.frames.push(EvalFrame::ApplyHandler { name, argc });
+                }
                 for arg in args.into_iter().rev() { self.frames.push(EvalFrame::Evaluate(arg)); }
             }
             LingoExpr::ObjProp(object, name) => {
@@ -2471,6 +2621,11 @@ impl EvalContinuation {
                 self.frames.push(EvalFrame::Evaluate(*object));
             }
             LingoExpr::ObjHandlerCall(object, name, args) => {
+                if self.value_mode.is_some() {
+                    return Some(EvalTurn::Complete(Err(ScriptError::new(
+                        format!("object handler '{}' is not supported by value()", name),
+                    ))));
+                }
                 let argc = args.len();
                 self.frames.push(EvalFrame::ApplyObjHandler { name, argc });
                 for arg in args.into_iter().rev() { self.frames.push(EvalFrame::Evaluate(arg)); }
@@ -2571,7 +2726,16 @@ impl EvalContinuation {
             }
             LingoExpr::IfThen(cond,body) => { self.frames.push(EvalFrame::ApplyIf{body:*body}); self.frames.push(EvalFrame::Evaluate(*cond)); }
             LingoExpr::Identifier(name) => {
-                let result=session.with_player(self.player_id, |context| get_eval_top_level_prop(context.player,context.symbols,&name)).ok_or_else(crate::player::cancelled_scope_error).and_then(|result| result);
+                let result = session.with_player(self.player_id, |context| {
+                    if self.value_mode.is_some() {
+                        match get_eval_top_level_prop_classified(context.player, context.symbols, &name)? {
+                            EvalLookupResult::Found(value) => Ok(value),
+                            EvalLookupResult::OrdinaryError(_) => Ok(DatumRef::Void),
+                        }
+                    } else {
+                        get_eval_top_level_prop(context.player, context.symbols, &name)
+                    }
+                }).ok_or_else(crate::player::cancelled_scope_error).and_then(|result| result);
                 let value = eval_turn_try!(result);
                 self.values.push(eval_turn_try!(Self::validate_ref(session, self.player_id, &value)));
             }
@@ -2707,15 +2871,15 @@ impl EvalContinuation {
             }
             EvalFrame::ApplyObjProp(name) => {
                 let object = eval_turn_try!(self.pop_value());
-                let flash_request = session.with_player(self.player_id, |context| {
+                let property_route = session.with_player(self.player_id, |context| {
                     let value = crate::player::driver::checked_internal_datum(
                         context.player,
                         context.symbols,
                         &object,
                     )?.clone();
+                    let symbol = context.symbols.intern(&name);
                     if matches!(value, Datum::FlashObjectRef(_)) {
-                        let symbol = context.symbols.intern(&name);
-                        Ok::<_, ScriptError>(Some(
+                        Ok::<_, ScriptError>(Some(crate::player::driver::InternalVmRequest::Flash(
                             crate::player::handlers::datum_handlers::flash_object::FlashObjectDatumHandlers::prepare_get_prop(
                                 context.player,
                                 &object,
@@ -2725,18 +2889,30 @@ impl EvalContinuation {
                                     .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
                                     .to_owned(),
                             )?,
-                        ))
+                        )))
+                    } else if matches!(value, Datum::JsObjectRef(_)) {
+                        Ok(Some(crate::player::driver::InternalVmRequest::ObjectProperty {
+                            receiver: object.clone(),
+                            name: symbol,
+                        }))
+                    } else if matches!(value, Datum::String(_) | Datum::StringChunk(..))
+                        && symbol == Symbol::builtin(BuiltInSymbol::Value)
+                    {
+                        Ok(Some(crate::player::driver::InternalVmRequest::EvaluateValue {
+                            source: object.clone(),
+                            mode: crate::player::driver::ValueEvaluationMode::StringPropertyFallback,
+                        }))
                     } else {
                         Ok(None)
                     }
                 }).ok_or_else(crate::player::cancelled_scope_error).and_then(|result| result);
-                let flash_request = eval_turn_try!(flash_request);
-                if let Some(request) = flash_request {
+                let property_route = eval_turn_try!(property_route);
+                if let Some(request) = property_route {
                     let capability = self.new_action(false);
                     return Some(EvalTurn::Pending {
                         request: EvalPending::Object {
                             capability,
-                            request: crate::player::driver::InternalVmRequest::Flash(request),
+                            request,
                             reason: None,
                         },
                     });
@@ -2745,6 +2921,42 @@ impl EvalContinuation {
                     let symbol = context.symbols.intern(&name);
                     get_obj_prop(context.player, context.symbols, &object, symbol)
                 }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r);
+                let result = eval_turn_try!(result);
+                self.values.push(eval_turn_try!(Self::validate_ref(session, self.player_id, &result)));
+            }
+            EvalFrame::ApplyValueHandler { name, argc } => {
+                let args = match self.pop_values(argc) {
+                    Ok(values) => values,
+                    Err(error) => return Some(EvalTurn::Complete(Err(error))),
+                };
+                let result = session
+                    .with_player(self.player_id, |context| {
+                        let mut component = |index: usize| -> Result<f64, ScriptError> {
+                            let Some(reference) = args.get(index) else { return Ok(0.0) };
+                            let datum = crate::player::driver::checked_internal_datum(
+                                context.player,
+                                context.symbols,
+                                reference,
+                            )?;
+                            Ok(datum.to_float().unwrap_or(0.0))
+                        };
+                        if name.eq_ignore_ascii_case("vector") {
+                            Ok::<_, ScriptError>(context.player.alloc_datum(Datum::Vector([
+                                component(0)?,
+                                component(1)?,
+                                component(2)?,
+                            ])))
+                        } else {
+                            Ok::<_, ScriptError>(context.player.alloc_datum(Datum::Rect([
+                                component(0)?,
+                                component(1)?,
+                                component(2)?,
+                                component(3)?,
+                            ], 0)))
+                        }
+                    })
+                    .ok_or_else(crate::player::cancelled_scope_error)
+                    .and_then(|result| result);
                 let result = eval_turn_try!(result);
                 self.values.push(eval_turn_try!(Self::validate_ref(session, self.player_id, &result)));
             }
@@ -2878,6 +3090,36 @@ impl EvalContinuation {
                 let index=eval_turn_try!(self.pop_value());let list=eval_turn_try!(self.pop_value());
                 eval_turn_try!(Self::validate_ref(session, self.player_id, &index));
                 eval_turn_try!(Self::validate_ref(session, self.player_id, &list));
+                let js_property = session.with_player(self.player_id, |context| {
+                    let is_js = matches!(crate::player::driver::checked_internal_datum(
+                        context.player,
+                        context.symbols,
+                        &list,
+                    )?, Datum::JsObjectRef(_));
+                    if is_js {
+                        let property = crate::player::driver::checked_internal_datum(
+                            context.player,
+                            context.symbols,
+                            &index,
+                        )?.string_value(context.symbols)?;
+                        Ok::<_, ScriptError>(Some(context.symbols.intern(&property)))
+                    } else {
+                        Ok(None)
+                    }
+                }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r);
+                if let Some(name) = eval_turn_try!(js_property) {
+                    let capability = self.new_action(false);
+                    return Some(EvalTurn::Pending {
+                        request: EvalPending::Object {
+                            capability,
+                            request: crate::player::driver::InternalVmRequest::ObjectProperty {
+                                receiver: list,
+                                name,
+                            },
+                            reason: None,
+                        },
+                    });
+                }
                 let result = session.with_player(self.player_id, |context| {
                     let p = context.player;
                     match p.get_datum(&list) {
@@ -2996,10 +3238,15 @@ impl EvalContinuation {
                 let LingoExpr::ObjProp(_, property) = list.as_ref() else {
                     return Some(EvalTurn::Complete(Err(ScriptError::new("invalid indexed assignment probe".to_owned()))));
                 };
-                let is_s3d = eval_turn_try!(session.with_player(self.player_id, |context| {
-                    Ok::<_, ScriptError>(matches!(context.player.get_datum(&object), Datum::Shockwave3dObjectRef(_)))
+                let receiver_kind = eval_turn_try!(session.with_player(self.player_id, |context| {
+                    let datum = crate::player::driver::checked_internal_datum(
+                        context.player,
+                        context.symbols,
+                        &object,
+                    )?;
+                    Ok::<_, ScriptError>(matches!(datum, Datum::Shockwave3dObjectRef(_) | Datum::JsObjectRef(_)))
                 }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r));
-                if is_s3d {
+                if receiver_kind {
                     self.values.push(object);
                     self.frames.push(EvalFrame::ApplyIndexedAssignment { value, property: Some(property.clone()) });
                     self.frames.push(EvalFrame::Evaluate(*index));
@@ -3015,7 +3262,74 @@ impl EvalContinuation {
                 eval_turn_try!(Self::validate_ref(session, self.player_id, &index));
                 eval_turn_try!(Self::validate_ref(session, self.player_id, &container));
                 eval_turn_try!(Self::validate_ref(session, self.player_id, &value));
+                if property.is_none() {
+                    let js_property = session.with_player(self.player_id, |context| {
+                        let is_js = matches!(crate::player::driver::checked_internal_datum(
+                            context.player,
+                            context.symbols,
+                            &container,
+                        )?, Datum::JsObjectRef(_));
+                        if is_js {
+                            let property = crate::player::driver::checked_internal_datum(
+                                context.player,
+                                context.symbols,
+                                &index,
+                            )?.string_value(context.symbols)?;
+                            Ok::<_, ScriptError>(Some(context.symbols.intern(&property)))
+                        } else {
+                            Ok(None)
+                        }
+                    }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r);
+                    if let Some(name) = eval_turn_try!(js_property) {
+                        self.frames.push(EvalFrame::ApplySetAtResult(value.clone()));
+                        let capability = self.new_action(false);
+                        return Some(EvalTurn::Pending {
+                            request: EvalPending::SetProperty {
+                                capability,
+                                request: crate::player::driver::InternalVmRequest::SetProperty {
+                                    receiver: container,
+                                    name,
+                                    value: value.clone(),
+                                },
+                            },
+                        });
+                    }
+                }
                 if let Some(property) = property {
+                    let js_receiver = session.with_player(self.player_id, |context| {
+                        Ok::<_, ScriptError>(matches!(
+                            crate::player::driver::checked_internal_datum(
+                                context.player,
+                                context.symbols,
+                                &container,
+                            )?,
+                            Datum::JsObjectRef(_),
+                        ))
+                    }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r);
+                    if eval_turn_try!(js_receiver) {
+                        let name = match session.with_player(self.player_id, |context| {
+                            Ok::<_, ScriptError>(context.symbols.intern(&property))
+                        }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r) {
+                            Ok(name) => name,
+                            Err(error) => return Some(EvalTurn::Complete(Err(error))),
+                        };
+                        self.frames.push(EvalFrame::ApplyIndexedAssignmentResult {
+                            value,
+                            index,
+                            receiver: Some((container.clone(), name.clone())),
+                        });
+                        let capability = self.new_action(false);
+                        return Some(EvalTurn::Pending {
+                            request: EvalPending::Object {
+                                capability,
+                                request: crate::player::driver::InternalVmRequest::ObjectProperty {
+                                    receiver: container,
+                                    name,
+                                },
+                                reason: None,
+                            },
+                        });
+                    }
                     let is_s3d = session.with_player(self.player_id, |context| {
                         Ok::<_, ScriptError>(matches!(context.player.get_datum(&container), Datum::Shockwave3dObjectRef(_)))
                     }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r);
@@ -3054,6 +3368,62 @@ impl EvalContinuation {
                     }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r);
                     self.values.push(eval_turn_try!(result));
                 }
+            }
+            EvalFrame::ApplyIndexedAssignmentResult { value, index, receiver } => {
+                let container = eval_turn_try!(self.pop_value());
+                eval_turn_try!(Self::validate_ref(session, self.player_id, &container));
+                eval_turn_try!(Self::validate_ref(session, self.player_id, &index));
+                eval_turn_try!(Self::validate_ref(session, self.player_id, &value));
+                let js_property = session.with_player(self.player_id, |context| {
+                    let is_js = matches!(crate::player::driver::checked_internal_datum(
+                        context.player,
+                        context.symbols,
+                        &container,
+                    )?, Datum::JsObjectRef(_));
+                    if is_js {
+                        let property = crate::player::driver::checked_internal_datum(
+                            context.player,
+                            context.symbols,
+                            &index,
+                        )?.string_value(context.symbols)?;
+                        Ok::<_, ScriptError>(Some(context.symbols.intern(&property)))
+                    } else {
+                        Ok(None)
+                    }
+                }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r);
+                if let Some(name) = eval_turn_try!(js_property) {
+                    self.frames.push(EvalFrame::ApplySetAtResult(value.clone()));
+                    let capability = self.new_action(false);
+                    return Some(EvalTurn::Pending {
+                        request: EvalPending::SetProperty {
+                            capability,
+                            request: crate::player::driver::InternalVmRequest::SetProperty {
+                                receiver: container,
+                                name,
+                                value,
+                            },
+                        },
+                    });
+                }
+                let result = session.with_player(self.player_id, |context| {
+                    Self::set_indexed_value(context.player, context.symbols, &container, &index, &value)
+                }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r);
+                let _ = eval_turn_try!(result);
+                if let Some((receiver, name)) = receiver {
+                    self.frames.push(EvalFrame::ApplySetAtResult(value.clone()));
+                    let capability = self.new_action(false);
+                    return Some(EvalTurn::Pending {
+                        request: EvalPending::SetProperty {
+                            capability,
+                            request: crate::player::driver::InternalVmRequest::SetProperty {
+                                receiver,
+                                name,
+                                value: container,
+                            },
+                        },
+                    });
+                }
+                self.values.push(value);
             }
             EvalFrame::ApplySetAtResult(value) => {
                 let _ = eval_turn_try!(self.pop_value());
@@ -3395,6 +3765,342 @@ mod tests {
     fn test_player() -> DirPlayer {
         let (tx, _rx) = channel::unbounded();
         DirPlayer::new_with_owner(tx, OwnerToken::transitional())
+    }
+
+    fn eval_value_for_test(
+        session: &mut crate::player::session::RuntimeSession,
+        text: &str,
+        mode: crate::player::driver::ValueEvaluationMode,
+    ) -> Result<Datum, ScriptError> {
+        let source = session
+            .with_player(1, |context| {
+                Ok::<_, ScriptError>(context.player.alloc_datum(Datum::String(text.to_owned())))
+            })
+            .unwrap()
+            .unwrap();
+        eval_value_source_for_test(session, source, mode)
+    }
+
+    fn eval_value_source_for_test(
+        session: &mut crate::player::session::RuntimeSession,
+        source: DatumRef,
+        mode: crate::player::driver::ValueEvaluationMode,
+    ) -> Result<Datum, ScriptError> {
+        let id = EvalId::new(10_000);
+        let mut continuation = EvalContinuation::new(
+            session,
+            1,
+            id,
+            LingoExpr::VoidLiteral,
+        )?;
+        let turn = continuation.start_value_request(session, source, mode);
+        let value = match turn {
+            EvalTurn::Complete(result) => result?,
+            EvalTurn::Pending { .. } => {
+                return Err(ScriptError::new("static value test unexpectedly suspended".to_owned()))
+            }
+        };
+        session
+            .with_player(1, |context| context.player.get_datum(&value).clone())
+            .ok_or_else(crate::player::cancelled_scope_error)
+    }
+
+    #[test]
+    fn owned_value_modes_preserve_fallback_and_empty_global() {
+        let mut session = test_session();
+        assert!(matches!(
+            eval_value_for_test(
+                &mut session,
+                "not a valid (",
+                crate::player::driver::ValueEvaluationMode::StringPropertyFallback,
+            ),
+            Ok(Datum::String(value)) if value == "not a valid ("
+        ));
+        assert!(matches!(
+            eval_value_for_test(
+                &mut session,
+                "",
+                crate::player::driver::ValueEvaluationMode::GlobalVoid,
+            ),
+            Ok(Datum::Int(0))
+        ));
+    }
+
+    #[test]
+    fn owned_value_unknown_and_case_insensitive_globals_match_static_semantics() {
+        let mut session = test_session();
+        assert!(matches!(
+            eval_value_for_test(
+                &mut session,
+                "missing_global",
+                crate::player::driver::ValueEvaluationMode::GlobalVoid,
+            ),
+            Ok(Datum::Void)
+        ));
+        session
+            .with_player(1, |context| {
+                let name = context.symbols.intern("MiXeD");
+                let value = context.player.alloc_datum(Datum::Int(42));
+                context.player.globals.insert(name, value);
+            })
+            .unwrap();
+        assert!(matches!(
+            eval_value_for_test(
+                &mut session,
+                "mixed",
+                crate::player::driver::ValueEvaluationMode::GlobalVoid,
+            ),
+            Ok(Datum::Int(42))
+        ));
+        assert!(matches!(
+            eval_value_for_test(
+                &mut session,
+                "mixed",
+                crate::player::driver::ValueEvaluationMode::StringPropertyFallback,
+            ),
+            Ok(Datum::Int(42))
+        ));
+    }
+
+    #[test]
+    fn owned_value_unknown_identifier_is_void_while_breakpoint_is_active() {
+        let mut session = test_session();
+        let (future, completer) = manual_future::ManualFuture::new();
+        drop(future);
+        session
+            .with_player(1, |context| {
+                context.player.current_breakpoint = Some(crate::player::debug::BreakpointContext {
+                    breakpoint: crate::player::debug::Breakpoint {
+                        script_name: String::new(),
+                        handler_name: String::new(),
+                        bytecode_index: 0,
+                    },
+                    script_ref: INVALID_CAST_MEMBER_REF,
+                    handler_ref: (INVALID_CAST_MEMBER_REF, Symbol::builtin(BuiltInSymbol::Item)),
+                    bytecode_index: 0,
+                    completer,
+                    error: None,
+                });
+            })
+            .unwrap();
+        assert!(matches!(
+            eval_value_for_test(
+                &mut session,
+                "unknown_at_breakpoint",
+                crate::player::driver::ValueEvaluationMode::StringPropertyFallback,
+            ),
+            Ok(Datum::Void)
+        ));
+    }
+
+    #[test]
+    fn owned_value_allows_legacy_constructors_but_blocks_handler_calls() {
+        let mut session = test_session();
+        assert!(matches!(
+            eval_value_for_test(
+                &mut session,
+                "vector(1, 2, 3)",
+                crate::player::driver::ValueEvaluationMode::GlobalVoid,
+            ),
+            Ok(Datum::Vector([x, y, z])) if x == 1.0 && y == 2.0 && z == 3.0
+        ));
+        assert!(matches!(
+            eval_value_for_test(
+                &mut session,
+                "vector(1, \"bad\")",
+                crate::player::driver::ValueEvaluationMode::GlobalVoid,
+            ),
+            Ok(Datum::Vector([x, y, z])) if x == 1.0 && y == 0.0 && z == 0.0
+        ));
+        assert!(matches!(
+            eval_value_for_test(
+                &mut session,
+                "sideEffect()",
+                crate::player::driver::ValueEvaluationMode::GlobalVoid,
+            ),
+            Ok(Datum::Void)
+        ));
+        assert!(matches!(
+            eval_value_for_test(
+                &mut session,
+                "rect(1, 2, 3, 4)",
+                crate::player::driver::ValueEvaluationMode::GlobalVoid,
+            ),
+            Ok(Datum::Rect([1.0, 2.0, 3.0, 4.0], 0))
+        ));
+    }
+
+    #[test]
+    fn owned_value_preserves_operands_and_rejects_foreign_source() {
+        let mut session = test_session();
+        assert!(matches!(
+            eval_value_for_test(
+                &mut session,
+                "[1 + 2, 3]",
+                crate::player::driver::ValueEvaluationMode::GlobalVoid,
+            ),
+            Ok(Datum::List(_, values, _)) if values.len() == 2
+        ));
+        let (tx, _rx) = channel::unbounded();
+        assert!(session.add_player(2, tx));
+        let foreign = session
+            .with_player(2, |context| {
+                Ok::<_, ScriptError>(context.player.alloc_datum(Datum::String("1".to_owned())))
+            })
+            .unwrap()
+            .unwrap();
+        let id = EvalId::new(10_001);
+        let mut continuation = EvalContinuation::new(
+            &mut session,
+            1,
+            id,
+            LingoExpr::VoidLiteral,
+        )
+        .unwrap();
+        let turn = continuation.start_value_request(
+            &mut session,
+            foreign,
+            crate::player::driver::ValueEvaluationMode::GlobalVoid,
+        );
+        assert!(matches!(
+            turn,
+            EvalTurn::Complete(Err(error)) if error.code == crate::player::ScriptErrorCode::InvalidReference
+        ));
+    }
+
+    #[test]
+    fn owned_value_rejects_string_chunk_with_foreign_datum_source() {
+        let mut session = test_session();
+        let (tx, _rx) = channel::unbounded();
+        assert!(session.add_player(2, tx));
+        let foreign = session
+            .with_player(2, |context| {
+                Ok::<_, ScriptError>(context.player.alloc_datum(Datum::String("2".to_owned())))
+            })
+            .unwrap()
+            .unwrap();
+        let chunk = session
+            .with_player(1, |context| {
+                let expression = StringChunkExpr {
+                    chunk_type: StringChunkType::Item,
+                    start: 1,
+                    end: 1,
+                    item_delimiter: ',',
+                };
+                Ok::<_, ScriptError>(context.player.alloc_datum(Datum::StringChunk(
+                    crate::director::lingo::datum::StringChunkSource::Datum(foreign),
+                    expression,
+                    "2".to_owned(),
+                )))
+            })
+            .unwrap()
+            .unwrap();
+        let id = EvalId::new(10_002);
+        let mut continuation = EvalContinuation::new(
+            &mut session,
+            1,
+            id,
+            LingoExpr::VoidLiteral,
+        )
+        .unwrap();
+        let turn = continuation.start_value_request(
+            &mut session,
+            chunk,
+            crate::player::driver::ValueEvaluationMode::GlobalVoid,
+        );
+        assert!(matches!(
+            turn,
+            EvalTurn::Complete(Err(error)) if error.code == crate::player::ScriptErrorCode::InvalidReference
+        ));
+    }
+
+    #[test]
+    fn owned_eval_indexed_js_assignment_requeues_updated_property() {
+        let mut session = test_session();
+        let object = std::rc::Rc::new(std::cell::RefCell::new(
+            crate::player::js_lingo::value::JsObject::new(),
+        ));
+        let handle = session
+            .with_player_js(1, |context, registry| {
+                let runtime = std::rc::Rc::new(std::cell::RefCell::new(
+                    crate::player::js_lingo::interpreter::JsRuntime::new(),
+                ));
+                registry.register_object(1, &context.player.owner, &runtime, &object)
+            })
+            .unwrap()
+            .unwrap();
+        let receiver = session
+            .with_player(1, |context| {
+                let value = context.player.alloc_datum(Datum::JsObjectRef(handle));
+                context.player.globals.insert(context.symbols.intern("g"), value.clone());
+                value
+            })
+            .unwrap();
+        let assignment = LingoExpr::Assignment(
+            Box::new(LingoExpr::ListAccess(
+                Box::new(LingoExpr::ObjProp(
+                    Box::new(LingoExpr::Identifier("g".to_owned())),
+                    "items".to_owned(),
+                )),
+                Box::new(LingoExpr::IntLiteral(1)),
+            )),
+            Box::new(LingoExpr::IntLiteral(9)),
+        );
+        let eval_id = session.start_eval(1, assignment).unwrap();
+        let (action, requested_receiver, requested_name) = match session.turn_eval(eval_id.clone()) {
+            EvalTurn::Pending {
+                request: EvalPending::Object {
+                    capability,
+                    request: crate::player::driver::InternalVmRequest::ObjectProperty { receiver, name },
+                    ..
+                },
+            } => (capability, receiver, name),
+            other => panic!("indexed JS assignment did not request g.items: {:?}", std::mem::discriminant(&other)),
+        };
+        assert_eq!(requested_receiver, receiver);
+        assert_eq!(requested_name, Symbol::builtin(BuiltInSymbol::Items));
+        let items = session
+            .with_player(1, |context| {
+                let one = context.player.alloc_datum(Datum::Int(1));
+                let two = context.player.alloc_datum(Datum::Int(2));
+                context.player.alloc_datum(Datum::List(
+                    DatumType::List,
+                    VecDeque::from([one, two]),
+                    false,
+                ))
+            })
+            .unwrap();
+        let owner = session
+            .with_player(1, |context| context.player.owner.clone())
+            .unwrap();
+        let (set_action, set_receiver, set_name, set_value) = match session.resume_eval(
+            eval_id.clone(),
+            &action,
+            &owner,
+            Ok(items),
+        ) {
+            EvalTurn::Pending {
+                request: EvalPending::SetProperty {
+                    capability,
+                    request: crate::player::driver::InternalVmRequest::SetProperty { receiver, name, value },
+                },
+            } => (capability, receiver, name, value),
+            other => panic!("indexed JS assignment did not write back g.items: {:?}", std::mem::discriminant(&other)),
+        };
+        assert_eq!(set_receiver, receiver);
+        assert_eq!(set_name, Symbol::builtin(BuiltInSymbol::Items));
+        let updated = session
+            .with_player(1, |context| context.player.get_datum(&set_value).clone())
+            .unwrap();
+        let Datum::List(_, values, _) = updated else {
+            panic!("updated JS property is not a list");
+        };
+        let first = values.front().cloned().expect("updated list has an item");
+        assert!(matches!(
+            session.with_player(1, |context| context.player.get_datum(&first).clone()),
+            Some(Datum::Int(9))
+        ));
+        let _ = set_action;
     }
 
     #[test]
