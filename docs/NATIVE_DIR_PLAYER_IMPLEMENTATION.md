@@ -77,8 +77,13 @@ native library tests is not a working native player.
 
 ### Accepted bitmap capability component
 
+The following three accepted components are published together in `dev` commit
+`e1e1547b394ececd8682e01e55830001d5cda81b`. All 261 committed runtime source
+files match the final RNG checkpoint manifest. Subsequent unfinished JS object
+edits are separate working-tree changes and are not covered by these receipts.
+
 The subsequent [bitmap capability checkpoint](checkpoints/bitmap-capabilities-20260917/README.md)
-is integrated and accepted in the working tree: retained bitmap handles reject
+is integrated and accepted: retained bitmap handles reject
 foreign/stale ownership; allocation, recursive reclamation and reset preserve
 refcount/liveness invariants; explicit copies own resolved RGBA pixels. Nested
 datum graphs are checked at deferred-access and duplication boundaries.
@@ -87,7 +92,7 @@ receipt records the applicable **13 browser**, **34 frontend** and TypeScript
 checks, including their precise source-reuse boundary.
 
 The subsequent [typed mutation checkpoint](checkpoints/typed-mutation-20260917/README.md)
-is also accepted in the working tree: vector/transform replacement requires a
+is also accepted: vector/transform replacement requires a
 live, same-owner, non-pooled target of the exact type. All ten whole-value writes
 use that boundary, and the raw player mutation accessor is crate-private.
 Definitive verification passed **503 native tests**, WASM compilation and source
