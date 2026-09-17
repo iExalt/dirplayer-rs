@@ -60,6 +60,7 @@ pub mod testing;
 pub mod testing_browser;
 pub mod testing_shared;
 pub mod timeout;
+pub(crate) mod value_transfer;
 pub mod virtual_scripts;
 pub mod xtra;
 
@@ -115,6 +116,278 @@ impl FlashBindingState {
         self.generations.get(&sprite_num).copied() == Some(expected)
     }
 
+}
+
+/// The owner fence attached to a detached host effect. Owned scheduler paths
+/// fill in the session and player so emission can revalidate the exact player
+/// before and after crossing into JavaScript. Legacy global paths retain the
+/// binding state and owner token, but do not claim a child-session capability.
+#[derive(Clone)]
+struct FlashActionFence {
+    owner: OwnerToken,
+    binding: Rc<RefCell<FlashBindingState>>,
+    session: Option<RuntimeSessionHandle>,
+    player_id: Option<session::PlayerId>,
+}
+
+impl FlashActionFence {
+    fn legacy(owner: OwnerToken, binding: Rc<RefCell<FlashBindingState>>) -> Self {
+        Self { owner, binding, session: None, player_id: None }
+    }
+
+    fn owned(
+        owner: OwnerToken,
+        binding: Rc<RefCell<FlashBindingState>>,
+        session: RuntimeSessionHandle,
+        player_id: session::PlayerId,
+    ) -> Self {
+        Self { owner, binding, session: Some(session), player_id: Some(player_id) }
+    }
+
+    fn revalidated(
+        &self,
+        local_sprite: i16,
+        generation: Option<u64>,
+        cast_pair: Option<(i32, i32)>,
+    ) -> Result<(), ScriptError> {
+        if !self.owner.is_arena_live() {
+            return Err(ScriptError::new_code(
+                ScriptErrorCode::InvalidReference,
+                "Flash host action owner is stale".to_owned(),
+            ));
+        }
+        if let Some(generation) = generation {
+            if !self.binding.borrow().is_current(local_sprite, generation) {
+                return Err(ScriptError::new_code(
+                    ScriptErrorCode::InvalidReference,
+                    "Flash host action generation is stale".to_owned(),
+                ));
+            }
+        }
+        if let (Some(session), Some(player_id)) = (&self.session, self.player_id) {
+            let mut session = session.try_borrow_mut().map_err(|_| {
+                ScriptError::new_code(
+                    ScriptErrorCode::InvalidReference,
+                    "Flash host action session is already borrowed".to_owned(),
+                )
+            })?;
+            let valid = session
+                .with_player(player_id, |context| {
+                    self.owner.is_arena_live()
+                        && self.owner.same_identity(&context.player.owner)
+                        && generation.map_or(true, |generation| {
+                            context.player.is_flash_instance_generation_current(
+                                local_sprite,
+                                generation,
+                            )
+                        })
+                        && cast_pair.map_or(true, |(cast_lib, cast_member)| {
+                            context
+                                .player
+                                .movie
+                                .score
+                                .get_sprite(local_sprite)
+                                .and_then(|sprite| sprite.member.as_ref())
+                                .is_some_and(|member| {
+                                    member.cast_lib == cast_lib && member.cast_member == cast_member
+                                })
+                        })
+                })
+                .unwrap_or(false);
+            if !valid {
+                return Err(ScriptError::new_code(
+                    ScriptErrorCode::InvalidReference,
+                    "Flash host action owner or generation is stale".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn bind_owned(&mut self, session: RuntimeSessionHandle, player_id: session::PlayerId) {
+        self.session = Some(session);
+        self.player_id = Some(player_id);
+    }
+}
+
+/// A detached Flash host effect prepared while the player is borrowed. The
+/// local sprite number remains an i16 for VM/state validation; host routing
+/// uses the separate i32 key only after the borrow has ended.
+#[derive(Clone)]
+pub(crate) enum FlashHostAction {
+    Load {
+        fence: FlashActionFence,
+        host_sprite: i32,
+        local_sprite: i16,
+        cast_lib: i32,
+        cast_member: i32,
+        data: Vec<u8>,
+        width: u32,
+        height: u32,
+        paused_at_start: bool,
+        asserted_frame: i32,
+        generation: u64,
+    },
+    Unload {
+        fence: FlashActionFence,
+        host_sprite: i32,
+        local_sprite: i16,
+        cast_lib: i32,
+        cast_member: i32,
+        generation: u64,
+    },
+    Resize {
+        fence: FlashActionFence,
+        host_sprite: i32,
+        local_sprite: i16,
+        cast_lib: i32,
+        cast_member: i32,
+        generation: u64,
+        width: u32,
+        height: u32,
+    },
+}
+
+impl FlashHostAction {
+    fn owner(&self) -> OwnerToken {
+        let fence = match self {
+            Self::Load { fence, .. } | Self::Unload { fence, .. } | Self::Resize { fence, .. } => fence,
+        };
+        fence.owner.clone()
+    }
+
+    fn bind_owned(&mut self, session: RuntimeSessionHandle, player_id: session::PlayerId) {
+        let fence = match self {
+            Self::Load { fence, .. } | Self::Unload { fence, .. } | Self::Resize { fence, .. } => fence,
+        };
+        fence.bind_owned(session, player_id);
+    }
+
+    fn emit(self) -> Result<(), ScriptError> {
+        match self {
+            Self::Load {
+                fence,
+                host_sprite,
+                local_sprite,
+                cast_lib,
+                cast_member,
+                data,
+                width,
+                height,
+                paused_at_start,
+                asserted_frame,
+                generation,
+            } => {
+                fence.revalidated(local_sprite, Some(generation), Some((cast_lib, cast_member)))?;
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let _ = (host_sprite, cast_lib, cast_member, data, width, height, paused_at_start, asserted_frame);
+                    return Err(ScriptError::new("Flash host is unavailable on native".to_owned()));
+                }
+                #[cfg(target_arch = "wasm32")]
+                crate::js_api::JsApi::dispatch_flash_member_loaded_prepared(
+                    host_sprite,
+                    cast_lib,
+                    cast_member,
+                    &data,
+                    width,
+                    height,
+                    paused_at_start,
+                    asserted_frame,
+                    &owner_key_string(&fence.owner),
+                    generation,
+                );
+                fence.revalidated(local_sprite, Some(generation), Some((cast_lib, cast_member)))
+            }
+            Self::Unload {
+                fence,
+                host_sprite,
+                local_sprite,
+                cast_lib,
+                cast_member,
+                generation,
+            } => {
+                let _ = (cast_lib, cast_member);
+                // Unload is a retirement action: a replacement may already
+                // own the same local sprite with a newer generation. The JS
+                // route receives the old generation and must leave that
+                // replacement untouched, so only the owner fence is checked.
+                fence.revalidated(local_sprite, None, None)?;
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let _ = host_sprite;
+                    return Err(ScriptError::new("Flash host is unavailable on native".to_owned()));
+                }
+                #[cfg(target_arch = "wasm32")]
+                crate::js_api::JsApi::dispatch_flash_member_unloaded_at_generation(
+                    host_sprite,
+                    generation,
+                    &owner_key_string(&fence.owner),
+                );
+                fence.revalidated(local_sprite, None, None)
+            }
+            Self::Resize {
+                fence,
+                host_sprite,
+                local_sprite,
+                cast_lib,
+                cast_member,
+                generation,
+                width,
+                height,
+            } => {
+                let _ = (cast_lib, cast_member);
+                fence.revalidated(local_sprite, Some(generation), Some((cast_lib, cast_member)))?;
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let _ = (host_sprite, width, height);
+                    return Err(ScriptError::new("Flash host is unavailable on native".to_owned()));
+                }
+                #[cfg(target_arch = "wasm32")]
+                crate::js_api::JsApi::dispatch_flash_member_resized(
+                    host_sprite,
+                    generation,
+                    width,
+                    height,
+                    &owner_key_string(&fence.owner),
+                );
+                fence.revalidated(local_sprite, Some(generation), Some((cast_lib, cast_member)))
+            }
+        }
+    }
+}
+
+pub(crate) fn bind_flash_host_actions(
+    mut actions: Vec<FlashHostAction>,
+    session: RuntimeSessionHandle,
+    player_id: session::PlayerId,
+) -> Vec<FlashHostAction> {
+    for action in &mut actions {
+        action.bind_owned(session.clone(), player_id);
+    }
+    actions
+}
+
+pub(crate) fn emit_flash_host_actions(actions: Vec<FlashHostAction>) -> Result<(), ScriptError> {
+    for action in actions {
+        let owner = action.owner();
+        match action.emit() {
+            Ok(()) => {}
+            Err(error) if error.code == ScriptErrorCode::InvalidReference => {
+                // A callback may synchronously replace the sprite or retire the
+                // owner.  The failed action is stale in that case, but the
+                // detached tail may still contain a distinct live sprite. Keep
+                // draining while the owner remains live; reset cancellation
+                // discards the old tail without touching the replacement.
+                if owner.is_arena_live() {
+                    continue;
+                }
+                break;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -609,6 +882,12 @@ pub struct DirPlayer {
     /// duplicate `createFlashInstance` calls every frame before the
     /// instance's first pixels arrive.
     pub flash_sprite_loaded: HashSet<(i16, i32, i32)>,
+    /// Flash host effects prepared under the player borrow and emitted only
+    /// after the owning session borrow has ended.
+    pub(crate) flash_host_actions: Vec<FlashHostAction>,
+    /// True only for players registered as actual nested children. Root
+    /// players may have nonzero session IDs and still use local host sprites.
+    pub(crate) flash_host_is_nested: bool,
     /// Sprites whose Ruffle instance has been confirmed loaded + AS-initialized
     /// at least once. Flash interop (getVariable/setVariable/callFunction/
     /// setCallback) takes the SYNC fast path for these; only the FIRST access to
@@ -962,6 +1241,83 @@ impl DirPlayer {
         self.flash_binding_state.borrow().is_current(sprite_num, expected)
     }
 
+    pub(crate) fn flash_instance_generation(&self, sprite_num: i16) -> Option<u64> {
+        self.flash_binding_state
+            .borrow()
+            .generations
+            .get(&sprite_num)
+            .copied()
+    }
+
+    pub(crate) fn take_flash_host_actions(&mut self) -> Vec<FlashHostAction> {
+        std::mem::take(&mut self.flash_host_actions)
+    }
+
+    fn flash_action_fence(&self) -> FlashActionFence {
+        FlashActionFence::legacy(self.owner.clone(), self.flash_binding_state.clone())
+    }
+
+    fn queue_flash_host_action(&mut self, action: FlashHostAction) {
+        self.flash_host_actions.push(action);
+    }
+
+    pub(crate) fn queue_flash_member_load(
+        &mut self,
+        host_sprite: i32,
+        local_sprite: i16,
+        cast_lib: i32,
+        cast_member: i32,
+        data: Vec<u8>,
+        width: u32,
+        height: u32,
+        paused_at_start: bool,
+        asserted_frame: i32,
+    ) -> Result<bool, ScriptError> {
+        if local_sprite <= 0 || self.flash_sprite_loaded.contains(&(local_sprite, cast_lib, cast_member)) {
+            return Ok(false);
+        }
+        let generation = self.reserve_flash_instance_generation(local_sprite)?;
+        self.queue_flash_host_action(FlashHostAction::Load {
+            fence: self.flash_action_fence(),
+            host_sprite,
+            local_sprite,
+            cast_lib,
+            cast_member,
+            data,
+            width,
+            height,
+            paused_at_start,
+            asserted_frame,
+            generation,
+        });
+        self.flash_sprite_loaded.insert((local_sprite, cast_lib, cast_member));
+        Ok(true)
+    }
+
+    pub(crate) fn queue_flash_resize(
+        &mut self,
+        host_sprite: i32,
+        local_sprite: i16,
+        cast_lib: i32,
+        cast_member: i32,
+        width: u32,
+        height: u32,
+    ) {
+        let Some(generation) = self.flash_instance_generation(local_sprite) else {
+            return;
+        };
+        self.queue_flash_host_action(FlashHostAction::Resize {
+            fence: self.flash_action_fence(),
+            host_sprite,
+            local_sprite,
+            cast_lib,
+            cast_member,
+            generation,
+            width,
+            height,
+        });
+    }
+
     pub(crate) fn next_flash_object_id(&mut self) -> Result<u32, ScriptError> {
         self.flash_object_counter = self
             .flash_object_counter
@@ -1203,6 +1559,8 @@ impl DirPlayer {
             in_frame_script: false,
             flash_frame_buffers: HashMap::new(),
             flash_sprite_loaded: HashSet::new(),
+            flash_host_actions: Vec::new(),
+            flash_host_is_nested: false,
             flash_ready_sprites: HashSet::new(),
             flash_binding_state: Rc::new(RefCell::new(FlashBindingState::new())),
             flash_object_counter: 0,
@@ -1298,14 +1656,15 @@ impl DirPlayer {
     /// Pre-dispatch Flash members for all active sprites so they start loading
     /// before Lingo scripts try to access them. Per-sprite: each sprite that
     /// references a Flash member gets its own dedicated Ruffle instance.
-    pub fn pre_dispatch_flash_members(&mut self) {
+    pub fn pre_dispatch_flash_members(&mut self) -> Result<(), ScriptError> {
         // When running a nested `#movie` sub-player, dispatch its Flash sprites
         // to Ruffle under a synthetic per-player key so they don't collide with
         // the host's channel keys and their captured frames route back into THIS
         // sub's `flash_frame_buffers` (see NESTED_FLASH_BASE / update_flash_frame).
         let active = unsafe { ACTIVE_PLAYER_ID };
+        let is_nested_host = self.flash_host_is_nested;
         let js_flash_key = |ch: i16| -> i32 {
-            if active == 0 {
+            if !is_nested_host {
                 ch as i32
             } else {
                 nested_flash_key(active, ch)
@@ -1350,16 +1709,42 @@ impl DirPlayer {
             // the stale bookkeeping entry and leave the new instance alone.
             if !self.channel_holds_live_flash(ch) {
                 let owner_key = owner_key_string(&self.owner);
-                JsApi::dispatch_flash_member_unloaded(js_flash_key(ch), &owner_key);
+                let generation = self.flash_instance_generation(ch);
+                if !is_nested_host {
+                    if let Some(generation) = generation {
+                        self.queue_flash_host_action(FlashHostAction::Unload {
+                            fence: self.flash_action_fence(),
+                            host_sprite: ch as i32,
+                            local_sprite: ch,
+                            cast_lib: cl,
+                            cast_member: cm,
+                            generation,
+                        });
+                    }
+                } else {
+                    // Nested Flash host registration remains a legacy path until
+                    // the session registry owns a child FlashHostSink.
+                    JsApi::dispatch_flash_member_unloaded(js_flash_key(ch), &owner_key);
+                }
                 self.flash_frame_buffers.remove(&ch);
             }
             self.flash_sprite_loaded.remove(&(ch, cl, cm));
         }
 
         // LOAD pass: dispatch newly-present Flash members.
-        for channel in &self.movie.score.channels {
-            let channel_num = channel.number as i16;
-            if let Some(member_ref) = &channel.sprite.member {
+        for channel_index in 0..self.movie.score.channels.len() {
+            let (channel_num, member_ref, asserted_frame, rect) = {
+                let channel = &self.movie.score.channels[channel_index];
+                (
+                    channel.number as i16,
+                    channel.sprite.member.clone(),
+                    channel.sprite.flash_asserted_frame,
+                    channel.sprite.member.as_ref().map(|_| {
+                        crate::player::score::get_concrete_sprite_rect(self, &channel.sprite)
+                    }),
+                )
+            };
+            if let Some(member_ref) = member_ref {
                 let dispatch_key = (channel_num, member_ref.cast_lib, member_ref.cast_member);
                 if self.flash_sprite_loaded.contains(&dispatch_key) {
                     // Already loaded: keep the Ruffle render resolution matched
@@ -1376,25 +1761,34 @@ impl DirPlayer {
                     // rect (member natural size when un-stretched), not the raw
                     // score cell — otherwise a 626x100 member in a 100x320 cell
                     // captures at the wrong aspect and resamples to a thin strip.
-                    let rect =
-                        crate::player::score::get_concrete_sprite_rect(self, &channel.sprite);
-                    let _ = ruffle_set_size(
-                        js_flash_key(channel_num),
-                        rect.width().max(1),
-                        rect.height().max(1),
-                    );
+                    let rect = rect.expect("Flash member has a resolved sprite rectangle");
+                    let width = rect.width().max(1) as u32;
+                    let height = rect.height().max(1) as u32;
+                    if !is_nested_host {
+                        self.queue_flash_resize(
+                            channel_num as i32,
+                            channel_num,
+                            member_ref.cast_lib,
+                            member_ref.cast_member,
+                            width,
+                            height,
+                        );
+                    } else {
+                        let _ = ruffle_set_size(
+                            js_flash_key(channel_num),
+                            width as i32,
+                            height as i32,
+                        );
+                    }
                     continue;
                 }
-                if let Some(member) = self.movie.cast_manager.find_member_by_ref(member_ref) {
+                if let Some(member) = self.movie.cast_manager.find_member_by_ref(&member_ref) {
                     if let CastMemberType::Flash(flash_member) = &member.member_type {
                         if crate::rendering::has_swf_signature(&flash_member.data) {
                             let data = flash_member.data.clone();
                             // Capture at the resolved sprite rect (member natural
                             // size when un-stretched), not the raw score cell.
-                            let rect = crate::player::score::get_concrete_sprite_rect(
-                                self,
-                                &channel.sprite,
-                            );
+                            let rect = rect.expect("Flash member has a resolved sprite rectangle");
                             let w = rect.width().max(1) as u32;
                             let h = rect.height().max(1) as u32;
                             let paused_at_start = flash_member
@@ -1405,7 +1799,7 @@ impl DirPlayer {
                             // Re-project the sprite's asserted frame onto the new
                             // instance so shared-member siblings show unique
                             // posters and swaps keep their frame.
-                            let asserted_frame = channel.sprite.flash_asserted_frame.unwrap_or(-1);
+                            let asserted_frame = asserted_frame.unwrap_or(-1);
                             debug!(
                                 "[Flash] Pre-dispatching sprite#{} {}:{} ({}x{}, {} bytes, pausedAtStart={}, assertedFrame={})",
                                 channel_num,
@@ -1417,18 +1811,34 @@ impl DirPlayer {
                                 paused_at_start,
                                 asserted_frame,
                             );
-                            JsApi::dispatch_flash_member_loaded(
-                                js_flash_key(channel_num),
-                                member_ref.cast_lib,
-                                member_ref.cast_member,
-                                &data,
-                                w,
-                                h,
-                                paused_at_start,
-                                asserted_frame,
-                                &owner_key_string(&self.owner),
-                            );
-                            self.flash_sprite_loaded.insert(dispatch_key);
+                            if !is_nested_host {
+                                self.queue_flash_member_load(
+                                    channel_num as i32,
+                                    channel_num,
+                                    member_ref.cast_lib,
+                                    member_ref.cast_member,
+                                    data,
+                                    w,
+                                    h,
+                                    paused_at_start,
+                                    asserted_frame,
+                                )?;
+                            } else {
+                                JsApi::dispatch_flash_member_loaded(
+                                    js_flash_key(channel_num),
+                                    member_ref.cast_lib,
+                                    member_ref.cast_member,
+                                    &data,
+                                    w,
+                                    h,
+                                    paused_at_start,
+                                    asserted_frame,
+                                    &owner_key_string(&self.owner),
+                                );
+                            }
+                            if is_nested_host {
+                                self.flash_sprite_loaded.insert(dispatch_key);
+                            }
                         }
                     }
                 }
@@ -1511,6 +1921,7 @@ impl DirPlayer {
             }
             self.movie.score.get_sprite_mut(cn).flash_prev_frame = cur;
         }
+        Ok(())
     }
 
     /// True if the given score channel currently holds a Flash (SWF) cast
@@ -1545,21 +1956,32 @@ impl DirPlayer {
     /// RAF) — makes the next render see `flash_bitmap_ref.is_none()` and
     /// re-dispatch `createFlashInstance` with the new story's SWF.
     pub fn invalidate_flash_for_cast_lib(&mut self, cast_lib: i32) {
-        let sprites: Vec<i16> = self
+        let sprites: Vec<(i16, i32, i32)> = self
             .flash_sprite_loaded
             .iter()
             .filter(|(_, cl, _)| *cl == cast_lib)
-            .map(|(sn, _, _)| *sn)
+            .map(|(sn, cl, cm)| (*sn, *cl, *cm))
             .collect();
         if sprites.is_empty() {
             return;
         }
         self.flash_sprite_loaded
             .retain(|(_, cl, _)| *cl != cast_lib);
-        for sn in sprites {
+        for (sn, cl, cm) in sprites {
             // Destroy the JS-side Ruffle instance first (cancels its capture
             // RAF so it can't re-insert a frame buffer after we drop it).
-            JsApi::dispatch_flash_member_unloaded(sn as i32, &owner_key_string(&self.owner));
+            if self.flash_host_is_nested {
+                JsApi::dispatch_flash_member_unloaded(sn as i32, &owner_key_string(&self.owner));
+            } else if let Some(generation) = self.flash_instance_generation(sn) {
+                self.queue_flash_host_action(FlashHostAction::Unload {
+                    fence: self.flash_action_fence(),
+                    host_sprite: sn as i32,
+                    local_sprite: sn,
+                    cast_lib: cl,
+                    cast_member: cm,
+                    generation,
+                });
+            }
             self.flash_frame_buffers.remove(&sn);
         }
     }
@@ -7103,6 +7525,12 @@ async fn run_movie_init_sequence() {
     // player could be borrowed; hand them over now so the frame loop can run
     // them. See player::gif.
     crate::player::gif::install_pending();
+    let flash_actions = reserve_player_mut(|player| {
+        player.pre_dispatch_flash_members().map(|_| player.take_flash_host_actions())
+    });
+    if let Err(error) = flash_actions.and_then(emit_flash_host_actions) {
+        warn!("Flash host preparation failed: {}", error.message);
+    }
     // The projector's `--do` argument, evaluated before the movie's own code
     // gets a turn. See `DirPlayer::startup_do`.
     run_startup_do().await;
@@ -7621,6 +8049,17 @@ pub async fn run_movie_init_owned_at(
         return Err(cancelled_scope_error());
     }
     crate::player::gif::install_pending();
+    let flash_actions = session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            context
+                .player
+                .pre_dispatch_flash_members()
+                .map(|_| context.player.take_flash_host_actions())
+        })
+        .ok_or_else(cancelled_scope_error)??;
+    let flash_actions = bind_flash_host_actions(flash_actions, session.clone(), player_id);
+    emit_flash_host_actions(flash_actions)?;
     run_startup_do_owned(session.clone(), player_id, owner.clone(), false).await?;
     // prepareMovie runs against the old score state. Mount callers set
     // pending_movie_init only after the new cast is installed, so this event
@@ -11242,9 +11681,12 @@ pub async fn run_frame_loop() {
 
         // Pre-dispatch Flash members for sprites on the current frame so they start
         // loading before Lingo scripts try to access them.
-        reserve_player_mut(|player| {
-            player.pre_dispatch_flash_members();
+        let flash_actions = reserve_player_mut(|player| {
+            player.pre_dispatch_flash_members().map(|_| player.take_flash_host_actions())
         });
+        if let Err(error) = flash_actions.and_then(emit_flash_host_actions) {
+            warn!("Flash host preparation failed: {}", error.message);
+        }
 
         // Wait for pending Flash/Ruffle instances to finish loading BEFORE running scripts.
         if is_flash_loading().unwrap_or(false) {

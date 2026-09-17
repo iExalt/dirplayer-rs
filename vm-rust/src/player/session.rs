@@ -2297,6 +2297,9 @@ impl RuntimeSession {
         if !self.add_player(child_id, command_tx.clone()) {
             return Err(ScriptError::new("nested player id collision".into()));
         }
+        self.with_player(child_id, |context| {
+            context.player.flash_host_is_nested = true;
+        });
         let child_owner = self
             .players
             .players

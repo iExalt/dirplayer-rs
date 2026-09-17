@@ -771,10 +771,7 @@ function parseSwfStageSize(data: Uint8Array): { w: number; h: number } | null {
  * stale small capture. Never shrinks below the SWF's native size (detail floor)
  * and no-ops for tiny changes / off-screen 3D-texture instances.
  */
-function setFlashSize(spriteNum: number, w: number, h: number): void {
-  if (spriteNum < 0) return; // off-screen 3D texture: fixed size
-  const inst = instances.get(instanceKey(spriteNum));
-  if (!inst) return;
+function resizeFlashInstance(inst: FlashInstance, w: number, h: number): void {
   let tw = Math.max(1, Math.round(w));
   let th = Math.max(1, Math.round(h));
   if (inst.nativeW && inst.nativeH) {
@@ -796,6 +793,12 @@ function setFlashSize(spriteNum: number, w: number, h: number): void {
   }
 }
 
+function setFlashSize(spriteNum: number, w: number, h: number): void {
+  if (spriteNum < 0) return; // off-screen 3D texture: fixed size
+  const inst = instances.get(instanceKey(spriteNum));
+  if (inst) resizeFlashInstance(inst, w, h);
+}
+
 /**
  * Create a Ruffle player instance for a specific Flash sprite.
  * Each sprite gets its own player so multiple sprites that share a single
@@ -811,17 +814,32 @@ export async function createFlashInstanceForOwner(
   height: number,
   pausedAtStart: boolean = false,
   assertedFrame: number = -1,
+  preparedGeneration?: number,
 ): Promise<void> {
   const ownerKey = host.ownerKey;
   const browserHandle = host.capability;
   if (host.disposed) throw new Error(`Flash owner ${ownerKey} is disposed`);
   const key = `${ownerKey}:${spriteNum}`;
 
+  // Rust may reserve the prepared generation before this callback. Validate
+  // that authoritative capability before touching the prior JS instance or
+  // its pending work; a stale callback must never destroy a replacement.
+  if (preparedGeneration !== undefined) {
+    if (!validFlashGeneration(preparedGeneration) ||
+        !host.isAuthoritativeGenerationCurrent(spriteNum, preparedGeneration)) {
+      throw new Error(`Stale prepared Flash generation for ${key}`);
+    }
+  }
+
   // A disabled replacement still retires any older pending creation. Do this
   // before the early return so a late load cannot publish into a disabled
   // sprite slot.
   if (isFlashDisabled()) {
-    destroyFlashInstance(host, spriteNum);
+    if (preparedGeneration !== undefined) {
+      host.invalidateAuthoritativeGeneration(spriteNum, preparedGeneration);
+    } else {
+      destroyFlashInstance(host, spriteNum);
+    }
     console.log(
       `[Flash] disableFlash is set; skipping Ruffle instance for ${key} ` +
       `(Lingo Flash calls will safely no-op).`
@@ -829,11 +847,43 @@ export async function createFlashInstanceForOwner(
     return;
   }
 
-  // Destroy existing instance for this sprite if any.
-  destroyFlashInstance(host, spriteNum);
+  // A duplicate callback for the already-published prepared generation is
+  // idempotent. In particular, do not destroy the live instance and invalidate
+  // its reservation before the duplicate can return.
+  const existing = host.instances.get(key);
+  if (preparedGeneration !== undefined &&
+      existing?.instanceGeneration === preparedGeneration) {
+    return;
+  }
+
+  // Destroy only an older published instance. If a prepared callback arrives
+  // during the registration gap, there may be no JS instance yet; retire only
+  // the older mirrored reservation and leave the prepared Rust generation
+  // authoritative until it is adopted below.
+  if (existing) {
+    destroyFlashInstance(host, spriteNum);
+  } else if (preparedGeneration !== undefined) {
+    const mirroredGeneration = host.instanceGenerations.get(spriteNum);
+    if (mirroredGeneration !== undefined && mirroredGeneration !== preparedGeneration) {
+      host.invalidateAuthoritativeGeneration(spriteNum, mirroredGeneration);
+    }
+  } else {
+    destroyFlashInstance(host, spriteNum);
+  }
   // Reserve before the first await. This also supersedes a prior creation
   // that has not published an instance yet.
-  const instanceGeneration = host.reserveInstanceGeneration(spriteNum);
+  const instanceGeneration = preparedGeneration === undefined
+    ? host.reserveInstanceGeneration(spriteNum)
+    : (() => {
+        if (!validFlashGeneration(preparedGeneration)) {
+          throw new Error(`Invalid prepared Flash generation for ${key}`);
+        }
+        if (!host.isAuthoritativeGenerationCurrent(spriteNum, preparedGeneration)) {
+          throw new Error(`Stale prepared Flash generation for ${key}`);
+        }
+        host.instanceGenerations.set(spriteNum, preparedGeneration);
+        return preparedGeneration;
+      })();
   const isCurrentGeneration = () =>
     host.isCurrentInstanceGeneration(spriteNum, instanceGeneration) &&
     host.capability === browserHandle;
@@ -1311,6 +1361,38 @@ export function destroyFlashInstance(host: FlashOwnerHost, spriteNum: number): v
   syncActiveFlashCount();
 }
 
+/** Retire only the captured generation. A newer same-sprite reservation is
+ * intentionally left untouched when an older detached unload arrives. */
+export function destroyFlashInstanceAtGeneration(
+  host: FlashOwnerHost,
+  spriteNum: number,
+  generation: number,
+): void {
+  if (!validFlashGeneration(generation) || host.disposed) return;
+  const key = `${host.ownerKey}:${spriteNum}`;
+  for (const entry of host.pendingQueue.clearGeneration(host.ownerKey, spriteNum, generation)) {
+    if (entry.scriptedAccessTicket !== undefined) {
+      host.completeScriptedAccess(spriteNum, entry.scriptedAccessTicket);
+    }
+  }
+  const instance = instances.get(key);
+  if (instance?.host === host && instance.instanceGeneration === generation) {
+    if (instance.animFrameId !== null) cancelAnimationFrame(instance.animFrameId);
+    try {
+      instance.rufflePlayer.remove();
+      if (instance.bridgeId) void bridgeDestroyPlayer(instance.bridgeId);
+    } catch { /* generation retirement is best effort */ }
+    instance.container.remove();
+    if (instances.get(key) === instance) instances.delete(key);
+    if (host.instances.get(key) === instance) host.instances.delete(key);
+    if (spriteIndex.get(spriteNum) === key && !instances.has(key)) spriteIndex.delete(spriteNum);
+    host.invalidateAuthoritativeGeneration(spriteNum, generation);
+    syncActiveFlashCount();
+    return;
+  }
+  host.invalidateAuthoritativeGeneration(spriteNum, generation);
+}
+
 export function destroyAllFlashInstances(host: FlashOwnerHost): void {
   const ownerPrefix = `${host.ownerKey}:`;
   host.pendingQueue.clearOwner(host.ownerKey);
@@ -1451,6 +1533,8 @@ export type PendingOp =
 export interface OwnedPendingOp {
   op: PendingOp;
   scriptedAccessTicket?: number;
+  generation?: number;
+  retired?: boolean;
 }
 /**
  * Queues Flash operations until the corresponding Ruffle instance is ready.
@@ -1471,10 +1555,10 @@ export class FlashPendingQueue {
     this.legacy.set(spriteNum, list);
   }
 
-  enqueueOwned(ownerKey: string, spriteNum: number, op: PendingOp, scriptedAccessTicket?: number): void {
+  enqueueOwned(ownerKey: string, spriteNum: number, op: PendingOp, scriptedAccessTicket?: number, generation?: number): void {
     const key = `${ownerKey}:${spriteNum}`;
     const list = this.owned.get(key) ?? [];
-    list.push({ op, scriptedAccessTicket });
+    list.push({ op, scriptedAccessTicket, generation });
     this.owned.set(key, list);
   }
 
@@ -1488,16 +1572,34 @@ export class FlashPendingQueue {
     instanceKey: string | undefined,
     ready: boolean,
     legacyTargetMatches: boolean,
+    generation?: number,
   ): OwnedPendingOp[] {
     if (!ready) return [];
     const ownedOps = instanceKey ? this.owned.get(instanceKey) : undefined;
+    const matchingOwnedOps: OwnedPendingOp[] = [];
+    const futureOwnedOps: OwnedPendingOp[] = [];
+    const retiredOwnedOps: OwnedPendingOp[] = [];
+    for (const entry of ownedOps ?? []) {
+      if (entry.generation === undefined || entry.generation === generation) {
+        matchingOwnedOps.push(entry);
+      } else if (generation !== undefined && entry.generation > generation) {
+        futureOwnedOps.push(entry);
+      } else {
+        retiredOwnedOps.push({ ...entry, retired: true });
+      }
+      // An entry for an older generation is retired at this readiness fence.
+    }
     const legacyOps = legacyTargetMatches ? this.legacy.get(spriteNum) : undefined;
     const drained: OwnedPendingOp[] = [
       ...(legacyOps ?? []).map(op => ({ op })),
-      ...(ownedOps ?? []),
+      ...retiredOwnedOps,
+      ...matchingOwnedOps,
     ];
     if (legacyTargetMatches) this.legacy.delete(spriteNum);
-    if (instanceKey) this.owned.delete(instanceKey);
+    if (instanceKey) {
+      if (futureOwnedOps.length === 0) this.owned.delete(instanceKey);
+      else this.owned.set(instanceKey, futureOwnedOps);
+    }
     return drained;
   }
 
@@ -1506,6 +1608,19 @@ export class FlashPendingQueue {
     Array.from(this.owned.keys()).forEach((key) => {
       if (key.startsWith(prefix)) this.owned.delete(key);
     });
+  }
+
+  clearGeneration(ownerKey: string, spriteNum: number, generation: number): OwnedPendingOp[] {
+    const key = `${ownerKey}:${spriteNum}`;
+    const list = this.owned.get(key);
+    if (!list) return [];
+    // Untagged legacy entries belong to the retiring pre-generation queue;
+    // entries explicitly tagged for a newer generation remain available.
+    const retired = list.filter((entry) => entry.generation === undefined || entry.generation === generation);
+    const retained = list.filter((entry) => entry.generation !== undefined && entry.generation !== generation);
+    if (retained.length === 0) this.owned.delete(key);
+    else this.owned.set(key, retained);
+    return retired;
   }
 
   clear(): void {
@@ -1554,6 +1669,18 @@ export class FlashOwnerHost {
     }
   }
 
+  /** Check the authoritative Rust capability without requiring this host's
+   * mirror to contain the reservation yet. Rust reserves prepared generations
+   * before the callback crosses into JavaScript. */
+  isAuthoritativeGenerationCurrent(spriteNum: number, generation: number): boolean {
+    if (this.disposed || !validFlashSpriteNumber(spriteNum) || !validFlashGeneration(generation)) return false;
+    try {
+      return this.capability.is_flash_instance_generation_current(spriteNum, generation);
+    } catch {
+      return false;
+    }
+  }
+
   invalidateInstanceGeneration(spriteNum: number, generation: number): void {
     if (this.instanceGenerations.get(spriteNum) !== generation) return;
     try {
@@ -1562,6 +1689,19 @@ export class FlashOwnerHost {
       this.capability.invalidate_flash_instance_generation(spriteNum, generation);
     } catch {
       // A stale capability is already unable to affect the replacement.
+    }
+    if (this.instanceGenerations.get(spriteNum) === generation) {
+      this.instanceGenerations.delete(spriteNum);
+    }
+  }
+
+  /** Retire a Rust reservation even when the JS mirror never published it. */
+  invalidateAuthoritativeGeneration(spriteNum: number, generation: number): void {
+    if (this.disposed || !validFlashSpriteNumber(spriteNum) || !validFlashGeneration(generation)) return;
+    try {
+      this.capability.invalidate_flash_instance_generation(spriteNum, generation);
+    } catch {
+      // A stale owner or already-retired generation is safely inert.
     }
     if (this.instanceGenerations.get(spriteNum) === generation) {
       this.instanceGenerations.delete(spriteNum);
@@ -1863,7 +2003,13 @@ function queueOp(spriteNum: number, op: PendingOp): void {
 
 function queueOwnedOp(host: FlashOwnerHost, spriteNum: number, op: PendingOp, scriptedAccessTicket?: number): void {
   if (host.disposed) return;
-  host.pendingQueue.enqueueOwned(host.ownerKey, spriteNum, op, scriptedAccessTicket);
+  host.pendingQueue.enqueueOwned(
+    host.ownerKey,
+    spriteNum,
+    op,
+    scriptedAccessTicket,
+    host.instanceGenerations.get(spriteNum),
+  );
 }
 
 function flushPendingGoto(host: FlashOwnerHost, spriteNum: number, instanceKeyOverride?: string): void {
@@ -1875,9 +2021,15 @@ function flushPendingGoto(host: FlashOwnerHost, spriteNum: number, instanceKeyOv
   if (!instance || !instance.ready) return;
   const isUniqueLegacyTarget = !ownedKey || instanceKey(spriteNum) === ownedKey;
   const ops = (ownedKey ? host.pendingQueue : pendingQueue)
-    .drainReady(spriteNum, ownedKey, true, isUniqueLegacyTarget);
+    .drainReady(spriteNum, ownedKey, true, isUniqueLegacyTarget, instance.instanceGeneration);
   if (ops.length === 0) return;
   for (const entry of ops) {
+    if (entry.retired) {
+      if (entry.scriptedAccessTicket !== undefined) {
+        host.completeScriptedAccess(spriteNum, entry.scriptedAccessTicket);
+      }
+      continue;
+    }
     const op = entry.op;
     try {
       switch (op.kind) {
@@ -2421,6 +2573,23 @@ function invokeFlashOwnedAtGeneration(
   } catch (error) {
     return hostError(error);
   }
+}
+
+/** Resize through the captured owner/generation route. The generic numeric
+ * setter remains available for legacy renderer shims; Rust's owner-qualified
+ * action always uses this fence. */
+export function resizeFlashInstanceForOwnerAtGeneration(
+  host: FlashOwnerHost,
+  spriteNum: number,
+  generation: number,
+  width: number,
+  height: number,
+): boolean {
+  const result = invokeFlashOwnedAtGeneration(host, spriteNum, generation, instance => {
+    resizeFlashInstance(instance, width, height);
+    return true;
+  });
+  return result.ok;
 }
 
 /** Read readiness through the same owner, instance, generation, and registry

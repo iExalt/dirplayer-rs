@@ -1,7 +1,8 @@
 # JS object ownership and value evaluation checkpoint — 2026-09-17
 
 Accepted bounded component of Stage 2.8, integrated. The
-complete Stage 2 and Stage 2.8 consumer audit remain open.
+complete Stage 2 remains open. The subsequent [consumer audit](consumer-audit.md)
+accepts the JS-specific ownership requirements.
 
 Runtime and object registries belong to the session. Retained JS objects carry
 an opaque owner capability; colliding local IDs, stale generations and foreign
@@ -43,9 +44,9 @@ the detected evaluator requeue hang, and failing fixtures were repaired; they
 are not acceptance evidence. The regression that exposed the hang now completes
 through the real owner scheduler.
 
-Remaining work includes the full direct-consumer/static-helper audit and the
-plan placement of session-level seed selection. General caller-dropped evaluator
-future cleanup and malformed public completion-route handling remain Stage 2.3
-audit items. Arbitrary cyclic/alias-preserving cross-language graph copying is
+The subsequent [consumer audit](consumer-audit.md) records supported routes,
+unchanged unsupported receiver forms and later-stage service seed policy. General caller-dropped evaluator
+future cleanup and unused crate-private completion-adapter retirement remain
+Stage 2.3 audit items; see the consumer audit for current call-site evidence. Arbitrary cyclic/alias-preserving cross-language graph copying is
 not implemented; current cycles produce controlled errors. No whole-Stage-2 or
 working-native-player claim is made by this checkpoint.

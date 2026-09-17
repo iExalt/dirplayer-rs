@@ -18,6 +18,7 @@ use fxhash::FxHashMap;
 
 use crate::player::{
     cast_lib::CastMemberRef,
+    cast_member::{CastMember, CastMemberType, FlashMember},
     commands::PlayerVMCommand,
     geometry::IntRect,
     score::SpriteChannel,
@@ -961,6 +962,102 @@ impl BrowserTestPlayer {
             .ok_or_else(|| "fresh owner disappeared after FlashOwnerHost lifecycle".to_owned())?;
         if final_pending {
             return Err("production FlashOwnerHost did not clear scripted readiness".to_owned());
+        }
+        Ok(())
+    }
+
+    /// Exercise the production root startup path with a real embedded SWF.
+    /// The Flash member is installed before startup, while no host generation
+    /// is manually reserved; the first BindGet must therefore use the
+    /// prepared load generation and later access must use that same owner
+    /// route.
+    pub async fn test_flash_initial_access_before_reservation(&self) -> Result<(), String> {
+        let swf = include_bytes!("../../tests/fixtures/flash_initial_access.swf").to_vec();
+        self.harness_runtime().with_context(|context| {
+            let mut cast = CastLib::test_external(1, 0);
+            cast.insert_member(
+                1,
+                CastMember::new(
+                    1,
+                    CastMemberType::Flash(FlashMember {
+                        data: swf.clone(),
+                        reg_point: (0, 0),
+                        flash_info: None,
+                    }),
+                ),
+                context.symbols,
+            );
+            context.player.movie.cast_manager.casts.push(cast);
+            let mut channel = SpriteChannel::new(1);
+            channel.sprite.member = Some(CastMemberRef { cast_lib: 1, cast_member: 1 });
+            channel.sprite.width = 1;
+            channel.sprite.height = 1;
+            context.player.movie.score.channels = vec![SpriteChannel::new(0), channel];
+            context.player.movie.score.invalidate_render_channel_cache();
+            context.player.startup_do = Some(
+                "put getVariable(sprite(1), \"_root.fixture\", 1) into flashInitialValue"
+                    .to_owned(),
+            );
+        });
+
+        crate::player::run_movie_init_owned(
+            self.harness_runtime().session(),
+            self.harness_runtime().player_id(),
+            self.harness_runtime().owner().clone(),
+        )
+        .await
+        .map_err(|error| format!("real Flash startup failed: {error}"))?;
+        let initial = self
+            .eval_datum("flashInitialValue")
+            .await
+            .map_err(|error| format!("initial Flash value read failed: {error:?}"))?;
+        if !matches!(initial, crate::director::static_datum::StaticDatum::Int(7)) {
+            return Err(format!("unexpected initial Flash value: {initial:?}"));
+        }
+
+        self.eval("put getVariable(sprite(1), \"_root.fixture\", 1) into flashLaterValue")
+            .await
+            .map_err(|error| format!("later Flash value read failed: {error:?}"))?;
+        let later = self
+            .eval_datum("flashLaterValue")
+            .await
+            .map_err(|error| format!("later Flash value lookup failed: {error:?}"))?;
+        if !matches!(later, crate::director::static_datum::StaticDatum::Int(7)) {
+            return Err(format!("unexpected later Flash value: {later:?}"));
+        }
+
+        // Replace the member after startup. This exercises the lazy first
+        // BindGet preparation path and the captured cast-pair/generation fence
+        // instead of only rereading the original instance.
+        self.harness_runtime().with_context(|context| {
+            if let Some(cast) = context.player.movie.cast_manager.casts.first_mut() {
+                cast.insert_member(
+                    2,
+                    CastMember::new(
+                        2,
+                        CastMemberType::Flash(FlashMember {
+                            data: swf.clone(),
+                            reg_point: (0, 0),
+                            flash_info: None,
+                        }),
+                    ),
+                    context.symbols,
+                );
+            }
+            if let Some(channel) = context.player.movie.score.channels.get_mut(1) {
+                channel.sprite.member = Some(CastMemberRef { cast_lib: 1, cast_member: 2 });
+            }
+            context.player.movie.score.invalidate_render_channel_cache();
+        });
+        self.eval("put getVariable(sprite(1), \"_root.fixture\", 1) into flashReplacementValue")
+            .await
+            .map_err(|error| format!("replacement Flash value read failed: {error:?}"))?;
+        let replacement = self
+            .eval_datum("flashReplacementValue")
+            .await
+            .map_err(|error| format!("replacement Flash value lookup failed: {error:?}"))?;
+        if !matches!(replacement, crate::director::static_datum::StaticDatum::Int(7)) {
+            return Err(format!("unexpected replacement Flash value: {replacement:?}"));
         }
         Ok(())
     }

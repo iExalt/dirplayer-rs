@@ -1868,7 +1868,7 @@ impl WebGL2Renderer {
             // playhead moments — they raced over flash_sprite_loaded and the
             // Ruffle instance was create/destroy-thrashed, so its capture loop
             // died before pushing a frame (sub Flash never showed).
-            let is_host = unsafe { crate::player::ACTIVE_PLAYER_ID } == 0;
+            let is_host = !player.flash_host_is_nested;
             if is_host && !player.flash_sprite_loaded.contains(&dispatch_key) {
                 if let Some(member) = player.movie.cast_manager.find_member_by_ref(&member_ref) {
                     if let CastMemberType::Flash(flash_member) = &member.member_type {
@@ -1899,18 +1899,17 @@ impl WebGL2Renderer {
                                 .get_sprite(channel_num)
                                 .and_then(|s| s.flash_asserted_frame)
                                 .unwrap_or(-1);
-                            JsApi::dispatch_flash_member_loaded(
+                            player.queue_flash_member_load(
                                 channel_num as i32,
+                                channel_num,
                                 member_ref.cast_lib,
                                 member_ref.cast_member,
-                                &data,
+                                data,
                                 w,
                                 h,
                                 paused_at_start,
                                 asserted_frame,
-                                &crate::player::owner_key_string(&player.owner),
-                            );
-                            player.flash_sprite_loaded.insert(dispatch_key);
+                            )?;
                         }
                     }
                 }

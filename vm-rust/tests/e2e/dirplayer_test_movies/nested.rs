@@ -15,3 +15,7 @@ browser_e2e_test!(test_browser_handle_flash_scripted_access_owner_capabilities, 
 browser_e2e_test!(test_flash_owned_evaluator_binding, |player| async move {
     player.test_flash_owned_evaluator_binding().await
 });
+
+browser_e2e_test!(test_flash_initial_access_before_reservation, |player| async move {
+    player.test_flash_initial_access_before_reservation().await
+});

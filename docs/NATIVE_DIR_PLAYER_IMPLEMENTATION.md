@@ -111,8 +111,9 @@ get/set/call dispatch, reentry, and nested value continuations pass **536 native
 tests**, WASM test compilation, **34 frontend tests**, and **13 existing plus one
 new browser fixture**. The final test-only changes preserve the recorded browser
 production source. All 374 final runtime/e2e source hashes were rechecked.
-The complete Stage 2.8 consumer audit remains open, as do broader evaluator
-cancellation and completion-route audit requirements.
+The [Stage 2.8 consumer audit](checkpoints/js-object-ownership-20260917/consumer-audit.md)
+accepts the JS-specific ownership requirements. Broader evaluator cancellation,
+completion-route handling and the combined Stage 2 cutover remain open.
 
 ## Current remaining sequence
 
@@ -133,8 +134,10 @@ verification and integration separately; its complete exit gate controls accepta
 - [ ] **2.2–2.5:** remove legacy execution/browser routes, audit every async
   producer and extension completion, and verify dispatch precedence, cancellation,
   reentry and teardown through production entrypoints.
-- [ ] **2.6–2.8:** close initial Flash access before reservation, actual Ruffle
-  callback-origin routing, and the remaining JS-Lingo consumer/seed-policy audit.
+- [ ] **2.6–2.8:** close initial Flash access before reservation, child Flash host
+  registration/retirement and local-channel routing, actual Ruffle
+  callback-origin routing. JS-Lingo consumer ownership is accepted; service seed
+  installation belongs to the later session/native-service stages.
 - [x] **2.8 RNG component:** runtime-owned `Math.random` state with explicit
   seeding and interleaving/replay tests.
 - [x] **2.8 JS object/value component:** owner capabilities, generic pending
@@ -1828,3 +1831,17 @@ Current review dependencies after live245: built-in Call/SendSprite/AllSprites b
 - [x] Final browser gate `browser-isolation-runtime-20260917T021843Z`: exit0/source unchanged;13 actual Rust browser fixtures passed, including `test_flash_owned_evaluator_binding` (BindGet, captured-generation Get, replacement rejection, fresh replacement bind/read).
 - [x] Current Flash checkpoint verified in existing combined review stage: native480/0, browser13/0, frontend34/0, native/WASM compiler0, TypeScript0. Hashes and gate references: `integration-evidence/flash-verified-pause-20260917.json` in review stage.
 - [ ] PAUSED at user request after current Flash verification. Live integration remains pending; no JS-Lingo registry migration started. Full native-player plan remains incomplete. Resume only when requested.
+
+### Nested Flash discovery
+
+The [nested Flash host lifecycle audit](checkpoints/flash-nested-host-audit-20260917.md)
+identifies missing child browser-host registration and local-channel versus
+synthetic-key routing. Root initial-access acceptance cannot close this child
+lifecycle requirement; it remains part of the Stage 2 completion audit.
+
+### Initial-access publication checkpoint
+
+The [current checkpoint](checkpoints/flash-initial-access-20260917.md) records
+implemented Flash preparation and explicit value transfer. Native compilation
+passes, but the final native suite has one failure (543 pass), and fresh
+WASM/browser acceptance remains outstanding. This is not Stage 2.6 completion.

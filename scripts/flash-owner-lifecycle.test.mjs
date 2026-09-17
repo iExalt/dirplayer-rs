@@ -1172,6 +1172,99 @@ test('production registration rejects creation after disposal and clears pending
   assert.equal(state.reentryDisposed ?? true, true);
 });
 
+test('prepared generation creation is idempotent and exact retirement preserves g2', async () => {
+  const owner = makeCapability('owner-prepared-idempotence:g1', {});
+  const player = installReadyOwnerInstance(owner.host, 7, { gets: [], sets: [], calls: [], gotos: [], hitTests: [] });
+  const g1 = owner.host.instanceGenerations.get(7);
+  await manager.createFlashInstanceForOwner(owner.host, 7, 2, 3, swfFixture(), 32, 24, false, -1, g1);
+  assert.equal(owner.host.instances.get('owner-prepared-idempotence:g1:7').rufflePlayer, player);
+
+  const g2 = owner.host.reserveInstanceGeneration(7);
+  manager.destroyFlashInstanceAtGeneration(owner.host, 7, g1);
+  assert.equal(owner.host.instances.has('owner-prepared-idempotence:g1:7'), false);
+  assert.equal(owner.host.isCurrentInstanceGeneration(7, g2), true);
+  owner.registration.dispose();
+});
+
+test('generation-filtered pending operations settle retired scripted tickets', () => {
+  const state = {};
+  const owner = makeCapability('owner-pending-generations:g1', state);
+  const g1 = owner.host.reserveInstanceGeneration(7);
+  const ticket = owner.host.beginScriptedAccess(7);
+  owner.host.pendingQueue.enqueueOwned(owner.host.ownerKey, 7, { kind: 'stop' }, ticket, g1);
+  const g2 = owner.host.reserveInstanceGeneration(7);
+  owner.host.pendingQueue.enqueueOwned(owner.host.ownerKey, 7, { kind: 'play' }, undefined, g2);
+
+  manager.destroyFlashInstanceAtGeneration(owner.host, 7, g1);
+  assert.equal(state.scriptedAccessPending, false);
+  assert.deepEqual(
+    owner.host.pendingQueue.drainReady(7, `${owner.host.ownerKey}:7`, true, false, g2).map((entry) => entry.op),
+    [{ kind: 'play' }],
+  );
+  owner.registration.dispose();
+});
+
+test('prepared actions retain load resize unload order through registration delay', () => {
+  const ownerKey = 'owner-prepared-order:g1';
+  const seen = [];
+  const swf = swfFixture();
+  vmApi.onFlashMemberLoadedPrepared(7, 1, 1, swf, 2, 2, false, -1, ownerKey, 1);
+  vmApi.onFlashMemberResized(7, 1, 4, 5, ownerKey);
+  vmApi.onFlashMemberUnloadedAtGeneration(7, 1, ownerKey);
+  const dispose = vmApi.registerVmCallbacks({
+    onFlashMemberLoaded: (...args) => seen.push(['load', args[9]]),
+    onFlashMemberResized: (...args) => seen.push(['resize', args[1]]),
+    onFlashMemberUnloadedAtGeneration: (...args) => seen.push(['unload', args[1]]),
+  }, ownerKey);
+  assert.deepEqual(seen, [['load', 1], ['resize', 1], ['unload', 1]]);
+  dispose();
+});
+
+test('prepared action tail survives callback rebind, while reset and overflow retire it', () => {
+  const rebindKey = 'owner-prepared-rebind:g1';
+  const swf = swfFixture();
+  vmApi.onFlashMemberLoadedPrepared(7, 1, 1, swf, 2, 2, false, -1, rebindKey, 1);
+  vmApi.onFlashMemberResized(7, 1, 4, 5, rebindKey);
+  vmApi.onFlashMemberUnloadedAtGeneration(7, 1, rebindKey);
+  const seen = [];
+  let reboundDispose;
+  const firstDispose = vmApi.registerVmCallbacks({
+    onFlashMemberLoaded: () => {
+      seen.push('load');
+      reboundDispose = vmApi.registerVmCallbacks({
+        onFlashMemberResized: () => seen.push('resize'),
+        onFlashMemberUnloadedAtGeneration: () => seen.push('unload'),
+      }, rebindKey);
+    },
+  }, rebindKey);
+  firstDispose();
+  reboundDispose();
+  const finalDispose = vmApi.registerVmCallbacks({
+    onFlashMemberResized: () => seen.push('resize-final'),
+    onFlashMemberUnloadedAtGeneration: () => seen.push('unload-final'),
+  }, rebindKey);
+  assert.deepEqual(seen, ['load', 'resize-final', 'unload-final']);
+  finalDispose();
+
+  const resetKey = 'owner-prepared-reset:g1';
+  vmApi.onFlashMemberLoadedPrepared(7, 1, 1, swf, 2, 2, false, -1, resetKey, 1);
+  vmApi.onFlashResetAll(resetKey);
+  vmApi.onFlashMemberResized(7, 1, 4, 5, resetKey);
+  const resetSeen = [];
+  const resetDispose = vmApi.registerVmCallbacks({ onFlashMemberLoaded: () => resetSeen.push('late') }, resetKey);
+  assert.deepEqual(resetSeen, []);
+  resetDispose();
+
+  const overflowKey = 'owner-prepared-overflow:g1';
+  for (let index = 0; index < 129; index += 1) {
+    vmApi.onFlashMemberLoadedPrepared(7, 1, 1, swf, 2, 2, false, -1, overflowKey, 1);
+  }
+  const overflowSeen = [];
+  const overflowDispose = vmApi.registerVmCallbacks({ onFlashMemberLoaded: () => overflowSeen.push('unexpected') }, overflowKey);
+  assert.deepEqual(overflowSeen, []);
+  overflowDispose();
+});
+
 test('instance generation exhaustion fails without wrapping to a live alias', () => {
   const state = {};
   const owner = makeCapability('owner-generation-exhausted:g1', state);

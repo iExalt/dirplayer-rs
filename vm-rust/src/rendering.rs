@@ -3202,7 +3202,7 @@ pub fn render_score_to_bitmap_with_offset(
                     let dispatch_key = (channel_num as i16, member_ref.cast_lib, member_ref.cast_member);
                     // Host-only: a nested sub-player's Flash lifecycle is owned by
                     // its own pre_dispatch_flash_members (see webgl2 render_sprite).
-                    let is_host = unsafe { crate::player::ACTIVE_PLAYER_ID } == 0;
+                    let is_host = !player.flash_host_is_nested;
                     if is_host && !player.flash_sprite_loaded.contains(&dispatch_key) {
                         let sprite = get_score_sprite(&player.movie, score_source, channel_num).unwrap();
                         let w = sprite.width.max(1) as u32;
@@ -3217,18 +3217,19 @@ pub fn render_score_to_bitmap_with_offset(
                             .map(|fi| fi.paused_at_start)
                             .unwrap_or(false);
                         let asserted_frame = sprite.flash_asserted_frame.unwrap_or(-1);
-                        JsApi::dispatch_flash_member_loaded(
+                        if let Err(error) = player.queue_flash_member_load(
                             channel_num as i32,
+                            channel_num as i16,
                             member_ref.cast_lib,
                             member_ref.cast_member,
-                            &flash_member.data,
+                            flash_member.data.clone(),
                             w,
                             h,
                             paused_at_start,
                             asserted_frame,
-                            &crate::player::owner_key_string(&player.owner),
-                        );
-                        player.flash_sprite_loaded.insert(dispatch_key);
+                        ) {
+                            log::warn!("Flash host preparation failed: {}", error.message);
+                        }
                     }
                 }
             }
@@ -3848,7 +3849,7 @@ pub(crate) fn draw_frame_owned(
     let mut runtime = session
         .try_borrow_mut()
         .map_err(|_| owned_error("runtime session is already borrowed"))?;
-    let result = runtime
+    let (result, flash_actions) = runtime
         .with_player(player_id, |context| {
             if !context.player.owner.same_identity(owner) {
                 return Err(owned_error("renderer owner is stale"));
@@ -3857,7 +3858,7 @@ pub(crate) fn draw_frame_owned(
                 context.player.stage_dirty = true;
             }
             if !context.player.stage_dirty {
-                return Ok(false);
+                return Ok((false, context.player.take_flash_host_actions()));
             }
             let tempo = context.player.current_frame_tempo as f64;
             let interval = if tempo > 0.0 {
@@ -3866,20 +3867,24 @@ pub(crate) fn draw_frame_owned(
                 1000
             };
             if now - state.last_draw_ms.get() < interval {
-                return Ok(false);
+                return Ok((false, context.player.take_flash_host_actions()));
             }
             let backend = renderer
                 .as_mut()
                 .ok_or_else(|| owned_error("renderer has not been created"))?;
             backend.draw_frame(context.player, context.symbols)?;
             context.player.stage_dirty = false;
-            Ok(true)
+            Ok((true, context.player.take_flash_host_actions()))
         })
-        .ok_or_else(|| owned_error("owned renderer player is not installed"))?;
-    if result.as_ref().is_ok_and(|drawn| *drawn) {
+        .ok_or_else(|| owned_error("owned renderer player is not installed"))??;
+    drop(runtime);
+    drop(renderer);
+    let flash_actions = crate::player::bind_flash_host_actions(flash_actions, session.clone(), player_id);
+    crate::player::emit_flash_host_actions(flash_actions)?;
+    if result {
         state.last_draw_ms.set(now);
     }
-    result
+    Ok(result)
 }
 
 /// Resolve the weak renderer binding owned by a session player before drawing.
@@ -3916,7 +3921,7 @@ pub(crate) fn draw_frame_at_end_owned(
     let mut runtime = session
         .try_borrow_mut()
         .map_err(|_| owned_error("runtime session is already borrowed"))?;
-    let result = runtime
+    let (result, flash_actions) = runtime
         .with_player(player_id, |context| {
             if !context.player.owner.same_identity(owner) {
                 return Err(owned_error("renderer owner is stale"));
@@ -3929,13 +3934,17 @@ pub(crate) fn draw_frame_at_end_owned(
                 .ok_or_else(|| owned_error("renderer has not been created"))?;
             backend.draw_frame(context.player, context.symbols)?;
             context.player.stage_dirty = false;
-            Ok(true)
+            Ok((true, context.player.take_flash_host_actions()))
         })
-        .ok_or_else(|| owned_error("owned renderer player is not installed"))?;
-    if result.as_ref().is_ok_and(|drawn| *drawn) {
+        .ok_or_else(|| owned_error("owned renderer player is not installed"))??;
+    drop(runtime);
+    drop(renderer);
+    let flash_actions = crate::player::bind_flash_host_actions(flash_actions, session.clone(), player_id);
+    crate::player::emit_flash_host_actions(flash_actions)?;
+    if result {
         state.last_draw_ms.set(now);
     }
-    result
+    Ok(result)
 }
 
 /// Draw the unpaced end-of-frame image for an explicitly captured owner.

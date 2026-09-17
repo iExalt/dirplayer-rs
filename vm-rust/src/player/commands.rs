@@ -2035,6 +2035,72 @@ pub(crate) async fn execute_owned_flash_request(
         {
             return Err(super::cancelled_scope_error());
         }
+        let local_sprite =
+            super::handlers::datum_handlers::flash_object::checked_sprite_number(request.sprite_num)?;
+        let initial_bind = request.expected_generation.is_none()
+            && matches!(
+                &request.operation,
+                super::handlers::datum_handlers::flash_object::FlashOperation::BindGet { .. }
+            );
+        if initial_bind {
+            // A sprite may acquire its Flash member after movie startup (for
+            // example from beginSprite or a score mutation). Prepare the
+            // owner-qualified host action lazily here, still outside the
+            // browser callback and before the first BindGet transport call.
+            let flash_actions = session
+                .borrow_mut()
+                .with_player(player_id, |context| {
+                    if !request.owner.same_identity(&context.player.owner)
+                        || !request.owner.is_arena_live()
+                    {
+                        return Err(super::cancelled_scope_error());
+                    }
+                    context
+                        .player
+                        .pre_dispatch_flash_members()
+                        .map(|_| context.player.take_flash_host_actions())
+                })
+                .ok_or_else(super::cancelled_scope_error)??;
+            let flash_actions = super::bind_flash_host_actions(
+                flash_actions,
+                session.clone(),
+                player_id,
+            );
+            super::emit_flash_host_actions(flash_actions)?;
+        }
+        // Capture and revalidate the exact Director cast pair around every
+        // host operation. A first BindGet may trigger Ruffle creation, during
+        // which a score/member replacement can occur; never adopt that
+        // response for a different member at the same sprite.
+        let binding_valid = session.borrow_mut().with_player(player_id, |context| {
+            if !request.owner.same_identity(&context.player.owner)
+                || !request.owner.is_arena_live()
+            {
+                return false;
+            }
+            let member_matches = context
+                .player
+                .movie
+                .score
+                .get_sprite(local_sprite)
+                .and_then(|sprite| sprite.member.as_ref())
+                .is_some_and(|member| {
+                    member.cast_lib == request.cast_lib && member.cast_member == request.cast_member
+                });
+            member_matches
+                && request.expected_generation.map_or(true, |generation| {
+                    context.player.is_flash_instance_generation_current(
+                        local_sprite,
+                        generation,
+                    )
+                })
+        });
+        if !binding_valid.unwrap_or(false) {
+            return Err(ScriptError::new_code(
+                super::ScriptErrorCode::InvalidReference,
+                "Flash request cast binding is stale or replaced".to_owned(),
+            ));
+        }
         if let Some(generation) = request.expected_generation {
             let current = session.borrow_mut().with_player(player_id, |context| {
                 super::handlers::datum_handlers::flash_object::checked_sprite_number(request.sprite_num)
@@ -2060,6 +2126,23 @@ pub(crate) async fn execute_owned_flash_request(
                 let sprite_num = super::handlers::datum_handlers::flash_object::checked_sprite_number(
                     request.sprite_num,
                 )?;
+                let pair_still_matches = session.borrow_mut().with_player(player_id, |context| {
+                    context
+                        .player
+                        .movie
+                        .score
+                        .get_sprite(sprite_num)
+                        .and_then(|sprite| sprite.member.as_ref())
+                        .is_some_and(|member| {
+                            member.cast_lib == request.cast_lib && member.cast_member == request.cast_member
+                        })
+                });
+                if !pair_still_matches.unwrap_or(false) {
+                    return Err(ScriptError::new_code(
+                        super::ScriptErrorCode::InvalidReference,
+                        "Flash response cast binding was replaced during host work".to_owned(),
+                    ));
+                }
                 let initial_bind = matches!(
                     &request.operation,
                     super::handlers::datum_handlers::flash_object::FlashOperation::BindGet { .. }

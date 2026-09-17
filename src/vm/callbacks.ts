@@ -10,7 +10,7 @@ import {
   getXtraRegistry,
   dispatchVmCallback,
 } from "dirplayer-js-api";
-import { callFunctionForOwner, createFlashInstanceForOwner, destroyFlashInstance, destroyAllFlashInstances, getVariableForOwner, goToFrameAndStopForOwner, goToFrameForOwner, initFlashBridge, isFlashInstanceReadyForOwner, localConnectionSendForOwner, playFlashForOwner, setVariableForOwner } from "../services/flashPlayerManager";
+import { callFunctionForOwner, createFlashInstanceForOwner, destroyFlashInstance, destroyFlashInstanceAtGeneration, destroyAllFlashInstances, getVariableForOwner, goToFrameAndStopForOwner, goToFrameForOwner, initFlashBridge, isFlashInstanceReadyForOwner, localConnectionSendForOwner, playFlashForOwner, resizeFlashInstanceForOwnerAtGeneration, setVariableForOwner } from "../services/flashPlayerManager";
 import store from "../store";
 import { breakpointListChanged, castLibNameChanged, castListChanged, castMemberChanged, castMemberListChanged, channelChanged, channelDisplayNameChanged, channelDisplayNamesChanged, datumSnapshot, debugContentAdded, debugMessageAdded, debugMessagesCleared, frameChanged, globalsChanged, movieLoaded, movieLoadFailed, onScriptError, removeTimeoutHandle, scopeListChanged, scoreChanged, scriptErrorCleared, scriptInstanceSnapshot, setTimeoutHandle } from "../store/vmSlice";
 import type { BrowserPlayerHandle, OnMovieLoadedCallbackData } from 'vm-rust'
@@ -231,16 +231,23 @@ export function initVmCallbacks(browserHandle: BrowserPlayerHandle): VmCallbackR
     onChannelDisplayNamesChanged: (names: Record<number, string>) => {
       store.dispatch(channelDisplayNamesChanged(names));
     },
-    onFlashMemberLoaded: (spriteNum: number, castLib: number, castMember: number, swfData: Uint8Array, width: number, height: number, pausedAtStart: boolean, assertedFrame: number, ownerKey: string) => {
+    onFlashMemberLoaded: (spriteNum: number, castLib: number, castMember: number, swfData: Uint8Array, width: number, height: number, pausedAtStart: boolean, assertedFrame: number, ownerKey: string, preparedGeneration?: number) => {
       // Copy immediately - swfData is a view into WASM memory that may be invalidated
       const swfDataCopy = new Uint8Array(swfData);
       console.log(`Flash member loaded: sprite#${spriteNum} ${castLib}:${castMember} ${width}x${height} (${swfDataCopy.length} bytes, first=[${Array.from(swfDataCopy.slice(0, 4)).join(',')}], pausedAtStart=${pausedAtStart}, assertedFrame=${assertedFrame})`);
       if (ownerKey !== flashHost.ownerKey || flashHost.disposed) return;
-      createFlashInstanceForOwner(flashHost, spriteNum, castLib, castMember, swfDataCopy, width, height, pausedAtStart, assertedFrame)
+      createFlashInstanceForOwner(flashHost, spriteNum, castLib, castMember, swfDataCopy, width, height, pausedAtStart, assertedFrame, preparedGeneration)
         .catch(e => console.error('Failed to create Flash instance:', e));
+    },
+    onFlashMemberResized: (spriteNum: number, generation: number, width: number, height: number, ownerKey: string) => {
+      if (ownerKey !== flashHost.ownerKey || flashHost.disposed) return;
+      resizeFlashInstanceForOwnerAtGeneration(flashHost, spriteNum, generation, width, height);
     },
     onFlashMemberUnloaded: (spriteNum: number, ownerKey: string) => {
       if (ownerKey === flashHost.ownerKey) destroyFlashInstance(flashHost, spriteNum);
+    },
+    onFlashMemberUnloadedAtGeneration: (spriteNum: number, generation: number, ownerKey: string) => {
+      if (ownerKey === flashHost.ownerKey) destroyFlashInstanceAtGeneration(flashHost, spriteNum, generation);
     },
     onFlashResetAll: (ownerKey: string) => {
       // Rust holds the handle mutably while dispatching this callback. Use the

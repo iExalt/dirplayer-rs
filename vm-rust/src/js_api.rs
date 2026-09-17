@@ -318,7 +318,10 @@ extern "C" {
     pub fn onScriptErrorOwned(owner_key: &str, data: js_sys::Object) -> Result<(), JsValue>;
     pub fn onExternalEvent(event: &str);
     pub fn onFlashMemberLoaded(sprite_num: i32, cast_lib: i32, cast_member: i32, swf_data: &[u8], width: u32, height: u32, paused_at_start: bool, asserted_frame: i32, owner_key: &str);
+    pub fn onFlashMemberLoadedPrepared(sprite_num: i32, cast_lib: i32, cast_member: i32, swf_data: &[u8], width: u32, height: u32, paused_at_start: bool, asserted_frame: i32, owner_key: &str, generation: f64);
     pub fn onFlashMemberUnloaded(sprite_num: i32, owner_key: &str);
+    pub fn onFlashMemberUnloadedAtGeneration(sprite_num: i32, generation: f64, owner_key: &str);
+    pub fn onFlashMemberResized(sprite_num: i32, generation: f64, width: u32, height: u32, owner_key: &str);
     pub fn onFlashResetAll(owner_key: &str);
     pub fn onStageSizeChanged(width: u32, height: u32, center: bool);
 }
@@ -361,8 +364,17 @@ impl JsApi {
     pub fn dispatch_flash_member_loaded(sprite_num: i32, cast_lib: i32, cast_member: i32, swf_data: &[u8], width: u32, height: u32, paused_at_start: bool, asserted_frame: i32, owner_key: &str) {
         onFlashMemberLoaded(sprite_num, cast_lib, cast_member, swf_data, width, height, paused_at_start, asserted_frame, owner_key);
     }
+    pub fn dispatch_flash_member_loaded_prepared(sprite_num: i32, cast_lib: i32, cast_member: i32, swf_data: &[u8], width: u32, height: u32, paused_at_start: bool, asserted_frame: i32, owner_key: &str, generation: u64) {
+        onFlashMemberLoadedPrepared(sprite_num, cast_lib, cast_member, swf_data, width, height, paused_at_start, asserted_frame, owner_key, generation as f64);
+    }
     pub fn dispatch_flash_member_unloaded(sprite_num: i32, owner_key: &str) {
         onFlashMemberUnloaded(sprite_num, owner_key);
+    }
+    pub fn dispatch_flash_member_unloaded_at_generation(sprite_num: i32, generation: u64, owner_key: &str) {
+        onFlashMemberUnloadedAtGeneration(sprite_num, generation as f64, owner_key);
+    }
+    pub fn dispatch_flash_member_resized(sprite_num: i32, generation: u64, width: u32, height: u32, owner_key: &str) {
+        onFlashMemberResized(sprite_num, generation as f64, width, height, owner_key);
     }
     /// Tear down every live Flash/Ruffle instance. Called on movie reset so
     /// a previous movie's Ruffle players (their per-frame capture RAF loops
@@ -3923,7 +3935,10 @@ impl JsApi {
     pub fn dispatch_movie_loaded(_: &DirectorFile) {}
     pub fn dispatch_movie_load_failed(_: &str, _: &str) {}
     pub fn dispatch_flash_member_loaded(_: i32, _: i32, _: i32, _: &[u8], _: u32, _: u32, _: bool, _: i32, _: &str) {}
+    pub fn dispatch_flash_member_loaded_prepared(_: i32, _: i32, _: i32, _: &[u8], _: u32, _: u32, _: bool, _: i32, _: &str, _: u64) -> Result<(), ScriptError> { Err(ScriptError::new("Flash host load is unavailable on native".to_owned())) }
     pub fn dispatch_flash_member_unloaded(_: i32, _: &str) {}
+    pub fn dispatch_flash_member_unloaded_at_generation(_: i32, _: u64, _: &str) -> Result<(), ScriptError> { Err(ScriptError::new("Flash host unload is unavailable on native".to_owned())) }
+    pub fn dispatch_flash_member_resized(_: i32, _: u64, _: u32, _: u32, _: &str) -> Result<(), ScriptError> { Err(ScriptError::new("Flash host resize is unavailable on native".to_owned())) }
     pub fn dispatch_flash_reset_all(_: &str) {}
     pub fn dispatch_stage_size_changed(_: u32, _: u32, _: bool) {}
     pub fn dispatch_cast_name_changed(_: u32) {}

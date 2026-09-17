@@ -1,5 +1,46 @@
 let vmCallbacks = undefined;
 const vmCallbacksByOwner = new Map();
+// A prepared load may arrive before its owner callback table is registered.
+// Retain a copied payload until that exact owner becomes available so the
+// initial Flash access cannot be lost during registration.
+const pendingPreparedFlashActions = new Map();
+const cancelledPreparedFlashOwners = new Set();
+const MAX_PENDING_PREPARED_FLASH_ACTIONS = 128;
+
+function enqueuePreparedFlashAction(ownerKey, action) {
+  if (cancelledPreparedFlashOwners.has(ownerKey)) return;
+  const pending = pendingPreparedFlashActions.get(ownerKey) ?? [];
+  if (pending.length >= MAX_PENDING_PREPARED_FLASH_ACTIONS) {
+    // Fail closed on a registration stall rather than retaining an unbounded
+    // WASM payload queue that could later replay stale host effects.
+    pendingPreparedFlashActions.delete(ownerKey);
+    cancelledPreparedFlashOwners.add(ownerKey);
+    console.error(`[Flash] prepared action queue overflow for owner ${ownerKey}`);
+    return;
+  }
+  pending.push(action);
+  pendingPreparedFlashActions.set(ownerKey, pending);
+}
+
+function flushPreparedFlashActions(callbacks, ownerKey) {
+  const pending = pendingPreparedFlashActions.get(ownerKey);
+  if (!pending) return;
+  pendingPreparedFlashActions.delete(ownerKey);
+  for (let index = 0; index < pending.length; index += 1) {
+    if (cancelledPreparedFlashOwners.has(ownerKey) || vmCallbacksByOwner.get(ownerKey) !== callbacks) {
+      if (!cancelledPreparedFlashOwners.has(ownerKey)) {
+        pendingPreparedFlashActions.set(ownerKey, pending.slice(index));
+      }
+      return;
+    }
+    const action = pending[index];
+    switch (action.kind) {
+      case 'load': callbacks.onFlashMemberLoaded?.(...action.args); break;
+      case 'resize': callbacks.onFlashMemberResized?.(...action.args); break;
+      case 'unload': callbacks.onFlashMemberUnloadedAtGeneration?.(...action.args); break;
+    }
+  }
+}
 
 // Owner-qualified Flash calls use the same capability-scoped callback table as
 // the rest of the VM bridge.  These stable page functions deliberately do not
@@ -80,7 +121,10 @@ export function onScriptInstanceSnapshotOwned(ownerKey, instanceId, snapshot) {
 
 export function registerVmCallbacks(callbacks, ownerKey) {
   vmCallbacks = callbacks;
-  if (ownerKey) vmCallbacksByOwner.set(ownerKey, callbacks);
+  if (ownerKey) {
+    vmCallbacksByOwner.set(ownerKey, callbacks);
+    flushPreparedFlashActions(callbacks, ownerKey);
+  }
   // Registration is capability-scoped: a provider may dispose its callbacks
   // without clearing a newer provider's registration.
   return () => {
@@ -292,6 +336,27 @@ export function onFlashMemberLoaded(spriteNum, castLib, castMember, swfData, wid
   }
 }
 
+export function onFlashMemberLoadedPrepared(spriteNum, castLib, castMember, swfData, width, height, pausedAtStart, assertedFrame, ownerKey, generation) {
+  if (!ownerKey) return;
+  const callbacks = vmCallbacksByOwner.get(ownerKey);
+  const args = [spriteNum, castLib, castMember, new Uint8Array(swfData), width, height, pausedAtStart, assertedFrame, ownerKey, generation];
+  if (!callbacks) {
+    enqueuePreparedFlashAction(ownerKey, { kind: 'load', args });
+    return;
+  }
+  callbacks?.onFlashMemberLoaded?.(...args);
+}
+
+export function onFlashMemberResized(spriteNum, generation, width, height, ownerKey) {
+  if (!ownerKey) return;
+  const callbacks = vmCallbacksByOwner.get(ownerKey);
+  if (!callbacks) {
+    enqueuePreparedFlashAction(ownerKey, { kind: 'resize', args: [spriteNum, generation, width, height, ownerKey] });
+    return;
+  }
+  callbacks?.onFlashMemberResized?.(spriteNum, generation, width, height, ownerKey);
+}
+
 export function onFlashMemberUnloaded(spriteNum, ownerKey) {
   const callbacks = ownerKey ? vmCallbacksByOwner.get(ownerKey) : vmCallbacks;
   if (ownerKey && !callbacks) return;
@@ -302,9 +367,27 @@ export function onFlashMemberUnloaded(spriteNum, ownerKey) {
   }
 }
 
+export function onFlashMemberUnloadedAtGeneration(spriteNum, generation, ownerKey) {
+  if (!ownerKey) return;
+  const callbacks = vmCallbacksByOwner.get(ownerKey);
+  if (!callbacks) {
+    enqueuePreparedFlashAction(ownerKey, { kind: 'unload', args: [spriteNum, generation, ownerKey] });
+    return;
+  }
+  callbacks?.onFlashMemberUnloadedAtGeneration?.(spriteNum, generation, ownerKey);
+}
+
 export function onFlashResetAll(ownerKey) {
   const callbacks = ownerKey ? vmCallbacksByOwner.get(ownerKey) : vmCallbacks;
-  if (ownerKey && !callbacks) return;
+  if (ownerKey && !callbacks) {
+    pendingPreparedFlashActions.delete(ownerKey);
+    cancelledPreparedFlashOwners.add(ownerKey);
+    return;
+  }
+  if (ownerKey) {
+    pendingPreparedFlashActions.delete(ownerKey);
+    cancelledPreparedFlashOwners.add(ownerKey);
+  }
   if (callbacks?.onFlashResetAll) {
     callbacks.onFlashResetAll(ownerKey);
   }

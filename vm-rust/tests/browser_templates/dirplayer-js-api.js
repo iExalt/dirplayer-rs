@@ -157,6 +157,19 @@ let _flashManagerPromise = null;
 // Existing owner callback routing is the temporary browser-harness boundary.
 // The FlashOwnerHost itself remains captured by each registration closure.
 const _flashOwnerCallbacks = new Map();
+const _pendingFlashOwnerActions = new Map();
+
+function dispatchFlashOwnerAction(ownerKey, method, ...args) {
+  if (typeof ownerKey !== 'string' || ownerKey.length === 0) return;
+  const callbacks = _flashOwnerCallbacks.get(ownerKey);
+  if (callbacks) {
+    callbacks[method]?.(...args);
+    return;
+  }
+  const pending = _pendingFlashOwnerActions.get(ownerKey) ?? [];
+  pending.push({ method, args });
+  _pendingFlashOwnerActions.set(ownerKey, pending);
+}
 
 // BrowserTestPlayer registers a non-owning, exact-generation capability here.
 // The capability is disposed before the harness retires its player.
@@ -189,6 +202,18 @@ export function dirplayer_registerFlashOwner(ownerKey, capability) {
         if (reg && !reg.host.disposed) flashManager().then(m => m.destroyFlashInstance?.(reg.host, spriteNum));
       });
     },
+    onUnloadedAtGeneration: (spriteNum, generation) => {
+      if (disposed) return;
+      registrationReady.then(reg => {
+        if (reg && !reg.host.disposed) flashManager().then(m => m.destroyFlashInstanceAtGeneration?.(reg.host, spriteNum, generation));
+      });
+    },
+    onResized: (spriteNum, generation, width, height) => {
+      if (disposed) return;
+      registrationReady.then(reg => {
+        if (reg && !reg.host.disposed) flashManager().then(m => m.resizeFlashInstanceForOwnerAtGeneration?.(reg.host, spriteNum, generation, width, height));
+      });
+    },
     onReset: () => {
       if (disposed) return;
       registrationReady.then(reg => {
@@ -209,6 +234,11 @@ export function dirplayer_registerFlashOwner(ownerKey, capability) {
     },
   };
   _flashOwnerCallbacks.set(ownerKey, callbacks);
+  const pending = _pendingFlashOwnerActions.get(ownerKey);
+  if (pending) {
+    _pendingFlashOwnerActions.delete(ownerKey);
+    for (const action of pending) callbacks[action.method]?.(...action.args);
+  }
   // These routers are stable for the page lifetime and resolve the exact
   // owner closure, so registering a later player cannot replace an earlier
   // owner's play callback. The unqualified legacy LocalConnection function
@@ -223,6 +253,7 @@ export function dirplayer_unregisterFlashOwner(ownerKey) {
   if (typeof ownerKey !== 'string') return;
   const callbacks = _flashOwnerCallbacks.get(ownerKey);
   _flashOwnerCallbacks.delete(ownerKey);
+  _pendingFlashOwnerActions.delete(ownerKey);
   callbacks?.dispose();
 }
 
@@ -283,10 +314,20 @@ flashManager();
 
 export function onFlashMemberLoaded(spriteNum, castLib, castMember, swfData, width, height, pausedAtStart, assertedFrame, ownerKey) {
   const copy = new Uint8Array(swfData);
-  _flashOwnerCallbacks.get(ownerKey)?.onLoaded(spriteNum, castLib, castMember, copy, width, height, pausedAtStart, assertedFrame);
+  dispatchFlashOwnerAction(ownerKey, 'onLoaded', spriteNum, castLib, castMember, copy, width, height, pausedAtStart, assertedFrame);
+}
+export function onFlashMemberLoadedPrepared(spriteNum, castLib, castMember, swfData, width, height, pausedAtStart, assertedFrame, ownerKey, generation) {
+  const copy = new Uint8Array(swfData);
+  dispatchFlashOwnerAction(ownerKey, 'onLoaded', spriteNum, castLib, castMember, copy, width, height, pausedAtStart, assertedFrame, generation);
+}
+export function onFlashMemberResized(spriteNum, generation, width, height, ownerKey) {
+  dispatchFlashOwnerAction(ownerKey, 'onResized', spriteNum, generation, width, height);
 }
 export function onFlashMemberUnloaded(spriteNum, ownerKey) {
-  _flashOwnerCallbacks.get(ownerKey)?.onUnloaded(spriteNum);
+  dispatchFlashOwnerAction(ownerKey, 'onUnloaded', spriteNum);
+}
+export function onFlashMemberUnloadedAtGeneration(spriteNum, generation, ownerKey) {
+  dispatchFlashOwnerAction(ownerKey, 'onUnloadedAtGeneration', spriteNum, generation);
 }
 export function onFlashResetAll(ownerKey) {
   // Only tear down if the Flash bundle was actually loaded by a prior movie;

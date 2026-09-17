@@ -465,7 +465,7 @@ impl SpriteDatumHandlers {
                 .and_then(|value| value.as_bool())
                 .unwrap_or(true);
             if !ready {
-                session
+                let flash_actions = session
                     .borrow_mut()
                     .with_player(request.player_id, |context| {
                         if !request.owner.same_identity(&context.player.owner)
@@ -473,10 +473,18 @@ impl SpriteDatumHandlers {
                         {
                             return Err(crate::player::cancelled_scope_error());
                         }
-                        context.player.pre_dispatch_flash_members();
-                        Ok(())
+                        context
+                            .player
+                            .pre_dispatch_flash_members()
+                            .map(|_| context.player.take_flash_host_actions())
                     })
                     .ok_or_else(crate::player::cancelled_scope_error)??;
+                let flash_actions = crate::player::bind_flash_host_actions(
+                    flash_actions,
+                    session.clone(),
+                    request.player_id,
+                );
+                crate::player::emit_flash_host_actions(flash_actions)?;
                 wait_for_flash_ready(sprite_num).await;
             }
             session
