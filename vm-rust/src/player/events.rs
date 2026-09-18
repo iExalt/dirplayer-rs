@@ -1,5 +1,5 @@
-use async_std::channel::Receiver;
-use std::collections::HashSet;
+use async_std::channel::{Receiver, Sender};
+use std::{cell::RefCell, collections::{HashSet, VecDeque}, rc::{Rc, Weak}};
 use itertools::Itertools;
 use log::{warn, debug};
 
@@ -15,7 +15,8 @@ use super::{
     cast_lib::CastMemberRef, handlers::datum_handlers::script_instance::ScriptInstanceUtils,
     player_semaphone, reserve_player_ref,
     script_ref::ScriptInstanceRef, DatumRef, ScriptError, ScriptErrorCode, ScriptReceiver,
-    score::ScoreRef, ownership::OwnerToken, session::{ExecutionContext, RuntimeSessionHandle},
+    score::ScoreRef, ownership::OwnerToken, session::{DeferredEventCleanup, ExecutionContext, RuntimeSessionHandle},
+    PlayerVMExecutionItem,
 };
 
 use crate::player::cancelled_scope_error;
@@ -90,7 +91,7 @@ fn report_owned_event_error(
 /// request and awaited through the real EvalId/EvalAction pump.  This keeps
 /// event and timeout callers from retaining a request and advancing the next
 /// receiver before its result arrives.
-async fn invoke_datum_owned(
+pub(crate) async fn invoke_datum_owned(
     session: &RuntimeSessionHandle,
     player_id: u32,
     owner: &OwnerToken,
@@ -140,10 +141,12 @@ async fn invoke_datum_owned(
 /// captured player is still the same live owner after the await.  A reset or
 /// replacement therefore cannot be mutated by stale cleanup.
 struct OwnedEventStopScope {
-    session: RuntimeSessionHandle,
+    session: Weak<RefCell<super::session::RuntimeSession>>,
+    mailbox: Weak<RefCell<VecDeque<DeferredEventCleanup>>>,
+    queue_tx: Sender<PlayerVMExecutionItem>,
     player_id: u32,
     owner: OwnerToken,
-    previous: bool,
+    scope_id: u64,
 }
 
 impl OwnedEventStopScope {
@@ -152,30 +155,37 @@ impl OwnedEventStopScope {
         player_id: u32,
         owner: &OwnerToken,
     ) -> Result<Self, ScriptError> {
-        let previous = session
+        session.borrow_mut().drain_event_cleanups();
+        let (scope_id, _previous, mailbox, queue_tx) = session
             .borrow_mut()
-            .with_player(player_id, |context| {
-                if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
-                    return Err(crate::player::cancelled_scope_error());
-                }
-                Ok(std::mem::replace(&mut context.player.event_stopped, false))
-            })
-            .ok_or_else(crate::player::cancelled_scope_error)??;
+            .begin_event_stop_scope(player_id, owner)?;
         Ok(Self {
-            session: session.clone(),
+            session: Rc::downgrade(session),
+            mailbox: Rc::downgrade(&mailbox),
+            queue_tx,
             player_id,
             owner: owner.clone(),
-            previous,
+            scope_id,
         })
     }
 }
 
 impl Drop for OwnedEventStopScope {
     fn drop(&mut self) {
-        let _ = self.session.borrow_mut().with_player(self.player_id, |context| {
-            if self.owner.same_identity(&context.player.owner) && self.owner.is_arena_live() {
-                context.player.event_stopped = self.previous;
-            }
+        let Some(session) = self.session.upgrade() else { return };
+        if let Ok(mut session_ref) = session.try_borrow_mut() {
+            let _ = session_ref.restore_event_stop_scope(self.player_id, &self.owner, self.scope_id);
+            return;
+        }
+        let Some(mailbox) = self.mailbox.upgrade() else { return };
+        mailbox.borrow_mut().push_back(DeferredEventCleanup::Stop {
+            player_id: self.player_id,
+            owner: self.owner.clone(),
+            scope_id: self.scope_id,
+        });
+        let _ = self.queue_tx.try_send(PlayerVMExecutionItem {
+            command: super::commands::PlayerVMCommand::DrainInputFlagCleanup,
+            completer: None,
         });
     }
 }
@@ -244,7 +254,9 @@ fn validate_event_owner(
 /// check in `release_static_event_guard` keeps a cancelled callback from
 /// mutating a replacement player.
 struct OwnedStaticEventGuard {
-    session: RuntimeSessionHandle,
+    session: Weak<RefCell<super::session::RuntimeSession>>,
+    mailbox: Weak<RefCell<VecDeque<DeferredEventCleanup>>>,
+    queue_tx: Sender<PlayerVMExecutionItem>,
     player_id: u32,
     guard: Option<crate::player::driver::StaticEventGuard>,
 }
@@ -254,14 +266,33 @@ impl OwnedStaticEventGuard {
         session: RuntimeSessionHandle,
         player_id: u32,
         guard: crate::player::driver::StaticEventGuard,
-    ) -> Self {
-        Self { session, player_id, guard: Some(guard) }
+    ) -> Result<Self, ScriptError> {
+        let (mailbox, queue_tx) = session.borrow_mut().event_cleanup_resources(player_id)?;
+        Ok(Self {
+            session: Rc::downgrade(&session),
+            mailbox: Rc::downgrade(&mailbox),
+            queue_tx,
+            player_id,
+            guard: Some(guard),
+        })
     }
 
     fn release(&mut self) {
-        if let Some(guard) = self.guard.take() {
-            let _ = self.session.borrow_mut().release_static_event_guard(self.player_id, &guard);
+        let Some(guard) = self.guard.take() else { return };
+        let Some(session) = self.session.upgrade() else { return };
+        if let Ok(mut session_ref) = session.try_borrow_mut() {
+            let _ = session_ref.release_static_event_guard(self.player_id, &guard);
+            return;
         }
+        let Some(mailbox) = self.mailbox.upgrade() else { return };
+        mailbox.borrow_mut().push_back(DeferredEventCleanup::Static {
+            player_id: self.player_id,
+            guard,
+        });
+        let _ = self.queue_tx.try_send(PlayerVMExecutionItem {
+            command: super::commands::PlayerVMCommand::DrainInputFlagCleanup,
+            completer: None,
+        });
     }
 }
 
@@ -389,7 +420,7 @@ pub(crate) async fn player_invoke_global_event_owned(
         let Some(guard) = session.borrow_mut().enter_static_event_guard(player_id, &call)? else {
             continue;
         };
-        let mut guard = OwnedStaticEventGuard::new(session.clone(), player_id, guard);
+        let mut guard = OwnedStaticEventGuard::new(session.clone(), player_id, guard)?;
         let result = await_owned_event_handler(&session, player_id, &owner, receiver, handler_ref, &args).await;
         guard.release();
         let handled_here = result?;
@@ -1752,7 +1783,7 @@ pub(crate) async fn player_invoke_static_event_owned(
         let Some(guard) = session.borrow_mut().enter_static_event_guard(player_id, &call)? else {
             continue;
         };
-        let mut guard = OwnedStaticEventGuard::new(session.clone(), player_id, guard);
+        let mut guard = OwnedStaticEventGuard::new(session.clone(), player_id, guard)?;
         let owned_args = args.to_vec();
         let result = await_owned_event_handler(
             session,
@@ -1841,7 +1872,7 @@ pub async fn player_invoke_static_event(
         let Some(guard) = session.borrow_mut().enter_static_event_guard(player_id, &call)? else {
             continue;
         };
-        let mut guard = OwnedStaticEventGuard::new(session.clone(), player_id, guard);
+        let mut guard = OwnedStaticEventGuard::new(session.clone(), player_id, guard)?;
         let result = await_owned_event_handler(
             &session,
             player_id,
@@ -4027,7 +4058,7 @@ mod owned_event_scope_tests {
         player_dispatch_event_to_sprite_targeted_owned, player_invoke_global_event_owned,
         dispatch_targeted_vm_event_owned, event_owner_is_live, run_event_loop,
         wait_event_owner_available, OwnedEventStopScope,
-        OwnedScoreContextScope, PlayerVMEvent,
+        OwnedScoreContextScope, OwnedStaticEventGuard, PlayerVMEvent,
         W3dCallbackReceiver, W3dCallbackRequest,
     };
     use crate::player::cast_lib::CastMemberRef;
@@ -4208,6 +4239,54 @@ mod owned_event_scope_tests {
             Some(true),
             "dropping an old event scope must not restore state on the replacement owner"
         );
+    }
+
+    #[test]
+    fn event_scope_drop_defers_when_session_is_borrowed() {
+        let session = session_handle();
+        let captured = owner(&session);
+        session
+            .borrow_mut()
+            .with_player(1, |context| context.player.event_stopped = true)
+            .unwrap();
+        let guard = OwnedEventStopScope::enter(&session, 1, &captured).unwrap();
+        let borrowed = session.borrow_mut();
+        drop(guard);
+        drop(borrowed);
+        session.borrow_mut().drain_event_cleanups();
+        assert_eq!(
+            session
+                .borrow_mut()
+                .with_player(1, |context| context.player.event_stopped),
+            Some(true),
+        );
+    }
+
+    #[test]
+    fn static_event_guard_drop_defers_when_session_is_borrowed() {
+        let session = session_handle();
+        let call = crate::player::driver::StaticEventCall {
+            member_ref: CastMemberRef { cast_lib: 1, cast_member: 1 },
+            receiver: None,
+            handler_name: Symbol::builtin(BuiltInSymbol::BeginSprite),
+            args: vec![],
+        };
+        let static_guard = session
+            .borrow_mut()
+            .enter_static_event_guard(1, &call)
+            .unwrap()
+            .expect("first static event registration should be accepted");
+        let owned_guard = OwnedStaticEventGuard::new(session.clone(), 1, static_guard).unwrap();
+        assert!(session.borrow_mut().with_player(1, |context| {
+            !context.player.active_static_event_handlers.is_empty()
+        }).unwrap());
+        let borrowed = session.borrow_mut();
+        drop(owned_guard);
+        drop(borrowed);
+        session.borrow_mut().drain_event_cleanups();
+        assert!(session.borrow_mut().with_player(1, |context| {
+            context.player.active_static_event_handlers.is_empty()
+        }).unwrap());
     }
 
     #[test]

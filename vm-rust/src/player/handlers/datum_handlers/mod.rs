@@ -595,18 +595,24 @@ pub(crate) fn player_call_datum_handler(
             completion,
         },
         SyncDatumCall::Unsupported => {
+            let request = match crate::player::driver::classify_async_object(
+                runtime,
+                obj_ref,
+                &handler_name,
+                args,
+            ) {
+                Ok(request) => request,
+                Err(error) => return DatumDispatch::Sync(Err(error)),
+            };
             let display = runtime
                 .symbols
                 .display(&handler_name)
                 .map(str::to_owned)
                 .unwrap_or_else(|_| "<foreign-handler>".to_owned());
             DatumDispatch::Pending {
-                request: crate::player::driver::InternalVmRequest::Object {
-                    receiver: obj_ref.clone(),
-                    name: handler_name,
-                    args: args.clone(),
-                },
-                reason: format!("datum handler {display} requires deferred dispatch"),
+                reason: crate::player::driver::async_request_reason(&request)
+                    .unwrap_or_else(|| format!("datum handler {display} requires deferred dispatch")),
+                request,
             }
         }
     }

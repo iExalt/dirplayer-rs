@@ -1,12 +1,12 @@
-use std::{cell::RefCell, collections::{HashMap, VecDeque}, future::Future, pin::Pin, rc::Rc};
+use std::{cell::RefCell, collections::{HashMap, VecDeque}, future::Future, pin::Pin, rc::{Rc, Weak}};
 
 use indexmap::IndexMap;
 
-use async_std::channel::Receiver;
+use async_std::channel::{Receiver, Sender};
 use async_std::task::sleep;
 use chrono::Local;
 use futures::{select, stream::{FuturesUnordered, StreamExt}, FutureExt};
-use log::{warn, debug};
+use log::{debug, error, warn};
 use manual_future::{ManualFuture, ManualFutureCompleter};
 use url::Url;
 
@@ -40,7 +40,7 @@ use super::{
     },
     script_ref::ScriptInstanceRef,
     PlayerVMExecutionItem, ScriptError, ScriptReceiver, ScriptHandlerTurn, PLAYER_TX,
-    session::RuntimeSession,
+    session::{DeferredInputFlagCleanup, InputFlagSnapshot, PendingEvalRequest, RuntimeSession},
 };
 
 /// Result of driving one owner-bound pending action.  `Retain` is used for
@@ -116,9 +116,15 @@ pub enum PlayerVMCommand {
         cast_lib: i32,
         cast_member: i32,
         handler_name: String,
-        args_json: String,
+        args: FlashCallbackArgs,
         flash_cast_lib: i32,
         flash_cast_member: i32,
+        /// The Flash callback's captured owner and binding.  These are
+        /// validated before the payload is decoded or any VM symbols/datum
+        /// values are allocated.
+        origin_owner: super::ownership::OwnerToken,
+        origin_sprite_num: i16,
+        origin_generation: u64,
     },
     /// Flash `LocalConnection.send` → the Lingo handler registered via
     /// `setCallback` on a Director-created LocalConnection, dispatched to the
@@ -133,6 +139,9 @@ pub enum PlayerVMCommand {
         method_name: String,
         args_json: String,
     },
+    /// Wake the owner command queue after a dropped input handler deferred its
+    /// exact-scope flag restoration because the session was borrowed.
+    DrainInputFlagCleanup,
     SetLingoScriptProperty {
         cast_lib: i32,
         cast_member: i32,
@@ -171,6 +180,15 @@ pub enum PlayerVMCommand {
         handler_name: Symbol,
         args: Vec<DatumRef>,
     },
+}
+
+/// Payload forms are kept distinct at the owner boundary. Plain JSON is used
+/// by BrowserPlayerHandle callers; Ruffle sends an outer JSON array whose
+/// elements are base64 encoded JSON values.
+#[derive(Clone)]
+pub(crate) enum FlashCallbackArgs {
+    PlainJson(String),
+    RuffleBase64Json(String),
 }
 
 pub fn _format_player_cmd(command: &PlayerVMCommand) -> String {
@@ -217,6 +235,7 @@ pub fn _format_player_cmd(command: &PlayerVMCommand) -> String {
         PlayerVMCommand::TriggerLocalConnectionCallbackRaw { connection_name, method_name, .. } => {
             format!("TriggerLocalConnectionCallbackRaw(connection: {:?}, method: {:?})", connection_name, method_name)
         }
+        PlayerVMCommand::DrainInputFlagCleanup => "DrainInputFlagCleanup".to_string(),
         PlayerVMCommand::SetLingoScriptProperty { cast_lib, cast_member, prop_name, .. } => {
             format!("SetLingoScriptProperty(cast_lib: {}, cast_member: {}, prop: {:?})", cast_lib, cast_member, prop_name)
         }
@@ -547,20 +566,44 @@ async fn run_command_with_pending_pump(
         // Keep action futures in a persistent set. Recreating a future inside
         // the loop and then losing a timer/select race would drop its exact
         // host completion capability and strand the continuation.
-        if session_handle.borrow().has_pending_eval_requests(player_id) {
-            work.push(Box::pin(async {
-                OwnerSchedulerEvent::Eval(pump_pending_eval_requests(&session_handle, player_id).await)
-            }));
+        let admitted_eval = session_handle
+            .borrow_mut()
+            .take_pending_eval_request_for(player_id);
+        if let Some(admitted_eval) = admitted_eval {
+            let eval_work = async {
+                OwnerSchedulerEvent::Eval(
+                    pump_admitted_eval_request(&session_handle, admitted_eval).await,
+                )
+            };
+            work.push(Box::pin(eval_work));
         }
-        if drive_pending || session_handle.borrow().has_ready_pending_commands(player_id) {
+        let admit_action = drive_pending || session_handle.borrow().has_ready_pending_commands(player_id);
+        if admit_action {
             // This flag admits the action once. A retained external action
             // sets it again only when a completion is observed; leaving it
             // set while its future is in `work` would schedule duplicates.
             drive_pending = false;
-            work.push(Box::pin(async {
-                let result = execute_pending_commands(&session_handle, player_id, &owner).await;
-                OwnerSchedulerEvent::Actions(result.0, result.1)
-            }));
+            match admit_pending_command(&session_handle, player_id, &owner) {
+                Some(PendingAdmission::Turn(turn)) => {
+                    drive_pending |= matches!(&turn, CommandTurn::Waiting(_) | CommandTurn::Pending(_));
+                    finish_command_turn_no_wake(turn, &session_handle, player_id, &owner).await;
+                }
+                Some(PendingAdmission::Action { action, ticket }) => {
+                    let action_work = async {
+                        let result = execute_admitted_pending_command(
+                            &session_handle,
+                            player_id,
+                            &owner,
+                            action,
+                            ticket,
+                        )
+                        .await;
+                        OwnerSchedulerEvent::Actions(result.0, result.1)
+                    };
+                    work.push(Box::pin(action_work));
+                }
+                None => {}
+            }
         }
 
         // Do not hold a RefCell borrow across the select. A producer may add
@@ -621,19 +664,49 @@ pub(crate) async fn drive_pending_owner(
             action_ready |= matches!(&turn, CommandTurn::Waiting(_) | CommandTurn::Pending(_));
             finish_command_turn_no_wake(turn, session, player_id, owner).await;
         }
-        if session.borrow().has_pending_eval_requests(player_id) {
-            work.push(Box::pin(async {
-                OwnerSchedulerEvent::Eval(pump_pending_eval_requests(session, player_id).await)
-            }));
+        let admitted_eval = session
+            .borrow_mut()
+            .take_pending_eval_request_for(player_id);
+        if let Some(admitted_eval) = admitted_eval {
+            let eval_work = async {
+                OwnerSchedulerEvent::Eval(pump_admitted_eval_request(session, admitted_eval).await)
+            };
+            work.push(Box::pin(eval_work));
         }
-        if action_ready || session.borrow().has_ready_pending_commands(player_id) {
+        let admit_action = action_ready || session.borrow().has_ready_pending_commands(player_id);
+        if admit_action {
             action_ready = false;
-            work.push(Box::pin(async {
-                let result = execute_pending_commands(session, player_id, owner).await;
-                OwnerSchedulerEvent::Actions(result.0, result.1)
-            }));
+            match admit_pending_command(session, player_id, owner) {
+                Some(PendingAdmission::Turn(turn)) => {
+                    action_ready |= matches!(&turn, CommandTurn::Waiting(_) | CommandTurn::Pending(_));
+                    finish_command_turn_no_wake(turn, session, player_id, owner).await;
+                }
+                Some(PendingAdmission::Action { action, ticket }) => {
+                    let action_work = async {
+                        let result = execute_admitted_pending_command(
+                            session,
+                            player_id,
+                            owner,
+                            action,
+                            ticket,
+                        )
+                        .await;
+                        OwnerSchedulerEvent::Actions(result.0, result.1)
+                    };
+                    work.push(Box::pin(action_work));
+                }
+                None => {}
+            }
         }
         if work.is_empty() {
+            if action_ready || session.borrow().has_ready_pending_commands(player_id) {
+                // A completed internal action may leave its child driver at
+                // one cooperative Waiting turn before it reaches its
+                // terminal result. Keep the owner pump alive for that ready
+                // command, while started external waits remain parked.
+                sleep(std::time::Duration::from_millis(1)).await;
+                continue;
+            }
             return;
         }
         let next = work.next().fuse();
@@ -729,6 +802,94 @@ fn owner_is_current(
     matches
 }
 
+fn with_owned_player<R>(
+    session: &Rc<RefCell<RuntimeSession>>,
+    player_id: u32,
+    owner: &super::ownership::OwnerToken,
+    f: impl FnOnce(&mut super::DirPlayer) -> R,
+) -> Result<R, ScriptError> {
+    Ok(session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                return Err(super::cancelled_scope_error());
+            }
+            Ok(f(context.player))
+        })
+        .ok_or_else(super::cancelled_scope_error)??)
+}
+
+struct MouseDownInputFlags {
+    session: Weak<RefCell<RuntimeSession>>,
+    mailbox: Weak<RefCell<VecDeque<DeferredInputFlagCleanup>>>,
+    queue_tx: Sender<PlayerVMExecutionItem>,
+    player_id: u32,
+    owner: super::ownership::OwnerToken,
+    scope_id: u64,
+    snapshot: InputFlagSnapshot,
+    active: bool,
+}
+
+impl MouseDownInputFlags {
+    fn enter(
+        session: &Rc<RefCell<RuntimeSession>>,
+        player_id: u32,
+        owner: &super::ownership::OwnerToken,
+    ) -> Result<Self, ScriptError> {
+        session.borrow_mut().drain_input_flag_cleanups();
+        session.borrow_mut().drain_event_cleanups();
+        let (scope_id, snapshot, mailbox, queue_tx) = session
+            .borrow_mut()
+            .begin_input_flag_scope(player_id, owner)?;
+        Ok(Self {
+            session: Rc::downgrade(session),
+            mailbox: Rc::downgrade(&mailbox),
+            queue_tx,
+            player_id,
+            owner: owner.clone(),
+            scope_id,
+            snapshot,
+            active: true,
+        })
+    }
+
+    fn restore(&mut self) {
+        if !self.active {
+            return;
+        }
+        self.active = false;
+        let Some(session) = self.session.upgrade() else { return };
+        if let Ok(mut session_ref) = session.try_borrow_mut() {
+            if session_ref.restore_input_flag_scope(
+                self.player_id,
+                &self.owner,
+                self.scope_id,
+                self.snapshot,
+            ) {
+                return;
+            }
+            return;
+        }
+        let Some(mailbox) = self.mailbox.upgrade() else { return };
+        mailbox.borrow_mut().push_back(DeferredInputFlagCleanup {
+            player_id: self.player_id,
+            owner: self.owner.clone(),
+            scope_id: self.scope_id,
+            snapshot: self.snapshot,
+        });
+        let _ = self.queue_tx.try_send(PlayerVMExecutionItem {
+            command: PlayerVMCommand::DrainInputFlagCleanup,
+            completer: None,
+        });
+    }
+}
+
+impl Drop for MouseDownInputFlags {
+    fn drop(&mut self) {
+        self.restore();
+    }
+}
+
 /// Retire a stale nested child without consulting any ambient player.  The
 /// numeric id is insufficient because a reset can immediately install a new
 /// player there; RuntimeSession checks both the nested registry capability and
@@ -802,8 +963,24 @@ async fn finish_command_turn(
 /// Drop retired host resources only after the session borrow used to extract
 /// them has ended. Host cleanup may synchronously re-enter the same session.
 pub(crate) fn drain_host_teardowns(session: &Rc<RefCell<RuntimeSession>>) {
-    let teardowns = session.borrow_mut().take_host_teardowns();
+    let (teardowns, flash_retirements) = {
+        let mut session = session.borrow_mut();
+        (
+            session.take_host_teardowns(),
+            session.take_nested_flash_retirements(),
+        )
+    };
     drop(teardowns);
+    for retirement in flash_retirements {
+        let parent_owner_key = super::owner_key_string(&retirement.parent_owner);
+        let child_owner_key = super::owner_key_string(&retirement.child_owner);
+        if let Err(error) = crate::js_api::JsApi::retire_nested_flash_owner(
+            &parent_owner_key,
+            &child_owner_key,
+        ) {
+            error!("nested Flash owner retirement failed: {error}");
+        }
+    }
 }
 
 /// Finish a turn produced while the owner pump already removed its pending
@@ -1383,6 +1560,41 @@ async fn finish_pending_eval_request_turn(
             ))
             .await
         }
+        super::session::EvalRequestTurn::SpriteAsync(request) => {
+            if request.player_id != request_player || !request.owner.same_identity(&owner) {
+                let sender = session
+                    .borrow_mut()
+                    .detach_pending_eval_route(&id, &action)
+                    .map(|(_, _, sender)| sender);
+                if let Some(sender) = sender {
+                    let _ = sender.try_send(Err(super::cancelled_scope_error()));
+                }
+                return true;
+            }
+            let typed_request = super::driver::InternalVmRequest::SpriteAsync(request.clone());
+            let result = super::session::RuntimeSession::execute_sprite_async_request(
+                session.clone(),
+                request,
+            )
+            .await;
+            let next = session.borrow_mut().resume_typed_async_eval(
+                id.clone(),
+                &action,
+                &typed_request,
+                &owner,
+                result,
+            );
+            Box::pin(finish_pending_eval_request_turn(
+                session,
+                id,
+                action,
+                owner,
+                request_player,
+                sender,
+                next,
+            ))
+            .await
+        }
         super::session::EvalRequestTurn::MovieAsync(movie_request) => {
             if !owner_is_current(session, request_player, &owner)
                 || movie_request.player_id != request_player
@@ -1567,6 +1779,47 @@ async fn finish_pending_eval_request_turn(
 /// Consume completion payloads submitted by the host and resume retained
 /// evaluator continuations. Unmatched completions stay queued until their
 /// pending action arrives; ticket validation remains owner-bound.
+pub(crate) async fn pump_admitted_eval_request(
+    session: &Rc<RefCell<RuntimeSession>>,
+    request: PendingEvalRequest,
+) -> bool {
+    let id = request.id.clone();
+    let action = request.action.clone();
+    let owner = request.owner.clone();
+    let request_player = request.player_id;
+    let turn = if let Some((_, internal_request)) = eval_pending_internal_request(&request.request) {
+        execute_eval_internal_request(
+            session,
+            id.clone(),
+            action.clone(),
+            owner.clone(),
+            internal_request,
+        )
+        .await
+        .unwrap_or_else(|| {
+            session
+                .borrow_mut()
+                .execute_eval_request(id.clone(), request.request)
+        })
+    } else {
+        session
+            .borrow_mut()
+            .execute_eval_request(id.clone(), request.request)
+    };
+    let advanced = finish_pending_eval_request_turn(
+        session,
+        id,
+        action,
+        owner,
+        request_player,
+        request.sender,
+        turn,
+    )
+    .await;
+    let _ = JsApi::dispatch_player_notifications(session.clone(), request_player);
+    advanced
+}
+
 pub(crate) async fn pump_pending_eval_requests(
     session: &Rc<RefCell<RuntimeSession>>,
     player_id: u32,
@@ -1578,40 +1831,7 @@ pub(crate) async fn pump_pending_eval_requests(
         .collect::<Vec<_>>();
     let mut advanced = false;
     for request in pending {
-        let id = request.id.clone();
-        let action = request.action.clone();
-        let owner = request.owner.clone();
-        let request_player = request.player_id;
-        let turn = if let Some((_, internal_request)) = eval_pending_internal_request(&request.request) {
-            execute_eval_internal_request(
-                session,
-                id.clone(),
-                action.clone(),
-                owner.clone(),
-                internal_request,
-            )
-            .await
-            .unwrap_or_else(|| {
-                session
-                    .borrow_mut()
-                    .execute_eval_request(id.clone(), request.request)
-            })
-        } else {
-            session
-                .borrow_mut()
-                .execute_eval_request(id.clone(), request.request)
-        };
-        advanced |= finish_pending_eval_request_turn(
-            session,
-            id,
-            action,
-            owner,
-            request_player,
-            request.sender,
-            turn,
-        )
-        .await;
-        let _ = JsApi::dispatch_player_notifications(session.clone(), request_player);
+        advanced |= pump_admitted_eval_request(session, request).await;
     }
     drain_host_teardowns(session);
     advanced
@@ -1839,6 +2059,76 @@ pub(crate) fn pump_pending_commands(
     turns
 }
 
+enum PendingAdmission {
+    Turn(CommandTurn),
+    Action {
+        action: crate::player::driver::PendingAction,
+        ticket: crate::player::driver::CompletionTicket,
+    },
+}
+
+/// Remove exactly one ready command before its executor future is created.
+/// Marking/requeuing the action here makes admission identity-safe even when
+/// the future is left unpolled by a scheduler select race.
+fn admit_pending_command(
+    session: &Rc<RefCell<RuntimeSession>>,
+    player_id: u32,
+    owner: &super::ownership::OwnerToken,
+) -> Option<PendingAdmission> {
+    if !owner_is_current(session, player_id, owner) {
+        return None;
+    }
+    let mut command = session
+        .borrow_mut()
+        .take_ready_pending_command_for(player_id)?;
+    let Some(action) = command.action.take() else {
+        let turn = session.borrow_mut().resume_pending_command(command, None);
+        drain_host_teardowns(session);
+        return Some(PendingAdmission::Turn(turn));
+    };
+    command.started = true;
+    let ticket = action.ticket().clone();
+    command.ticket = Some(ticket.clone());
+    command.action = Some(action.clone());
+    session.borrow_mut().requeue_pending_command(command);
+    Some(PendingAdmission::Action { action, ticket })
+}
+
+async fn execute_admitted_pending_command(
+    session: &Rc<RefCell<RuntimeSession>>,
+    player_id: u32,
+    owner: &super::ownership::OwnerToken,
+    action: crate::player::driver::PendingAction,
+    ticket: crate::player::driver::CompletionTicket,
+) -> (Vec<CommandTurn>, bool) {
+    if !session
+        .borrow()
+        .is_admitted_action_current(player_id, owner, &ticket)
+    {
+        drain_host_teardowns(session);
+        return (Vec::new(), false);
+    }
+    let action_result = execute_pending_action(session, player_id, owner, action).await;
+    let (turn, drive_again) = match action_result {
+        PendingActionExecution::Complete(completion) => {
+            session
+                .borrow_mut()
+                .submit_pending_command_completion(player_id, ticket, completion);
+            (CommandTurn::Continue, true)
+        }
+        PendingActionExecution::Retain(action) => {
+            session
+                .borrow_mut()
+                .update_started_pending_command(player_id, &ticket, action);
+            // This is an external wait. Do not immediately run the same
+            // action again; the host must submit its completion first.
+            (CommandTurn::Continue, false)
+        }
+    };
+    drain_host_teardowns(session);
+    (vec![turn], drive_again)
+}
+
 /// Execute the retained actions for one captured owner and resume their
 /// continuations. This is the concrete command-loop executor: synchronous VM
 /// work, tracing, cooperative yields, and debugger pauses run here, while
@@ -1850,53 +2140,13 @@ pub(crate) async fn execute_pending_commands(
     player_id: u32,
     owner: &super::ownership::OwnerToken,
 ) -> (Vec<CommandTurn>, bool) {
-    if !owner_is_current(session, player_id, owner) {
-        return (Vec::new(), false);
+    match admit_pending_command(session, player_id, owner) {
+        Some(PendingAdmission::Turn(turn)) => (vec![turn], false),
+        Some(PendingAdmission::Action { action, ticket }) => {
+            execute_admitted_pending_command(session, player_id, owner, action, ticket).await
+        }
+        None => (Vec::new(), false),
     }
-    let Some(mut command) = session
-        .borrow_mut()
-        .take_ready_pending_command_for(player_id) else {
-        return (Vec::new(), false);
-    };
-    let mut turns = Vec::with_capacity(1);
-    let mut drive_again = false;
-        let Some(action) = command.action.take() else {
-            // Action-less Waiting is a cooperative driver turn. Resume it
-            // synchronously until it reaches a real action or completion.
-            turns.push(session.borrow_mut().resume_pending_command(command, None));
-            drain_host_teardowns(session);
-            return (turns, false);
-        };
-        command.started = true;
-        let ticket = action.ticket().clone();
-        command.ticket = Some(ticket.clone());
-        command.action = Some(action.clone());
-        // Keep the continuation and its cancellation metadata session-owned
-        // while host work is awaited. This permits nested ready requests to
-        // run and lets reset abort the exact caller even if this future is
-        // dropped.
-        session.borrow_mut().requeue_pending_command(command);
-        let action_result = execute_pending_action(session, player_id, owner, action).await;
-        let (turn, needs_followup) = match action_result {
-            PendingActionExecution::Complete(completion) => {
-                session.borrow_mut().submit_pending_command_completion(
-                    player_id,
-                    ticket,
-                    completion,
-                );
-                (CommandTurn::Continue, true)
-            }
-            PendingActionExecution::Retain(action) => {
-                session.borrow_mut().update_started_pending_command(player_id, &ticket, action);
-                // This is an external wait. Do not immediately run the same
-                // action again; the host must submit its completion first.
-                (CommandTurn::Continue, false)
-            }
-        };
-        drive_again |= needs_followup;
-        turns.push(turn);
-    drain_host_teardowns(session);
-    (turns, drive_again)
 }
 
 /// Execute one action after its owning session borrow has been acquired only
@@ -3009,6 +3259,16 @@ enum RawFlashValue {
     Object(Vec<(String, RawFlashValue)>),
 }
 
+/// Binding captured after the callback origin fence has been validated.
+/// Retained Flash values must carry the same owner, sprite, and instance
+/// generation as the raw callback that produced them.
+#[derive(Clone)]
+struct RawFlashBinding {
+    owner_key: String,
+    sprite_num: i32,
+    generation: u64,
+}
+
 impl<'de> serde::Deserialize<'de> for RawFlashValue {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -3115,6 +3375,7 @@ fn raw_flash_datum(
     symbols: &mut crate::player::symbols::symbol_table::SymbolTable,
     flash_cast_lib: i32,
     flash_cast_member: i32,
+    binding: Option<&RawFlashBinding>,
 ) -> DatumRef {
     match value {
         RawFlashValue::Null => player.alloc_datum(Datum::Void),
@@ -3135,7 +3396,7 @@ fn raw_flash_datum(
         RawFlashValue::Array(values) => {
             let values = values
                 .iter()
-                .map(|value| raw_flash_datum(value, player, symbols, flash_cast_lib, flash_cast_member))
+                .map(|value| raw_flash_datum(value, player, symbols, flash_cast_lib, flash_cast_member, binding))
                 .collect();
             player.alloc_datum(Datum::List(DatumType::XmlChildNodes, values, false))
         }
@@ -3159,7 +3420,13 @@ fn raw_flash_datum(
                 }).flatten()
             }) {
                 return player.alloc_datum(Datum::FlashObjectRef(
-                    FlashObjectRef::from_path_with_member(path, flash_cast_lib, flash_cast_member),
+                    FlashObjectRef::from_path_with_sprite(
+                        path,
+                        flash_cast_lib,
+                        flash_cast_member,
+                        binding.map_or(0, |binding| binding.sprite_num),
+                    )
+                    .with_binding_from(binding),
                 ));
             }
             let mut properties = std::collections::VecDeque::new();
@@ -3179,7 +3446,7 @@ fn raw_flash_datum(
                     continue;
                 }
                 let key_ref = player.alloc_datum(Datum::Symbol(symbols.intern(key)));
-                let value_ref = raw_flash_datum(value, player, symbols, flash_cast_lib, flash_cast_member);
+                let value_ref = raw_flash_datum(value, player, symbols, flash_cast_lib, flash_cast_member, binding);
                 properties.push_back((key_ref, value_ref));
             }
             if let Some(value) = flash_type {
@@ -3191,6 +3458,19 @@ fn raw_flash_datum(
     }
 }
 
+trait FlashObjectBindingExt {
+    fn with_binding_from(self, binding: Option<&RawFlashBinding>) -> Self;
+}
+
+impl FlashObjectBindingExt for FlashObjectRef {
+    fn with_binding_from(mut self, binding: Option<&RawFlashBinding>) -> Self {
+        if let Some(binding) = binding {
+            self = self.with_binding(binding.owner_key.clone(), binding.generation);
+        }
+        self
+    }
+}
+
 fn raw_flash_args(
     args_json: &str,
     player: &mut crate::player::DirPlayer,
@@ -3198,6 +3478,18 @@ fn raw_flash_args(
     flash_cast_lib: i32,
     flash_cast_member: i32,
 ) -> Result<Vec<DatumRef>, ScriptError> {
+    let values = raw_flash_values(args_json)?;
+    Ok(raw_flash_args_from_values(
+        values,
+        player,
+        symbols,
+        flash_cast_lib,
+        flash_cast_member,
+        None,
+    ))
+}
+
+fn raw_flash_values(args_json: &str) -> Result<Vec<RawFlashValue>, ScriptError> {
     let mut deserializer = serde_json::Deserializer::from_str(args_json);
     let value = <RawFlashValue as serde::Deserialize>::deserialize(&mut deserializer)
         .map_err(|error| ScriptError::new(format!("invalid Flash callback JSON: {error}")))?;
@@ -3208,11 +3500,39 @@ fn raw_flash_args(
     let RawFlashValue::Array(values) = value else {
         return Err(ScriptError::new("Flash callback arguments are not an array".to_owned()));
     };
+    Ok(values)
+}
+
+fn raw_flash_args_from_values(
+    values: Vec<RawFlashValue>,
+    player: &mut crate::player::DirPlayer,
+    symbols: &mut crate::player::symbols::symbol_table::SymbolTable,
+    flash_cast_lib: i32,
+    flash_cast_member: i32,
+    binding: Option<&RawFlashBinding>,
+) -> Vec<DatumRef> {
     let mut args = vec![player.alloc_datum(Datum::Void)];
     args.extend(values.iter().map(|value| {
-        raw_flash_datum(value, player, symbols, flash_cast_lib, flash_cast_member)
+        raw_flash_datum(value, player, symbols, flash_cast_lib, flash_cast_member, binding)
     }));
-    Ok(args)
+    args
+}
+
+fn ruffle_flash_values(args_json: &str) -> Result<Vec<RawFlashValue>, ScriptError> {
+    use base64::Engine as _;
+
+    let encoded: Vec<String> = serde_json::from_str(args_json)
+        .map_err(|error| ScriptError::new(format!("invalid Ruffle callback JSON: {error}")))?;
+    Ok(encoded
+        .into_iter()
+        .map(|value| {
+            base64::engine::general_purpose::STANDARD
+                .decode(value.as_bytes())
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<RawFlashValue>(&bytes).ok())
+                .unwrap_or(RawFlashValue::String(value))
+        })
+        .collect())
 }
 
 fn command_turn_from_script(
@@ -3256,6 +3576,44 @@ fn command_turn_from_script(
             },
         ),
     }
+}
+
+/// Validate the callback's captured Flash binding before touching its raw
+/// JSON.  In particular, this must run before symbol interning or datum
+/// allocation so a queued callback from a replaced/disposed instance cannot
+/// consume VM resources or reach a sibling owner that reuses the local sprite
+/// number.
+fn validate_flash_callback_origin(
+    session_handle: &Rc<RefCell<RuntimeSession>>,
+    player_id: u32,
+    owner: &super::ownership::OwnerToken,
+    origin_owner: &super::ownership::OwnerToken,
+    origin_sprite_num: i16,
+    origin_generation: u64,
+) -> Result<(), ScriptError> {
+    if !owner.same_identity(origin_owner)
+        || !owner.is_arena_live()
+        || !origin_owner.is_arena_live()
+    {
+        return Err(ScriptError::new_code(
+            crate::player::ScriptErrorCode::Abort,
+            "Flash callback origin owner is stale".to_owned(),
+        ));
+    }
+    let current = session_handle
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            origin_owner.same_identity(&context.player.owner)
+                && context.player.flash_instance_generation(origin_sprite_num) == Some(origin_generation)
+        })
+        .unwrap_or(false);
+    if !current {
+        return Err(ScriptError::new_code(
+            crate::player::ScriptErrorCode::Abort,
+            "Flash callback origin binding is stale".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 async fn run_callback_command(
@@ -3378,37 +3736,66 @@ async fn run_callback_command(
             cast_lib,
             cast_member,
             handler_name,
-            args_json,
+            args,
             flash_cast_lib,
             flash_cast_member,
+            origin_owner,
+            origin_sprite_num,
+            origin_generation,
         } => {
+            if let Err(error) = validate_flash_callback_origin(
+                &session_handle,
+                player_id,
+                &owner,
+                &origin_owner,
+                origin_sprite_num,
+                origin_generation,
+            ) {
+                return CommandTurn::Complete(Err(error), completer);
+            }
+            let raw_binding = RawFlashBinding {
+                owner_key: super::owner_key_string(&origin_owner),
+                sprite_num: i32::from(origin_sprite_num),
+                generation: origin_generation,
+            };
             let call_params = {
                 let mut session = session_handle.borrow_mut();
                 session.with_player(player_id, |context| {
-                    let args = raw_flash_args(
-                        &args_json,
+                    let values = match args {
+                        FlashCallbackArgs::PlainJson(args_json) => raw_flash_values(&args_json)?,
+                        FlashCallbackArgs::RuffleBase64Json(args_json) => ruffle_flash_values(&args_json)?,
+                    };
+                    let args = raw_flash_args_from_values(
+                        values,
                         context.player,
                         context.symbols,
                         flash_cast_lib,
                         flash_cast_member,
-                    )?;
+                        Some(&raw_binding),
+                    );
                     let handler_name = context.symbols.intern(&handler_name);
+                    let mut matching_instances = 0usize;
+                    let mut handler_found = false;
+                    let mut call_params = None;
                     for (instance_id, entry) in context.player.allocator.iter_script_instances() {
                         let instance = &entry.script_instance;
                         if instance.script.cast_lib == cast_lib && instance.script.cast_member == cast_member {
+                            matching_instances += 1;
                             if let Some(script) = context.player.movie.cast_manager.get_script_by_ref(&instance.script) {
                                 if let Some(handler_ref) = script.get_own_handler_ref(handler_name.clone()) {
+                                    handler_found = true;
                                     let receiver = ScriptInstanceRef::from_id(
                                         instance_id as u32,
                                         entry.ref_count.get(),
                                         context.player.owner.clone(),
                                     );
-                                    return Ok(Some((Some(receiver), handler_ref, args)));
+                                    call_params = Some((Some(receiver), handler_ref, args));
+                                    break;
                                 }
                             }
                         }
                     }
-                    Ok(None)
+                    Ok(call_params)
                 })
             };
             let call_params = match call_params {
@@ -3597,7 +3984,12 @@ async fn run_player_command_result(
     player_id: u32,
     owner: super::ownership::OwnerToken,
 ) -> Result<DatumRef, ScriptError> {
-    player_wait_available().await;
+    session_handle.borrow_mut().drain_input_flag_cleanups();
+    session_handle.borrow_mut().drain_event_cleanups();
+    let is_mouse_down = matches!(&command, PlayerVMCommand::MouseDown(_));
+    if !is_mouse_down {
+        player_wait_available().await;
+    }
     // The command owns a session handle and capability.  Validate that exact
     // owner after the yield; a numeric player id or process-wide generation
     // can refer to a replacement player after reset.
@@ -3608,6 +4000,11 @@ async fn run_player_command_result(
         ));
     }
     match command {
+        PlayerVMCommand::DrainInputFlagCleanup => {
+            session_handle.borrow_mut().drain_input_flag_cleanups();
+            session_handle.borrow_mut().drain_event_cleanups();
+            return Ok(DatumRef::Void);
+        }
         PlayerVMCommand::SetExternalParams(params) => {
             reserve_player_mut(|player| {
                 player.external_params = params;
@@ -3812,17 +4209,23 @@ async fn run_player_command_result(
             });
         }
         PlayerVMCommand::MouseDown((x, y)) => {
-            crate::player::wait_for_handler_gap().await;
-            crate::player::hold_draw_for_input_handler();
-            if !player_is_playing().await {
+            crate::player::wait_for_handler_gap_owned(
+                session_handle.clone(), player_id, owner.clone(),
+            ).await?;
+            with_owned_player(&session_handle, player_id, &owner, |player| {
+                if player.draw_hold_since_ms.is_none() {
+                    player.draw_hold_since_ms = Some(chrono::Utc::now().timestamp_millis());
+                }
+            })?;
+            if !with_owned_player(&session_handle, player_id, &owner, |player| player.is_playing)? {
                 return Ok(DatumRef::Void);
             }
             // In Director, mouseDownScript intercepts BEFORE sprites get the event.
             // Only block when it contains executable content (not just a comment).
             // Comments like "--nothing" are stored but don't block propagation.
-            let mouse_down_script_active = reserve_player_ref(|player| {
+            let mouse_down_script_active = with_owned_player(&session_handle, player_id, &owner, |player| {
                 has_executable_callback(&player.movie.mouse_down_script)
-            });
+            })?;
             // Capture click timestamp BEFORE the stepFrame flush below. The flush is
             // async and variable in length (CS rooms have 50+ FurnitureItems in
             // actorList, plus IsoScene.processRoomRollover doing pixel hit-tests),
@@ -3837,13 +4240,18 @@ async fn run_player_command_result(
             // no prior mouse_move, so stepFrame hasn't run at the tap position yet.
             // mouse_loc is already set synchronously by the JS-side mouse_down() call.
             {
-                let actor_snapshot = reserve_player_ref(|player| {
+                let actor_snapshot = with_owned_player(&session_handle, player_id, &owner, |player| {
                     player.actor_list_stepframe_snapshot()
-                });
+                })?;
                 for (_idx, actor_ref) in actor_snapshot.0.iter().enumerate() {
                     if actor_snapshot.1.contains(&actor_ref.unwrap()) {
-                        let _ = call_datum_handler_active(
-                            actor_ref, Symbol::builtin(BuiltInSymbol::StepFrame), &vec![],
+                        let _ = super::events::invoke_datum_owned(
+                            &session_handle,
+                            player_id,
+                            &owner,
+                            actor_ref.clone(),
+                            Symbol::builtin(BuiltInSymbol::StepFrame),
+                            vec![],
                         ).await;
                     }
                 }
@@ -3866,12 +4274,12 @@ async fn run_player_command_result(
             // BEFORE the normal sprite lookup because that lookup applies
             // `is_click_transparent_sprite`, which makes a non-editable field
             // click-through; the scrollbar must stay live regardless.
-            let scrollbar_consumed = reserve_player_mut(|player| {
+            let scrollbar_consumed = with_owned_player(&session_handle, player_id, &owner, |player| {
                 player.mouse_loc = (x, y);
                 player.movie.mouse_down = true;
                 player.movie.click_loc = (x, y);
                 handle_field_scrollbar_mouse_down(player, x, y)
-            });
+            })?;
             if scrollbar_consumed {
                 return Ok(DatumRef::Void);
             }
@@ -3879,7 +4287,7 @@ async fn run_player_command_result(
             // Use scripted=true so only sprites with scripts (behavior or cast member)
             // are detected. Non-scripted sprites (decorations, overlays) are skipped,
             // matching Director behavior.
-            reserve_player_mut(|player| {
+            with_owned_player(&session_handle, player_id, &owner, |player| {
                 let is_double_click = (click_now - player.last_mouse_down_time) < 500;
                 player.mouse_loc = (x, y);
                 player.movie.mouse_down = true;
@@ -3968,7 +4376,7 @@ async fn run_player_command_result(
                     "[mouseDown] mouse_down_sprite={} (scripted lookup at {},{})",
                     player.mouse_down_sprite, x, y
                 );
-            });
+            })?;
 
             // If the click landed on a Flash sprite, forward the press into
             // the SWF so its own AS1 `on (press)` / button handlers run.
@@ -3978,43 +4386,49 @@ async fn run_player_command_result(
             // Use unscripted lookup here — Flash members don't always carry
             // a Director-side behaviour, but their internal buttons still
             // need the event.
-            let (flash_forward, debug_info) = reserve_player_ref(|player| {
+            let (flash_forward, debug_info, flash_binding_missing) = with_owned_player(&session_handle, player_id, &owner, |player| {
                 let any_sprite = get_sprite_at(player, x, y, false);
                 if any_sprite.is_none() {
-                    return (None, format!("no sprite at ({},{})", x, y));
+                    return (None, format!("no sprite at ({},{})", x, y), false);
                 }
                 let any_sprite = any_sprite.unwrap();
                 let sprite = match player.movie.score.get_sprite(any_sprite as i16) {
                     Some(s) => s,
-                    None => return (None, format!("sprite#{} not found", any_sprite)),
+                    None => return (None, format!("sprite#{} not found", any_sprite), false),
                 };
                 let member_ref = match sprite.member.as_ref() {
                     Some(m) => m,
-                    None => return (None, format!("sprite#{} has no member", any_sprite)),
+                    None => return (None, format!("sprite#{} has no member", any_sprite), false),
                 };
                 let member = match player.movie.cast_manager.find_member_by_ref(member_ref) {
                     Some(m) => m,
-                    None => return (None, format!("member {:?} not resolvable", member_ref)),
+                    None => return (None, format!("member {:?} not resolvable", member_ref), false),
                 };
                 let type_str = member.member_type.type_string();
                 if !matches!(member.member_type, CastMemberType::Flash(_)) {
-                    return (None, format!("sprite#{} member type='{}' (not Flash)", any_sprite, type_str));
+                    return (None, format!("sprite#{} member type='{}' (not Flash)", any_sprite, type_str), false);
                 }
                 let rect = super::score::get_concrete_sprite_rect(player, sprite);
+                let Some(generation) = player.flash_instance_generation(any_sprite as i16) else {
+                    return (None, format!("Flash sprite#{} has no live instance generation", any_sprite), true);
+                };
                 (
-                    Some((any_sprite as i32, x - rect.left, y - rect.top, rect.right - rect.left, rect.bottom - rect.top)),
+                    Some((any_sprite as i32, x - rect.left, y - rect.top, rect.right - rect.left, rect.bottom - rect.top, generation)),
                     format!("Flash sprite#{} member={}:{} rect=({},{})-({},{})",
                         any_sprite, member_ref.cast_lib, member_ref.cast_member,
-                        rect.left, rect.top, rect.right, rect.bottom),
+                        rect.left, rect.top, rect.right, rect.bottom), false,
                 )
-            });
+            })?;
             debug!("[Flash mouseDown] click@({},{}) → {}", x, y, debug_info);
+            if flash_binding_missing {
+                return Err(ScriptError::new("Flash sprite has no current owner generation".to_owned()));
+            }
 
             // Diagnostic: dump the script names attached to the clicked sprite
             // so we can see what behaviours (if any) have a chance to handle
             // mouseUp. If the list is empty / has no on mouseUp, clicking is a
             // no-op regardless of Flash forwarding.
-            let sprite_scripts_dump = reserve_player_ref(|player| {
+            let sprite_scripts_dump = with_owned_player(&session_handle, player_id, &owner, |player| {
                 let any_sprite = match get_sprite_at(player, x, y, false) {
                     Some(s) => s,
                     None => return "none".to_string(),
@@ -4050,9 +4464,9 @@ async fn run_player_command_result(
                 } else {
                     format!("sprite#{} behaviours: {}", any_sprite, names.join(" | "))
                 }
-            });
+            })?;
             debug!("[click sprite scripts] {}", sprite_scripts_dump);
-            if let Some((sn, lx, ly, sw, sh)) = flash_forward {
+            if let Some((sn, lx, ly, sw, sh, generation)) = flash_forward {
                 // AVM1 button hit-testing reads the stage-mouse position
                 // that's last updated by MouseMove. A real browser always
                 // emits pointermove before pointerdown, so the position is
@@ -4060,12 +4474,27 @@ async fn run_player_command_result(
                 // mouse at its previous location (often 0,0 if no organic
                 // input ever reached the SWF), and Ruffle's button test
                 // misses the click. Send a MouseMove first to seed it.
-                let _ = super::handlers::datum_handlers::flash_object::ruffle_dispatch_mouse_event_global(
-                    sn, "move", lx, ly, sw, sh,
-                );
-                let _ = super::handlers::datum_handlers::flash_object::ruffle_dispatch_mouse_event_global(
-                    sn, "down", lx, ly, sw, sh,
-                );
+                let owner_key = owner.clone();
+                let flash_generation_current = || {
+                    with_owned_player(&session_handle, player_id, &owner, |player| {
+                        player.flash_instance_generation(sn as i16) == Some(generation)
+                    }).unwrap_or(false)
+                };
+                if !flash_generation_current() {
+                    return Err(super::cancelled_scope_error());
+                }
+                super::handlers::datum_handlers::flash_object::ruffle_dispatch_mouse_event_owned(
+                    &owner_key, sn, generation, "move", lx, ly, sw, sh,
+                )?;
+                if !flash_generation_current() {
+                    return Err(super::cancelled_scope_error());
+                }
+                super::handlers::datum_handlers::flash_object::ruffle_dispatch_mouse_event_owned(
+                    &owner_key, sn, generation, "down", lx, ly, sw, sh,
+                )?;
+                if !flash_generation_current() {
+                    return Err(super::cancelled_scope_error());
+                }
             }
 
             // Temporarily clear ALL is_yield_safe() flags so that updateStage()
@@ -4076,27 +4505,11 @@ async fn run_player_command_result(
             // Set in_mouse_command so the frame loop skips frame updates/advancement
             // and updateStage renders without sleeping (preventing re-entrant event
             // dispatch and timing issues with mouseUp processing).
-            let saved_yield_flags = reserve_player_mut(|player| {
-                let saved = (
-                    player.is_in_frame_update,
-                    player.in_frame_script,
-                    player.in_enter_frame,
-                    player.in_prepare_frame,
-                    player.in_event_dispatch,
-                    player.in_mouse_command,
-                );
-                player.is_in_frame_update = false;
-                player.in_frame_script = false;
-                player.in_enter_frame = false;
-                player.in_prepare_frame = false;
-                player.in_event_dispatch = false;
-                player.in_mouse_command = true;
-                saved
-            });
+            let mut input_flags = MouseDownInputFlags::enter(&session_handle, player_id, &owner)?;
 
             // Dispatch to sprite behaviors if the sprite has any, otherwise
             // fall through to frame/movie scripts per Director's propagation chain.
-            let sprite_with_behaviors = reserve_player_ref(|player| {
+            let sprite_with_behaviors = with_owned_player(&session_handle, player_id, &owner, |player| {
                 if player.mouse_down_sprite > 0 {
                     let sprite = player.movie.score.get_sprite(player.mouse_down_sprite);
                     let has_behaviors = sprite.map_or(false, |s| {
@@ -4110,30 +4523,31 @@ async fn run_player_command_result(
                     }
                 }
                 None
-            });
+            })?;
 
             // A behavior that calls stopEvent() also blocks the cast member
             // script — the message hierarchy stops there (Director 11.5
             // Scripting Dictionary, `stopEvent()`).
             let mut event_stopped = false;
             if let Some(sprite_num) = sprite_with_behaviors {
-                event_stopped = player_dispatch_event_to_sprite_targeted(
-                    Symbol::builtin(BuiltInSymbol::MouseDown),
-                    &vec![],
-                    sprite_num,
-                ).await;
+                event_stopped = super::events::player_dispatch_event_to_sprite_targeted_owned(
+                    session_handle.clone(), player_id, owner.clone(),
+                    Symbol::builtin(BuiltInSymbol::MouseDown), vec![], sprite_num,
+                ).await?;
             } else {
-                player_invoke_frame_and_movie_scripts(
-                    Symbol::builtin(BuiltInSymbol::MouseDown),
-                    &vec![]
+                super::events::player_invoke_static_event_owned(
+                    &session_handle, player_id, &owner,
+                    Symbol::builtin(BuiltInSymbol::MouseDown), &vec![],
                 ).await?;
             }
 
             // Execute cast member script if it exists
-            let cast_member_script_call = retained_session_handle()
-                .and_then(|handle| {
-                    let mut session = handle.borrow_mut();
-                    session.with_player(active_player_id() as u32, |context| {
+            let cast_member_script_call = session_handle
+                .borrow_mut()
+                .with_player(player_id, |context| {
+                    if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                        return None;
+                    }
                 let player = context.player;
                 let symbols = context.symbols;
                 if event_stopped || player.mouse_down_sprite <= 0 {
@@ -4185,17 +4599,15 @@ async fn run_player_command_result(
                 let handler = script.get_own_handler_ref(Symbol::builtin(BuiltInSymbol::MouseDown))?;
 
                 Some((None, handler, vec![]))
-                    })
                 })
                 .flatten();
 
             let mut handler_err: Option<ScriptError> = None;
             if let Some((receiver, handler, args)) = cast_member_script_call {
-                match player_call_script_handler(receiver, handler, &args).await {
-                    ScriptHandlerTurn::Complete(Err(e)) => handler_err = Some(e),
-                    ScriptHandlerTurn::Complete(Ok(_))
-                    | ScriptHandlerTurn::Waiting
-                    | ScriptHandlerTurn::Pending(_) => {}
+                if let Err(e) = crate::player::eval::invoke_script_callback_owned(
+                    session_handle.clone(), player_id, owner.clone(), receiver, handler, args, false,
+                ).await {
+                    handler_err = Some(e);
                 }
             }
 
@@ -4211,14 +4623,7 @@ async fn run_player_command_result(
 
             // Restore all is_yield_safe() flags and in_mouse_command
             // MUST happen even on error to prevent skip_frame getting stuck
-            reserve_player_mut(|player| {
-                player.is_in_frame_update = saved_yield_flags.0;
-                player.in_frame_script = saved_yield_flags.1;
-                player.in_enter_frame = saved_yield_flags.2;
-                player.in_prepare_frame = saved_yield_flags.3;
-                player.in_event_dispatch = saved_yield_flags.4;
-                player.in_mouse_command = saved_yield_flags.5;
-            });
+            input_flags.restore();
 
             if let Some(e) = handler_err {
                 return Err(e);
@@ -4689,10 +5094,44 @@ async fn run_player_command_result(
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod raw_flash_tests {
-    use super::{raw_flash_args, Datum};
+    use super::{
+        raw_flash_args, raw_flash_args_from_values, raw_flash_values, ruffle_flash_values,
+        RawFlashBinding,
+        run_callback_command, CommandTurn, Datum, FlashCallbackArgs, PlayerVMCommand,
+    };
     use async_std::channel;
+    use std::{cell::RefCell, rc::Rc};
     use crate::player::session::RuntimeSession;
     use crate::player::symbols::symbol_table::SymbolOwner;
+    use crate::player::{owner_key_string, DirPlayer};
+    use crate::player::datum_ref::DatumRef;
+
+    fn assert_bound_markers(
+        player: &DirPlayer,
+        value: &DatumRef,
+        owner_key: &str,
+        sprite_num: i32,
+        generation: u64,
+    ) {
+        match player.get_datum(value).clone() {
+            Datum::FlashObjectRef(object) => {
+                assert_eq!(object.owner_key.as_deref(), Some(owner_key));
+                assert_eq!(object.instance_generation, Some(generation));
+                assert_eq!(object.instance_id, sprite_num as u32);
+            }
+            Datum::List(_, values, _) => {
+                for value in values {
+                    assert_bound_markers(player, &value, owner_key, sprite_num, generation);
+                }
+            }
+            Datum::PropList(values, _) => {
+                for (_, value) in values {
+                    assert_bound_markers(player, &value, owner_key, sprite_num, generation);
+                }
+            }
+            _ => {}
+        }
+    }
 
     fn decode_first_value(json: &str) -> Datum {
         let mut session = RuntimeSession::new(SymbolOwner {
@@ -4719,6 +5158,9 @@ mod raw_flash_tests {
         };
         assert_eq!(object.path, "final");
         assert_eq!((object.cast_lib, object.cast_member), (7, 8));
+        assert_eq!(object.instance_id, 0);
+        assert_eq!(object.owner_key, None);
+        assert_eq!(object.instance_generation, None);
     }
 
     #[test]
@@ -4730,6 +5172,150 @@ mod raw_flash_tests {
             matches!(value, Datum::PropList(_, _)),
             "a non-string final marker must not retain an older FlashObjectRef"
         );
+    }
+
+    #[test]
+    fn ruffle_payload_decodes_values_and_preserves_invalid_element_strings() {
+        use base64::Engine as _;
+        let encoded = [
+            serde_json::to_string(&base64::engine::general_purpose::STANDARD.encode(
+                serde_json::to_string("雪だるま☃").unwrap(),
+            )).unwrap(),
+            serde_json::to_string(&base64::engine::general_purpose::STANDARD.encode("7")).unwrap(),
+            serde_json::to_string(&base64::engine::general_purpose::STANDARD.encode(r#"{"kind":"object"}"#)).unwrap(),
+            serde_json::to_string("legacy-encoded-value").unwrap(),
+        ];
+        let payload = format!("[{}]", encoded.join(","));
+        let values = ruffle_flash_values(&payload).expect("Ruffle outer payload should parse");
+        let mut session = RuntimeSession::new(SymbolOwner { session: 9902, generation: 1 });
+        assert!(session.add_player(1, channel::unbounded().0));
+        let observed = session
+            .with_player(1, |context| {
+                let args = raw_flash_args_from_values(
+                    values,
+                    context.player,
+                    context.symbols,
+                    7,
+                    8,
+                    None,
+                );
+                args.into_iter()
+                    .skip(1)
+                    .map(|value| context.player.get_datum(&value).clone())
+                    .collect::<Vec<_>>()
+            })
+            .expect("Ruffle test player exists");
+        assert!(matches!(&observed[0], Datum::String(value) if value == "雪だるま☃"));
+        assert!(matches!(observed[1], Datum::Int(7)));
+        assert!(matches!(observed[2], Datum::PropList(_, _)));
+        assert!(matches!(&observed[3], Datum::String(value) if value == "legacy-encoded-value"));
+        assert!(ruffle_flash_values("{malformed outer").is_err());
+    }
+
+    #[test]
+    fn owned_plain_and_ruffle_markers_bind_recursively_after_origin_fence() {
+        use base64::Engine as _;
+
+        let mut session = RuntimeSession::new(SymbolOwner { session: 9904, generation: 1 });
+        assert!(session.add_player(1, channel::unbounded().0));
+        session
+            .with_player(1, |context| {
+                let owner_key = owner_key_string(&context.player.owner);
+                let binding = RawFlashBinding {
+                    owner_key: owner_key.clone(),
+                    sprite_num: 3,
+                    generation: 11,
+                };
+                let plain_values = raw_flash_values(
+                    r#"[{"__dirplayer_stored_path":"root"},{"nested":[{"__dirplayer_stored_path":"nested"}]}]"#,
+                )
+                .expect("plain callback payload should parse");
+                let plain_args = raw_flash_args_from_values(
+                    plain_values,
+                    context.player,
+                    context.symbols,
+                    7,
+                    8,
+                    Some(&binding),
+                );
+                assert_bound_markers(context.player, &plain_args[1], &owner_key, 3, 11);
+                assert_bound_markers(context.player, &plain_args[2], &owner_key, 3, 11);
+
+                let encode = |value: &str| {
+                    serde_json::to_string(&base64::engine::general_purpose::STANDARD.encode(value))
+                        .expect("Ruffle value should encode")
+                };
+                let ruffle_payload = format!(
+                    "[{},{}]",
+                    encode(r#"{"__dirplayer_stored_path":"root"}"#),
+                    encode(r#"{"nested":[{"__dirplayer_stored_path":"nested"}]}"#),
+                );
+                let ruffle_values = ruffle_flash_values(&ruffle_payload)
+                    .expect("Ruffle callback payload should decode");
+                let ruffle_args = raw_flash_args_from_values(
+                    ruffle_values,
+                    context.player,
+                    context.symbols,
+                    7,
+                    8,
+                    Some(&binding),
+                );
+                assert_bound_markers(context.player, &ruffle_args[1], &owner_key, 3, 11);
+                assert_bound_markers(context.player, &ruffle_args[2], &owner_key, 3, 11);
+            })
+            .expect("owned callback test player exists");
+    }
+
+    #[test]
+    fn stale_queued_flash_callback_rejects_malformed_outer_before_decode_or_allocation() {
+        let mut session = RuntimeSession::new(SymbolOwner { session: 9903, generation: 1 });
+        assert!(session.add_player(1, channel::unbounded().0));
+        let session = Rc::new(RefCell::new(session));
+        let (owner, stale_generation) = session
+            .borrow_mut()
+            .with_player(1, |context| {
+                let owner = context.player.owner.clone();
+                let stale_generation = context.player.reserve_flash_instance_generation(1).expect("generation");
+                (owner, stale_generation)
+            })
+            .expect("callback test player exists");
+        let queued_command = PlayerVMCommand::TriggerLingoCallbackOnScriptRaw {
+            cast_lib: 1,
+            cast_member: 1,
+            handler_name: "onFlashCallback".to_owned(),
+            args: FlashCallbackArgs::PlainJson("malformed outer JSON".to_owned()),
+            flash_cast_lib: 1,
+            flash_cast_member: 1,
+            origin_owner: owner.clone(),
+            origin_sprite_num: 1,
+            origin_generation: stale_generation,
+        };
+        session
+            .borrow_mut()
+            .with_player(1, |context| {
+                context.player.reserve_flash_instance_generation(1).expect("replacement generation");
+            })
+            .expect("callback test player exists");
+        let datum_count_before = session
+            .borrow_mut()
+            .with_player(1, |context| context.player.allocator.datum_count())
+            .expect("callback test player exists");
+        let turn = async_std::task::block_on(run_callback_command(
+            queued_command,
+            None,
+            session.clone(),
+            1,
+            owner,
+        ));
+        let CommandTurn::Complete(Err(error), None) = turn else {
+            panic!("stale queued callback must complete with an owner error");
+        };
+        assert_eq!(error.message, "Flash callback origin binding is stale");
+        let datum_count_after = session
+            .borrow_mut()
+            .with_player(1, |context| context.player.allocator.datum_count())
+            .expect("callback test player exists");
+        assert_eq!(datum_count_after, datum_count_before, "stale callback allocated VM data");
     }
 }
 
@@ -4865,6 +5451,707 @@ mod multiuser_socket_command_tests {
             })
             .expect("test player exists");
         assert_eq!(state_after_discarded, state_after_current);
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod scheduler_admission_tests {
+    use super::{
+        admit_pending_command, execute_admitted_pending_command, pump_admitted_eval_request,
+        pump_pending_commands, CommandTurn, PendingAdmission,
+    };
+    use async_std::channel;
+    use std::{cell::RefCell, rc::Rc};
+
+    use crate::player::{
+        driver::{ActionCompletion, InternalVmRequest, PendingAction, PendingCommand, TraceRequest},
+        eval::EvalTurn,
+        ownership::OwnerToken,
+        session::RuntimeSession,
+        symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolOwner},
+        DatumRef,
+    };
+
+    #[test]
+    fn scheduler_admits_each_eval_and_action_identity_once_before_poll() {
+        let mut session = RuntimeSession::new(SymbolOwner { session: 9951, generation: 1 });
+        assert!(session.add_player(1, channel::unbounded().0));
+        let owner = session
+            .with_player(1, |context| context.player.owner.clone())
+            .expect("scheduler test player exists");
+        let session = Rc::new(RefCell::new(session));
+
+        let (first_id, first_action, first_receiver) = session
+            .borrow_mut()
+            .start_eval_request(
+                1,
+                InternalVmRequest::ObjectProperty {
+                    receiver: DatumRef::Void,
+                    name: Symbol::builtin(BuiltInSymbol::Value),
+                },
+            )
+            .expect("first evaluator request should start");
+        let first_request = session
+            .borrow_mut()
+            .take_pending_eval_request_for(1)
+            .expect("first evaluator request should admit");
+        assert_eq!(first_request.id, first_id);
+        let first_action_for_cancel = first_action.clone();
+        let first_id_for_cancel = first_id.clone();
+        let first_owner_for_cancel = first_request.owner.clone();
+        let _unpolled = pump_admitted_eval_request(&session, first_request);
+        assert!(session.borrow_mut().take_pending_eval_request_for(1).is_none());
+
+        let (second_id, _second_action, second_receiver) = session
+            .borrow_mut()
+            .start_eval_request(
+                1,
+                InternalVmRequest::ObjectProperty {
+                    receiver: DatumRef::Void,
+                    name: Symbol::builtin(BuiltInSymbol::Value),
+                },
+            )
+            .expect("distinct nested evaluator request should start");
+        let second_request = session
+            .borrow_mut()
+            .take_pending_eval_request_for(1)
+            .expect("distinct nested evaluator request should admit");
+        assert_eq!(second_request.id, second_id);
+        assert_ne!(second_request.id, first_id);
+
+        let (_, _, first_sender) = session
+            .borrow_mut()
+            .detach_pending_eval_route(&first_id_for_cancel, &first_action_for_cancel)
+            .expect("first evaluator route should remain uniquely attached");
+        let canceled = session.borrow_mut().resume_eval(
+            first_id_for_cancel,
+            &first_action_for_cancel,
+            &first_owner_for_cancel,
+            Err(crate::player::cancelled_scope_error()),
+        );
+        assert!(matches!(canceled, EvalTurn::Complete(Err(_))));
+        let _ = first_sender.try_send(Err(crate::player::cancelled_scope_error()));
+        assert!(matches!(first_receiver.try_recv(), Ok(Err(_))));
+
+        let second_id_for_complete = second_request.id.clone();
+        let second_action_for_complete = second_request.action.clone();
+        let second_owner_for_complete = second_request.owner.clone();
+        let (_, _, second_sender) = session
+            .borrow_mut()
+            .detach_pending_eval_route(&second_id_for_complete, &second_action_for_complete)
+            .expect("second evaluator route should remain uniquely attached");
+        let completed = session.borrow_mut().resume_eval(
+            second_id_for_complete,
+            &second_action_for_complete,
+            &second_owner_for_complete,
+            Ok(DatumRef::Void),
+        );
+        let completed_result = match completed {
+            EvalTurn::Complete(result) => result,
+            _ => panic!("second evaluator did not complete"),
+        };
+        let _ = second_sender.try_send(completed_result);
+        assert!(second_receiver.try_recv().is_ok());
+
+        let (cancel_id, _cancel_action, cancel_receiver) = session
+            .borrow_mut()
+            .start_eval_request(
+                1,
+                InternalVmRequest::ObjectProperty {
+                    receiver: DatumRef::Void,
+                    name: Symbol::builtin(BuiltInSymbol::Value),
+                },
+            )
+            .expect("cancellable evaluator request should start");
+        let cancel_ticket = session.borrow_mut().test_scheduler_ticket(&owner);
+        session.borrow_mut().retain_pending_command(PendingCommand {
+            player_id: 1,
+            owner: owner.clone(),
+            action: Some(PendingAction::Trace(TraceRequest {
+                ticket: cancel_ticket.clone(),
+                message: "canceled scheduler identity test".to_owned(),
+            })),
+            started: false,
+            ticket: Some(cancel_ticket.clone()),
+            completer: None,
+            event_sender: None,
+            score_continuation: None,
+            child_completion: None,
+            eval_child: Some(cancel_id.clone()),
+            eval_sender: None,
+        });
+        let (cancel_action, admitted_cancel_ticket) = match admit_pending_command(&session, 1, &owner)
+            .expect("cancellable action should admit")
+        {
+            PendingAdmission::Action { action, ticket } => (action, ticket),
+            PendingAdmission::Turn(_) => panic!("cancellable trace action was admitted as a cooperative turn"),
+        };
+        let canceled_unpolled = execute_admitted_pending_command(
+            &session,
+            1,
+            &owner,
+            cancel_action,
+            admitted_cancel_ticket,
+        );
+        session
+            .borrow_mut()
+            .cancel_eval_callback(&cancel_id, 1, &owner);
+        assert!(matches!(cancel_receiver.try_recv(), Ok(Err(_))));
+        let (canceled_turns, canceled_again) = async_std::task::block_on(canceled_unpolled);
+        assert!(canceled_turns.is_empty());
+        assert!(!canceled_again);
+        assert!(session.borrow().action_details(&cancel_ticket).is_none());
+
+        let ticket = session.borrow_mut().test_scheduler_ticket(&owner);
+        session.borrow_mut().retain_pending_command(PendingCommand {
+            player_id: 1,
+            owner: owner.clone(),
+            action: Some(PendingAction::Trace(TraceRequest {
+                ticket: ticket.clone(),
+                message: "scheduler identity test".to_owned(),
+            })),
+            started: false,
+            ticket: Some(ticket.clone()),
+            completer: None,
+            event_sender: None,
+            score_continuation: None,
+            child_completion: None,
+            eval_child: None,
+            eval_sender: None,
+        });
+        let admitted = admit_pending_command(&session, 1, &owner)
+            .expect("ready action should admit");
+        let (admitted_action, admitted_ticket) = match admitted {
+            PendingAdmission::Action { action, ticket: admitted_ticket } => {
+                assert!(admitted_ticket.same_identity(&ticket));
+                (action, admitted_ticket)
+            }
+            PendingAdmission::Turn(_) => panic!("trace action was admitted as a cooperative turn"),
+        };
+        let unpolled = execute_admitted_pending_command(
+            &session,
+            1,
+            &owner,
+            admitted_action.clone(),
+            admitted_ticket.clone(),
+        );
+        assert!(!session.borrow().has_ready_pending_commands(1));
+        assert!(admit_pending_command(&session, 1, &owner).is_none());
+        drop(unpolled);
+        let (completion_turns, drive_again) = async_std::task::block_on(
+            execute_admitted_pending_command(
+                &session,
+                1,
+                &owner,
+                admitted_action,
+                admitted_ticket,
+            ),
+        );
+        assert!(drive_again);
+        assert!(matches!(completion_turns.as_slice(), [CommandTurn::Continue]));
+        let turns = pump_pending_commands(&session, 1);
+        assert_eq!(turns.len(), 1);
+        assert!(!session.borrow().has_pending_commands(1));
+        session.borrow_mut().submit_pending_command_completion(
+            1,
+            ticket,
+            ActionCompletion::Resume,
+        );
+        assert!(pump_pending_commands(&session, 1).is_empty());
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod owned_mouse_down_tests {
+    use super::{
+        execute_pending_commands, pump_pending_commands, pump_pending_eval_requests,
+        run_player_command_result, CommandTurn, MouseDownInputFlags, PlayerVMCommand,
+    };
+    use async_std::channel;
+    use futures::future::{select, Either, FutureExt};
+    use std::{cell::RefCell, collections::HashMap, rc::Rc, task::{Context, Poll}};
+
+    use crate::player::{
+        ownership::OwnerToken,
+        session::RuntimeSession,
+        symbols::symbol_table::SymbolOwner,
+    };
+
+    fn session_with_player(id: u32) -> (Rc<RefCell<RuntimeSession>>, OwnerToken) {
+        let mut session = RuntimeSession::new(SymbolOwner { session: 91, generation: 1 });
+        let (queue, _receiver) = channel::unbounded();
+        assert!(session.add_player(id, queue));
+        let owner = session
+            .with_player(id, |context| context.player.owner.clone())
+            .expect("test player exists");
+        let handle = Rc::new(RefCell::new(session));
+        handle.borrow_mut().with_player(id, |context| {
+            context.player.is_playing = true;
+        });
+        (handle, owner)
+    }
+
+    fn session_with_suspended_mouse_behavior(
+        session_id: u64,
+    ) -> (Rc<RefCell<RuntimeSession>>, OwnerToken, crate::player::symbols::symbol::Symbol) {
+        use crate::director::{
+            chunks::{handler::{Bytecode, HandlerDef}, script::ScriptChunk},
+            enums::ScriptType,
+            lingo::opcode::OpCode,
+        };
+        use crate::player::{
+            allocator::ScriptInstanceAllocatorTrait,
+            cast_lib::{CastLib, CastMemberRef},
+            cast_member::{CastMember, CastMemberType, FieldMember},
+            script::{Script, ScriptInstance},
+            score::{ScoreSpriteSpan, SpriteChannel},
+            symbols::{builtin::BuiltInSymbol, symbol::Symbol},
+        };
+
+        let mut session = RuntimeSession::new(SymbolOwner { session: session_id, generation: 1 });
+        assert!(session.add_player(1, channel::unbounded().0));
+        let (mouse_down, marker) = session
+            .with_player(1, |context| {
+                (
+                    Symbol::builtin(BuiltInSymbol::MouseDown),
+                    context.symbols.intern("ownedMouseDownMarker"),
+                )
+            })
+            .expect("test player exists");
+        let nothing = Symbol::builtin(BuiltInSymbol::Nothing);
+        let member_ref = CastMemberRef { cast_lib: 1, cast_member: 1 };
+        let handler = Rc::new(HandlerDef {
+            name_id: 0,
+            bytecode_array: vec![
+                Bytecode::new(OpCode::PushArgListNoRet, 0, 0),
+                Bytecode::new(OpCode::ExtCall, 1, 1),
+                Bytecode::new(OpCode::PushInt8, 7, 2),
+                Bytecode::new(OpCode::SetGlobal, 2, 3),
+                Bytecode::new(OpCode::Ret, 0, 4),
+            ],
+            bytecode_index_map: fxhash::FxHashMap::default(),
+            argument_name_ids: vec![],
+            local_name_ids: vec![],
+            global_name_ids: vec![1, 2],
+            compiled_ir: RefCell::new(None),
+        });
+        let script = Rc::new(Script {
+            member_ref: member_ref.clone(),
+            name: "owned-mouse-down-fixture".to_owned(),
+            chunk: ScriptChunk {
+                script_number: 1,
+                literals: vec![],
+                handlers: vec![],
+                property_name_ids: vec![],
+                property_defaults: HashMap::new(),
+            },
+            script_type: ScriptType::Score,
+            handlers: fxhash::FxHashMap::from_iter([(mouse_down.clone(), handler)]),
+            handler_names_raw: vec!["mouseDown".to_owned(), "nothing".to_owned()],
+            handler_names: vec![mouse_down.clone()],
+            properties: RefCell::new(fxhash::FxHashMap::default()),
+        });
+        session
+            .with_player(1, |context| {
+                let instance = context.player.allocator.alloc_script_instance(ScriptInstance {
+                    instance_id: 1,
+                    script: member_ref.clone(),
+                    ancestor: None,
+                    properties: fxhash::FxHashMap::default(),
+                    begin_sprite_called: false,
+                });
+                let mut cast = CastLib::test_external(1, 0);
+                cast.name_symbols = Rc::from(vec![mouse_down.clone(), nothing, marker.clone()]);
+                cast.scripts.insert(1, script);
+                cast.members.insert(1, CastMember::new(
+                    1,
+                    CastMemberType::Field(FieldMember::new()),
+                ));
+                context.player.movie.cast_manager.casts.push(cast);
+                context.player.movie.score.channels = vec![
+                    SpriteChannel::new(0),
+                    SpriteChannel::new(1),
+                ];
+                context.player.movie.score.sprite_spans.push(ScoreSpriteSpan {
+                    channel_number: 1,
+                    start_frame: 1,
+                    end_frame: 1,
+                    scripts: vec![],
+                });
+                let sprite = &mut context.player.movie.score.channels[1].sprite;
+                sprite.entered = true;
+                sprite.visible = true;
+                sprite.loc_h = 0;
+                sprite.loc_v = 0;
+                sprite.width = 100;
+                sprite.height = 100;
+                sprite.member = Some(member_ref);
+                sprite.script_instance_list = vec![instance];
+                context.player.is_playing = true;
+                // Keep the initial owned handler-gap probe deterministic for
+                // this fixture; the owned path treats this state as a safe
+                // input-handler gap and proceeds immediately.
+                context.player.command_handler_yielding = true;
+            })
+            .expect("mouseDown fixture installed");
+        let owner = session
+            .with_player(1, |context| context.player.owner.clone())
+            .expect("test player exists");
+        (Rc::new(RefCell::new(session)), owner, marker)
+    }
+
+    fn session_with_suspended_static_mouse_behavior(
+        session_id: u64,
+    ) -> (Rc<RefCell<RuntimeSession>>, OwnerToken, crate::player::symbols::symbol::Symbol) {
+        use crate::director::enums::ScriptType;
+
+        let (session, owner, marker) = session_with_suspended_mouse_behavior(session_id);
+        session
+            .borrow_mut()
+            .with_player(1, |context| {
+                let cast = context
+                    .player
+                    .movie
+                    .cast_manager
+                    .casts
+                    .first_mut()
+                    .expect("mouseDown fixture cast exists");
+                let script = cast
+                    .scripts
+                    .get_mut(&1)
+                    .expect("mouseDown fixture script exists");
+                Rc::get_mut(script)
+                    .expect("static fixture script is uniquely owned")
+                    .script_type = ScriptType::Movie;
+                context.player.movie.score.channels[1]
+                    .sprite
+                    .script_instance_list
+                    .clear();
+            })
+            .expect("static mouseDown fixture installed");
+        (session, owner, marker)
+    }
+
+    async fn finish_turn(
+        session: &Rc<RefCell<RuntimeSession>>,
+        player_id: u32,
+        owner: &OwnerToken,
+        turn: CommandTurn,
+    ) {
+        if !session
+            .borrow_mut()
+            .with_player(player_id, |context| {
+                owner.same_identity(&context.player.owner) && owner.is_arena_live()
+            })
+            .unwrap_or(false)
+        {
+            if let CommandTurn::Complete(_, Some(completer)) = turn {
+                completer.complete(Err(crate::player::cancelled_scope_error())).await;
+            }
+            return;
+        }
+        match turn {
+            CommandTurn::Continue => {}
+            CommandTurn::Waiting(pending) | CommandTurn::Pending(pending) => {
+                session.borrow_mut().requeue_pending_command(pending);
+            }
+            CommandTurn::Complete(result, completer) => {
+                if let Some(completer) = completer {
+                    completer.complete(result).await;
+                }
+            }
+        }
+    }
+
+    async fn drive_mouse_down(
+        session: Rc<RefCell<RuntimeSession>>,
+        owner: OwnerToken,
+    ) -> Result<crate::player::DatumRef, crate::player::ScriptError> {
+        let operation = run_player_command_result(
+            PlayerVMCommand::MouseDown((10, 10)),
+            session.clone(),
+            1,
+            owner.clone(),
+        )
+        .fuse();
+        futures::pin_mut!(operation);
+        let pump = async {
+            loop {
+                let turns = pump_pending_commands(&session, 1);
+                for turn in turns {
+                    finish_turn(&session, 1, &owner, turn).await;
+                }
+                let _ = pump_pending_eval_requests(&session, 1).await;
+                let (turns, _) = execute_pending_commands(&session, 1, &owner).await;
+                for turn in turns {
+                    finish_turn(&session, 1, &owner, turn).await;
+                }
+                async_std::task::yield_now().await;
+            }
+        };
+        futures::pin_mut!(pump);
+        match async_std::future::timeout(
+            std::time::Duration::from_secs(2),
+            select(operation, pump),
+        )
+        .await
+        .map_err(|_| crate::player::ScriptError::new("mouseDown fixture pump timed out".to_owned()))?
+        {
+            Either::Left((result, _)) => result,
+            Either::Right((never, _)) => match never {},
+        }
+    }
+
+    #[test]
+    fn dropped_suspended_mouse_down_behavior_defers_owned_cleanup() {
+        let (session, owner, marker) = session_with_suspended_mouse_behavior(9_101);
+        session.borrow_mut().with_player(1, |context| {
+            context.player.event_stopped = true;
+            context.player.in_frame_script = true;
+        });
+        let mut operation = Box::pin(run_player_command_result(
+            PlayerVMCommand::MouseDown((10, 10)),
+            session.clone(),
+            1,
+            owner.clone(),
+        ));
+        let waker = futures::task::noop_waker();
+        let mut poll_context = Context::from_waker(&waker);
+        assert!(matches!(
+            operation.as_mut().poll(&mut poll_context),
+            Poll::Pending
+        ));
+        assert_eq!(
+            session.borrow().active_event_scope_count_for_test(1),
+            1,
+            "the real MouseDown behavior must suspend inside its owned event scope"
+        );
+        assert!(session.borrow_mut().with_player(1, |context| {
+            context.player.in_mouse_command && !context.player.event_stopped
+        }).unwrap());
+
+        let borrowed = session.borrow_mut();
+        drop(operation);
+        drop(borrowed);
+        session.borrow_mut().drain_eval_cancellations();
+        session.borrow_mut().drain_input_flag_cleanups();
+        session.borrow_mut().drain_event_cleanups();
+        assert_eq!(session.borrow().pending_owned_work_count_for_test(1), 0);
+        assert_eq!(session.borrow().active_event_scope_count_for_test(1), 0);
+        assert!(session.borrow_mut().with_player(1, |context| {
+            !context.player.in_mouse_command
+                && context.player.in_frame_script
+                && context.player.event_stopped
+                && context.player.active_static_event_handlers.is_empty()
+                && !context.player.globals.contains_key(&marker)
+        }).unwrap());
+    }
+
+    #[test]
+    fn owned_mouse_down_behavior_completes_and_updates_selected_session() {
+        let (session, owner, marker) = session_with_suspended_mouse_behavior(9_102);
+        let (other_session, _other_owner, other_marker) =
+            session_with_suspended_mouse_behavior(9_104);
+        let result = async_std::task::block_on(drive_mouse_down(session.clone(), owner));
+        assert!(result.is_ok(), "owned MouseDown fixture failed: {:?}", result.err());
+        assert!(session.borrow_mut().with_player(1, |context| {
+            context.player.globals.get(&marker).is_some_and(|value| {
+                matches!(context.player.get_datum(value), crate::director::lingo::datum::Datum::Int(7))
+            })
+        }).unwrap());
+        assert!(session.borrow_mut().with_player(1, |context| {
+            context.player.movie.mouse_down && !context.player.in_mouse_command
+        }).unwrap());
+        assert!(other_session.borrow_mut().with_player(1, |context| {
+            !context.player.movie.mouse_down
+                && !context.player.globals.contains_key(&other_marker)
+        }).unwrap());
+    }
+
+    #[test]
+    fn dropped_suspended_mouse_down_cleanup_is_discarded_on_reset_replacement() {
+        let (session, owner, _marker) = session_with_suspended_mouse_behavior(9_103);
+        let mut operation = Box::pin(run_player_command_result(
+            PlayerVMCommand::MouseDown((10, 10)),
+            session.clone(),
+            1,
+            owner.clone(),
+        ));
+        let waker = futures::task::noop_waker();
+        let mut poll_context = Context::from_waker(&waker);
+        assert!(matches!(
+            operation.as_mut().poll(&mut poll_context),
+            Poll::Pending
+        ));
+        assert_eq!(session.borrow().active_event_scope_count_for_test(1), 1);
+        let replacement = session.borrow_mut().reset_player_owned(1, &owner).unwrap();
+        drop(operation);
+        session.borrow_mut().drain_eval_cancellations();
+        session.borrow_mut().drain_input_flag_cleanups();
+        session.borrow_mut().drain_event_cleanups();
+        assert_eq!(session.borrow().pending_owned_work_count_for_test(1), 0);
+        assert_eq!(session.borrow().active_event_scope_count_for_test(1), 0);
+        assert!(session.borrow_mut().with_player(1, |context| {
+            context.player.owner.same_identity(&replacement)
+                && !context.player.in_mouse_command
+                && !context.player.event_stopped
+                && context.player.active_static_event_handlers.is_empty()
+        }).unwrap());
+    }
+
+    #[test]
+    fn mouse_down_uses_selected_session_for_colliding_numeric_ids() {
+        let (first, first_owner) = session_with_player(1);
+        let (second, second_owner) = session_with_player(1);
+
+        let result = async_std::task::block_on(run_player_command_result(
+            PlayerVMCommand::MouseDown((12, 8)),
+            first.clone(),
+            1,
+            first_owner,
+        ));
+        assert!(result.is_ok());
+        assert!(first.borrow_mut().with_player(1, |context| context.player.movie.mouse_down).unwrap());
+        assert!(!second.borrow_mut().with_player(1, |context| context.player.movie.mouse_down).unwrap());
+
+        let result = async_std::task::block_on(run_player_command_result(
+            PlayerVMCommand::MouseDown((4, 3)),
+            second.clone(),
+            1,
+            second_owner,
+        ));
+        assert!(result.is_ok());
+        assert!(second.borrow_mut().with_player(1, |context| context.player.movie.mouse_down).unwrap());
+    }
+
+    #[test]
+    fn stale_mouse_down_owner_is_rejected_without_touching_replacement() {
+        let (session, old_owner) = session_with_player(1);
+        let replacement = session
+            .borrow_mut()
+            .reset_player_owned(1, &old_owner)
+            .expect("reset test player");
+        session.borrow_mut().with_player(1, |context| {
+            context.player.is_playing = true;
+        });
+        let result = async_std::task::block_on(run_player_command_result(
+            PlayerVMCommand::MouseDown((12, 8)),
+            session.clone(),
+            1,
+            old_owner,
+        ));
+        assert!(result.is_err());
+        assert!(!session.borrow_mut().with_player(1, |context| context.player.movie.mouse_down).unwrap());
+        assert!(session.borrow_mut().with_player(1, |context| {
+            context.player.owner.same_identity(&replacement)
+        }).unwrap());
+    }
+
+    #[test]
+    fn dropped_overlapping_mouse_down_scopes_unwind_in_either_order() {
+        let (session, owner) = session_with_player(1);
+        session.borrow_mut().with_player(1, |context| {
+            context.player.in_frame_script = true;
+        });
+        let first = MouseDownInputFlags::enter(&session, 1, &owner).unwrap();
+        let second = MouseDownInputFlags::enter(&session, 1, &owner).unwrap();
+        drop(first);
+        assert!(session.borrow_mut().with_player(1, |context| context.player.in_mouse_command).unwrap());
+        drop(second);
+        assert!(session.borrow_mut().with_player(1, |context| context.player.in_frame_script).unwrap());
+        assert!(!session.borrow_mut().with_player(1, |context| context.player.in_mouse_command).unwrap());
+    }
+
+    #[test]
+    fn dropped_overlapping_mouse_down_scopes_unwind_inner_first() {
+        let (session, owner) = session_with_player(1);
+        session.borrow_mut().with_player(1, |context| {
+            context.player.in_frame_script = true;
+        });
+        let first = MouseDownInputFlags::enter(&session, 1, &owner).unwrap();
+        let second = MouseDownInputFlags::enter(&session, 1, &owner).unwrap();
+        drop(second);
+        assert!(session.borrow_mut().with_player(1, |context| context.player.in_mouse_command).unwrap());
+        drop(first);
+        assert!(session.borrow_mut().with_player(1, |context| context.player.in_frame_script).unwrap());
+        assert!(!session.borrow_mut().with_player(1, |context| context.player.in_mouse_command).unwrap());
+    }
+
+    #[test]
+    fn dropped_mouse_down_defers_restore_when_session_is_borrowed() {
+        let (session, owner) = session_with_player(1);
+        session.borrow_mut().with_player(1, |context| {
+            context.player.in_event_dispatch = true;
+        });
+        let guard = MouseDownInputFlags::enter(&session, 1, &owner).unwrap();
+        let borrowed = session.borrow_mut();
+        drop(guard);
+        drop(borrowed);
+        session.borrow_mut().drain_input_flag_cleanups();
+        assert!(session.borrow_mut().with_player(1, |context| context.player.in_event_dispatch).unwrap());
+        assert!(!session.borrow_mut().with_player(1, |context| context.player.in_mouse_command).unwrap());
+    }
+
+    #[test]
+    fn input_scope_exhaustion_preserves_flags_and_owner() {
+        let (session, owner) = session_with_player(1);
+        session.borrow_mut().with_player(1, |context| {
+            context.player.in_frame_script = true;
+        });
+        session.borrow_mut().set_next_input_scope_id_for_test(u64::MAX);
+        let result = MouseDownInputFlags::enter(&session, 1, &owner);
+        assert!(result.is_err());
+        assert!(session.borrow_mut().with_player(1, |context| {
+            context.player.in_frame_script && !context.player.in_mouse_command
+                && context.player.owner.same_identity(&owner)
+        }).unwrap());
+    }
+
+    #[test]
+    fn reset_discards_old_input_cleanup_without_touching_replacement() {
+        let (session, owner) = session_with_player(1);
+        let guard = MouseDownInputFlags::enter(&session, 1, &owner).unwrap();
+        let replacement = session.borrow_mut().reset_player_owned(1, &owner).unwrap();
+        drop(guard);
+        assert!(session.borrow_mut().with_player(1, |context| {
+            context.player.owner.same_identity(&replacement)
+                && !context.player.in_mouse_command
+        }).unwrap());
+    }
+
+    #[test]
+    fn dropped_suspended_mouse_down_static_fallback_defers_guard_cleanup() {
+        let (session, owner, marker) =
+            session_with_suspended_static_mouse_behavior(9_105);
+        let mut operation = Box::pin(run_player_command_result(
+            PlayerVMCommand::MouseDown((10, 10)),
+            session.clone(),
+            1,
+            owner.clone(),
+        ));
+        let waker = futures::task::noop_waker();
+        let mut poll_context = Context::from_waker(&waker);
+        assert!(matches!(
+            operation.as_mut().poll(&mut poll_context),
+            Poll::Pending
+        ));
+        assert!(session.borrow_mut().with_player(1, |context| {
+            context.player.in_mouse_command
+                && !context.player.active_static_event_handlers.is_empty()
+        }).unwrap());
+
+        let borrowed = session.borrow_mut();
+        drop(operation);
+        drop(borrowed);
+        session.borrow_mut().drain_eval_cancellations();
+        session.borrow_mut().drain_input_flag_cleanups();
+        session.borrow_mut().drain_event_cleanups();
+        assert_eq!(session.borrow().pending_owned_work_count_for_test(1), 0);
+        assert!(session.borrow_mut().with_player(1, |context| {
+            !context.player.in_mouse_command
+                && context.player.active_static_event_handlers.is_empty()
+                && !context.player.globals.contains_key(&marker)
+        }).unwrap());
     }
 }
 

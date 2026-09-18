@@ -133,16 +133,13 @@ use crate::player::{
     ScriptError,
 };
 use crate::player::ownership::OwnerToken;
-use crate::player::session::{ExecutionContext, PlayerId, RuntimeSession, RuntimeSessionHandle};
+use crate::player::session::{allocate_session_id, ExecutionContext, PlayerId, RuntimeSession, RuntimeSessionHandle};
 use crate::player::symbols::symbol_table::SymbolOwner;
 use crate::player::PlayerVMExecutionItem;
 use async_std::channel::Sender;
 use manual_future::ManualFuture;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 const DEFAULT_TIMEOUT_SECS: f64 = 30.0;
-
-static TEST_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Explicit owner and context used by a native or browser test harness.
 ///
@@ -159,7 +156,7 @@ pub struct HarnessRuntime {
 impl HarnessRuntime {
     pub(crate) fn new(command_tx: Sender<PlayerVMExecutionItem>) -> Self {
         let owner = SymbolOwner {
-            session: TEST_SESSION_ID.fetch_add(1, Ordering::Relaxed),
+            session: allocate_session_id().expect("shared session id namespace exhausted"),
             generation: 1,
         };
         let session = RuntimeSession::new(owner).into_handle();

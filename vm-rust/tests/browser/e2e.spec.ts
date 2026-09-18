@@ -220,6 +220,59 @@ function processSnapshot(
 
 test("browser e2e tests", async ({ page }) => {
   const snapshotErrors: string[] = [];
+  const pageLifecycle: string[] = ["before-goto"];
+  const pageErrors: string[] = [];
+  const failedRequests: string[] = [];
+  const badResponses: string[] = [];
+
+  page.on("domcontentloaded", () => {
+    pageLifecycle.push("domcontentloaded");
+  });
+  page.on("pageerror", (error) => {
+    const detail = error.stack ? `${error.message}\n${error.stack}` : error.message;
+    pageErrors.push(detail);
+    console.log(`[browser-e2e] pageerror: ${detail}`);
+  });
+  page.on("requestfailed", (request) => {
+    const failure = request.failure()?.errorText ?? "unknown request failure";
+    const detail = `${request.method()} ${request.url()} — ${failure}`;
+    failedRequests.push(detail);
+    console.log(`[browser-e2e] requestfailed: ${detail}`);
+  });
+  page.on("response", (response) => {
+    if (response.status() < 400) return;
+    const detail = `${response.status()} ${response.request().method()} ${response.url()}`;
+    badResponses.push(detail);
+    console.log(`[browser-e2e] response>=400: ${detail}`);
+  });
+
+  const capturePageState = async (): Promise<string> => {
+    try {
+      const state = await page.evaluate(() => {
+        const win = window as any;
+        const output = document.getElementById("output");
+        return {
+          url: window.location.href,
+          readyState: document.readyState,
+          outputText: output?.textContent?.slice(0, 12000) ?? "",
+          bodyText: document.body?.textContent?.slice(0, 12000) ?? "",
+          testResults: win.__testResults ?? null,
+          testPanic: win.__testPanic ?? null,
+          scriptErrors: win.__scriptErrors ?? [],
+          currentPhase: win.__dirplayerNestedPhase ?? win.__testPhase ?? null,
+        };
+      });
+      return JSON.stringify({ pageLifecycle, pageErrors, failedRequests, badResponses, state }, null, 2);
+    } catch (error) {
+      return JSON.stringify({
+        pageLifecycle,
+        pageErrors,
+        failedRequests,
+        badResponses,
+        evaluateError: error instanceof Error ? error.message : String(error),
+      }, null, 2);
+    }
+  };
 
   // Expose snapshot handler so snapshots are saved as they're taken
   await page.exposeFunction(
@@ -248,21 +301,36 @@ test("browser e2e tests", async ({ page }) => {
     });
   }
 
-  await page.goto("/index.html");
+  const navigation = await page.goto("/index.html");
+  pageLifecycle.push("goto-resolved");
+  console.log(
+    `[browser-e2e] harness-start page.goto resolved status=${navigation?.status() ?? "no-response"} ` +
+      `url=${page.url()}`
+  );
+  console.log(`[browser-e2e] harness-start state=${await capturePageState()}`);
 
   // Stop waiting as soon as the harness finishes, a panic hook reports a
   // Rust panic, or the page accumulates script errors.
-  const handle = await page.waitForFunction(
-    () => {
-      const win = window as any;
-      return (
-        win.__testResults?.done === true ||
-        typeof win.__testPanic === "string" ||
-        (Array.isArray(win.__scriptErrors) && win.__scriptErrors.length > 0)
-      );
-    },
-    { timeout: 900_000 }
-  );
+  let handle: Awaited<ReturnType<typeof page.waitForFunction>>;
+  try {
+    handle = await page.waitForFunction(
+      () => {
+        const win = window as any;
+        return (
+          win.__testResults?.done === true ||
+          typeof win.__testPanic === "string" ||
+          (Array.isArray(win.__scriptErrors) && win.__scriptErrors.length > 0)
+        );
+      },
+      { timeout: 900_000 }
+    );
+  } catch (error) {
+    const diagnostic = await capturePageState();
+    console.log(`[browser-e2e] harness wait failed: ${diagnostic}`);
+    throw new Error(
+      `browser harness did not publish completion: ${error instanceof Error ? error.message : String(error)}\n${diagnostic}`
+    );
+  }
   await handle.dispose();
 
   const [testResults, panicMessage, scriptErrors, interpStats] = await Promise.all([

@@ -17,6 +17,7 @@ use super::{
     events::PlayerVMEvent,
     font::BitmapFont,
     ownership::{OwnerKey, OwnerToken},
+    owner_key_string,
     session::{ExecutionContext, PlayerId, RuntimeSessionHandle},
     PlayerVMExecutionItem, ScriptError,
 };
@@ -146,6 +147,7 @@ pub(crate) struct NestedChildRecord {
     pub(crate) child_owner: OwnerToken,
     pub(crate) command_tx: Sender<PlayerVMExecutionItem>,
     pub(crate) event_tx: Sender<PlayerVMEvent>,
+    pub(crate) flash_owner_registered: bool,
 }
 
 #[derive(Default)]
@@ -250,6 +252,49 @@ impl NestedPlayerRegistry {
         .then_some(record)
     }
 
+    pub(crate) fn child_mut(
+        &mut self,
+        child_id: PlayerId,
+        child_owner: &OwnerToken,
+    ) -> Option<&mut NestedChildRecord> {
+        let record = self.children.get_mut(&child_id)?;
+        (record.child_owner.same_identity(child_owner)
+            && record.parent_owner.is_arena_live()
+            && child_owner.is_arena_live())
+            .then_some(record)
+    }
+
+    pub(crate) fn child_mut_identity(
+        &mut self,
+        child_id: PlayerId,
+        child_owner: &OwnerToken,
+    ) -> Option<&mut NestedChildRecord> {
+        let record = self.children.get_mut(&child_id)?;
+        record.child_owner.same_identity(child_owner).then_some(record)
+    }
+
+    pub(crate) fn replace_child_runtime(
+        &mut self,
+        child_id: PlayerId,
+        old_owner: &OwnerToken,
+        new_owner: OwnerToken,
+        command_tx: Sender<PlayerVMExecutionItem>,
+        event_tx: Sender<PlayerVMEvent>,
+    ) -> Result<(PlayerId, OwnerToken), ScriptError> {
+        let record = self
+            .children
+            .get_mut(&child_id)
+            .filter(|record| record.child_owner.same_identity(old_owner))
+            .ok_or_else(crate::player::cancelled_scope_error)?;
+        let parent_id = record.parent_id;
+        let parent_owner = record.parent_owner.clone();
+        record.child_owner = new_owner;
+        record.command_tx = command_tx;
+        record.event_tx = event_tx;
+        record.flash_owner_registered = false;
+        Ok((parent_id, parent_owner))
+    }
+
     /// Check only the capability identity for teardown.  Cancellation can mark
     /// the captured owner dead before the loop gets a final scheduling turn;
     /// requiring arena liveness here would leave the stale registry record in
@@ -351,6 +396,68 @@ pub(crate) async fn start_nested_movie_owned(
         committed: false,
     };
 
+    // Register the exact child capability before any loop can dispatch a
+    // Flash action. The session borrow used to capture the capability state
+    // ends before the frontend callback factory is entered.
+    let (flash_pending, flash_binding_tx) = session
+        .borrow_mut()
+        .with_player(child_id, |context| {
+            (
+                context.player.flash_scripted_access_pending.clone(),
+                context.player.queue_tx.clone(),
+            )
+        })
+        .ok_or_else(crate::player::cancelled_scope_error)?;
+    let flash_capability = crate::BrowserFlashCapability::new_child(
+        session.clone(),
+        child_id,
+        child_owner.clone(),
+        flash_pending,
+        flash_binding_tx,
+    );
+    let parent_owner_key = owner_key_string(&start.parent_owner);
+    let child_owner_key = owner_key_string(&child_owner);
+    #[cfg(target_arch = "wasm32")]
+    {
+        let flash_capability: wasm_bindgen::JsValue = flash_capability.into();
+        crate::js_api::JsApi::register_nested_flash_owner(
+            &parent_owner_key,
+            &child_owner_key,
+            &flash_capability,
+        )?;
+        let mark_result = {
+            let result = session.borrow_mut().mark_nested_flash_owner_registered(
+                start.parent_id,
+                &start.parent_owner,
+                child_id,
+                &child_owner,
+            );
+            result
+        };
+        if let Err(error) = mark_result {
+            // The callback may synchronously reset either side of the pair.
+            // Retire the exact registration before startup guard cleanup so a
+            // replacement child can never inherit this host.
+            if let Err(retire_error) = crate::js_api::JsApi::retire_nested_flash_owner(
+                &parent_owner_key,
+                &child_owner_key,
+            ) {
+                log::error!("nested Flash registration rollback failed: {retire_error}");
+            }
+            return Err(error);
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = flash_capability;
+        session.borrow_mut().activate_nested_flash_route(
+            start.parent_id,
+            &start.parent_owner,
+            child_id,
+            &child_owner,
+        )?;
+    }
+
     // Start servicing the child before load/init. Startup callbacks can issue
     // PumpPending work; starting these loops afterwards would deadlock them.
     let command_session = session.clone();
@@ -396,6 +503,157 @@ pub(crate) async fn start_nested_movie_owned(
     }
     startup_guard.commit();
     Ok((child_id, child_owner))
+}
+
+/// Rotate one linked child without leaving its old command/event loops or
+/// frontend owner alive. The old senders are closed only after reset
+/// preflight and owner rotation succeed; fresh channels are installed and
+/// their loops are spawned only after the exact replacement Flash owner has
+/// been registered.
+pub(crate) fn reset_nested_player_owned(
+    session: RuntimeSessionHandle,
+    child_id: PlayerId,
+    old_owner: OwnerToken,
+) -> Result<OwnerToken, ScriptError> {
+    let old_record = session
+        .borrow()
+        .nested_child_owned(child_id, &old_owner)
+        .ok_or_else(crate::player::cancelled_scope_error)?;
+    let parent_id = old_record.parent_id;
+    let parent_owner = old_record.parent_owner.clone();
+    let new_owner = session
+        .borrow_mut()
+        .reset_player_owned(child_id, &old_owner)?;
+    // Only close the old runtime after reset preflight and owner rotation have
+    // succeeded. Exhaustion must leave both old channels usable.
+    old_record.command_tx.close();
+    old_record.event_tx.close();
+    // The reset queues exact old child retirement while the borrow is held.
+    // Deliver it before publishing the replacement key.
+    super::commands::drain_host_teardowns(&session);
+
+    let (command_tx, command_rx) = async_std::channel::unbounded();
+    let (event_tx, event_rx) = async_std::channel::unbounded();
+    {
+        let mut runtime = session.borrow_mut();
+        let replace_result = runtime.replace_nested_child_runtime(
+                child_id,
+                &old_owner,
+                new_owner.clone(),
+                command_tx.clone(),
+                event_tx.clone(),
+            );
+        if let Err(error) = replace_result {
+            drop(runtime);
+            session
+                .borrow_mut()
+                .retire_nested_child_if_owner(child_id, &new_owner);
+            super::commands::drain_host_teardowns(&session);
+            return Err(error);
+        }
+        let install_result = runtime.with_player(child_id, |context| {
+                context.player.queue_tx = command_tx.clone();
+                context
+                    .player
+                    .set_nested_flash_host_route(super::FlashHostRoute::NestedPending);
+            });
+        if install_result.is_none() {
+            drop(runtime);
+            session
+                .borrow_mut()
+                .retire_nested_child_if_owner(child_id, &new_owner);
+            super::commands::drain_host_teardowns(&session);
+            return Err(crate::player::cancelled_scope_error());
+        }
+    }
+
+    let (flash_pending, flash_binding_tx) = session
+        .borrow_mut()
+        .with_player(child_id, |context| {
+            (
+                context.player.flash_scripted_access_pending.clone(),
+                context.player.queue_tx.clone(),
+            )
+        })
+        .ok_or_else(crate::player::cancelled_scope_error)?;
+    let flash_capability = crate::BrowserFlashCapability::new_child(
+        session.clone(),
+        child_id,
+        new_owner.clone(),
+        flash_pending,
+        flash_binding_tx,
+    );
+    let parent_owner_key = owner_key_string(&parent_owner);
+    let child_owner_key = owner_key_string(&new_owner);
+    #[cfg(target_arch = "wasm32")]
+    {
+        let flash_capability: wasm_bindgen::JsValue = flash_capability.into();
+        if let Err(error) = crate::js_api::JsApi::register_nested_flash_owner(
+            &parent_owner_key,
+            &child_owner_key,
+            &flash_capability,
+        ) {
+            session
+                .borrow_mut()
+                .retire_nested_child_if_owner(child_id, &new_owner);
+            super::commands::drain_host_teardowns(&session);
+            return Err(error);
+        }
+        let mark_result = {
+            let result = session.borrow_mut().mark_nested_flash_owner_registered(
+                parent_id,
+                &parent_owner,
+                child_id,
+                &new_owner,
+            );
+            result
+        };
+        if let Err(error) = mark_result {
+            if let Err(retire_error) = crate::js_api::JsApi::retire_nested_flash_owner(
+                &parent_owner_key,
+                &child_owner_key,
+            ) {
+                log::error!("nested Flash reset rollback failed: {retire_error}");
+            }
+            session
+                .borrow_mut()
+                .retire_nested_child_if_owner(child_id, &new_owner);
+            super::commands::drain_host_teardowns(&session);
+            return Err(error);
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = flash_capability;
+        let activate_result = {
+            let result = session.borrow_mut().activate_nested_flash_route(
+                parent_id,
+                &parent_owner,
+                child_id,
+                &new_owner,
+            );
+            result
+        };
+        if let Err(error) = activate_result {
+            session
+                .borrow_mut()
+                .retire_nested_child_if_owner(child_id, &new_owner);
+            return Err(error);
+        }
+    }
+
+    let command_session = session.clone();
+    let command_owner = new_owner.clone();
+    async_std::task::spawn_local(async move {
+        super::commands::run_command_loop(command_rx, command_session, child_id, command_owner)
+            .await;
+    });
+    let event_session = session.clone();
+    let event_owner = new_owner.clone();
+    async_std::task::spawn_local(async move {
+        super::events::run_event_loop(event_rx, event_session, child_id, event_owner).await;
+    });
+    Ok(new_owner)
 }
 
 /// Discover linked movie sprites after the parent frame has settled.  The
@@ -833,8 +1091,10 @@ mod tests {
     use crate::player::score::SpriteChannel;
     use crate::player::session::RuntimeSession;
     use crate::player::symbols::symbol_table::SymbolOwner;
+    use manual_future::ManualFuture;
     use std::cell::RefCell;
     use std::rc::Rc;
+    use std::time::{Duration, Instant};
 
     fn owner(session: u64, player: u64) -> OwnerToken {
         OwnerToken::new(OwnerKey {
@@ -859,6 +1119,7 @@ mod tests {
             child_owner,
             command_tx,
             event_tx,
+            flash_owner_registered: false,
         }
     }
 
@@ -926,6 +1187,337 @@ mod tests {
         let replacement = owner(3, 9);
         assert!(!stale.same_identity(&replacement));
         assert!(!registry.contains_child_identity(9, &replacement));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn owned_nested_start_mounts_d5_channel_one_in_child_context() {
+        let session = Rc::new(RefCell::new(RuntimeSession::new(SymbolOwner {
+            session: 79,
+            generation: 1,
+        })));
+        let (parent_tx, _parent_rx) = async_std::channel::unbounded();
+        assert!(session.borrow_mut().add_player(1, parent_tx));
+        let parent_owner = session
+            .borrow_mut()
+            .with_player(1, |context| context.player.owner.clone())
+            .unwrap();
+        let parent_member = CastMemberRef {
+            cast_lib: 1,
+            cast_member: 91,
+        };
+        session
+            .borrow_mut()
+            .with_player(1, |context| {
+                let mut channel = SpriteChannel::new(1);
+                channel.sprite.member = Some(parent_member);
+                channel.sprite.entered = true;
+                context.player.movie.score.channels = vec![SpriteChannel::new(0), channel];
+            })
+            .unwrap();
+
+        let make_start = || NestedMovieStart {
+            parent_id: 1,
+            parent_owner: parent_owner.clone(),
+            member_ref: CastMemberRef {
+                cast_lib: 1,
+                cast_member: 1,
+            },
+            bytes: Rc::new(include_bytes!("../../tests/fixtures/nested_flash_a.dcr").to_vec()),
+            base_url: "https://fixture.invalid/".to_owned(),
+            file_name: "nested_flash_a.dcr".to_owned(),
+            system_font: None,
+        };
+        let parsed = make_start().parse().expect("D5 fixture should parse");
+        let frame_pair = parsed
+            .score
+            .as_ref()
+            .and_then(|score| {
+                score
+                    .frame_data
+                    .frame_channel_data
+                    .iter()
+                    .find(|(frame, channel, _)| *frame == 0 && *channel == 6)
+                    .map(|(_, _, data)| (data.cast_lib, data.cast_member))
+            });
+        assert_eq!(frame_pair, Some((1, 1)));
+
+        // Exercise the production loader up to the host-emission boundary.
+        // This proves the parsed D5 channel is mounted into the selected child
+        // before native startup rejects the first Flash action.
+        let (child_id, child_owner) = async_std::task::block_on(async {
+            let start = make_start();
+            let dir = start.parse()?;
+            let (command_tx, _command_rx) = async_std::channel::unbounded();
+            let (event_tx, _event_rx) = async_std::channel::unbounded();
+            let (child_id, child_owner) = session.borrow_mut().register_nested_player(
+                start.parent_id,
+                &start.parent_owner,
+                start.member_ref,
+                command_tx,
+                event_tx,
+            )?;
+            session.borrow_mut().activate_nested_flash_route(
+                start.parent_id,
+                &start.parent_owner,
+                child_id,
+                &child_owner,
+            )?;
+            super::super::load_movie_from_dir_owned(
+                session.clone(),
+                child_id,
+                child_owner.clone(),
+                dir,
+            )
+            .await?;
+            Ok::<_, ScriptError>((child_id, child_owner))
+        })
+        .expect("production child mount should finish before host emission");
+
+        let (root_member, root_entered) = session
+            .borrow_mut()
+            .with_player(1, |context| {
+                (
+                    context.player.movie.score.get_sprite(1).and_then(|sprite| sprite.member),
+                    context.player.movie.score.get_sprite(1).is_some_and(|sprite| sprite.entered),
+                )
+            })
+            .unwrap();
+        let (child_member, child_entered, child_props_applied, child_script_wrote, child_route) = session
+            .borrow_mut()
+            .with_player(child_id, |context| {
+                let sprite = context.player.movie.score.get_sprite(1);
+                (
+                    sprite.and_then(|sprite| sprite.member),
+                    sprite.is_some_and(|sprite| sprite.entered),
+                    sprite.is_some_and(|sprite| sprite.score_props_already_applied),
+                    sprite.is_some_and(|sprite| sprite.script_wrote_since_span_init),
+                    context.player.flash_host_route,
+                )
+            })
+            .unwrap();
+        eprintln!(
+            "owned nested D5 mount: frame_pair={frame_pair:?} root_member={root_member:?} root_entered={root_entered} child_id={child_id} child_owner={:?} child_member={child_member:?} child_entered={child_entered} props_applied={child_props_applied} script_wrote={child_script_wrote} route={child_route:?}",
+            child_owner.key(),
+        );
+        assert_eq!(child_owner.key().player, child_id as u64);
+        assert_eq!(root_member, Some(parent_member));
+        assert!(root_entered);
+        assert_eq!(child_member, Some(CastMemberRef { cast_lib: 1, cast_member: 1 }));
+        assert!(!child_entered);
+        assert!(child_props_applied);
+        assert!(!child_script_wrote);
+        assert_eq!(child_route, super::super::FlashHostRoute::LocalOwned);
+
+        session.borrow_mut().remove_player(child_id);
+
+        let error = async_std::task::block_on(async {
+            start_nested_movie_owned(session.clone(), make_start()).await
+        })
+        .expect_err("native nested startup must reject the first Flash host action");
+        assert_eq!(error.message, "Flash host is unavailable on native");
+        assert!(session
+            .borrow()
+            .nested_children_for(1, &parent_owner)
+            .is_empty());
+        assert_eq!(session.borrow().players().len(), 1);
+
+        let (root_member, root_entered) = session
+            .borrow_mut()
+            .with_player(1, |context| {
+                (
+                    context.player.movie.score.get_sprite(1).and_then(|sprite| sprite.member),
+                    context.player.movie.score.get_sprite(1).is_some_and(|sprite| sprite.entered),
+                )
+            })
+            .unwrap();
+        assert_eq!(root_member, Some(parent_member));
+        assert!(root_entered);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn direct_nested_reset_replaces_owner_and_both_runtime_channels() {
+        let session = Rc::new(RefCell::new(RuntimeSession::new(SymbolOwner {
+            session: 77,
+            generation: 1,
+        })));
+        let (parent_tx, _parent_rx) = async_std::channel::unbounded();
+        assert!(session.borrow_mut().add_player(1, parent_tx));
+        let parent_owner = session
+            .borrow_mut()
+            .with_player(1, |context| context.player.owner.clone())
+            .unwrap();
+        let (old_command_tx, old_command_rx) = async_std::channel::unbounded();
+        let (old_event_tx, old_event_rx) = async_std::channel::unbounded();
+        let (child_id, old_owner) = session
+            .borrow_mut()
+            .register_nested_player(
+                1,
+                &parent_owner,
+                CastMemberRef { cast_lib: 3, cast_member: 4 },
+                old_command_tx.clone(),
+                old_event_tx.clone(),
+            )
+            .unwrap();
+        session
+            .borrow_mut()
+            .activate_nested_flash_route(1, &parent_owner, child_id, &old_owner)
+            .unwrap();
+
+        let new_owner = async_std::task::block_on(async {
+            reset_nested_player_owned(session.clone(), child_id, old_owner.clone())
+        })
+        .unwrap();
+        assert!(!old_owner.same_identity(&new_owner));
+        assert!(old_command_tx
+            .try_send(PlayerVMExecutionItem {
+                command: PlayerVMCommand::PumpPending,
+                completer: None,
+            })
+            .is_err());
+        while old_command_rx.try_recv().is_ok() {}
+        while old_event_rx.try_recv().is_ok() {}
+        assert!(matches!(
+            old_command_rx.try_recv(),
+            Err(async_std::channel::TryRecvError::Closed)
+        ));
+        assert!(matches!(
+            old_event_rx.try_recv(),
+            Err(async_std::channel::TryRecvError::Closed)
+        ));
+
+        // reset_owned_core intentionally stops a player.  The replacement
+        // loops are live, but this direct channel test must put the child
+        // back into playback before exercising the MouseDown command path.
+        session
+            .borrow_mut()
+            .with_player(child_id, |context| {
+                context.player.is_playing = true;
+            })
+            .unwrap();
+
+        let replacement = session
+            .borrow()
+            .nested_child_owned(child_id, &new_owner)
+            .expect("replacement nested record");
+        async_std::task::block_on(async {
+            replacement
+                .event_tx
+                .try_send(PlayerVMEvent::Global(
+                    crate::player::symbols::symbol::Symbol::builtin(
+                        crate::player::symbols::builtin::BuiltInSymbol::BeginSprite,
+                    ),
+                    vec![],
+                ))
+                .unwrap();
+            let (command_future, command_completer) = ManualFuture::new();
+            replacement
+                .command_tx
+                .send(PlayerVMExecutionItem {
+                    command: PlayerVMCommand::MouseDown((1, 1)),
+                    completer: Some(command_completer),
+                })
+                .await
+                .unwrap();
+            async_std::future::timeout(Duration::from_millis(250), command_future)
+                .await
+                .expect("replacement command loop did not complete")
+                .expect("replacement MouseDown command failed");
+            let deadline = Instant::now() + Duration::from_millis(250);
+            while replacement.event_tx.len() != 0 {
+                assert!(Instant::now() < deadline, "replacement event loop did not consume event");
+                async_std::task::yield_now().await;
+            }
+        });
+        assert!(session
+            .borrow_mut()
+            .with_player(child_id, |context| context.player.movie.mouse_down)
+            .unwrap());
+        assert!(!replacement.event_tx.is_closed());
+
+        let (flash_pending, flash_binding_tx) = session
+            .borrow_mut()
+            .with_player(child_id, |context| {
+                (
+                    context.player.flash_scripted_access_pending.clone(),
+                    context.player.queue_tx.clone(),
+                )
+            })
+            .unwrap();
+        let capability = crate::BrowserFlashCapability::new_child(
+            session.clone(),
+            child_id,
+            new_owner,
+            flash_pending,
+            flash_binding_tx,
+        );
+        capability
+            .update_flash_frame(1, 1, 1, &[255, 0, 0, 255])
+            .unwrap();
+        assert!(session
+            .borrow_mut()
+            .with_player(child_id, |context| {
+                context.player.flash_frame_buffers.contains_key(&1)
+            })
+            .unwrap());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn nested_reset_exhaustion_preserves_old_owner_and_runtime_channels() {
+        let session = Rc::new(RefCell::new(RuntimeSession::new(SymbolOwner {
+            session: 78,
+            generation: u64::MAX,
+        })));
+        let (parent_tx, _parent_rx) = async_std::channel::unbounded();
+        assert!(session.borrow_mut().add_player(1, parent_tx));
+        let parent_owner = session
+            .borrow_mut()
+            .with_player(1, |context| context.player.owner.clone())
+            .unwrap();
+        let (command_tx, command_rx) = async_std::channel::unbounded();
+        let (event_tx, event_rx) = async_std::channel::unbounded();
+        let (child_id, child_owner) = session
+            .borrow_mut()
+            .register_nested_player(
+                1,
+                &parent_owner,
+                CastMemberRef { cast_lib: 4, cast_member: 5 },
+                command_tx.clone(),
+                event_tx.clone(),
+            )
+            .unwrap();
+
+        let result = async_std::task::block_on(async {
+            reset_nested_player_owned(session.clone(), child_id, child_owner.clone())
+        });
+        assert!(result.is_err());
+        assert!(child_owner.is_arena_live());
+        assert!(session
+            .borrow()
+            .nested_child_owned(child_id, &child_owner)
+            .is_some());
+        assert!(session
+            .borrow_mut()
+            .with_player(child_id, |context| context.player.owner.same_identity(&child_owner))
+            .unwrap());
+        assert!(command_tx
+            .try_send(PlayerVMExecutionItem {
+                command: PlayerVMCommand::PumpPending,
+                completer: None,
+            })
+            .is_ok());
+        assert!(event_tx
+            .try_send(PlayerVMEvent::Global(
+                crate::player::symbols::symbol::Symbol::builtin(
+                    crate::player::symbols::builtin::BuiltInSymbol::BeginSprite,
+                ),
+                vec![],
+            ))
+            .is_ok());
+        assert!(command_rx.try_recv().is_ok());
+        assert!(event_rx.try_recv().is_ok());
     }
 
     #[test]

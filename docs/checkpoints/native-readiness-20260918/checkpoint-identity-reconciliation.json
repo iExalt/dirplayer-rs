@@ -1,0 +1,183 @@
+{
+  "latest_sprite_overlay_sha256": "31c2b0f3ceb98833beb9211aca0b33379b031ce6c2719198bede7b14ff80abb1",
+  "latest_sprite_overlay_entry_count": 62,
+  "manifest_stream_sha256": "fb45f80dabb748c5b47d740b403f97145e8aeb575c9105115322a3ecb2e7773c",
+  "nested_manifest_stream_sha256": "290f9cb35fda413f81bb37ee76195a700115943c651353d8577fadebf3d03c2e",
+  "critical_paths": [
+    {
+      "path": "vm-rust/src/lib.rs",
+      "latest_sprite_hash": "c58c33b553bd7903a3b92f23eb23244a617b8638a655ce49cc21bb7c29a21d68",
+      "identities": [
+        {
+          "checkpoint": "callback/native-ownership combined after",
+          "hash": "47a650c91d10eed8bdf084e24f4722f59c1a8eda6eaa44e8fe95f19d8ec5ca84",
+          "relation": "superseded-by-latest-sprite-overlay"
+        },
+        {
+          "checkpoint": "score/stage2 integration runtime",
+          "hash": "47a650c91d10eed8bdf084e24f4722f59c1a8eda6eaa44e8fe95f19d8ec5ca84",
+          "relation": "superseded-by-latest-sprite-overlay"
+        }
+      ]
+    },
+    {
+      "path": "vm-rust/src/player/commands.rs",
+      "latest_sprite_hash": "0016a15d4840f7be10d0767b7d6bb6923e9f76c0cadc918adb585de9451a7013",
+      "identities": [
+        {
+          "checkpoint": "callback/native-ownership combined after",
+          "hash": "82cbbdf9c8f5d4fdbed7b5844fd0fc4bd346ab36ea573add6976f50fdda3ae52",
+          "relation": "superseded-by-latest-sprite-overlay"
+        },
+        {
+          "checkpoint": "evaluator-cancellation browser source",
+          "hash": "fbad2b138041450e138bf25060cb2da58189962fd7f7a21bbe34efc956aec73a",
+          "relation": "superseded-by-latest-sprite-overlay"
+        },
+        {
+          "checkpoint": "score/stage2 integration runtime",
+          "hash": "82cbbdf9c8f5d4fdbed7b5844fd0fc4bd346ab36ea573add6976f50fdda3ae52",
+          "relation": "superseded-by-latest-sprite-overlay"
+        }
+      ]
+    },
+    {
+      "path": "vm-rust/src/player/mod.rs",
+      "latest_sprite_hash": "5c64e670c3bab6e9fd5051d0112a7961605b69a7c9b233db5a20c298c45d5dfd",
+      "identities": [
+        {
+          "checkpoint": "callback/native-ownership combined after",
+          "hash": "7ef33739bf2a9b5cfc4487e493c7a9cca137730e7ddd9d7ec5cb54002010b5ca",
+          "relation": "superseded-by-latest-sprite-overlay"
+        },
+        {
+          "checkpoint": "evaluator-cancellation browser source",
+          "hash": "c66602f5157c34e2eb79d7e36086cd97b1b8ecc4baa2dd75fd69ecfe95d0d758",
+          "relation": "superseded-by-latest-sprite-overlay"
+        },
+        {
+          "checkpoint": "score/stage2 integration runtime",
+          "hash": "7ef33739bf2a9b5cfc4487e493c7a9cca137730e7ddd9d7ec5cb54002010b5ca",
+          "relation": "superseded-by-latest-sprite-overlay"
+        }
+      ]
+    },
+    {
+      "path": "vm-rust/src/player/session.rs",
+      "latest_sprite_hash": "80f4d1feae1fd35aad5921c25532c45a0374317853e73b677368e253d24f4c09",
+      "identities": [
+        {
+          "checkpoint": "callback/native-ownership combined after",
+          "hash": "0aba4291f740d5847f6ea2d04dd6ba5be53ec9be750b60fa405958bce189b615",
+          "relation": "superseded-by-latest-sprite-overlay"
+        },
+        {
+          "checkpoint": "evaluator-cancellation browser source",
+          "hash": "0eaac10c0695ac765a6be3ed80e30cedf89b58240a0112df3dd6f4eafe5ec46a",
+          "relation": "superseded-by-latest-sprite-overlay"
+        },
+        {
+          "checkpoint": "score/stage2 integration runtime",
+          "hash": "0aba4291f740d5847f6ea2d04dd6ba5be53ec9be750b60fa405958bce189b615",
+          "relation": "superseded-by-latest-sprite-overlay"
+        }
+      ]
+    },
+    {
+      "path": "vm-rust/src/player/testing_browser.rs",
+      "latest_sprite_hash": "1dd981edfc58d91d8b328c907144448d245ad44058ca12cc7c796ecef3283372",
+      "identities": [
+        {
+          "checkpoint": "callback/native-ownership combined after",
+          "hash": "3776f046c2db56410798c7892809f2333c44e441d785e86e2caa6af590b0bf3e",
+          "relation": "superseded-by-latest-sprite-overlay"
+        },
+        {
+          "checkpoint": "score/stage2 integration runtime",
+          "hash": "3776f046c2db56410798c7892809f2333c44e441d785e86e2caa6af590b0bf3e",
+          "relation": "superseded-by-latest-sprite-overlay"
+        }
+      ]
+    },
+    {
+      "path": "src/services/flashPlayerManager.ts",
+      "latest_sprite_hash": "522ddc591ad536be82d3c8852a16b957252943ec3eb34b75f8fcf50d09d6874d",
+      "identities": [
+        {
+          "checkpoint": "callback/native-ownership combined after",
+          "hash": "a97fde861ae5a1d2f41fca7a77333da894520b9bc4c4a9f76adafa99e0edf084",
+          "relation": "superseded-by-latest-sprite-overlay"
+        },
+        {
+          "checkpoint": "score/stage2 integration runtime",
+          "hash": "a97fde861ae5a1d2f41fca7a77333da894520b9bc4c4a9f76adafa99e0edf084",
+          "relation": "superseded-by-latest-sprite-overlay"
+        }
+      ]
+    },
+    {
+      "path": "src/vm/callbacks.ts",
+      "latest_sprite_hash": "3590892d21d2c7a923d4e4e1e95b85ecca8504b0e3f93538fc6bc264dd47caab",
+      "identities": [
+        {
+          "checkpoint": "callback/native-ownership combined after",
+          "hash": "d5156b5d91466f7814e213c836ed58407cceabaa2c020365707195f7f24702e3",
+          "relation": "superseded-by-latest-sprite-overlay"
+        },
+        {
+          "checkpoint": "score/stage2 integration runtime",
+          "hash": "d5156b5d91466f7814e213c836ed58407cceabaa2c020365707195f7f24702e3",
+          "relation": "superseded-by-latest-sprite-overlay"
+        }
+      ]
+    },
+    {
+      "path": "vm-rust/src/player/driver.rs",
+      "latest_sprite_hash": "afd7f954db083e7d38e81730b2a59b5f378d28c87c20113189dc67952ad5dc80",
+      "identities": [
+        {
+          "checkpoint": "callback/native-ownership combined after",
+          "hash": "1b421dd1377909d4813bebe3edbd9f77a1ee7ff7498540096d01678593125ee2",
+          "relation": "superseded-by-latest-sprite-overlay"
+        },
+        {
+          "checkpoint": "score/stage2 integration runtime",
+          "hash": "1b421dd1377909d4813bebe3edbd9f77a1ee7ff7498540096d01678593125ee2",
+          "relation": "superseded-by-latest-sprite-overlay"
+        }
+      ]
+    },
+    {
+      "path": "vm-rust/src/player/events.rs",
+      "latest_sprite_hash": "8b0cf2ef2e301b8a16666bb9dbfd93cdb0174ccb8534f90e4e723b4eaa645365",
+      "identities": [
+        {
+          "checkpoint": "callback/native-ownership combined after",
+          "hash": "309af6d0bef3e68477a44854d15b3df69e8127b1b788953100e4c83388b68138",
+          "relation": "superseded-by-latest-sprite-overlay"
+        },
+        {
+          "checkpoint": "score/stage2 integration runtime",
+          "hash": "309af6d0bef3e68477a44854d15b3df69e8127b1b788953100e4c83388b68138",
+          "relation": "superseded-by-latest-sprite-overlay"
+        }
+      ]
+    },
+    {
+      "path": "vm-rust/src/player/handlers/datum_handlers/sprite.rs",
+      "latest_sprite_hash": "a4b63dcd3477eeaeda1aa9a926c2c15cc2f9c20a6f2e889183dcfd91323d0294",
+      "identities": [
+        {
+          "checkpoint": "callback/native-ownership combined after",
+          "hash": "edf57c91481fbd835791c10bcd100f07c57cb51102c82517e02fdadaadf50c6f",
+          "relation": "superseded-by-latest-sprite-overlay"
+        },
+        {
+          "checkpoint": "score/stage2 integration runtime",
+          "hash": "edf57c91481fbd835791c10bcd100f07c57cb51102c82517e02fdadaadf50c6f",
+          "relation": "superseded-by-latest-sprite-overlay"
+        }
+      ]
+    }
+  ]
+}

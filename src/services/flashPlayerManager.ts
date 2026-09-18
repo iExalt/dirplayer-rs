@@ -15,6 +15,8 @@ import {
   bridgeCallMethod,
   bridgeDestroyPlayer,
   bridgeGetVariableSync,
+  bridgeGetVariableOwnedSync,
+  normalizeOwnedFlashVariable,
   bridgeSetVariableSync,
   bridgeCallFunctionSync,
   bridgeCallMethodSync,
@@ -80,6 +82,22 @@ export interface FlashOwnerCapability {
   set_flash_scripted_access_pending(pending: boolean): void;
   update_flash_frame(spriteNum: number, width: number, height: number, rgba: Uint8Array): void;
   trigger_lingo_callback_on_script(
+    originOwnerKey: string,
+    originSpriteNum: number,
+    originGeneration: number,
+    castLib: number,
+    castMember: number,
+    handlerName: string,
+    argsJson: string,
+    flashCastLib: number,
+    flashCastMember: number,
+  ): boolean;
+  /** Ruffle's encoded callback wire; the payload is opaque until Rust has
+   * validated the captured owner and generation. */
+  trigger_lingo_callback_on_script_ruffle(
+    originOwnerKey: string,
+    originSpriteNum: number,
+    originGeneration: number,
     castLib: number,
     castMember: number,
     handlerName: string,
@@ -106,6 +124,116 @@ const spriteIndex = new Map<number, string>();
 // Sprite numbers may overlap across BrowserPlayerHandle instances, and a
 // retired generation must never fall through to the numeric legacy index.
 const flashOwnerHosts = new Map<string, FlashOwnerHost>();
+const LINGO_CALLBACK_EVENT = 'dirplayer-lingo-callback';
+
+/** Route an encoded Ruffle callback through the exact owner and instance.
+ * This function deliberately does no JSON or base64 work. Rust performs the
+ * decode only after its queued owner/generation fence has passed. */
+export function deliverOwnedLingoCallback(
+  ownerKey: unknown,
+  spriteNum: unknown,
+  generation: unknown,
+  castLib: unknown,
+  castMember: unknown,
+  handlerName: unknown,
+  argsJson: unknown,
+  flashCastLib: unknown,
+  flashCastMember: unknown,
+): boolean {
+  if (
+    typeof ownerKey !== 'string' ||
+    !Number.isInteger(spriteNum) ||
+    !Number.isSafeInteger(generation) ||
+    typeof castLib !== 'number' ||
+    typeof castMember !== 'number' ||
+    typeof handlerName !== 'string' ||
+    typeof argsJson !== 'string' ||
+    typeof flashCastLib !== 'number' ||
+    typeof flashCastMember !== 'number'
+  ) return false;
+  const host = flashOwnerHosts.get(ownerKey);
+  if (!host || host.disposed || !validFlashSpriteNumber(spriteNum as number)) return false;
+  if (!validFlashGeneration(generation as number)) return false;
+  const instance = host.instances.get(`${ownerKey}:${spriteNum}`);
+  if (
+    !instance ||
+    instance.instanceGeneration !== generation ||
+    !host.isCurrentInstanceGeneration(spriteNum as number, generation as number)
+  ) return false;
+  try {
+    return host.capability.trigger_lingo_callback_on_script_ruffle(
+      ownerKey as string,
+      spriteNum as number,
+      generation as number,
+      castLib as number,
+      castMember as number,
+      handlerName as string,
+      argsJson as string,
+      flashCastLib as number,
+      flashCastMember as number,
+    ) === true;
+  } catch {
+    return false;
+  }
+}
+
+// One isolated-world subscriber handles every owner. It resolves the owner
+// table at delivery time, so disposing/replacing A cannot remove or redirect
+// B's callback route.
+if (typeof window !== 'undefined') {
+  window.addEventListener(LINGO_CALLBACK_EVENT, (event: Event) => {
+    const detail = (event as CustomEvent).detail as {
+      ownerKey?: unknown;
+      spriteNum?: unknown;
+      generation?: unknown;
+      castLib?: unknown;
+      castMember?: unknown;
+      handlerName?: unknown;
+      argsJson?: unknown;
+      flashCastLib?: unknown;
+      flashCastMember?: unknown;
+    } | undefined;
+    if (!detail || typeof detail.ownerKey !== 'string') return;
+    deliverOwnedLingoCallback(
+      detail.ownerKey,
+      detail.spriteNum,
+      detail.generation,
+      detail.castLib,
+      detail.castMember,
+      detail.handlerName,
+      detail.argsJson,
+      detail.flashCastLib,
+      detail.flashCastMember,
+    );
+  });
+  // Direct Ruffle and the MV3 event bridge share exactly the same route.
+  const stableRoute = (...args: Parameters<typeof deliverOwnedLingoCallback>) => deliverOwnedLingoCallback(...args);
+  (window as any).dirplayer_triggerLingoCallbackOnScript = stableRoute;
+  (window as any).dirplayer_triggerLingoCallbackOnScriptRuffle = stableRoute;
+}
+// Controllers publish exact subtree cleanup hooks without storing a strong
+// host->controller reference on the host itself. WeakMap keys avoid making
+// lifecycle ownership depend on a controller retaining a retired host.
+const nestedControllerHooks = new WeakMap<FlashOwnerHost, Set<() => void>>();
+
+function addNestedControllerHook(host: FlashOwnerHost, hook: () => void): () => void {
+  const hooks = nestedControllerHooks.get(host) ?? new Set<() => void>();
+  hooks.add(hook);
+  nestedControllerHooks.set(host, hooks);
+  return () => {
+    const current = nestedControllerHooks.get(host);
+    if (!current) return;
+    current.delete(hook);
+    if (current.size === 0) nestedControllerHooks.delete(host);
+  };
+}
+
+function disposeNestedControllerHooks(parent: FlashOwnerHost): void {
+  const hooks = nestedControllerHooks.get(parent);
+  if (!hooks) return;
+  nestedControllerHooks.delete(parent);
+  for (const hook of Array.from(hooks)) hook();
+}
 
 const MAX_FLASH_SPRITE_NUMBER = 0x7fff;
 
@@ -115,6 +243,15 @@ function validFlashSpriteNumber(spriteNum: number): boolean {
 
 function unregisterFlashOwnerHost(host: FlashOwnerHost): void {
   if (flashOwnerHosts.get(host.ownerKey) === host) flashOwnerHosts.delete(host.ownerKey);
+}
+
+function disposeNestedFlashHosts(parent: FlashOwnerHost): void {
+  for (const child of Array.from(flashOwnerHosts.values())) {
+    if (child.parentHost !== parent) continue;
+    child.dispose();
+    destroyAllFlashInstances(child);
+    unregisterFlashOwnerHost(child);
+  }
 }
 
 // Track pending Flash instance creations so the WASM frame loop can wait for them
@@ -441,6 +578,26 @@ function syncActiveFlashCount(): void {
   (window as any).__dirplayerActiveFlashCount = instances.size;
 }
 
+/** Publish one exact instance into both owner and module registries. All
+ * owner-qualified operations require these registries to name the same live
+ * object, so production publication and focused transport tests share this
+ * fence rather than manufacturing a second test-only map update. */
+export function publishFlashInstanceForOwner(host: FlashOwnerHost, instance: FlashInstance): void {
+  const key = `${host.ownerKey}:${instance.spriteNum}`;
+  if (
+    host.disposed ||
+    instance.host !== host ||
+    instance.browserHandle !== host.capability ||
+    !host.isCurrentInstanceGeneration(instance.spriteNum, instance.instanceGeneration)
+  ) {
+    throw new Error(`Cannot publish stale Flash instance ${key}`);
+  }
+  instances.set(key, instance);
+  host.instances.set(key, instance);
+  bindSpriteIndex(instance.spriteNum, key);
+  syncActiveFlashCount();
+}
+
 /**
  * Forward a Director sprite mouse event into a Ruffle player so the SWF's
  * own AS1 button handlers (`on (press)` / `on (release)`) actually run.
@@ -456,21 +613,14 @@ function syncActiveFlashCount(): void {
  * coords). They're rebased to canvas client coords here so Ruffle's input
  * code computes the correct Flash-stage position.
  */
-function dispatchMouseEvent(
-  spriteNum: number,
+function dispatchMouseEventOnInstance(
+  inst: FlashInstance,
   type: 'down' | 'up' | 'move',
   localX: number,
   localY: number,
   spriteW?: number,
   spriteH?: number,
 ): boolean {
-  const inst = instances.get(instanceKey(spriteNum));
-  if (!inst) {
-    // No Flash instance for this sprite (e.g. a click on a non-Flash sprite, or
-    // before the SWF instance is created) — nothing to forward.
-    return false;
-  }
-
   // `localX/localY` are in the sprite's DISPLAY space (0..spriteW). The SWF renders
   // at its own native size (`canvas.width/height`), which the sprite may scale — so
   // map sprite-space → canvas internal space by the sprite dimensions (NOT the canvas
@@ -507,6 +657,19 @@ function dispatchMouseEvent(
   }
   const handled = !!player.dirplayer_dispatchPointer(type, canvasX, canvasY);
   return handled;
+}
+
+function dispatchMouseEvent(
+  spriteNum: number,
+  type: 'down' | 'up' | 'move',
+  localX: number,
+  localY: number,
+  spriteW?: number,
+  spriteH?: number,
+): boolean {
+  const inst = instances.get(instanceKey(spriteNum));
+  if (!inst) return false;
+  return dispatchMouseEventOnInstance(inst, type, localX, localY, spriteW, spriteH);
 }
 
 /**
@@ -997,10 +1160,7 @@ export async function createFlashInstanceForOwner(
     container.remove();
     return;
   }
-  instances.set(key, instance);
-  host.instances.set(key, instance);
-  bindSpriteIndex(spriteNum, key);
-  syncActiveFlashCount();
+  publishFlashInstanceForOwner(host, instance);
 
   // Copy data out of WASM memory immediately — the underlying ArrayBuffer
   // can be detached/invalidated when WASM memory grows
@@ -1645,7 +1805,15 @@ export class FlashOwnerHost {
   private readonly scriptedAccessRequests = new Map<number, Set<number>>();
   private nextScriptedAccessRequest = 1;
 
-  constructor(readonly ownerKey: string, readonly capability: FlashOwnerCapability) {}
+  constructor(
+    readonly ownerKey: string,
+    readonly capability: FlashOwnerCapability,
+    readonly parentHost?: FlashOwnerHost,
+  ) {}
+
+  get parentOwnerKey(): string | undefined {
+    return this.parentHost?.ownerKey;
+  }
 
   reserveInstanceGeneration(spriteNum: number): number {
     if (this.disposed) throw new Error(`Flash owner ${this.ownerKey} is disposed`);
@@ -1727,11 +1895,13 @@ export class FlashOwnerHost {
   }
 
   private invalidateAfterCapabilityFailure(): void {
+    this.disposed = true;
     this.scriptedAccessRequests.clear();
+    disposeNestedControllerHooks(this);
+    disposeNestedFlashHosts(this);
     this.pendingQueue.clear();
     this.pinTargets.clear();
     this.invalidateAllInstanceGenerations();
-    this.disposed = true;
     unregisterFlashOwnerHost(this);
     destroyAllFlashInstances(this);
   }
@@ -1771,12 +1941,16 @@ export class FlashOwnerHost {
       unregisterFlashOwnerHost(this);
       return;
     }
+    // Close the exact host before any capability or Ruffle teardown callback
+    // can synchronously re-enter the bridge.
+    this.disposed = true;
     this.scriptedAccessRequests.clear();
+    disposeNestedControllerHooks(this);
+    disposeNestedFlashHosts(this);
     // Publish the cleared state while this captured capability can still
     // validate its owner generation. A stale capability is rejected safely.
     this.publishScriptedAccessState();
     this.invalidateAllInstanceGenerations();
-    this.disposed = true;
     this.pendingQueue.clear();
     this.pinTargets.clear();
     unregisterFlashOwnerHost(this);
@@ -1798,9 +1972,247 @@ export function localConnectionSendForOwner(
   try { return !!host.capability.local_connection_send(name, method, argsJson); } catch { return false; }
 }
 
+/** Register on the exact owner/sprite/generation Ruffle instance. The direct
+ * receiver and isolated-world bridge paths both require a literal `true`
+ * acknowledgement; an absent method, missing bridge reply, null, undefined,
+ * or any other value is a failed registration. */
+export function registerLingoCallbackForOwner(
+  host: FlashOwnerHost,
+  spriteNum: number,
+  generation: number,
+  movieClipPath: string,
+  methodName: string,
+  lingoCastLib: number,
+  lingoCastMember: number,
+  lingoHandler: string,
+  flashCastLib: number,
+  flashCastMember: number,
+): boolean {
+  if (host.disposed) return false;
+  const result = invokeFlashOwnedAtGeneration(host, spriteNum, generation, instance => {
+    const args = [
+      spriteNum,
+      generation,
+      movieClipPath,
+      methodName,
+      lingoCastLib,
+      lingoCastMember,
+      lingoHandler,
+      flashCastLib,
+      flashCastMember,
+    ];
+    if (instance.bridgeId) {
+      return bridgeCallMethodSync(instance.bridgeId, 'dirplayer_register_lingo_callback', args);
+    }
+    const receiver = instance.rufflePlayer as Record<string, unknown> | undefined;
+    const method = receiver?.dirplayer_register_lingo_callback;
+    if (typeof method !== 'function') return undefined;
+    return (method as (...values: unknown[]) => unknown).apply(receiver, args);
+  });
+  return result.ok && result.value === true;
+}
+
 export interface FlashOwnerRegistration {
   readonly host: FlashOwnerHost;
   dispose(): void;
+}
+
+/** Generic owner-bound callback factory shared by the app and browser runner. */
+export function createOwnedFlashCallbacks(host: FlashOwnerHost) {
+  return {
+    onFlashMemberLoaded: (spriteNum: number, castLib: number, castMember: number, swfData: Uint8Array, width: number, height: number, pausedAtStart: boolean, assertedFrame: number, ownerKey: string, preparedGeneration?: number) => {
+      if (ownerKey !== host.ownerKey || host.disposed) return;
+      createFlashInstanceForOwner(host, spriteNum, castLib, castMember, new Uint8Array(swfData), width, height, pausedAtStart, assertedFrame, preparedGeneration)
+        .catch(error => console.error('Failed to create Flash instance:', error));
+    },
+    onFlashMemberResized: (spriteNum: number, generation: number, width: number, height: number, ownerKey: string) => {
+      if (ownerKey !== host.ownerKey || host.disposed) return;
+      resizeFlashInstanceForOwnerAtGeneration(host, spriteNum, generation, width, height);
+    },
+    onFlashMemberUnloaded: (spriteNum: number, ownerKey: string) => {
+      if (ownerKey === host.ownerKey) destroyFlashInstance(host, spriteNum);
+    },
+    onFlashMemberUnloadedAtGeneration: (spriteNum: number, generation: number, ownerKey: string) => {
+      if (ownerKey === host.ownerKey) destroyFlashInstanceAtGeneration(host, spriteNum, generation);
+    },
+    onFlashResetAll: (ownerKey: string) => {
+      if (ownerKey === host.ownerKey) destroyAllFlashInstances(host);
+    },
+    onFlashPlayOwned: (spriteNum: number) => {
+      if (!host.disposed) playFlashForOwner(host, spriteNum);
+    },
+    onFlashLocalConnectionSendOwned: (name: string, method: string, argsJson: string) =>
+      localConnectionSendForOwner(host, name, method, argsJson),
+    onFlashRegisterLingoCallback: (
+      spriteNum: number,
+      generation: number,
+      movieClipPath: string,
+      methodName: string,
+      lingoCastLib: number,
+      lingoCastMember: number,
+      lingoHandler: string,
+      flashCastLib: number,
+      flashCastMember: number,
+    ) => registerLingoCallbackForOwner(
+      host,
+      spriteNum,
+      generation,
+      movieClipPath,
+      methodName,
+      lingoCastLib,
+      lingoCastMember,
+      lingoHandler,
+      flashCastLib,
+      flashCastMember,
+    ),
+    onFlashGetVariable: (spriteNum: number, path: string) => getVariableForOwner(host, spriteNum, path),
+    onFlashSetVariable: (spriteNum: number, path: string, value: string) => setVariableForOwner(host, spriteNum, path, value),
+    onFlashCallFunction: (spriteNum: number, path: string, argsXml: string) => callFunctionForOwner(host, spriteNum, path, argsXml),
+    onFlashGotoFrame: (spriteNum: number, frameOrLabel: string) => goToFrameForOwner(host, spriteNum, frameOrLabel),
+    onFlashGotoFrameAndStop: (spriteNum: number, frameOrLabel: string) => goToFrameAndStopForOwner(host, spriteNum, frameOrLabel),
+    onFlashInstanceReady: (spriteNum: number) => isFlashInstanceReadyForOwner(host, spriteNum),
+  };
+}
+
+export interface FlashOwnerController {
+  registerNested(parentOwnerKey: string, childOwnerKey: string, capability: FlashOwnerCapability): void;
+  retireNested(parentOwnerKey: string, childOwnerKey: string): void;
+  disposeNestedTree(parent: FlashOwnerHost): void;
+}
+
+/**
+ * Own nested host registration independently of React/Redux. The callback
+ * registrar is injected so the same exact controller serves production and
+ * the browser runner's owner-qualified VM callback table.
+ */
+export function createFlashOwnerController(
+  registerCallbacks: (callbacks: any, ownerKey: string, setAsDefault?: boolean) => () => void,
+): FlashOwnerController {
+  const isCurrentLiveHost = (host: FlashOwnerHost): boolean =>
+    !host.disposed && flashOwnerHosts.get(host.ownerKey) === host;
+  const registrations = new Map<string, {
+    parent: FlashOwnerHost;
+    host: FlashOwnerHost;
+    disposeCallbacks: () => void;
+    disposeHost: () => void;
+    removeParentControllerHook: () => void;
+    removeHostControllerHook: () => void;
+  }>();
+  const disposeNestedTree = (parent: FlashOwnerHost): void => {
+    for (const [childOwnerKey, registration] of Array.from(registrations.entries())) {
+      if (registration.parent !== parent) continue;
+      disposeNestedTree(registration.host);
+      try {
+        registration.disposeCallbacks();
+      } finally {
+        registration.removeParentControllerHook();
+        registration.removeHostControllerHook();
+        registration.disposeHost();
+        if (registrations.get(childOwnerKey) === registration) {
+          registrations.delete(childOwnerKey);
+        }
+      }
+    }
+  };
+  const disposeRegisteredHost = (host: FlashOwnerHost): void => {
+    const entry = Array.from(registrations.entries()).find(([, registration]) => registration.host === host);
+    if (!entry) {
+      disposeNestedTree(host);
+      return;
+    }
+    const [childOwnerKey, registration] = entry;
+    disposeNestedTree(host);
+    try {
+      registration.disposeCallbacks();
+    } finally {
+      registration.removeParentControllerHook();
+      registration.removeHostControllerHook();
+      if (registrations.get(childOwnerKey) === registration) {
+        registrations.delete(childOwnerKey);
+      }
+    }
+  };
+  return {
+    registerNested(parentOwnerKey, childOwnerKey, capability) {
+      const registration = registerNestedFlashOwner(parentOwnerKey, childOwnerKey, capability);
+      let disposeCallbacks: (() => void) | undefined;
+      try {
+        disposeCallbacks = registerCallbacks(
+          createOwnedFlashCallbacks(registration.host),
+          childOwnerKey,
+          false,
+        );
+        const parent = registration.host.parentHost;
+        if (
+          !parent ||
+          !isCurrentLiveHost(parent) ||
+          !isCurrentLiveHost(registration.host) ||
+          registration.host.parentHost !== parent
+        ) {
+          throw new Error(`nested Flash owner ${childOwnerKey} was retired during callback registration`);
+        }
+        registrations.set(childOwnerKey, {
+          parent,
+          host: registration.host,
+          disposeCallbacks,
+          disposeHost: registration.dispose,
+          removeParentControllerHook: addNestedControllerHook(parent, () => disposeNestedTree(parent)),
+          removeHostControllerHook: addNestedControllerHook(
+            registration.host,
+            () => disposeRegisteredHost(registration.host),
+          ),
+        });
+      } catch (error) {
+        try {
+          // The registrar may synchronously re-enter and register descendants
+          // before this outer entry is committed. Clean that exact subtree
+          // before disposing the outer host, while identity guards protect a
+          // replacement entry installed during teardown.
+          disposeNestedTree(registration.host);
+          disposeCallbacks?.();
+        } finally {
+          registration.dispose();
+        }
+        throw error;
+      }
+    },
+    retireNested(parentOwnerKey, childOwnerKey) {
+      const registration = registrations.get(childOwnerKey);
+      if (!registration) {
+        retireNestedFlashOwner(parentOwnerKey, childOwnerKey);
+        return;
+      }
+      if (registration.parent.disposed || registration.parent.ownerKey !== parentOwnerKey) {
+        throw new Error(`nested Flash retirement parent mismatch for ${childOwnerKey}`);
+      }
+      disposeNestedTree(registration.host);
+      try {
+        registration.disposeCallbacks();
+      } finally {
+        registration.removeParentControllerHook();
+        registration.removeHostControllerHook();
+        registration.disposeHost();
+        if (registrations.get(childOwnerKey) === registration) {
+          registrations.delete(childOwnerKey);
+        }
+      }
+    },
+    disposeNestedTree,
+  };
+}
+
+function validateFlashOwnerCapability(ownerKey: string, capability: FlashOwnerCapability): void {
+  if (!ownerKey || capability.owner_identity() !== ownerKey) {
+    throw new Error(`invalid Flash owner capability ${ownerKey}`);
+  }
+  if (
+    typeof capability.reserve_flash_instance_generation !== 'function' ||
+    typeof capability.invalidate_flash_instance_generation !== 'function' ||
+    typeof capability.is_flash_instance_generation_current !== 'function' ||
+    typeof capability.trigger_lingo_callback_on_script_ruffle !== 'function'
+  ) {
+    throw new Error(`Flash owner ${ownerKey} lacks binding-generation authority`);
+  }
 }
 
 /** Create an owner host synchronously. The caller retains this registration;
@@ -1809,16 +2221,7 @@ export function registerFlashOwner(
   ownerKey: string,
   capability: FlashOwnerCapability,
 ): FlashOwnerRegistration {
-  if (!ownerKey || capability.owner_identity() !== ownerKey) {
-    throw new Error(`invalid Flash owner capability ${ownerKey}`);
-  }
-  if (
-    typeof capability.reserve_flash_instance_generation !== 'function' ||
-    typeof capability.invalidate_flash_instance_generation !== 'function' ||
-    typeof capability.is_flash_instance_generation_current !== 'function'
-  ) {
-    throw new Error(`Flash owner ${ownerKey} lacks binding-generation authority`);
-  }
+  validateFlashOwnerCapability(ownerKey, capability);
   const existing = flashOwnerHosts.get(ownerKey);
   if (existing && !existing.disposed) {
     throw new Error(`Flash owner ${ownerKey} is already registered`);
@@ -1838,6 +2241,48 @@ export function registerFlashOwner(
       unregisterFlashOwnerHost(host);
     },
   };
+}
+
+/** Register a child only under the exact live parent host that created it. */
+export function registerNestedFlashOwner(
+  parentOwnerKey: string,
+  ownerKey: string,
+  capability: FlashOwnerCapability,
+): FlashOwnerRegistration {
+  const parent = flashOwnerHosts.get(parentOwnerKey);
+  if (!parent || parent.disposed || parent.ownerKey !== parentOwnerKey) {
+    throw new Error(`nested Flash parent ${parentOwnerKey} is not live`);
+  }
+  validateFlashOwnerCapability(ownerKey, capability);
+  const existing = flashOwnerHosts.get(ownerKey);
+  if (existing && !existing.disposed) {
+    throw new Error(`Flash owner ${ownerKey} is already registered`);
+  }
+  if (existing) unregisterFlashOwnerHost(existing);
+  const host = new FlashOwnerHost(ownerKey, capability, parent);
+  flashOwnerHosts.set(ownerKey, host);
+  return {
+    host,
+    dispose: () => {
+      if (flashOwnerHosts.get(ownerKey) !== host) return;
+      host.dispose();
+      destroyAllFlashInstances(host);
+      unregisterFlashOwnerHost(host);
+    },
+  };
+}
+
+/** Idempotently retire only the child registered under this parent instance. */
+export function retireNestedFlashOwner(parentOwnerKey: string, ownerKey: string): void {
+  const parent = flashOwnerHosts.get(parentOwnerKey);
+  const child = flashOwnerHosts.get(ownerKey);
+  if (!parent || parent.disposed || !child || child.disposed) return;
+  if (child.parentHost !== parent || child.parentOwnerKey !== parentOwnerKey) {
+    throw new Error(`nested Flash owner ${ownerKey} is not owned by ${parentOwnerKey}`);
+  }
+  child.dispose();
+  destroyAllFlashInstances(child);
+  unregisterFlashOwnerHost(child);
 }
 
 /**
@@ -2656,8 +3101,56 @@ function readFlashReadyAtGeneration(
   return { ok: true, generation, ready };
 }
 
+/** Forward a pointer event through the exact owner and Flash instance generation. */
+export function dispatchMouseEventForOwnerAtGeneration(
+  host: FlashOwnerHost,
+  spriteNum: number,
+  generation: number,
+  type: 'down' | 'up' | 'move',
+  localX: number,
+  localY: number,
+  spriteW: number,
+  spriteH: number,
+): FlashOwnedResult {
+  return invokeFlashOwnedAtGeneration(host, spriteNum, generation, instance =>
+    dispatchMouseEventOnInstance(instance, type, localX, localY, spriteW, spriteH));
+}
+
+/** Read a sprite variable through the exact owner and instance generation.
+ * Primitive JSON values remain typed; object values are limited to Ruffle's
+ * canonical stored-path marker so a generic object cannot cross as identity. */
+export function getSpriteVariableForOwnerAtGeneration(
+  host: FlashOwnerHost,
+  spriteNum: number,
+  generation: number,
+  path: string,
+): FlashOwnedResult {
+  return invokeFlashOwnedAtGeneration(host, spriteNum, generation, instance => {
+    const value = instance.bridgeId
+      ? bridgeGetVariableOwnedSync(instance.bridgeId, translateLevel0(path))
+      : instance.rufflePlayer.GetVariable(translateLevel0(path));
+    return normalizeOwnedFlashVariable(value);
+  });
+}
+
 function installGenerationAwareFlashRoutes(win: any): void {
   const unknownOwner = () => flashOwnedFailure('unknown-owner');
+  win.dirplayer_ruffleDispatchMouseOwned = (
+    ownerKey: string,
+    spriteNum: number,
+    generation: number,
+    type: 'down' | 'up' | 'move',
+    localX: number,
+    localY: number,
+    spriteW: number,
+    spriteH: number,
+  ): FlashOwnedResult => {
+    const host = ownerHostForRoute(ownerKey);
+    if (!host) return unknownOwner();
+    return dispatchMouseEventForOwnerAtGeneration(
+      host, spriteNum, generation, type, localX, localY, spriteW, spriteH,
+    );
+  };
   win.dirplayer_ruffleGetVariableOwnedForBinding = (
     ownerKey: string,
     spriteNum: number,
@@ -2700,6 +3193,17 @@ function installGenerationAwareFlashRoutes(win: any): void {
         ? bridgeGetVariableSync(instance.bridgeId, translateLevel0(path))
         : instance.rufflePlayer.GetVariable(translateLevel0(path)),
     );
+  };
+
+  win.dirplayer_ruffleGetSpriteVariableOwnedAtGeneration = (
+    ownerKey: string,
+    spriteNum: number,
+    generation: number,
+    path: string,
+  ): FlashOwnedResult => {
+    const host = ownerHostForRoute(ownerKey);
+    if (!host) return unknownOwner();
+    return getSpriteVariableForOwnerAtGeneration(host, spriteNum, generation, path);
   };
 
   win.dirplayer_ruffleSetVariableOwnedAtGeneration = (
@@ -3256,56 +3760,6 @@ function tellTarget(spriteNum: number, target: string, action: string): void {
  * Callback registry for Lingo callbacks.
  * Maps "movieClipPath:methodName" -> { castLib, castMember, lingoHandler }
  */
-interface LingoCallbackEntry {
-  castLib: number;
-  castMember: number;
-  lingoHandler: string;
-}
-
-const callbackRegistry = new Map<string, LingoCallbackEntry>();
-
-/**
- * Register a Lingo callback. Called from dirplayer WASM (via setCallback handler).
- * This registers the callback in Ruffle's WASM (LINGO_CALLBACKS) so that when
- * AVM1 calls the matching method, Ruffle fires trigger_lingo_callback_on_script
- * back to dirplayer.
- */
-function registerLingoCallback(
-  movieClipPath: string,
-  methodName: string,
-  lingoCastLib: number,
-  lingoCastMember: number,
-  lingoHandler: string,
-  flashCastLib: number,
-  flashCastMember: number,
-): void {
-  const key = `${movieClipPath}:${methodName}`;
-  callbackRegistry.set(key, {
-    castLib: lingoCastLib,
-    castMember: lingoCastMember,
-    lingoHandler,
-  });
-
-  // Call our forked Ruffle's WASM export to register the callback in
-  // LINGO_CALLBACKS. The export is exposed under the dirplayer_ prefix to
-  // avoid colliding with stock Ruffle if it's also on the page.
-  const win = window as any;
-  if (win.dirplayer_ruffleRegisterLingoCallback) {
-    win.dirplayer_ruffleRegisterLingoCallback(
-      movieClipPath,
-      methodName,
-      lingoCastLib,
-      lingoCastMember,
-      lingoHandler,
-      flashCastLib,
-      flashCastMember,
-    );
-    console.log(`Registered Lingo callback: ${key} -> #${lingoHandler} (lingo=${lingoCastLib}:${lingoCastMember}, flash=${flashCastLib}:${flashCastMember})`);
-  } else {
-    console.warn('dirplayer_ruffleRegisterLingoCallback not available on window (Ruffle not loaded yet?)');
-  }
-}
-
 /**
  * Register global JS functions that the WASM module calls into.
  *
@@ -3368,34 +3822,11 @@ export function initFlashBridge(
   win.dirplayer_ruffleGetFlashProperty = getFlashProperty;
   win.dirplayer_ruffleSetFlashProperty = setFlashProperty;
   win.dirplayer_ruffleTellTarget = tellTarget;
-  win.dirplayer_ruffleRegisterLingoCallback_dirplayer = registerLingoCallback;
   installOwnerFlashRoutes(win);
 
   // Expose dirplayer's WASM exports as window.wasmModule so that Ruffle's
   // wasm_bindgen extern (js_namespace = wasmModule) can resolve
   // trigger_lingo_callback_on_script back to dirplayer's WASM export.
-  // Expose as global function for Ruffle's wasm_bindgen extern
-  // Ruffle sends args as a JSON array of base64-encoded JSON values.
-  // Decode them to native JS values before passing to WASM.
-  const triggerLingoCallbackOnScript = (castLib: number, castMember: number, handlerName: string, argsJson: string, flashCastLib: number, flashCastMember: number) => {
-    try {
-      const b64Args: string[] = JSON.parse(argsJson);
-      const decodedArgs = b64Args.map((b64: string) => {
-        try {
-          const json = atob(b64);
-          return JSON.parse(json);
-        } catch {
-          return b64; // fallback: pass as-is
-        }
-      });
-      return browserHandle.trigger_lingo_callback_on_script(castLib, castMember, handlerName, JSON.stringify(decodedArgs), flashCastLib, flashCastMember);
-    } catch (e) {
-      console.error('[triggerLingoCallback] decode error:', e);
-      return browserHandle.trigger_lingo_callback_on_script(castLib, castMember, handlerName, argsJson, flashCastLib, flashCastMember);
-    }
-  };
-  win.dirplayer_triggerLingoCallbackOnScript = triggerLingoCallbackOnScript;
-
   // Expose flash loading state for the WASM frame loop to check. The loop
   // BLOCKS (up to 15s) while this is true, so it must only be true when the
   // game genuinely can't proceed without a Flash instance — i.e. when a script
@@ -3475,9 +3906,6 @@ export function initFlashBridge(
     }
     if (win.dirplayer_dispatchFlashEvent === dispatchFlashEventForHandle) {
       delete win.dirplayer_dispatchFlashEvent;
-    }
-    if (win.dirplayer_triggerLingoCallbackOnScript === triggerLingoCallbackOnScript) {
-      delete win.dirplayer_triggerLingoCallbackOnScript;
     }
   }) as FlashBridgeDisposer;
   dispose.host = host;

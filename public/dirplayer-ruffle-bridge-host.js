@@ -106,6 +106,27 @@
     return false;
   }
 
+  // Stable main-world producer for the owner-qualified AVM1 callback ABI.
+  // The payload crosses unchanged; the isolated-world subscriber resolves the
+  // current owner capability and applies the Rust generation fence.
+  const triggerLingoCallbackOnScriptRuffle = function (
+    ownerKey, spriteNum, generation, castLib, castMember, handlerName,
+    argsJson, flashCastLib, flashCastMember,
+  ) {
+    if (typeof ownerKey !== 'string' || !ownerIsActive(ownerKey)) return false;
+    window.dispatchEvent(new CustomEvent('dirplayer-lingo-callback', {
+      detail: {
+        ownerKey, spriteNum, generation, castLib, castMember, handlerName,
+        argsJson, flashCastLib, flashCastMember,
+      },
+    }));
+    return true;
+  };
+  // Keep the historical name as a compatibility alias while patched Ruffle
+  // uses the explicit receiver name for its encoded callback wire.
+  window.dirplayer_triggerLingoCallbackOnScriptRuffle = triggerLingoCallbackOnScriptRuffle;
+  window.dirplayer_triggerLingoCallbackOnScript = triggerLingoCallbackOnScriptRuffle;
+
   // Owner-qualified producer used by the patched AVM1 wasm import. This is a
   // stable host function; it does not capture an owner or replace another
   // player's callback.

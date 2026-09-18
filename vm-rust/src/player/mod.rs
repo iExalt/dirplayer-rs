@@ -78,15 +78,53 @@ use std::{
 /// Owner-local authority for Flash instance generations. The counter never
 /// wraps and the map is replaced on player reset, so a late teardown from an
 /// old instance cannot invalidate a replacement on the same sprite number.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FlashBindingOrigin {
+    Absent,
+    Exact { cast_lib: i32, cast_member: i32 },
+    FirstPublished { cast_lib: i32, cast_member: i32 },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FlashMemberClassification {
+    Absent,
+    UnresolvedExact,
+    ValidFlash,
+    InvalidTarget,
+}
+
 #[derive(Debug)]
 pub(crate) struct FlashBindingState {
     next_generation: u64,
     generations: HashMap<i16, u64>,
+    teardown_generations: HashMap<(i16, i32, i32), Vec<u64>>,
+    origins: HashMap<i16, FlashBindingOrigin>,
+    pending_absent: HashSet<i16>,
 }
 
 impl FlashBindingState {
     pub(crate) fn new() -> Self {
-        Self { next_generation: 0, generations: HashMap::new() }
+        Self {
+            next_generation: 0,
+            generations: HashMap::new(),
+            teardown_generations: HashMap::new(),
+            origins: HashMap::new(),
+            pending_absent: HashSet::new(),
+        }
+    }
+
+    fn record_retirement(
+        &mut self,
+        sprite_num: i16,
+        cast_lib: i32,
+        cast_member: i32,
+        generation: u64,
+        teardown: bool,
+    ) {
+        let key = (sprite_num, cast_lib, cast_member);
+        if teardown {
+            self.teardown_generations.entry(key).or_default().push(generation);
+        }
     }
 
     pub(crate) fn reserve(&mut self, sprite_num: i16) -> Result<u64, ScriptError> {
@@ -99,18 +137,293 @@ impl FlashBindingState {
         if generation > 9_007_199_254_740_991 {
             return Err(ScriptError::new("Flash instance generation exceeds JavaScript safe integer range".to_owned()));
         }
+        if let Some(current) = self.generations.remove(&sprite_num) {
+            let retired_pair = match self.origin(sprite_num) {
+                FlashBindingOrigin::Exact { cast_lib, cast_member }
+                | FlashBindingOrigin::FirstPublished { cast_lib, cast_member } => {
+                    (cast_lib, cast_member)
+                }
+                FlashBindingOrigin::Absent => (0, 0),
+            };
+            self.record_retirement(
+                sprite_num,
+                retired_pair.0,
+                retired_pair.1,
+                current,
+                matches!(self.origin(sprite_num), FlashBindingOrigin::FirstPublished { .. }),
+            );
+            self.pending_absent.remove(&sprite_num);
+            self.origins.insert(sprite_num, FlashBindingOrigin::Absent);
+        }
         self.next_generation = generation;
         self.generations.insert(sprite_num, generation);
+        Ok(generation)
+    }
+
+    pub(crate) fn reserve_for_pair(
+        &mut self,
+        sprite_num: i16,
+        cast_lib: i32,
+        cast_member: i32,
+    ) -> Result<u64, ScriptError> {
+        if let Some(generation) = self.generations.get(&sprite_num).copied() {
+            if self.pending_absent.contains(&sprite_num) {
+                // The one legal Absent -> Exact association is performed by
+                // transition_member after the score write. A queue/load path
+                // arriving before that transition must not adopt an early
+                // 0:0 handle's reservation for an arbitrary pair.
+                self.invalidate(sprite_num, generation);
+            } else {
+                let same_origin = matches!(
+                    self.origin(sprite_num),
+                    FlashBindingOrigin::Exact {
+                        cast_lib: current_lib,
+                        cast_member: current_member,
+                    } | FlashBindingOrigin::FirstPublished {
+                        cast_lib: current_lib,
+                        cast_member: current_member,
+                    } if current_lib == cast_lib && current_member == cast_member
+                );
+                if same_origin {
+                    return Ok(generation);
+                }
+                self.invalidate(sprite_num, generation);
+            }
+        }
+        let generation = self.reserve(sprite_num)?;
+        self.origins.insert(
+            sprite_num,
+            FlashBindingOrigin::Exact { cast_lib, cast_member },
+        );
+        Ok(generation)
+    }
+
+    pub(crate) fn reserve_absent(&mut self, sprite_num: i16) -> Result<u64, ScriptError> {
+        if let Some(generation) = self.generations.get(&sprite_num).copied() {
+            if self.pending_absent.contains(&sprite_num) {
+                return Ok(generation);
+            }
+            self.invalidate(sprite_num, generation);
+        }
+        let generation = self.reserve(sprite_num)?;
+        self.pending_absent.insert(sprite_num);
+        self.origins.insert(sprite_num, FlashBindingOrigin::Absent);
         Ok(generation)
     }
 
     pub(crate) fn invalidate(&mut self, sprite_num: i16, expected: u64) -> bool {
         if self.generations.get(&sprite_num).copied() == Some(expected) {
             self.generations.remove(&sprite_num);
+            self.pending_absent.remove(&sprite_num);
+            let retired_pair = match self.origin(sprite_num) {
+                FlashBindingOrigin::Exact { cast_lib, cast_member }
+                | FlashBindingOrigin::FirstPublished { cast_lib, cast_member } => {
+                    (cast_lib, cast_member)
+                }
+                FlashBindingOrigin::Absent => (0, 0),
+            };
+            self.record_retirement(
+                sprite_num,
+                retired_pair.0,
+                retired_pair.1,
+                expected,
+                matches!(self.origin(sprite_num), FlashBindingOrigin::FirstPublished { .. }),
+            );
+            self.origins.insert(sprite_num, FlashBindingOrigin::Absent);
             true
         } else {
             false
         }
+    }
+
+    pub(crate) fn retire_current_for_pair(
+        &mut self,
+        sprite_num: i16,
+        cast_lib: i32,
+        cast_member: i32,
+        expected: u64,
+    ) -> bool {
+        if self.generations.get(&sprite_num).copied() == Some(expected) {
+            self.generations.remove(&sprite_num);
+            self.pending_absent.remove(&sprite_num);
+            let published = matches!(self.origin(sprite_num), FlashBindingOrigin::FirstPublished { .. });
+            self.record_retirement(sprite_num, cast_lib, cast_member, expected, published);
+            // Retirement removes the owner-visible binding as one atomic
+            // state transition. Callers that establish a replacement origin
+            // write it after this helper returns.
+            self.origins.insert(sprite_num, FlashBindingOrigin::Absent);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn retire_failed_publication(
+        &mut self,
+        sprite_num: i16,
+        cast_lib: i32,
+        cast_member: i32,
+        expected: u64,
+    ) -> bool {
+        let retired = self.retire_current_for_pair(
+            sprite_num,
+            cast_lib,
+            cast_member,
+            expected,
+        );
+        if retired {
+            self.pending_absent.remove(&sprite_num);
+            self.origins.insert(sprite_num, FlashBindingOrigin::Absent);
+        }
+        // A reentrant replacement may have removed this generation before
+        // the failed Load is reported. The host may still have created the
+        // old frontend instance, so retain exact teardown authority for this
+        // failed publication even when it is no longer current. The caller
+        // clears the record after the generation-qualified unload attempt.
+        let key = (sprite_num, cast_lib, cast_member);
+        let already_marked = self
+            .teardown_generations
+            .get(&key)
+            .is_some_and(|generations| generations.contains(&expected));
+        if !already_marked {
+            self.teardown_generations
+                .entry(key)
+                .or_default()
+                .push(expected);
+        }
+        retired
+    }
+
+    pub(crate) fn retired_generation_for_pair(
+        &self,
+        sprite_num: i16,
+        cast_lib: i32,
+        cast_member: i32,
+    ) -> Option<u64> {
+        self.teardown_generations
+            .get(&(sprite_num, cast_lib, cast_member))
+            .and_then(|generations| generations.last().copied())
+    }
+
+    pub(crate) fn retired_generations_for_pair(
+        &self,
+        sprite_num: i16,
+        cast_lib: i32,
+        cast_member: i32,
+    ) -> Vec<u64> {
+        self.teardown_generations
+            .get(&(sprite_num, cast_lib, cast_member))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn is_retired_generation(
+        &self,
+        sprite_num: i16,
+        cast_lib: i32,
+        cast_member: i32,
+        generation: u64,
+    ) -> bool {
+        self.teardown_generations
+            .get(&(sprite_num, cast_lib, cast_member))
+            .is_some_and(|generations| generations.contains(&generation))
+    }
+
+    pub(crate) fn clear_retired_generation(
+        &mut self,
+        sprite_num: i16,
+        cast_lib: i32,
+        cast_member: i32,
+        expected: u64,
+    ) {
+        let key = (sprite_num, cast_lib, cast_member);
+        if let Some(generations) = self.teardown_generations.get_mut(&key) {
+            generations.retain(|generation| *generation != expected);
+            if generations.is_empty() {
+                self.teardown_generations.remove(&key);
+            }
+        }
+    }
+
+    pub(crate) fn publish_first(
+        &mut self,
+        sprite_num: i16,
+        cast_lib: i32,
+        cast_member: i32,
+        generation: u64,
+    ) -> bool {
+        if self.generations.get(&sprite_num).copied() != Some(generation) {
+            return false;
+        }
+        if self.origin(sprite_num)
+            == (FlashBindingOrigin::Exact { cast_lib, cast_member })
+        {
+            self.origins.insert(
+                sprite_num,
+                FlashBindingOrigin::FirstPublished { cast_lib, cast_member },
+            );
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn origin(&self, sprite_num: i16) -> FlashBindingOrigin {
+        self.origins
+            .get(&sprite_num)
+            .copied()
+            .unwrap_or(FlashBindingOrigin::Absent)
+    }
+
+    /// Record one score member transition. A first publication is the only
+    /// transition that establishes the origin association. Replacements and
+    /// clears retire the current generation; their next host load must use the
+    /// exact new cast pair rather than inheriting the old origin.
+    pub(crate) fn transition_member(
+        &mut self,
+        sprite_num: i16,
+        previous: Option<(i32, i32)>,
+        next: Option<(i32, i32)>,
+        classification: FlashMemberClassification,
+    ) {
+        if previous == next {
+            return;
+        }
+        let pair = next;
+        let preserves_initial_reservation = previous.is_none()
+            && next.is_some()
+            && matches!(
+                classification,
+                FlashMemberClassification::UnresolvedExact | FlashMemberClassification::ValidFlash
+            )
+            && (self.pending_absent.remove(&sprite_num)
+                || matches!(
+                    (self.origin(sprite_num), pair),
+                    (
+                        FlashBindingOrigin::Exact { cast_lib, cast_member },
+                        Some((next_lib, next_member))
+                    ) if cast_lib == next_lib && cast_member == next_member
+                ));
+        if !preserves_initial_reservation {
+            if let Some(generation) = self.generations.get(&sprite_num).copied() {
+                if let Some((cast_lib, cast_member)) = previous {
+                    self.retire_current_for_pair(sprite_num, cast_lib, cast_member, generation);
+                } else {
+                    self.invalidate(sprite_num, generation);
+                }
+            }
+        }
+        let origin = match (previous, next, classification) {
+            (
+                None,
+                Some((cast_lib, cast_member)),
+                FlashMemberClassification::UnresolvedExact | FlashMemberClassification::ValidFlash,
+            ) => {
+                FlashBindingOrigin::Exact { cast_lib, cast_member }
+            }
+            _ => FlashBindingOrigin::Absent,
+        };
+        self.origins.insert(sprite_num, origin);
     }
 
     pub(crate) fn is_current(&self, sprite_num: i16, expected: u64) -> bool {
@@ -211,6 +524,16 @@ impl FlashActionFence {
     }
 }
 
+/// Flash host route for a player. `NestedPending` is used between the session
+/// child insertion and the frontend owner registration; it prevents a child
+/// from publishing actions before its exact owner callback set exists.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FlashHostRoute {
+    LocalOwned,
+    NestedPending,
+    LegacySynthetic,
+}
+
 /// A detached Flash host effect prepared while the player is borrowed. The
 /// local sprite number remains an i16 for VM/state validation; host routing
 /// uses the separate i32 key only after the borrow has ended.
@@ -264,7 +587,63 @@ impl FlashHostAction {
         fence.bind_owned(session, player_id);
     }
 
-    fn emit(self) -> Result<(), ScriptError> {
+    fn rollback_after_emit_failure(&self) {
+        let (fence, local_sprite, generation, cast_pair) = match self {
+            Self::Load {
+                fence,
+                local_sprite,
+                generation,
+                cast_lib,
+                cast_member,
+                ..
+            } => (fence, *local_sprite, Some(*generation), Some((*cast_lib, *cast_member))),
+            _ => return,
+        };
+        if let Some(generation) = generation {
+            let _ = fence.binding.borrow_mut().retire_failed_publication(
+                local_sprite,
+                cast_pair.map(|pair| pair.0).unwrap_or_default(),
+                cast_pair.map(|pair| pair.1).unwrap_or_default(),
+                generation,
+            );
+            #[cfg(target_arch = "wasm32")]
+            if cast_pair.is_some() {
+                // A Load can create the old frontend instance before a
+                // synchronous reentrant replacement invalidates its fence.
+                // Teardown is qualified by that exact retired generation and
+                // cannot address the replacement's current generation.
+                crate::js_api::JsApi::dispatch_flash_member_unloaded_at_generation(
+                    local_sprite as i32,
+                    generation,
+                    &owner_key_string(&fence.owner),
+                );
+            }
+            if let Some((cast_lib, cast_member)) = cast_pair {
+                fence.binding.borrow_mut().clear_retired_generation(
+                    local_sprite,
+                    cast_lib,
+                    cast_member,
+                    generation,
+                );
+            }
+            if let (Some(session), Some(player_id)) = (&fence.session, fence.player_id) {
+                if let Ok(mut session) = session.try_borrow_mut() {
+                    let _ = session.with_player(player_id, |context| {
+                        if context.player.flash_instance_generation(local_sprite).is_none() {
+                            if let Some(cast_pair) = cast_pair {
+                                context
+                                    .player
+                                    .flash_sprite_loaded
+                                    .remove(&(local_sprite, cast_pair.0, cast_pair.1));
+                            }
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    fn emit(&self) -> Result<(), ScriptError> {
         match self {
             Self::Load {
                 fence,
@@ -279,26 +658,41 @@ impl FlashHostAction {
                 asserted_frame,
                 generation,
             } => {
-                fence.revalidated(local_sprite, Some(generation), Some((cast_lib, cast_member)))?;
+                fence.revalidated(*local_sprite, Some(*generation), Some((*cast_lib, *cast_member)))?;
                 #[cfg(not(target_arch = "wasm32"))]
                 {
                     let _ = (host_sprite, cast_lib, cast_member, data, width, height, paused_at_start, asserted_frame);
                     return Err(ScriptError::new("Flash host is unavailable on native".to_owned()));
                 }
                 #[cfg(target_arch = "wasm32")]
-                crate::js_api::JsApi::dispatch_flash_member_loaded_prepared(
-                    host_sprite,
-                    cast_lib,
-                    cast_member,
-                    &data,
-                    width,
-                    height,
-                    paused_at_start,
-                    asserted_frame,
-                    &owner_key_string(&fence.owner),
-                    generation,
-                );
-                fence.revalidated(local_sprite, Some(generation), Some((cast_lib, cast_member)))
+                {
+                    crate::js_api::JsApi::dispatch_flash_member_loaded_prepared(
+                        *host_sprite,
+                        *cast_lib,
+                        *cast_member,
+                        data.as_slice(),
+                        *width,
+                        *height,
+                        *paused_at_start,
+                        *asserted_frame,
+                        &owner_key_string(&fence.owner),
+                        *generation,
+                    );
+                    let result = fence.revalidated(
+                        *local_sprite,
+                        Some(*generation),
+                        Some((*cast_lib, *cast_member)),
+                    );
+                    if result.is_ok() {
+                        let _ = fence.binding.borrow_mut().publish_first(
+                            *local_sprite,
+                            *cast_lib,
+                            *cast_member,
+                            *generation,
+                        );
+                    }
+                    result
+                }
             }
             Self::Unload {
                 fence,
@@ -308,24 +702,51 @@ impl FlashHostAction {
                 cast_member,
                 generation,
             } => {
-                let _ = (cast_lib, cast_member);
+                if !fence.binding.borrow().is_retired_generation(
+                    *local_sprite,
+                    *cast_lib,
+                    *cast_member,
+                    *generation,
+                ) {
+                    return Err(ScriptError::new_code(
+                        ScriptErrorCode::InvalidReference,
+                        "Flash unload generation is not retired for its cast pair".to_owned(),
+                    ));
+                }
                 // Unload is a retirement action: a replacement may already
                 // own the same local sprite with a newer generation. The JS
-                // route receives the old generation and must leave that
-                // replacement untouched, so only the owner fence is checked.
-                fence.revalidated(local_sprite, None, None)?;
+                // route receives only this exact retired generation.
+                fence.revalidated(*local_sprite, None, None)?;
                 #[cfg(not(target_arch = "wasm32"))]
                 {
                     let _ = host_sprite;
+                    // Native has no frontend instance to unload. Settle the
+                    // exact authority immediately while preserving the
+                    // explicit unsupported-host result.
+                    fence.binding.borrow_mut().clear_retired_generation(
+                        *local_sprite,
+                        *cast_lib,
+                        *cast_member,
+                        *generation,
+                    );
                     return Err(ScriptError::new("Flash host is unavailable on native".to_owned()));
                 }
                 #[cfg(target_arch = "wasm32")]
                 crate::js_api::JsApi::dispatch_flash_member_unloaded_at_generation(
-                    host_sprite,
-                    generation,
+                    *host_sprite,
+                    *generation,
                     &owner_key_string(&fence.owner),
                 );
-                fence.revalidated(local_sprite, None, None)
+                let result = fence.revalidated(*local_sprite, None, None);
+                if result.is_ok() {
+                    fence.binding.borrow_mut().clear_retired_generation(
+                        *local_sprite,
+                        *cast_lib,
+                        *cast_member,
+                        *generation,
+                    );
+                }
+                result
             }
             Self::Resize {
                 fence,
@@ -338,7 +759,7 @@ impl FlashHostAction {
                 height,
             } => {
                 let _ = (cast_lib, cast_member);
-                fence.revalidated(local_sprite, Some(generation), Some((cast_lib, cast_member)))?;
+                fence.revalidated(*local_sprite, Some(*generation), Some((*cast_lib, *cast_member)))?;
                 #[cfg(not(target_arch = "wasm32"))]
                 {
                     let _ = (host_sprite, width, height);
@@ -346,13 +767,13 @@ impl FlashHostAction {
                 }
                 #[cfg(target_arch = "wasm32")]
                 crate::js_api::JsApi::dispatch_flash_member_resized(
-                    host_sprite,
-                    generation,
-                    width,
-                    height,
+                    *host_sprite,
+                    *generation,
+                    *width,
+                    *height,
                     &owner_key_string(&fence.owner),
                 );
-                fence.revalidated(local_sprite, Some(generation), Some((cast_lib, cast_member)))
+                fence.revalidated(*local_sprite, Some(*generation), Some((*cast_lib, *cast_member)))
             }
         }
     }
@@ -373,8 +794,9 @@ pub(crate) fn emit_flash_host_actions(actions: Vec<FlashHostAction>) -> Result<(
     for action in actions {
         let owner = action.owner();
         match action.emit() {
-            Ok(()) => {}
+            Ok(()) => {},
             Err(error) if error.code == ScriptErrorCode::InvalidReference => {
+                action.rollback_after_emit_failure();
                 // A callback may synchronously replace the sprite or retire the
                 // owner.  The failed action is stale in that case, but the
                 // detached tail may still contain a distinct live sprite. Keep
@@ -385,7 +807,10 @@ pub(crate) fn emit_flash_host_actions(actions: Vec<FlashHostAction>) -> Result<(
                 }
                 break;
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                action.rollback_after_emit_failure();
+                return Err(error);
+            }
         }
     }
     Ok(())
@@ -435,6 +860,81 @@ mod flash_binding_state_tests {
         assert!(replacement > generation);
         assert!(!old.invalidate(3, generation));
         assert!(old.is_current(3, replacement));
+    }
+
+    #[test]
+    fn member_transition_retire_keeps_old_generation_for_exact_unload() {
+        let mut state = FlashBindingState::new();
+        state.transition_member(
+            1,
+            None,
+            Some((1, 7)),
+            super::FlashMemberClassification::ValidFlash,
+        );
+        assert_eq!(
+            state.origin(1),
+            super::FlashBindingOrigin::Exact {
+                cast_lib: 1,
+                cast_member: 7,
+            }
+        );
+        let first = state.reserve(1).expect("first published generation");
+        assert_eq!(
+            state.origin(1),
+            super::FlashBindingOrigin::Exact {
+                cast_lib: 1,
+                cast_member: 7,
+            }
+        );
+        assert!(state.publish_first(1, 1, 7, first));
+        assert_eq!(
+            state.origin(1),
+            super::FlashBindingOrigin::FirstPublished {
+                cast_lib: 1,
+                cast_member: 7,
+            }
+        );
+        state.transition_member(
+            1,
+            Some((1, 7)),
+            Some((1, 8)),
+            super::FlashMemberClassification::ValidFlash,
+        );
+        assert_eq!(state.generations.get(&1).copied(), None);
+        assert_eq!(state.retired_generation_for_pair(1, 1, 7), Some(first));
+        assert_eq!(state.origin(1), super::FlashBindingOrigin::Absent);
+        state.clear_retired_generation(1, 1, 7, first);
+        assert_eq!(state.retired_generation_for_pair(1, 1, 7), None);
+    }
+
+    #[test]
+    fn forged_unload_requires_an_exact_retired_generation() {
+        let state = FlashBindingState::new();
+        assert!(!state.is_retired_generation(1, 2, 3, 1));
+    }
+
+    #[test]
+    fn absent_and_exact_reservations_reuse_only_their_pending_binding() {
+        let mut state = FlashBindingState::new();
+        let absent = state.reserve_absent(1).expect("absent reservation");
+        assert_eq!(state.reserve_absent(1).expect("repeat absent reservation"), absent);
+        let exact = state
+            .reserve_for_pair(1, 2, 3)
+            .expect("exact reservation should rotate the unrelated absent binding");
+        assert_ne!(exact, absent);
+        assert_eq!(state.reserve_for_pair(1, 2, 3).expect("repeat exact reservation"), exact);
+        state.next_generation = 9_007_199_254_740_991;
+        assert!(state.reserve_absent(2).is_err());
+
+        let mut transitioned = FlashBindingState::new();
+        let early = transitioned.reserve_absent(1).expect("early absent reservation");
+        transitioned.transition_member(
+            1,
+            None,
+            Some((4, 5)),
+            super::FlashMemberClassification::UnresolvedExact,
+        );
+        assert_eq!(transitioned.reserve_for_pair(1, 4, 5).expect("exact reuse"), early);
     }
 
     #[test]
@@ -592,6 +1092,28 @@ mod flash_binding_state_tests {
             height: 2,
         };
         let error = action.emit().expect_err("stale generation must reject");
+        assert_eq!(error.code, crate::player::ScriptErrorCode::InvalidReference);
+    }
+
+    #[test]
+    fn forged_unload_is_rejected_before_native_transport() {
+        let session = RuntimeSession::new(SymbolOwner { session: 97, generation: 1 }).into_handle();
+        assert!(session.borrow_mut().add_player(1, channel::unbounded().0));
+        let (owner, binding) = session
+            .borrow_mut()
+            .with_player(1, |context| {
+                (context.player.owner.clone(), context.player.flash_binding_state.clone())
+            })
+            .expect("fixture player must exist");
+        let action = super::FlashHostAction::Unload {
+            fence: super::FlashActionFence::owned(owner, binding, session, 1),
+            host_sprite: 1,
+            local_sprite: 1,
+            cast_lib: 2,
+            cast_member: 3,
+            generation: 1,
+        };
+        let error = action.emit().expect_err("unretired unload must reject");
         assert_eq!(error.code, crate::player::ScriptErrorCode::InvalidReference);
     }
 
@@ -1069,22 +1591,22 @@ pub struct DirPlayer {
     /// Flash host effects prepared under the player borrow and emitted only
     /// after the owning session borrow has ended.
     pub(crate) flash_host_actions: Vec<FlashHostAction>,
-    /// True only for players registered as actual nested children. Root
-    /// players may have nonzero session IDs and still use local host sprites.
+    /// Legacy nested players retain synthetic host keys. Session-owned nested
+    /// children switch to `LocalOwned` after exact frontend registration.
     pub(crate) flash_host_is_nested: bool,
+    pub(crate) flash_host_route: FlashHostRoute,
     /// Sprites whose Ruffle instance has been confirmed loaded + AS-initialized
     /// at least once. Flash interop (getVariable/setVariable/callFunction/
     /// setCallback) takes the SYNC fast path for these; only the FIRST access to
     /// a sprite ever goes through the async wait (which then adds it here).
-    /// STICKY on purpose — never cleared: once a sprite has had a ready instance
-    /// we always take the sync path, which safely returns null/void if the
-    /// instance is transiently not ready (a member swap / reload), exactly as
-    /// interop behaved before the ready-wait existed. The async path exists only
-    /// to make the one-shot startup call (Coke Studios' SESSION_createSession,
-    /// which runs before its SWF is dispatched) get a live instance; clearing
-    /// this would re-arm the async path mid-game and reload the instance on
-    /// ordinary interactions (navigator windows vanishing/rebuilding). Keeps the
-    /// hundreds of per-frame interop calls sync with no async-dispatch overhead.
+    /// STICKY for this owner generation — once a sprite has had a ready instance
+    /// we keep the sync path across same-owner member swaps, which safely returns
+    /// null/void if the replacement instance is transiently not ready. The
+    /// async path exists only to make the one-shot startup call (Coke Studios'
+    /// SESSION_createSession, which runs before its SWF is dispatched) get a
+    /// live instance; resetting the owner clears this cache so a new generation
+    /// receives its own first-access wait. This keeps the hundreds of per-frame
+    /// interop calls sync with no async-dispatch overhead.
     pub flash_ready_sprites: HashSet<i16>,
     /// Owner-local Flash instance generation authority shared with browser
     /// capabilities without borrowing the session during host callbacks.
@@ -1400,6 +1922,17 @@ pub enum MovieFrameTarget {
 }
 
 impl DirPlayer {
+    pub(crate) fn set_nested_flash_host_route(&mut self, route: FlashHostRoute) {
+        debug_assert!(matches!(route, FlashHostRoute::LocalOwned | FlashHostRoute::NestedPending));
+        self.flash_host_is_nested = true;
+        self.flash_host_route = route;
+    }
+
+    pub(crate) fn set_legacy_flash_host_route(&mut self) {
+        self.flash_host_is_nested = true;
+        self.flash_host_route = FlashHostRoute::LegacySynthetic;
+    }
+
     pub(crate) fn reserve_flash_instance_generation(
         &self,
         sprite_num: i16,
@@ -1433,6 +1966,182 @@ impl DirPlayer {
             .copied()
     }
 
+    pub(crate) fn flash_binding_origin(&self, sprite_num: i16) -> FlashBindingOrigin {
+        self.flash_binding_state.borrow().origin(sprite_num)
+    }
+
+    /// Return every exact generation requiring teardown. If the current
+    /// generation still owns the requested pair, retire it before returning
+    /// it so an Unload action always carries explicit retired authority.
+    pub(crate) fn retire_or_get_flash_unload_generations(
+        &self,
+        sprite_num: i16,
+        cast_lib: i32,
+        cast_member: i32,
+    ) -> Vec<u64> {
+        let retired = self
+            .flash_binding_state
+            .borrow()
+            .retired_generations_for_pair(sprite_num, cast_lib, cast_member);
+        if !retired.is_empty() {
+            let current = self.flash_instance_generation(sprite_num);
+            let current_is_pair = matches!(
+                self.flash_binding_origin(sprite_num),
+                FlashBindingOrigin::Exact {
+                    cast_lib: current_lib,
+                    cast_member: current_member,
+                }
+                | FlashBindingOrigin::FirstPublished {
+                    cast_lib: current_lib,
+                    cast_member: current_member,
+                } if (current_lib, current_member) == (cast_lib, cast_member)
+            );
+            if let Some(current) = current.filter(|_| current_is_pair) {
+                self.flash_binding_state.borrow_mut().retire_current_for_pair(
+                    sprite_num,
+                    cast_lib,
+                    cast_member,
+                    current,
+                );
+            }
+            return self
+                .flash_binding_state
+                .borrow()
+                .retired_generations_for_pair(sprite_num, cast_lib, cast_member);
+        }
+        let current = self.flash_instance_generation(sprite_num);
+        let current_is_pair = matches!(
+            self.flash_binding_origin(sprite_num),
+            FlashBindingOrigin::Exact {
+                cast_lib: current_lib,
+                cast_member: current_member,
+            }
+            | FlashBindingOrigin::FirstPublished {
+                cast_lib: current_lib,
+                cast_member: current_member,
+            } if (current_lib, current_member) == (cast_lib, cast_member)
+        );
+        if let Some(current) = current.filter(|_| current_is_pair) {
+            if self.flash_binding_state.borrow_mut().retire_current_for_pair(
+                sprite_num,
+                cast_lib,
+                cast_member,
+                current,
+            ) {
+                return self
+                    .flash_binding_state
+                    .borrow()
+                    .retired_generations_for_pair(sprite_num, cast_lib, cast_member);
+            }
+        }
+        Vec::new()
+    }
+
+    pub(crate) fn current_flash_bindings_for_cast_lib(
+        &self,
+        cast_lib: i32,
+    ) -> Vec<(i16, i32, i32, u64)> {
+        let state = self.flash_binding_state.borrow();
+        state
+            .generations
+            .iter()
+            .filter_map(|(sprite_num, generation)| match state.origin(*sprite_num) {
+                FlashBindingOrigin::Exact {
+                    cast_lib: current_lib,
+                    cast_member,
+                }
+                | FlashBindingOrigin::FirstPublished {
+                    cast_lib: current_lib,
+                    cast_member,
+                } if current_lib == cast_lib => {
+                    Some((*sprite_num, current_lib, cast_member, *generation))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub(crate) fn reconcile_flash_binding_origins(&mut self) {
+        let bindings: Vec<_> = {
+            let state = self.flash_binding_state.borrow();
+            state
+                .generations
+                .iter()
+                .filter_map(|(sprite_num, generation)| match state.origin(*sprite_num) {
+                    FlashBindingOrigin::Exact { cast_lib, cast_member }
+                    | FlashBindingOrigin::FirstPublished { cast_lib, cast_member } => {
+                        Some((*sprite_num, cast_lib, cast_member, *generation, state.origin(*sprite_num)))
+                    }
+                    FlashBindingOrigin::Absent => None,
+                })
+                .collect()
+        };
+        for (sprite_num, cast_lib, cast_member, generation, origin) in bindings {
+            let current_pair = self
+                .movie
+                .score
+                .get_sprite(sprite_num)
+                .and_then(|sprite| sprite.member.as_ref())
+                .map(|member| (member.cast_lib, member.cast_member));
+            let classification = match current_pair {
+                Some((current_lib, current_member)) if (current_lib, current_member) == (cast_lib, cast_member) => {
+                    match self.movie.cast_manager.find_member_by_ref(&CastMemberRef { cast_lib, cast_member }) {
+                        None => FlashMemberClassification::UnresolvedExact,
+                        Some(member) if matches!(&member.member_type, CastMemberType::Flash(flash) if crate::rendering::has_swf_signature(&flash.data)) => FlashMemberClassification::ValidFlash,
+                        Some(_) => FlashMemberClassification::InvalidTarget,
+                    }
+                }
+                None => FlashMemberClassification::Absent,
+                Some(_) => FlashMemberClassification::InvalidTarget,
+            };
+            let must_retire = match origin {
+                FlashBindingOrigin::FirstPublished { .. } =>
+                    !matches!(classification, FlashMemberClassification::ValidFlash),
+                FlashBindingOrigin::Exact { .. } => matches!(
+                    classification,
+                    FlashMemberClassification::InvalidTarget | FlashMemberClassification::Absent
+                ),
+                FlashBindingOrigin::Absent => false,
+            };
+            if must_retire {
+                let mut state = self.flash_binding_state.borrow_mut();
+                if state.retire_current_for_pair(sprite_num, cast_lib, cast_member, generation) {
+                    state.origins.insert(sprite_num, FlashBindingOrigin::Absent);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn transition_flash_member(
+        &mut self,
+        sprite_num: i16,
+        previous: Option<(i32, i32)>,
+        next: Option<(i32, i32)>,
+    ) {
+        let classification = match next {
+            None => FlashMemberClassification::Absent,
+            Some((cast_lib, cast_member)) => match self
+                .movie
+                .cast_manager
+                .find_member_by_ref(&cast_lib::CastMemberRef {
+                    cast_lib,
+                    cast_member,
+                }) {
+                None => FlashMemberClassification::UnresolvedExact,
+                Some(member) if matches!(&member.member_type, CastMemberType::Flash(flash) if crate::rendering::has_swf_signature(&flash.data)) => {
+                    FlashMemberClassification::ValidFlash
+                }
+                Some(_) => FlashMemberClassification::InvalidTarget,
+            },
+        };
+        self.flash_binding_state.borrow_mut().transition_member(
+            sprite_num,
+            previous,
+            next,
+            classification,
+        );
+    }
+
     pub(crate) fn take_flash_host_actions(&mut self) -> Vec<FlashHostAction> {
         std::mem::take(&mut self.flash_host_actions)
     }
@@ -1460,7 +2169,10 @@ impl DirPlayer {
         if local_sprite <= 0 || self.flash_sprite_loaded.contains(&(local_sprite, cast_lib, cast_member)) {
             return Ok(false);
         }
-        let generation = self.reserve_flash_instance_generation(local_sprite)?;
+        let generation = self
+            .flash_binding_state
+            .borrow_mut()
+            .reserve_for_pair(local_sprite, cast_lib, cast_member)?;
         self.queue_flash_host_action(FlashHostAction::Load {
             fence: self.flash_action_fence(),
             host_sprite,
@@ -1745,6 +2457,7 @@ impl DirPlayer {
             flash_sprite_loaded: HashSet::new(),
             flash_host_actions: Vec::new(),
             flash_host_is_nested: false,
+            flash_host_route: FlashHostRoute::LocalOwned,
             flash_ready_sprites: HashSet::new(),
             flash_binding_state: Rc::new(RefCell::new(FlashBindingState::new())),
             flash_object_counter: 0,
@@ -1846,8 +2559,17 @@ impl DirPlayer {
         // the host's channel keys and their captured frames route back into THIS
         // sub's `flash_frame_buffers` (see NESTED_FLASH_BASE / update_flash_frame).
         let active = unsafe { ACTIVE_PLAYER_ID };
-        let is_nested_host = self.flash_host_is_nested;
-        let js_flash_key = |ch: i16| flash_host_sprite_key(is_nested_host, active, ch);
+        let route = self.flash_host_route;
+        if route == FlashHostRoute::NestedPending {
+            return Err(ScriptError::new_code(
+                ScriptErrorCode::InvalidReference,
+                "nested Flash host registration is pending".to_owned(),
+            ));
+        }
+        self.reconcile_flash_binding_origins();
+        let js_flash_key = |ch: i16| {
+            flash_host_sprite_key(route == FlashHostRoute::LegacySynthetic, active, ch)
+        };
         // UNLOAD pass FIRST: tear down any Ruffle instance whose channel no
         // longer holds that exact Flash member — BEFORE the load pass below, so
         // a member swap is deterministically unload(old) → load(new). If the
@@ -1865,31 +2587,22 @@ impl DirPlayer {
                 .get_sprite(ch)
                 .and_then(|s| s.member.as_ref())
                 .map(|m| (m.cast_lib, m.cast_member));
-            let still_present = cur == Some((cl, cm));
+            let still_present = cur == Some((cl, cm)) && self.channel_holds_live_flash(ch);
             if still_present {
                 continue;
             }
-            // The channel no longer holds THIS member. But the JS Ruffle instance
-            // map is keyed by CHANNEL NUMBER only, while `flash_sprite_loaded` is
-            // keyed by (channel, cast_lib, cast_member) — so a flash→flash swap
-            // leaves BOTH the old and new member entries in the set for the same
-            // channel for a frame. If we blindly `destroyFlashInstance(ch)` for
-            // the stale OLD entry, we destroy the NEW member's instance (same JS
-            // key) that `createFlashInstance` just put there — bogey_nights'
-            // bogeyman swaps longarm↔straw and the straw instance was being
-            // killed the instant it registered (permanent "NO INSTANCE",
-            // frame reads 0, grab stalls into #retreat).
-            //
-            // On a flash→flash swap `createFlashInstance` already replaced the
-            // single per-channel instance itself (its own leading
-            // destroyFlashInstance). So only tear down the JS instance when the
-            // channel no longer shows ANY live Flash member; otherwise just drop
-            // the stale bookkeeping entry and leave the new instance alone.
-            if !self.channel_holds_live_flash(ch) {
-                let owner_key = owner_key_string(&self.owner);
-                let generation = self.flash_instance_generation(ch);
-                if !is_nested_host {
-                    if let Some(generation) = generation {
+            // The channel no longer holds THIS member. A flash→flash swap
+            // leaves both the old and new member entries in the bookkeeping
+            // set for one pass. A retired generation owns its own teardown
+            // authority. Queue the
+            // exact old generation even when a replacement Flash member is
+            // already live on this channel; the generation-qualified host
+            // route must leave that replacement untouched.
+            let owner_key = owner_key_string(&self.owner);
+            let generations = self.retire_or_get_flash_unload_generations(ch, cl, cm);
+            match route {
+                FlashHostRoute::LocalOwned => {
+                    for generation in generations {
                         self.queue_flash_host_action(FlashHostAction::Unload {
                             fence: self.flash_action_fence(),
                             host_sprite: ch as i32,
@@ -1899,11 +2612,13 @@ impl DirPlayer {
                             generation,
                         });
                     }
-                } else {
-                    // Nested Flash host registration remains a legacy path until
-                    // the session registry owns a child FlashHostSink.
+                }
+                FlashHostRoute::LegacySynthetic if !self.channel_holds_live_flash(ch) => {
                     JsApi::dispatch_flash_member_unloaded(js_flash_key(ch), &owner_key);
                 }
+                FlashHostRoute::LegacySynthetic | FlashHostRoute::NestedPending => {}
+            }
+            if !self.channel_holds_live_flash(ch) {
                 self.flash_frame_buffers.remove(&ch);
             }
             self.flash_sprite_loaded.remove(&(ch, cl, cm));
@@ -1942,21 +2657,23 @@ impl DirPlayer {
                     let rect = rect.expect("Flash member has a resolved sprite rectangle");
                     let width = rect.width().max(1) as u32;
                     let height = rect.height().max(1) as u32;
-                    if !is_nested_host {
-                        self.queue_flash_resize(
+                    match route {
+                        FlashHostRoute::LocalOwned => self.queue_flash_resize(
                             channel_num as i32,
                             channel_num,
                             member_ref.cast_lib,
                             member_ref.cast_member,
                             width,
                             height,
-                        );
-                    } else {
-                        let _ = ruffle_set_size(
-                            js_flash_key(channel_num),
-                            width as i32,
-                            height as i32,
-                        );
+                        ),
+                        FlashHostRoute::LegacySynthetic => {
+                            let _ = ruffle_set_size(
+                                js_flash_key(channel_num),
+                                width as i32,
+                                height as i32,
+                            );
+                        }
+                        FlashHostRoute::NestedPending => unreachable!(),
                     }
                     continue;
                 }
@@ -1989,32 +2706,36 @@ impl DirPlayer {
                                 paused_at_start,
                                 asserted_frame,
                             );
-                            if !is_nested_host {
-                                self.queue_flash_member_load(
-                                    channel_num as i32,
-                                    channel_num,
-                                    member_ref.cast_lib,
-                                    member_ref.cast_member,
-                                    data,
-                                    w,
-                                    h,
-                                    paused_at_start,
-                                    asserted_frame,
-                                )?;
-                            } else {
-                                JsApi::dispatch_flash_member_loaded(
-                                    js_flash_key(channel_num),
-                                    member_ref.cast_lib,
-                                    member_ref.cast_member,
-                                    &data,
-                                    w,
-                                    h,
-                                    paused_at_start,
-                                    asserted_frame,
-                                    &owner_key_string(&self.owner),
-                                );
+                            match route {
+                                FlashHostRoute::LocalOwned => {
+                                    self.queue_flash_member_load(
+                                        channel_num as i32,
+                                        channel_num,
+                                        member_ref.cast_lib,
+                                        member_ref.cast_member,
+                                        data,
+                                        w,
+                                        h,
+                                        paused_at_start,
+                                        asserted_frame,
+                                    )?;
+                                }
+                                FlashHostRoute::LegacySynthetic => {
+                                    JsApi::dispatch_flash_member_loaded(
+                                        js_flash_key(channel_num),
+                                        member_ref.cast_lib,
+                                        member_ref.cast_member,
+                                        &data,
+                                        w,
+                                        h,
+                                        paused_at_start,
+                                        asserted_frame,
+                                        &owner_key_string(&self.owner),
+                                    );
+                                }
+                                FlashHostRoute::NestedPending => unreachable!(),
                             }
-                            if is_nested_host {
+                            if route == FlashHostRoute::LegacySynthetic {
                                 self.flash_sprite_loaded.insert(dispatch_key);
                             }
                         }
@@ -2134,12 +2855,20 @@ impl DirPlayer {
     /// RAF) — makes the next render see `flash_bitmap_ref.is_none()` and
     /// re-dispatch `createFlashInstance` with the new story's SWF.
     pub fn invalidate_flash_for_cast_lib(&mut self, cast_lib: i32) {
-        let sprites: Vec<(i16, i32, i32)> = self
+        let loaded: Vec<(i16, i32, i32)> = self
             .flash_sprite_loaded
             .iter()
             .filter(|(_, cl, _)| *cl == cast_lib)
             .map(|(sn, cl, cm)| (*sn, *cl, *cm))
             .collect();
+        let mut sprites = loaded.clone();
+        sprites.extend(
+            self.current_flash_bindings_for_cast_lib(cast_lib)
+                .into_iter()
+                .map(|(sn, cl, cm, _)| (sn, cl, cm)),
+        );
+        sprites.sort_unstable();
+        sprites.dedup();
         if sprites.is_empty() {
             return;
         }
@@ -2148,17 +2877,21 @@ impl DirPlayer {
         for (sn, cl, cm) in sprites {
             // Destroy the JS-side Ruffle instance first (cancels its capture
             // RAF so it can't re-insert a frame buffer after we drop it).
-            if self.flash_host_is_nested {
-                JsApi::dispatch_flash_member_unloaded(sn as i32, &owner_key_string(&self.owner));
-            } else if let Some(generation) = self.flash_instance_generation(sn) {
-                self.queue_flash_host_action(FlashHostAction::Unload {
-                    fence: self.flash_action_fence(),
-                    host_sprite: sn as i32,
-                    local_sprite: sn,
-                    cast_lib: cl,
-                    cast_member: cm,
-                    generation,
-                });
+            if self.flash_host_route == FlashHostRoute::LegacySynthetic {
+                if loaded.contains(&(sn, cl, cm)) {
+                    JsApi::dispatch_flash_member_unloaded(sn as i32, &owner_key_string(&self.owner));
+                }
+            } else {
+                for generation in self.retire_or_get_flash_unload_generations(sn, cl, cm) {
+                    self.queue_flash_host_action(FlashHostAction::Unload {
+                        fence: self.flash_action_fence(),
+                        host_sprite: sn as i32,
+                        local_sprite: sn,
+                        cast_lib: cl,
+                        cast_member: cm,
+                        generation,
+                    });
+                }
             }
             self.flash_frame_buffers.remove(&sn);
         }
@@ -2257,7 +2990,7 @@ impl DirPlayer {
             session_handle
                 .borrow_mut()
                 .with_player(id as u32, |context| {
-                    context.player.flash_host_is_nested = true;
+                    context.player.set_legacy_flash_host_route();
                 })
                 .expect("legacy nested player must be present in RuntimeSession");
             NESTED_PLAYERS.push(None);
@@ -2711,9 +3444,7 @@ impl DirPlayer {
     }
 
     pub fn begin_all_sprites(&mut self, symbols: &mut SymbolTable) {
-        self.movie
-            .score
-            .begin_sprites(ScoreRef::Stage, self.movie.current_frame, symbols);
+        self.begin_score_sprites(ScoreRef::Stage, self.movie.current_frame, symbols);
 
         // Cache the tempo for this frame
         self.refresh_frame_tempo();
@@ -2739,21 +3470,25 @@ impl DirPlayer {
         self.invalidate_active_stage_filmloop_cache();
         let active_filmloops = self.active_stage_filmloop_member_refs();
         for member_ref in active_filmloops {
-            let film_loop = match self
+            let current_frame = match self
+                .movie
+                .cast_manager
+                .find_member_by_ref(&member_ref)
+                .and_then(|m| m.member_type.as_film_loop())
+            {
+                Some(fl) => fl.current_frame,
+                None => continue,
+            };
+            // Use filmloop's own current_frame instead of movie's current_frame
+            self.begin_score_sprites(ScoreRef::FilmLoop(member_ref.clone()), current_frame, symbols);
+            if let Some(film_loop) = self
                 .movie
                 .cast_manager
                 .find_mut_member_by_ref(&member_ref)
                 .and_then(|m| m.member_type.as_film_loop_mut())
             {
-                Some(fl) => fl,
-                None => continue,
-            };
-            // Use filmloop's own current_frame instead of movie's current_frame
-            let current_frame = film_loop.current_frame;
-            film_loop
-                .score
-                .begin_sprites(ScoreRef::FilmLoop(member_ref.clone()), current_frame, symbols);
-            film_loop.score.apply_tween_modifiers(current_frame);
+                film_loop.score.apply_tween_modifiers(current_frame);
+            }
         }
 
         self.invalidate_behavior_channel_cache();
@@ -3144,6 +3879,9 @@ impl DirPlayer {
         // so switching movies doesn't leave old sounds looping or leak players.
         self.sound_manager.stop_all();
         self.flash_frame_buffers.clear();
+        self.flash_sprite_loaded.clear();
+        self.flash_host_actions.clear();
+        self.flash_ready_sprites.clear();
         self.nested_movie_images.clear();
         self.w3d_frame_buffers.clear();
         self.stage_image = None;
@@ -5648,15 +6386,25 @@ impl DirPlayer {
             session_handle
                 .borrow_mut()
                 .with_player(player_id, |mut context| {
-                    if let Some(member) = context.player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                    let is_film_loop = if let Some(member) = context.player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
                         if let CastMemberType::FilmLoop(film_loop) = &mut member.member_type {
-                            for sprite_num in ended_sprites {
-                                let sprite = film_loop.score.get_sprite_mut(sprite_num as i16);
-                                sprite.exited = true;
+                            for sprite_num in &ended_sprites {
+                                film_loop.score.get_sprite_mut(*sprite_num as i16).exited = true;
                             }
                             film_loop.current_frame = new_frame;
-                            film_loop.score.begin_sprites(score_ref.clone(), new_frame, context.symbols);
-                            film_loop.score.apply_tween_modifiers(new_frame);
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    if is_film_loop {
+                        context.player.begin_score_sprites(score_ref.clone(), new_frame, context.symbols);
+                        if let Some(member) = context.player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                            if let CastMemberType::FilmLoop(film_loop) = &mut member.member_type {
+                                film_loop.score.apply_tween_modifiers(new_frame);
+                            }
                         }
                     }
                 })
@@ -5902,6 +6650,36 @@ pub(crate) async fn drive_eval_owned(
                             result,
                         );
                     }
+                    crate::player::session::EvalRequestTurn::SpriteAsync(request) => {
+                        if request.player_id != player_id
+                            || !request.owner.same_identity(&owner)
+                        {
+                            turn = crate::player::eval::EvalTurn::Complete(Err(
+                                crate::player::cancelled_scope_error(),
+                            ));
+                            continue;
+                        }
+                        let typed_request = crate::player::driver::InternalVmRequest::SpriteAsync(
+                            request.clone(),
+                        );
+                        let result = crate::player::session::RuntimeSession::execute_sprite_async_request(
+                            session.clone(),
+                            request,
+                        )
+                        .await;
+                        turn = match session.borrow_mut().resume_typed_async_eval(
+                            eval_id.clone(),
+                            &action,
+                            &typed_request,
+                            &owner,
+                            result,
+                        ) {
+                            crate::player::session::EvalRequestTurn::Evaluator(turn) => turn,
+                            _ => crate::player::eval::EvalTurn::Complete(Err(
+                                crate::player::cancelled_scope_error(),
+                            )),
+                        };
+                    }
                     crate::player::session::EvalRequestTurn::MovieAsync(request) => {
                         let result = Box::pin(crate::player::handlers::movie::execute_movie_async(
                             session.clone(),
@@ -6015,6 +6793,7 @@ pub(crate) async fn drive_eval_owned(
                                 .and_then(|child| match child {
                                     crate::player::session::EvalRequestTurn::Evaluator(turn) => Some(turn),
                                     crate::player::session::EvalRequestTurn::Child(_)
+                                    | crate::player::session::EvalRequestTurn::SpriteAsync(_)
                                     | crate::player::session::EvalRequestTurn::MovieAsync(_)
                                     | crate::player::session::EvalRequestTurn::Flash(_)
                                     | crate::player::session::EvalRequestTurn::ExternalXtra(_)
@@ -9774,9 +10553,15 @@ async fn advance_filmloops_owned(
                             film_loop.score.get_sprite_mut(sprite_num as i16).exited = true;
                         }
                         film_loop.current_frame = next_frame;
-                        film_loop.score.begin_sprites(score_ref.clone(), next_frame, context.symbols);
-                        film_loop.score.apply_tween_modifiers(next_frame);
                         changed = true;
+                    }
+                }
+                if changed {
+                    context.player.begin_score_sprites(score_ref.clone(), next_frame, context.symbols);
+                    if let Some(member) = context.player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                        if let CastMemberType::FilmLoop(film_loop) = &mut member.member_type {
+                            film_loop.score.apply_tween_modifiers(next_frame);
+                        }
                     }
                 }
                 if changed {
@@ -13656,7 +14441,7 @@ mod scope_token_tests {
     use crate::director::enums::{FilmLoopInfo, ScriptType};
     use crate::director::lingo::opcode::OpCode;
     use crate::player::cast_lib::{CastLib, CastMemberRef};
-    use crate::player::cast_member::{CastMember, CastMemberType, FilmLoopMember};
+    use crate::player::cast_member::{CastMember, CastMemberType, FilmLoopMember, FlashMember};
     use crate::player::bitmap::bitmap::{Bitmap, PaletteRef};
     use crate::player::geometry::IntRect;
     use crate::player::score::{Score, ScoreSpriteSpan, SpriteChannel};
@@ -13709,6 +14494,259 @@ mod scope_token_tests {
         );
 
         drop(retained);
+    }
+
+    #[test]
+    fn reset_core_clears_flash_state_and_requeues_with_rotated_owner() {
+        let mut player = make_player(OwnerToken::new(super::ownership::OwnerKey {
+            session: 96,
+            player: 1,
+            generation: 1,
+        }));
+        let old_owner = player.owner.clone();
+        let swf = include_bytes!("../../tests/fixtures/flash_initial_access.swf").to_vec();
+        let member_ref = CastMemberRef { cast_lib: 1, cast_member: 1 };
+        player.movie.cast_manager.casts.push({
+            let mut cast = CastLib::test_external(1, 0);
+            cast.members.insert(
+                1,
+                CastMember::new(
+                    1,
+                    CastMemberType::Flash(FlashMember {
+                        data: swf.clone(),
+                        reg_point: (0, 0),
+                        flash_info: None,
+                    }),
+                ),
+            );
+            cast
+        });
+        player.movie.score.channels = vec![SpriteChannel::new(0), SpriteChannel::new(1)];
+        player.movie.score.channels[1].sprite.member = Some(member_ref);
+        player.movie.score.channels[1].sprite.visible = true;
+        player
+            .queue_flash_member_load(1, 1, 1, 1, swf, 1, 1, false, -1)
+            .expect("old Flash load should queue");
+        player.flash_ready_sprites.insert(1);
+        assert_eq!(player.flash_sprite_loaded.len(), 1);
+        assert_eq!(player.flash_host_actions.len(), 1);
+
+        player.reset_owned_core();
+
+        assert!(!old_owner.is_arena_live());
+        assert_eq!(player.movie.score.channels[1].sprite.member, Some(member_ref));
+        assert!(player.flash_sprite_loaded.is_empty());
+        assert!(player.flash_host_actions.is_empty());
+        assert!(player.flash_ready_sprites.is_empty());
+        let new_owner = player.owner.clone();
+        assert!(!new_owner.same_identity(&old_owner));
+        player
+            .pre_dispatch_flash_members()
+            .expect("preserved Flash member should queue under the new owner");
+        let new_generation = player
+            .flash_instance_generation(1)
+            .expect("new owner should reserve a Flash generation");
+        let actions = player.take_flash_host_actions();
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            FlashHostAction::Load { fence, generation, .. } => {
+                assert!(fence.owner.same_identity(&new_owner));
+                assert_eq!(*generation, new_generation);
+            }
+            _ => panic!("preserved Flash member should queue a Load action"),
+        }
+    }
+
+    #[test]
+    fn pre_dispatch_unloads_exact_old_pair_without_touching_new_generation() {
+        let mut player = make_player(OwnerToken::new(super::ownership::OwnerKey {
+            session: 98,
+            player: 1,
+            generation: 1,
+        }));
+        player.movie.score.channels = vec![SpriteChannel::new(0), SpriteChannel::new(1)];
+        player.movie.score.channels[1].sprite.member = Some(CastMemberRef {
+            cast_lib: 1,
+            cast_member: 2,
+        });
+        let old_generation = player
+            .flash_binding_state
+            .borrow_mut()
+            .reserve_for_pair(1, 1, 1)
+            .expect("old generation");
+        assert!(player
+            .flash_binding_state
+            .borrow_mut()
+            .publish_first(1, 1, 1, old_generation));
+        player
+            .flash_binding_state
+            .borrow_mut()
+            .transition_member(
+                1,
+                Some((1, 1)),
+                Some((1, 2)),
+                FlashMemberClassification::ValidFlash,
+            );
+        let new_generation = player
+            .flash_binding_state
+            .borrow_mut()
+            .reserve_for_pair(1, 1, 2)
+            .expect("new generation");
+        player.flash_sprite_loaded.insert((1, 1, 1));
+        player
+            .pre_dispatch_flash_members()
+            .expect("old unload should queue");
+        let actions = player.take_flash_host_actions();
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            FlashHostAction::Unload {
+                cast_lib: 1,
+                cast_member: 1,
+                generation,
+                ..
+            } if *generation == old_generation
+        )));
+        assert_eq!(player.flash_instance_generation(1), Some(new_generation));
+        assert!(player
+            .flash_binding_state
+            .borrow()
+            .is_current(1, new_generation));
+    }
+
+    #[test]
+    fn failed_first_publication_retires_old_generation_before_replacement() {
+        let mut state = FlashBindingState::new();
+        let old_generation = state
+            .reserve_for_pair(1, 3, 4)
+            .expect("old generation");
+        assert!(state.retire_failed_publication(1, 3, 4, old_generation));
+        assert!(state.is_retired_generation(1, 3, 4, old_generation));
+        let replacement = state
+            .reserve_for_pair(1, 3, 5)
+            .expect("replacement generation");
+        assert_ne!(replacement, old_generation);
+        assert_eq!(state.generations.get(&1), Some(&replacement));
+        assert!(state.is_retired_generation(1, 3, 4, old_generation));
+    }
+
+    #[test]
+    fn failed_stale_publication_records_exact_old_generation_for_teardown() {
+        let mut state = FlashBindingState::new();
+        let old_generation = state
+            .reserve_for_pair(1, 7, 8)
+            .expect("old generation");
+        let replacement = state
+            .reserve_for_pair(1, 7, 9)
+            .expect("replacement generation");
+        assert!(!state.retire_failed_publication(1, 7, 8, old_generation));
+        assert!(state.is_current(1, replacement));
+        assert!(state.is_retired_generation(1, 7, 8, old_generation));
+        state.clear_retired_generation(1, 7, 8, old_generation);
+        assert!(!state.is_retired_generation(1, 7, 8, old_generation));
+    }
+
+    #[test]
+    fn cast_reload_retires_unresolved_exact_binding_without_loaded_cache() {
+        let mut player = make_player(OwnerToken::new(super::ownership::OwnerKey {
+            session: 99,
+            player: 1,
+            generation: 1,
+        }));
+        player.movie.score.channels = vec![SpriteChannel::new(0), SpriteChannel::new(1)];
+        player.movie.score.channels[1].sprite.member = Some(CastMemberRef {
+            cast_lib: 4,
+            cast_member: 8,
+        });
+        let generation = player
+            .flash_binding_state
+            .borrow_mut()
+            .reserve_for_pair(1, 4, 8)
+            .expect("unresolved exact generation");
+        player.invalidate_flash_for_cast_lib(4);
+        assert_eq!(player.flash_instance_generation(1), None);
+        assert_eq!(player.flash_binding_origin(1), FlashBindingOrigin::Absent);
+        assert!(!player
+            .flash_binding_state
+            .borrow()
+            .is_retired_generation(1, 4, 8, generation));
+        assert!(player.take_flash_host_actions().is_empty());
+    }
+
+    #[test]
+    fn cast_reload_drains_all_published_same_pair_generations() {
+        let mut player = make_player(OwnerToken::new(super::ownership::OwnerKey {
+            session: 100,
+            player: 1,
+            generation: 1,
+        }));
+        player.movie.score.channels = vec![SpriteChannel::new(0), SpriteChannel::new(1)];
+        player.movie.score.channels[1].sprite.member = Some(CastMemberRef {
+            cast_lib: 5,
+            cast_member: 9,
+        });
+        let first = player
+            .flash_binding_state
+            .borrow_mut()
+            .reserve_for_pair(1, 5, 9)
+            .expect("first generation");
+        assert!(player
+            .flash_binding_state
+            .borrow_mut()
+            .publish_first(1, 5, 9, first));
+        assert!(player
+            .flash_binding_state
+            .borrow_mut()
+            .retire_current_for_pair(1, 5, 9, first));
+        let second = player
+            .flash_binding_state
+            .borrow_mut()
+            .reserve_for_pair(1, 5, 9)
+            .expect("second generation");
+        assert!(player
+            .flash_binding_state
+            .borrow_mut()
+            .publish_first(1, 5, 9, second));
+        player.flash_sprite_loaded.insert((1, 5, 9));
+        player.invalidate_flash_for_cast_lib(5);
+        let actions = player.take_flash_host_actions();
+        let mut generations: Vec<_> = actions
+            .iter()
+            .filter_map(|action| match action {
+                FlashHostAction::Unload { generation, .. } => Some(*generation),
+                _ => None,
+            })
+            .collect();
+        generations.sort_unstable();
+        assert_eq!(generations, vec![first, second]);
+        assert_eq!(player.flash_instance_generation(1), None);
+    }
+
+    #[test]
+    fn pre_dispatch_retires_exact_binding_after_member_replacement_before_load() {
+        let mut player = make_player(OwnerToken::new(super::ownership::OwnerKey {
+            session: 101,
+            player: 1,
+            generation: 1,
+        }));
+        player.movie.score.channels = vec![SpriteChannel::new(0), SpriteChannel::new(1)];
+        player.movie.score.channels[1].sprite.member = Some(CastMemberRef {
+            cast_lib: 6,
+            cast_member: 2,
+        });
+        let generation = player
+            .flash_binding_state
+            .borrow_mut()
+            .reserve_for_pair(1, 6, 1)
+            .expect("exact reservation");
+        player
+            .pre_dispatch_flash_members()
+            .expect("reconciliation should complete");
+        assert_eq!(player.flash_instance_generation(1), None);
+        assert!(!player
+            .flash_binding_state
+            .borrow()
+            .is_retired_generation(1, 6, 1, generation));
+        assert!(player.take_flash_host_actions().is_empty());
     }
 
     #[test]

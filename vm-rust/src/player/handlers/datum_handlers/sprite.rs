@@ -1,6 +1,7 @@
 use log::warn;
 use wasm_bindgen::prelude::*;
 
+use crate::js_api::JsApi;
 use crate::director::lingo::datum::Datum;
 
 use crate::player::symbols::builtin::BuiltInSymbol;
@@ -188,6 +189,505 @@ mod tests {
 
         assert_eq!(result.unwrap_err().code, ScriptErrorCode::InvalidReference);
     }
+
+    fn flash_callback_fixture() -> (
+        crate::player::session::RuntimeSessionHandle,
+        crate::player::ownership::OwnerToken,
+        DatumRef,
+        Symbol,
+    ) {
+        let session = crate::player::session::RuntimeSession::new(
+            crate::player::symbols::symbol_table::SymbolOwner {
+                session: 905,
+                generation: 1,
+            },
+        )
+        .into_handle();
+        assert!(session.borrow_mut().add_player(1, async_std::channel::unbounded().0));
+        let (owner, receiver, handler) = session
+            .borrow_mut()
+            .with_player(1, |context| {
+                let mut cast = crate::player::cast_lib::CastLib::test_external(1, 0);
+                cast.insert_member(
+                    1,
+                    crate::player::cast_member::CastMember::new(
+                        1,
+                        crate::player::cast_member::CastMemberType::Flash(
+                            crate::player::cast_member::FlashMember {
+                                data: include_bytes!(
+                                    "../../../../tests/fixtures/flash_lingo_callback_probe.swf"
+                                )
+                                .to_vec(),
+                                reg_point: (0, 0),
+                                flash_info: None,
+                            },
+                        ),
+                    ),
+                    context.symbols,
+                );
+                context.player.movie.cast_manager.casts.push(cast);
+                let mut channel = crate::player::score::SpriteChannel::new(1);
+                channel.sprite.member = Some(crate::player::cast_lib::CastMemberRef {
+                    cast_lib: 1,
+                    cast_member: 1,
+                });
+                context.player.movie.score.channels = vec![
+                    crate::player::score::SpriteChannel::new(0),
+                    channel,
+                    crate::player::score::SpriteChannel::new(2),
+                ];
+                context.player.movie.score.sprite_spans = vec![
+                    crate::player::score::ScoreSpriteSpan {
+                        channel_number: 1,
+                        start_frame: 1,
+                        end_frame: 1,
+                        scripts: vec![],
+                    },
+                ];
+                context.player.movie.score.frame_count = Some(1);
+                context.player.movie.score.invalidate_span_channel_cache();
+                let owner = context.player.owner.clone();
+                let receiver = context.player.alloc_datum(Datum::SpriteRef(1));
+                let handler = context.symbols.intern("setCallback");
+                (owner, receiver, handler)
+            })
+            .expect("callback fixture player exists");
+        (session, owner, receiver, handler)
+    }
+
+    fn callback_request(
+        owner: &crate::player::ownership::OwnerToken,
+        receiver: DatumRef,
+        handler: Symbol,
+        args: Vec<DatumRef>,
+    ) -> crate::player::driver::SpriteAsyncRequest {
+        crate::player::driver::SpriteAsyncRequest {
+            player_id: 1,
+            owner: owner.clone(),
+            receiver,
+            sprite_num: 1,
+            handler,
+            args,
+        }
+    }
+
+    fn callback_args(
+        session: &crate::player::session::RuntimeSessionHandle,
+        object: crate::director::lingo::datum::FlashObjectRef,
+    ) -> Vec<DatumRef> {
+        session
+            .borrow_mut()
+            .with_player(1, |context| {
+                let handler = context.symbols.intern("onFlashCallback");
+                vec![
+                    context.player.alloc_datum(Datum::FlashObjectRef(object)),
+                    context.player.alloc_datum(Datum::String("callback".to_owned())),
+                    context.player.alloc_datum(Datum::Symbol(handler)),
+                ]
+            })
+            .expect("callback fixture player exists")
+    }
+
+    #[test]
+    fn set_callback_short_arity_returns_void_without_generation_or_host_work() {
+        let (session, owner, receiver, handler) = flash_callback_fixture();
+        let result = async_std::task::block_on(SpriteDatumHandlers::execute_async_request(
+            session.clone(),
+            callback_request(&owner, receiver, handler, Vec::new()),
+        ))
+        .expect("short setCallback must return successfully");
+        let observed = session
+            .borrow_mut()
+            .with_player(1, |context| context.player.get_datum(&result).clone())
+            .expect("callback fixture player exists");
+        assert!(matches!(observed, Datum::Void));
+        let (generation, actions) = session
+            .borrow_mut()
+            .with_player(1, |context| {
+                (context.player.flash_instance_generation(1), context.player.take_flash_host_actions())
+            })
+            .expect("callback fixture player exists");
+        assert_eq!(generation, None);
+        assert!(actions.is_empty(), "short setCallback must not prepare host work");
+    }
+
+    #[test]
+    fn synchronous_set_callback_rejects_before_local_connection_mutation() {
+        let (session, _owner, receiver, _handler) = flash_callback_fixture();
+        session
+            .borrow_mut()
+            .with_player(1, |mut runtime| {
+                let callback_handler = runtime.symbols.intern("onFlashCallback");
+                let args = vec![
+                    runtime.player.alloc_datum(Datum::String("_root".to_owned())),
+                    runtime.player.alloc_datum(Datum::String("callback".to_owned())),
+                    runtime.player.alloc_datum(Datum::Symbol(callback_handler)),
+                ];
+                let before = runtime.player.flash_lc_callbacks.len();
+                let error = SpriteDatumHandlers::call(&mut runtime, &receiver, "setCallback", &args)
+                    .expect_err("synchronous setCallback must require the owner-bound async path");
+                assert_eq!(error.message, "setCallback requires the owner-bound async path");
+                assert_eq!(runtime.player.flash_lc_callbacks.len(), before);
+            })
+            .expect("callback fixture player exists");
+    }
+
+    #[test]
+    fn set_callback_string_reaches_explicit_native_host_unsupported_boundary() {
+        let (session, owner, receiver, handler) = flash_callback_fixture();
+        let args = session
+            .borrow_mut()
+            .with_player(1, |context| {
+                let callback_handler = context.symbols.intern("onFlashCallback");
+                vec![
+                    context.player.alloc_datum(Datum::String("_root".to_owned())),
+                    context.player.alloc_datum(Datum::String("callback".to_owned())),
+                    context.player.alloc_datum(Datum::Symbol(callback_handler)),
+                ]
+            })
+            .expect("callback fixture player exists");
+        let error = async_std::task::block_on(SpriteDatumHandlers::execute_async_request(
+            session,
+            callback_request(&owner, receiver, handler, args),
+        ))
+        .expect_err("native setCallback registration must reject explicitly");
+        assert_eq!(error.message, "Flash host is unavailable on native");
+    }
+
+    #[test]
+    fn evaluator_set_callback_string_reaches_native_unsupported_boundary() {
+        let (session, owner, receiver, handler) = flash_callback_fixture();
+        let args = session
+            .borrow_mut()
+            .with_player(1, |context| {
+                let callback_handler = context.symbols.intern("onFlashCallback");
+                vec![
+                    context.player.alloc_datum(Datum::String("_root".to_owned())),
+                    context.player.alloc_datum(Datum::String("callback".to_owned())),
+                    context.player.alloc_datum(Datum::Symbol(callback_handler)),
+                ]
+            })
+            .expect("callback fixture player exists");
+        let request = crate::player::driver::InternalVmRequest::SpriteAsync(callback_request(
+            &owner,
+            receiver,
+            handler,
+            args,
+        ));
+        let (_id, _action, result_receiver) = session
+            .borrow_mut()
+            .start_eval_request(1, request)
+            .expect("sprite callback evaluator request should start");
+        let pending = session
+            .borrow_mut()
+            .take_pending_eval_request_for(1)
+            .expect("sprite callback evaluator request should be retained");
+        async_std::task::block_on(crate::player::commands::pump_admitted_eval_request(
+            &session, pending,
+        ));
+        let error = async_std::task::block_on(result_receiver.recv())
+            .expect("evaluator result should be delivered")
+            .expect_err("native sprite callback must reject explicitly");
+        assert_eq!(error.message, "Flash host is unavailable on native");
+    }
+
+    #[test]
+    fn owned_sprite_call_preparation_preserves_path_and_json_string_only() {
+        let (session, _owner, _receiver, _handler) = flash_callback_fixture();
+        let request = session
+            .borrow_mut()
+            .with_player(1, |context| {
+                let path = context.player.alloc_datum(Datum::String(
+                    "_root.dirplayerInvokeCallbackProbe".to_owned(),
+                ));
+                let args_xml = context
+                    .player
+                    .alloc_datum(Datum::String("[\"payload\"]".to_owned()));
+                let trailing_number = context.player.alloc_datum(Datum::Int(7));
+                let trailing_object = context.player.alloc_datum(Datum::String("ignored".to_owned()));
+                let args = vec![path, args_xml, trailing_number, trailing_object];
+                let (path, args_xml) = prepare_sprite_call_inputs(
+                    context.player,
+                    context.symbols,
+                    &args,
+                )
+                .expect("sprite call inputs should prepare");
+                let generation = context
+                    .player
+                    .reserve_flash_instance_generation(1)
+                    .expect("generation should reserve");
+                crate::player::handlers::datum_handlers::flash_object::FlashObjectDatumHandlers::prepare_sprite_call(
+                    context.player,
+                    1,
+                    generation,
+                    path,
+                    args_xml,
+                    1,
+                    1,
+                )
+            })
+            .expect("callback fixture player exists")
+            .expect("owned sprite call should prepare");
+        assert_eq!(request.path, "_root.dirplayerInvokeCallbackProbe");
+        assert_eq!(request.expected_generation, Some(1));
+        match request.operation {
+            crate::player::handlers::datum_handlers::flash_object::FlashOperation::Call { args_xml } => {
+                assert_eq!(args_xml, "[\"payload\"]");
+            }
+            _ => panic!("sprite call must prepare a Flash Call operation"),
+        }
+    }
+
+    #[test]
+    fn sprite_call_function_reaches_owned_native_unsupported_boundary() {
+        let (session, owner, receiver, _handler) = flash_callback_fixture();
+        let handler = session
+            .borrow_mut()
+            .with_player(1, |context| context.symbols.intern("callFunction"))
+            .expect("callback fixture player exists");
+        let args = session
+            .borrow_mut()
+            .with_player(1, |context| {
+                vec![
+                    context.player.alloc_datum(Datum::String(
+                        "_root.dirplayerInvokeCallbackProbe".to_owned(),
+                    )),
+                    context.player.alloc_datum(Datum::String("[]".to_owned())),
+                    context.player.alloc_datum(Datum::Int(7)),
+                ]
+            })
+            .expect("callback fixture player exists");
+        let error = async_std::task::block_on(SpriteDatumHandlers::execute_async_request(
+            session,
+            callback_request(&owner, receiver, handler, args),
+        ))
+        .expect_err("native sprite callFunction must reject explicitly");
+        assert_eq!(error.message, "Flash host is unavailable on native");
+    }
+
+    #[test]
+    fn set_callback_rejects_foreign_stale_and_different_sprite_objects_before_host_work() {
+        let cases = [
+            ("foreign", "foreign:905:1:1", 1_u64, 1_i32),
+            ("stale", "905:1:1", 1_u64, 1_i32),
+            ("different-sprite", "905:1:1", 1_u64, 2_i32),
+        ];
+        for (label, object_owner, generation, sprite_num) in cases {
+            let (session, owner, receiver, handler) = flash_callback_fixture();
+            if label == "stale" {
+                session
+                    .borrow_mut()
+                    .with_player(1, |context| {
+                        let current = context.player.reserve_flash_instance_generation(1).expect("generation");
+                        assert_eq!(current, generation);
+                        assert!(context.player.invalidate_flash_instance_generation(1, current));
+                    })
+                    .expect("callback fixture player exists");
+            }
+            let object = crate::director::lingo::datum::FlashObjectRef::from_path_with_sprite(
+                "_root",
+                1,
+                1,
+                sprite_num,
+            )
+            .with_binding(object_owner, generation);
+            let args = callback_args(&session, object);
+            let error = async_std::task::block_on(SpriteDatumHandlers::execute_async_request(
+                session.clone(),
+                callback_request(&owner, receiver, handler, args),
+            ))
+            .expect_err("invalid callback object must be rejected");
+            assert_eq!(error.code, ScriptErrorCode::InvalidReference, "{label} error");
+            assert!(
+                error.message.contains("owner")
+                    || error.message.contains("generation")
+                    || error.message.contains("sprite"),
+                "{label} error should identify the invalid binding: {}",
+                error.message
+            );
+            let actions = session
+                .borrow_mut()
+                .with_player(1, |context| context.player.take_flash_host_actions())
+                .expect("callback fixture player exists");
+            assert!(actions.is_empty(), "{label} callback rejection emitted host work");
+        }
+    }
+
+    #[test]
+    fn sprite_set_variable_checks_consumed_arguments_before_host_work() {
+        let (session, owner, receiver, _callback_handler) = flash_callback_fixture();
+        let handler = session
+            .borrow_mut()
+            .with_player(1, |context| context.symbols.intern("setVariable"))
+            .expect("callback fixture player exists");
+        let path_only = session
+            .borrow_mut()
+            .with_player(1, |context| {
+                vec![context.player.alloc_datum(Datum::String("value".to_owned()))]
+            })
+            .expect("callback fixture player exists");
+        let error = async_std::task::block_on(SpriteDatumHandlers::execute_async_request(
+            session.clone(),
+            callback_request(&owner, receiver, handler, path_only),
+        ))
+        .expect_err("missing setVariable value must be rejected");
+        assert!(error.message.contains("path and value"));
+        let actions = session
+            .borrow_mut()
+            .with_player(1, |context| context.player.take_flash_host_actions())
+            .expect("callback fixture player exists");
+        assert!(actions.is_empty(), "argument rejection must precede host work");
+    }
+
+    #[test]
+    fn sprite_set_variable_ignores_valid_trailing_arguments_before_owned_native_failure() {
+        let (session, owner, receiver, _callback_handler) = flash_callback_fixture();
+        let handler = session
+            .borrow_mut()
+            .with_player(1, |context| context.symbols.intern("setVariable"))
+            .expect("callback fixture player exists");
+        let args = session
+            .borrow_mut()
+            .with_player(1, |context| {
+                vec![
+                    context.player.alloc_datum(Datum::String("value".to_owned())),
+                    context.player.alloc_datum(Datum::Int(7)),
+                    context.player.alloc_datum(Datum::String("ignored".to_owned())),
+                ]
+            })
+            .expect("callback fixture player exists");
+        let error = async_std::task::block_on(SpriteDatumHandlers::execute_async_request(
+            session,
+            callback_request(&owner, receiver, handler, args),
+        ))
+        .expect_err("native owned setVariable must reject at host boundary");
+        assert_eq!(error.message, "Flash host is unavailable on native");
+    }
+
+    #[test]
+    fn sprite_get_variable_default_and_object_mode_use_owned_native_boundary() {
+        for object_mode in [false, true] {
+            let (session, owner, receiver, _callback_handler) = flash_callback_fixture();
+            let handler = session
+                .borrow_mut()
+                .with_player(1, |context| context.symbols.intern("getVariable"))
+                .expect("callback fixture player exists");
+            let args = session
+                .borrow_mut()
+                .with_player(1, |context| {
+                    if object_mode {
+                        vec![
+                            context.player.alloc_datum(Datum::String(
+                                "_root.callbackProbeString".to_owned(),
+                            )),
+                            context.player.alloc_datum(Datum::Int(0)),
+                        ]
+                    } else {
+                        Vec::new()
+                    }
+                })
+                .expect("callback fixture player exists");
+            let error = async_std::task::block_on(SpriteDatumHandlers::execute_async_request(
+                session,
+                callback_request(&owner, receiver, handler, args),
+            ))
+            .expect_err("native owned getVariable must reject explicitly");
+            assert_eq!(error.message, "Flash host is unavailable on native");
+        }
+    }
+
+    #[test]
+    fn sprite_get_variable_absent_object_binds_and_reuses_pending_generation() {
+        let (session, owner, receiver, _callback_handler) = flash_callback_fixture();
+        session
+            .borrow_mut()
+            .with_player(1, |context| {
+                context.player.movie.score.channels[1].sprite.member = None;
+            })
+            .expect("callback fixture player exists");
+        let handler = session
+            .borrow_mut()
+            .with_player(1, |context| context.symbols.intern("getVariable"))
+            .expect("callback fixture player exists");
+        let make_args = |session: &crate::player::session::RuntimeSessionHandle| {
+            session
+                .borrow_mut()
+                .with_player(1, |context| {
+                    vec![
+                        context.player.alloc_datum(Datum::String("early".to_owned())),
+                        context.player.alloc_datum(Datum::Int(0)),
+                    ]
+                })
+                .expect("callback fixture player exists")
+        };
+        let first = async_std::task::block_on(SpriteDatumHandlers::execute_async_request(
+            session.clone(),
+            callback_request(&owner, receiver.clone(), handler.clone(), make_args(&session)),
+        ))
+        .expect("absent object access should return a bound handle");
+        let second = async_std::task::block_on(SpriteDatumHandlers::execute_async_request(
+            session.clone(),
+            callback_request(&owner, receiver, handler, make_args(&session)),
+        ))
+        .expect("repeated absent object access should reuse its binding");
+        let (first_object, second_object, generation) = session
+            .borrow_mut()
+            .with_player(1, |context| {
+                let first = context.player.get_datum(&first).as_flash_object().cloned();
+                let second = context.player.get_datum(&second).as_flash_object().cloned();
+                (first, second, context.player.flash_instance_generation(1))
+            })
+            .expect("callback fixture player exists");
+        let first_object = first_object.expect("first result must be a Flash object");
+        let second_object = second_object.expect("second result must be a Flash object");
+        assert_eq!(first_object.instance_id, 1);
+        assert_eq!(first_object.cast_lib, 0);
+        assert_eq!(first_object.cast_member, 0);
+        assert_eq!(first_object.owner_key, Some(crate::player::owner_key_string(&owner)));
+        assert_eq!(first_object.instance_generation, generation);
+        assert_eq!(second_object.instance_generation, generation);
+    }
+
+    #[test]
+    fn sprite_get_variable_unresolved_object_binds_exact_pair_without_host_work() {
+        let (session, owner, receiver, _callback_handler) = flash_callback_fixture();
+        session
+            .borrow_mut()
+            .with_player(1, |context| {
+                context.player.movie.score.channels[1].sprite.member =
+                    Some(crate::player::cast_lib::CastMemberRef {
+                        cast_lib: 1,
+                        cast_member: 99,
+                    });
+            })
+            .expect("callback fixture player exists");
+        let handler = session
+            .borrow_mut()
+            .with_player(1, |context| context.symbols.intern("getVariable"))
+            .expect("callback fixture player exists");
+        let args = session
+            .borrow_mut()
+            .with_player(1, |context| {
+                vec![
+                    context.player.alloc_datum(Datum::String("early".to_owned())),
+                    context.player.alloc_datum(Datum::Int(0)),
+                ]
+            })
+            .expect("callback fixture player exists");
+        let result = async_std::task::block_on(SpriteDatumHandlers::execute_async_request(
+            session.clone(),
+            callback_request(&owner, receiver, handler, args),
+        ))
+        .expect("unresolved object access should return a bound handle");
+        let object = session
+            .borrow_mut()
+            .with_player(1, |context| context.player.get_datum(&result).as_flash_object().cloned())
+            .expect("callback fixture player exists")
+            .expect("result must be a Flash object");
+        assert_eq!((object.cast_lib, object.cast_member), (1, 99));
+        assert_eq!(object.owner_key, Some(crate::player::owner_key_string(&owner)));
+        assert!(object.instance_generation.is_some());
+    }
 }
 
 /// Write an ordered camera list back to the sprite's primary + extras split.
@@ -214,6 +714,25 @@ fn checked_player_datum<'a>(player: &'a DirPlayer, symbols: &SymbolTable, datum_
     };
     validate_direct_symbol_fields(datum, symbols)?;
     Ok(datum)
+}
+
+fn prepare_sprite_call_inputs(
+    player: &DirPlayer,
+    symbols: &SymbolTable,
+    args: &[DatumRef],
+) -> Result<(String, String), ScriptError> {
+    let path = args
+        .first()
+        .ok_or_else(|| ScriptError::new("callFunction requires a path".to_owned()))
+        .and_then(|arg| checked_player_datum(player, symbols, arg))?
+        .string_value(symbols)
+        .map(|path| root_flash_path(&path))?;
+    let args_xml = args
+        .get(1)
+        .map(|arg| checked_player_datum(player, symbols, arg).and_then(|datum| datum.string_value(symbols)))
+        .transpose()?
+        .unwrap_or_default();
+    Ok((path, args_xml))
 }
 
 fn checked_script_instance(player: &DirPlayer, instance_ref: &ScriptInstanceRef) -> Result<(), ScriptError> {
@@ -257,10 +776,6 @@ extern "C" {
     fn ruffle_rewind(sprite_num: i32);
     #[wasm_bindgen(js_name = "dirplayer_ruffleCallFrame")]
     fn ruffle_call_frame(sprite_num: i32, frame: i32);
-    #[wasm_bindgen(js_name = "dirplayer_ruffleGetVariable", catch)]
-    fn ruffle_get_variable(sprite_num: i32, path: &str) -> Result<JsValue, JsValue>;
-    #[wasm_bindgen(js_name = "dirplayer_ruffleSetVariable", catch)]
-    fn ruffle_set_variable(sprite_num: i32, path: &str, value: &str) -> Result<JsValue, JsValue>;
     #[wasm_bindgen(js_name = "dirplayer_ruffleCallFunction", catch)]
     fn ruffle_call_function(sprite_num: i32, path: &str, args_xml: &str) -> Result<JsValue, JsValue>;
     /// Classify what's under a sprite-local point: 0 = #background,
@@ -271,31 +786,6 @@ extern "C" {
     fn ruffle_get_flash_property(sprite_num: i32, target: &str, prop_num: i32) -> Result<JsValue, JsValue>;
     #[wasm_bindgen(js_name = "dirplayer_ruffleSetFlashProperty")]
     fn ruffle_set_flash_property(sprite_num: i32, target: &str, prop_num: i32, value: &str);
-    /// True once the sprite's Ruffle instance has loaded AND finished AS init.
-    /// Used to BLOCK a Flash interop call until the SWF is ready (see call_async).
-    #[wasm_bindgen(js_name = "dirplayer_isFlashInstanceReady", catch)]
-    fn is_flash_instance_ready(sprite_num: i32) -> Result<JsValue, JsValue>;
-}
-
-/// Yield the frame loop until the sprite's Ruffle instance is ready (loaded +
-/// AS-initialized), so a Flash interop call reads/writes a live instance rather
-/// than returning null. Bounded (~10s) so a sprite that never gets a ready
-/// instance falls back to the caller's existing lazy-handle / VOID behaviour.
-pub(crate) async fn wait_for_flash_ready(sprite_num: i16) {
-    for _ in 0..100u32 {
-        let ready = is_flash_instance_ready(sprite_num as i32)
-            .ok()
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-        if ready {
-            return;
-        }
-        let _ = async_std::future::timeout(
-            std::time::Duration::from_millis(100),
-            std::future::pending::<()>(),
-        )
-        .await;
-    }
 }
 
 /// Root a bare Flash variable/function path.
@@ -395,7 +885,447 @@ impl SpriteDatumUtils {
     }
 }
 
+/// The data needed to cross the Flash callback boundary. It intentionally
+/// contains no VM borrows: setCallback prepares metadata and LocalConnection
+/// bookkeeping while the selected owner is borrowed, releases that borrow for
+/// host registration, then revalidates the captured owner/generation before
+/// allocating the return value.
+struct LingoCallbackRegistration {
+    translated_path: String,
+    flash_method: String,
+    cast_lib: i32,
+    cast_member: i32,
+    lingo_name: String,
+    flash_cast_lib: i32,
+    flash_cast_member: i32,
+    lc_target: Option<ScriptInstanceRef>,
+}
+
 impl SpriteDatumHandlers {
+    fn prepare_lingo_callback(
+        runtime: &mut ExecutionContext<'_>,
+        datum: &DatumRef,
+        args: &[DatumRef],
+    ) -> Result<LingoCallbackRegistration, ScriptError> {
+        if args.len() < 3 {
+            return Err(ScriptError::new("setCallback requires a Flash object, method, and handler".to_owned()));
+        }
+        checked_datum(runtime, &args[0])?;
+        if let Some(target) = args.get(3) {
+            checked_datum(runtime, target)?;
+        }
+        let lingo_value = checked_datum(runtime, &args[2])?.clone();
+        let lingo_handler = lingo_value
+            .symbol_value(runtime.symbols)
+            .unwrap_or_else(|_| Symbol::empty());
+        let lingo_name = runtime
+            .symbols
+            .display(&lingo_handler)
+            .unwrap_or_default()
+            .to_owned();
+        let flash_method = checked_datum(runtime, &args[1])
+            .and_then(|value| value.string_value(runtime.symbols))?;
+        runtime.with_player_and_symbols(|player, _symbols| {
+            let receiver_sprite_num = player.get_datum(datum).to_sprite_ref()?;
+            let flash_object_path = match player.get_datum(&args[0]) {
+                Datum::FlashObjectRef(fo) => {
+                    let (_, generation, sprite_num) = crate::player::handlers::datum_handlers::flash_object::validate_owned_binding(player, fo)?;
+                    if sprite_num != receiver_sprite_num as i32 {
+                        return Err(ScriptError::new_code(
+                            crate::player::ScriptErrorCode::InvalidReference,
+                            "Flash object targets a different sprite".to_owned(),
+                        ));
+                    }
+                    if !player.is_flash_instance_generation_current(sprite_num as i16, generation) {
+                        return Err(ScriptError::new_code(
+                            crate::player::ScriptErrorCode::InvalidReference,
+                            "Flash object targets a stale instance generation".to_owned(),
+                        ));
+                    }
+                    fo.path.clone()
+                }
+                Datum::String(s) => s.clone(),
+                other => {
+                    return Err(ScriptError::new(format!(
+                        "setCallback: first argument must be a Flash object or string, got {}",
+                        other.type_str()
+                    )));
+                }
+            };
+            let translated_path = if flash_object_path.starts_with("_level0") {
+                flash_object_path.replace("_level0", "_root")
+            } else {
+                flash_object_path
+            };
+            let (cast_lib, cast_member, lc_target) = if let Some(target) = args.get(3) {
+                match player.get_datum(target) {
+                    Datum::ScriptInstanceRef(script_ref) => {
+                        let instance = player.allocator.get_script_instance(script_ref);
+                        (instance.script.cast_lib, instance.script.cast_member, Some(script_ref.clone()))
+                    }
+                    _ => (0, 0, None),
+                }
+            } else {
+                (0, 0, None)
+            };
+            let sprite_cast = player
+                .movie
+                .score
+                .get_sprite(receiver_sprite_num)
+                .and_then(|sprite| sprite.member.as_ref())
+                .map(|member| (member.cast_lib, member.cast_member))
+                .unwrap_or((0, 0));
+            let (cast_lib, cast_member) = if cast_lib == 0 && cast_member == 0 {
+                sprite_cast
+            } else {
+                (cast_lib, cast_member)
+            };
+            let (flash_cast_lib, flash_cast_member) = match player.get_datum(&args[0]) {
+                Datum::FlashObjectRef(fo) => (fo.cast_lib, fo.cast_member),
+                _ => sprite_cast,
+            };
+            Ok(LingoCallbackRegistration {
+                translated_path,
+                flash_method,
+                cast_lib,
+                cast_member,
+                lingo_name,
+                flash_cast_lib,
+                flash_cast_member,
+                lc_target,
+            })
+        })
+    }
+
+    fn register_lingo_callback(
+        owner: &crate::player::ownership::OwnerToken,
+        sprite_num: i16,
+        generation: u64,
+        registration: &LingoCallbackRegistration,
+    ) -> Result<(), ScriptError> {
+        JsApi::register_flash_lingo_callback(
+            &owner_key_string(owner),
+            sprite_num,
+            generation,
+            &registration.translated_path,
+            &registration.flash_method,
+            registration.cast_lib,
+            registration.cast_member,
+            &registration.lingo_name,
+            registration.flash_cast_lib,
+            registration.flash_cast_member,
+        )
+    }
+
+    async fn execute_lingo_callback(
+        session: crate::player::session::RuntimeSessionHandle,
+        request: &crate::player::driver::SpriteAsyncRequest,
+        sprite_num: i16,
+        generation: u64,
+        registration: LingoCallbackRegistration,
+    ) -> Result<DatumRef, ScriptError> {
+        crate::player::handlers::datum_handlers::flash_object::wait_for_flash_ready_owned(
+            &request.owner,
+            sprite_num as i32,
+            generation,
+        )
+        .await?;
+        // The session borrow is deliberately released before entering JS.
+        Self::register_lingo_callback(&request.owner, sprite_num, generation, &registration)?;
+        session
+            .borrow_mut()
+            .with_player(request.player_id, |context| {
+                if !request.owner.same_identity(&context.player.owner)
+                    || !request.owner.is_arena_live()
+                    || context.player.flash_instance_generation(sprite_num) != Some(generation)
+                {
+                    return Err(crate::player::cancelled_scope_error());
+                }
+                Ok(context.player.alloc_datum(Datum::Int(1)))
+            })
+            .ok_or_else(crate::player::cancelled_scope_error)?
+    }
+
+    /// Execute Flash sprite variables through the owner-qualified request path.
+    /// The request is completely prepared while the selected player is borrowed;
+    /// host work and readiness waits happen after that borrow has been released.
+    async fn execute_flash_variable_request(
+        session: crate::player::session::RuntimeSessionHandle,
+        request: &crate::player::driver::SpriteAsyncRequest,
+        handler_name: &str,
+    ) -> Result<DatumRef, ScriptError> {
+        let is_get = handler_name.eq_ignore_ascii_case("getvariable");
+        let prepared: (
+            Option<crate::player::handlers::datum_handlers::flash_object::FlashRequest>,
+            Vec<crate::player::FlashHostAction>,
+            Option<DatumRef>,
+        ) = session
+            .borrow_mut()
+            .with_player(request.player_id, |context| -> Result<_, ScriptError> {
+                if !request.owner.same_identity(&context.player.owner)
+                    || !request.owner.is_arena_live()
+                {
+                    return Err(crate::player::cancelled_scope_error());
+                }
+                let receiver_sprite = match checked_player_datum(
+                    context.player,
+                    context.symbols,
+                    &request.receiver,
+                )? {
+                    Datum::SpriteRef(sprite_num) => *sprite_num,
+                    _ => {
+                        return Err(ScriptError::new_code(
+                            ScriptErrorCode::InvalidReference,
+                            "SpriteAsync receiver is not a sprite reference".to_owned(),
+                        ));
+                    }
+                };
+                if receiver_sprite != request.sprite_num {
+                    return Err(ScriptError::new_code(
+                        ScriptErrorCode::InvalidReference,
+                        "SpriteAsync receiver sprite does not match its captured owner".to_owned(),
+                    ));
+                }
+
+                let getter_inputs = if is_get {
+                    let path = request
+                        .args
+                        .first()
+                        .map(|arg| checked_player_datum(context.player, context.symbols, arg))
+                        .transpose()?
+                        .map(|datum| datum.string_value(context.symbols))
+                        .transpose()?
+                        .unwrap_or_default();
+                    let return_as_object = request
+                        .args
+                        .get(1)
+                        .map(|arg| {
+                            checked_player_datum(context.player, context.symbols, arg)
+                                .map(|datum| datum.int_value().unwrap_or(1) == 0)
+                        })
+                        .transpose()?
+                        .unwrap_or(false);
+                    Some((path, return_as_object))
+                } else {
+                    if request.args.len() < 2 {
+                        return Err(ScriptError::new(
+                            "setVariable requires a path and value".to_owned(),
+                        ));
+                    }
+                    None
+                };
+
+                let Some((sprite_num, cast_lib, cast_member)) =
+                    Self::resolve_sprite_flash_member_explicit(
+                        context.player,
+                        context.symbols,
+                        &request.receiver,
+                    )?
+                else {
+                    if let Some((path, true)) = getter_inputs.as_ref() {
+                        let generation = context
+                            .player
+                            .flash_binding_state
+                            .borrow_mut()
+                            .reserve_absent(receiver_sprite)?;
+                        let object = crate::director::lingo::datum::FlashObjectRef::from_path_with_sprite(
+                            &root_flash_path(path),
+                            0,
+                            0,
+                            receiver_sprite as i32,
+                        )
+                        .with_binding(
+                            crate::player::owner_key_string(&context.player.owner),
+                            generation,
+                        );
+                        return Ok((
+                            None,
+                            Vec::new(),
+                            Some(context.player.alloc_datum(Datum::FlashObjectRef(object))),
+                        ));
+                    }
+                    return Ok((None, Vec::new(), None));
+                };
+
+                let member_kind = context
+                    .player
+                    .movie
+                    .cast_manager
+                    .find_member_by_ref(&crate::player::cast_lib::CastMemberRef {
+                        cast_lib,
+                        cast_member,
+                    })
+                    .map(|member| {
+                        matches!(&member.member_type, CastMemberType::Flash(flash)
+                            if crate::rendering::has_swf_signature(&flash.data))
+                    });
+                if member_kind != Some(true) {
+                    if is_get
+                        && getter_inputs
+                            .as_ref()
+                            .is_some_and(|(_, return_as_object)| *return_as_object)
+                        && member_kind.is_none()
+                    {
+                        let (path, _) = getter_inputs.as_ref().expect("getter inputs");
+                        let generation = context
+                            .player
+                            .flash_binding_state
+                            .borrow_mut()
+                            .reserve_for_pair(receiver_sprite, cast_lib, cast_member)?;
+                        let object = crate::director::lingo::datum::FlashObjectRef::from_path_with_sprite(
+                            &root_flash_path(path),
+                            cast_lib,
+                            cast_member,
+                            sprite_num as i32,
+                        )
+                        .with_binding(
+                            crate::player::owner_key_string(&context.player.owner),
+                            generation,
+                        );
+                        return Ok((
+                            None,
+                            Vec::new(),
+                            Some(context.player.alloc_datum(Datum::FlashObjectRef(object))),
+                        ));
+                    }
+                    if is_get
+                        && getter_inputs
+                            .as_ref()
+                            .is_some_and(|(_, return_as_object)| *return_as_object)
+                        && member_kind.is_some()
+                    {
+                        return Err(ScriptError::new_code(
+                            ScriptErrorCode::InvalidReference,
+                            "sprite getVariable object target is not a valid Flash member".to_owned(),
+                        ));
+                    }
+                    return Ok((None, Vec::new(), None));
+                }
+
+                let (path, operation) = if is_get {
+                    let (path, return_as_object) = getter_inputs
+                        .as_ref()
+                        .expect("getter inputs prepared before operation");
+                    let path = path.clone();
+                    let root_path = root_flash_path(&path);
+                    let operation = crate::player::handlers::datum_handlers::flash_object::FlashOperation::SpriteGet {
+                        return_mode: if *return_as_object {
+                            crate::player::handlers::datum_handlers::flash_object::FlashReturnMode::Object {
+                                fallback_path: Some(root_path.clone()),
+                            }
+                        } else {
+                            crate::player::handlers::datum_handlers::flash_object::FlashReturnMode::Scalar
+                        },
+                    };
+                    (root_path, operation)
+                } else {
+                    let path = checked_player_datum(
+                        context.player,
+                        context.symbols,
+                        &request.args[0],
+                    )?
+                    .string_value(context.symbols)?;
+                    let value = checked_player_datum(
+                        context.player,
+                        context.symbols,
+                        &request.args[1],
+                    )?
+                    .string_value(context.symbols)?;
+                    (
+                        root_flash_path(&path),
+                        crate::player::handlers::datum_handlers::flash_object::FlashOperation::Set {
+                            value,
+                        },
+                    )
+                };
+
+                let already_loaded = context
+                    .player
+                    .flash_sprite_loaded
+                    .contains(&(receiver_sprite, cast_lib, cast_member));
+                if !already_loaded {
+                    context.player.pre_dispatch_flash_members()?;
+                }
+                let generation = context
+                    .player
+                    .flash_instance_generation(receiver_sprite)
+                    .ok_or_else(|| {
+                        ScriptError::new_code(
+                            ScriptErrorCode::InvalidReference,
+                            "Flash sprite has no published instance generation".to_owned(),
+                        )
+                    })?;
+                let current_pair = context
+                    .player
+                    .movie
+                    .score
+                    .get_sprite(receiver_sprite)
+                    .and_then(|sprite| sprite.member.as_ref())
+                    .map(|member| (member.cast_lib, member.cast_member));
+                if current_pair != Some((cast_lib, cast_member)) {
+                    return Err(ScriptError::new_code(
+                        ScriptErrorCode::InvalidReference,
+                        "Flash sprite variable cast binding was replaced during preparation".to_owned(),
+                    ));
+                }
+                let request = crate::player::handlers::datum_handlers::flash_object::FlashRequest {
+                    player_id: request.player_id,
+                    owner: request.owner.clone(),
+                    sprite_num: sprite_num as i32,
+                    expected_generation: Some(generation),
+                    path,
+                    operation,
+                    cast_lib,
+                    cast_member,
+                };
+                Ok((
+                    Some(request),
+                    if already_loaded {
+                        Vec::new()
+                    } else {
+                        context.player.take_flash_host_actions()
+                    },
+                    None,
+                ))
+            })
+            .ok_or_else(crate::player::cancelled_scope_error)??;
+        let (flash_request, actions, immediate) = prepared;
+        if let Some(immediate) = immediate {
+            return Ok(immediate);
+        }
+
+        let Some(flash_request) = flash_request else {
+            return session
+                .borrow_mut()
+                .with_player(request.player_id, |context| {
+                    Ok(context.player.alloc_datum(Datum::Void))
+                })
+                .ok_or_else(crate::player::cancelled_scope_error)?;
+        };
+        let actions = crate::player::bind_flash_host_actions(
+            actions,
+            session.clone(),
+            request.player_id,
+        );
+        crate::player::emit_flash_host_actions(actions)?;
+        let result = crate::player::commands::execute_owned_flash_request(
+            &session,
+            request.player_id,
+            &request.owner,
+            flash_request,
+        )
+        .await?;
+        if is_get {
+            return Ok(result);
+        }
+        session
+            .borrow_mut()
+            .with_player(request.player_id, |context| {
+                Ok(context.player.alloc_datum(Datum::Void))
+            })
+            .ok_or_else(crate::player::cancelled_scope_error)?
+    }
+
     pub(crate) async fn execute_async_request(
         session: crate::player::session::RuntimeSessionHandle,
         request: crate::player::driver::SpriteAsyncRequest,
@@ -452,42 +1382,182 @@ impl SpriteDatumHandlers {
             })
             .ok_or_else(crate::player::cancelled_scope_error)??;
         let handler_lower = handler_name.to_lowercase();
-        let waits_for_ready = matches!(
-            handler_lower.as_str(),
-            "getvariable" | "setvariable" | "callfunction" | "setcallback"
-        );
-        let sprite_num = flash_sprite
-            .map(|number| number as i16)
-            .or_else(|| waits_for_ready.then_some(request.sprite_num));
-        if let Some(sprite_num) = sprite_num {
-            let ready = is_flash_instance_ready(sprite_num as i32)
-                .ok()
-                .and_then(|value| value.as_bool())
-                .unwrap_or(true);
-            if !ready {
-                let flash_actions = session
+        if handler_lower == "setcallback" {
+            if request.args.len() < 3 {
+                return session
                     .borrow_mut()
                     .with_player(request.player_id, |context| {
-                        if !request.owner.same_identity(&context.player.owner)
-                            || !request.owner.is_arena_live()
-                        {
-                            return Err(crate::player::cancelled_scope_error());
-                        }
-                        context
-                            .player
-                            .pre_dispatch_flash_members()
-                            .map(|_| context.player.take_flash_host_actions())
+                        Ok(context.player.alloc_datum(Datum::Void))
                     })
-                    .ok_or_else(crate::player::cancelled_scope_error)??;
-                let flash_actions = crate::player::bind_flash_host_actions(
-                    flash_actions,
-                    session.clone(),
-                    request.player_id,
-                );
-                crate::player::emit_flash_host_actions(flash_actions)?;
-                wait_for_flash_ready(sprite_num).await;
+                    .ok_or_else(crate::player::cancelled_scope_error)?;
             }
-            session
+            let Some(sprite_num) = flash_sprite.map(|number| number as i16) else {
+                return Err(ScriptError::new("setCallback requires a Flash sprite".to_owned()));
+            };
+            // Prepare immutable callback metadata and reserve/capture the
+            // exact binding generation in one validated owner borrow. The
+            // captured generation cannot be adopted from a reentrant
+            // replacement after host emission.
+            let (registration, generation, actions) = session
+                .borrow_mut()
+                .with_player(request.player_id, |context| -> Result<_, ScriptError> {
+                    if !request.owner.same_identity(&context.player.owner)
+                        || !request.owner.is_arena_live()
+                    {
+                        return Err(crate::player::cancelled_scope_error());
+                    }
+                    let registration = Self::prepare_lingo_callback(
+                        &mut ExecutionContext {
+                            player_id: request.player_id,
+                            player: context.player,
+                            symbols: context.symbols,
+                        },
+                        &request.receiver,
+                        &request.args,
+                    )?;
+                    let mut generation = context.player.flash_instance_generation(sprite_num);
+                    let actions = if generation.is_none() {
+                        context.player.pre_dispatch_flash_members()?;
+                        generation = context.player.flash_instance_generation(sprite_num);
+                        context.player.take_flash_host_actions()
+                    } else {
+                        Vec::new()
+                    };
+                    let generation = generation.ok_or_else(|| {
+                        ScriptError::new("Flash callback binding has no current generation".to_owned())
+                    })?;
+                    if let Some(target_ref) = registration.lc_target.clone() {
+                        context.player.flash_lc_callbacks.insert(
+                            (registration.translated_path.clone(), registration.flash_method.clone()),
+                            (registration.lingo_name.clone(), target_ref),
+                        );
+                    }
+                    Ok((registration, generation, actions))
+                })
+                .ok_or_else(crate::player::cancelled_scope_error)??;
+            let actions = crate::player::bind_flash_host_actions(
+                actions,
+                session.clone(),
+                request.player_id,
+            );
+            if !actions.is_empty() {
+                crate::player::emit_flash_host_actions(actions)?;
+            }
+            let still_current = session
+                .borrow_mut()
+                .with_player(request.player_id, |context| {
+                    request.owner.same_identity(&context.player.owner)
+                        && request.owner.is_arena_live()
+                        && context.player.flash_instance_generation(sprite_num) == Some(generation)
+                })
+                .unwrap_or(false);
+            if !still_current {
+                return Err(crate::player::cancelled_scope_error());
+            }
+            return Self::execute_lingo_callback(
+                session,
+                &request,
+                sprite_num,
+                generation,
+                registration,
+            )
+            .await;
+        }
+        if handler_lower == "callfunction" {
+            let Some((flash_request, actions)) = session
+                .borrow_mut()
+                .with_player(request.player_id, |context| -> Result<_, ScriptError> {
+                    if !request.owner.same_identity(&context.player.owner)
+                        || !request.owner.is_arena_live()
+                    {
+                        return Err(crate::player::cancelled_scope_error());
+                    }
+                    let Some((sprite_num, cast_lib, cast_member)) =
+                        Self::resolve_sprite_flash_member_explicit(
+                            context.player,
+                            context.symbols,
+                            &request.receiver,
+                        )?
+                    else {
+                        return Ok(None);
+                    };
+                    let is_flash = context
+                        .player
+                        .movie
+                        .cast_manager
+                        .find_member_by_ref(&crate::player::cast_lib::CastMemberRef {
+                            cast_lib,
+                            cast_member,
+                        })
+                        .is_some_and(|member| matches!(member.member_type, CastMemberType::Flash(_)));
+                    if !is_flash {
+                        return Ok(None);
+                    }
+                    let (path, args_xml) =
+                        prepare_sprite_call_inputs(context.player, context.symbols, &request.args)?;
+                    // Capture the current member pair and generation while the
+                    // owner borrow is held. The owned executor revalidates both
+                    // after readiness/host work before converting the result.
+                    context.player.pre_dispatch_flash_members()?;
+                    let current_pair = context
+                        .player
+                        .movie
+                        .score
+                        .get_sprite(sprite_num as i16)
+                        .and_then(|sprite| sprite.member.as_ref())
+                        .map(|member| (member.cast_lib, member.cast_member));
+                    if current_pair != Some((cast_lib, cast_member)) {
+                        return Err(ScriptError::new_code(
+                            ScriptErrorCode::InvalidReference,
+                            "Flash sprite call cast binding was replaced during preparation".to_owned(),
+                        ));
+                    }
+                    let generation = context
+                        .player
+                        .flash_instance_generation(sprite_num as i16)
+                        .ok_or_else(|| {
+                            ScriptError::new_code(
+                                ScriptErrorCode::InvalidReference,
+                                "Flash sprite call has no current instance generation".to_owned(),
+                            )
+                        })?;
+                    let flash_request =
+                        crate::player::handlers::datum_handlers::flash_object::FlashObjectDatumHandlers::prepare_sprite_call(
+                            context.player,
+                            sprite_num as i16,
+                            generation,
+                            path,
+                            args_xml,
+                            cast_lib,
+                            cast_member,
+                        )?;
+                    Ok(Some((flash_request, context.player.take_flash_host_actions())))
+                })
+                .ok_or_else(crate::player::cancelled_scope_error)??
+            else {
+                return session
+                    .borrow_mut()
+                    .with_player(request.player_id, |context| {
+                        Ok(context.player.alloc_datum(Datum::Void))
+                    })
+                    .ok_or_else(crate::player::cancelled_scope_error)?;
+            };
+            let actions = crate::player::bind_flash_host_actions(
+                actions,
+                session.clone(),
+                request.player_id,
+            );
+            if !actions.is_empty() {
+                crate::player::emit_flash_host_actions(actions)?;
+            }
+            let result = crate::player::commands::execute_owned_flash_request(
+                &session,
+                request.player_id,
+                &request.owner,
+                flash_request,
+            )
+            .await?;
+            return session
                 .borrow_mut()
                 .with_player(request.player_id, |context| {
                     if !request.owner.same_identity(&context.player.owner)
@@ -495,18 +1565,21 @@ impl SpriteDatumHandlers {
                     {
                         return Err(crate::player::cancelled_scope_error());
                     }
-                    context.player.flash_ready_sprites.insert(sprite_num);
-                    Ok(())
-                })
-                .ok_or_else(crate::player::cancelled_scope_error)??;
-        }
-        if waits_for_ready {
-            return session
-                .borrow_mut()
-                .with_player(request.player_id, |mut context| {
-                    Self::call(&mut context, &request.receiver, &handler_name, &request.args)
+                    if matches!(context.player.get_datum(&result), Datum::String(_)) {
+                        Ok(result)
+                    } else {
+                        Ok(context.player.alloc_datum(Datum::Void))
+                    }
                 })
                 .ok_or_else(crate::player::cancelled_scope_error)?;
+        }
+        if handler_lower == "getvariable" || handler_lower == "setvariable" {
+            return Self::execute_flash_variable_request(
+                session,
+                &request,
+                &handler_name,
+            )
+            .await;
         }
         if let Some(sprite_num) = flash_sprite {
             let json_args = session
@@ -637,7 +1710,7 @@ impl SpriteDatumHandlers {
         // async-dispatch overhead. Cleared on member unload/swap so it re-waits.
         if matches!(
             name_lower.as_str(),
-            "getvariable" | "setvariable" | "callfunction" | "setcallback"
+            "getvariable" | "setvariable" | "callfunction"
         ) {
             let ready = reserve_player_ref(|player| {
                 match player.get_datum(datum).to_sprite_ref() {
@@ -646,6 +1719,12 @@ impl SpriteDatumHandlers {
                 }
             });
             return Ok(!ready);
+        }
+        if name_lower == "setcallback" {
+            // Registration always crosses the owner-bound async boundary so
+            // readiness, host acknowledgement, and the post-call generation
+            // fence cannot be hidden behind a synchronous ambient lookup.
+            return Ok(true);
         }
 
         let is_sync_handler = matches!(name_lower.as_str(),
@@ -1349,144 +2428,14 @@ impl SpriteDatumHandlers {
                 Ok(DatumRef::Void)
             }
             "getvariable" => {
-                // Resolve the target sprite number FIRST, even if its cast
-                // member isn't resolvable at this instant. Director's
-                // getVariable(sprite(N), path, 0) yields a Flash object handle
-                // BOUND TO THAT SPRITE; it must not degrade to VOID just because
-                // the member/Ruffle instance isn't ready yet — a beginSprite can
-                // run before the Flash member is committed to the channel, and a
-                // VOID handle stored in a global (e.g. gDemoFlash) crashes the
-                // deferred `gDemoFlash.play()`. We capture the sprite's cast
-                // member when available (so cast-based lookups still work) but
-                // always bind the handle to the sprite number as the primary key.
-                let sn = runtime.with_player_and_symbols(|player, symbols| player.get_datum(datum).to_sprite_ref())?;
-                let (cl, cm) = runtime.with_player_and_symbols(|player, symbols| {
-                    player
-                        .movie
-                        .score
-                        .get_sprite(sn)
-                        .and_then(|s| s.member.as_ref())
-                        .map(|m| (m.cast_lib, m.cast_member))
-                        .unwrap_or((0, 0))
-                });
-                let (path, return_as_object) = runtime.with_player_and_symbols(|player, symbols| {
-                    if args.is_empty() { return Ok::<_, ScriptError>((String::new(), false)); }
-                    let p = player.get_datum(&args[0]).string_value(symbols)?;
-                    // Second arg: 0 = return as Flash object reference, otherwise string
-                    let as_obj = if args.len() >= 2 {
-                        player.get_datum(&args[1]).int_value().unwrap_or(1) == 0
-                    } else {
-                        false
-                    };
-                    Ok((p, as_obj))
-                })?;
-
-                if return_as_object {
-                    // Root a bare variable name so it addresses the real
-                    // timeline object — DGS `getVariable("objMain", 0)` returns a
-                    // handle used for `objMain.includeIsLoaded()` etc. See
-                    // root_flash_path for why bare names don't resolve.
-                    let rooted = root_flash_path(&path);
-
-                    // In Director, getVariable(path, 0) returns an object reference.
-                    // But if the Flash variable is a simple string/number, Director
-                    // returns the value directly. We check via GetVariable first:
-                    // if it returns a JS string, return as Datum::String so that
-                    // stringp() works. If it returns an object or undefined, return
-                    // a FlashObjectRef for setCallback/call usage.
-                    if let Ok(val) = ruffle_get_variable(sn as i32, &rooted) {
-                        if val.is_string() {
-                            let s = val.as_string().unwrap();
-                            // Ruffle's GetVariable ALWAYS returns a string, coercing
-                            // an AS OBJECT to "[object Object]" / "[type Object]" /
-                            // "[object MovieClip]". The object form
-                            // (getVariable(path, 0)) must return a FlashObjectRef for
-                            // those, NOT the coercion text — DGS does
-                            // `objMain = getVariable("objMain", 0)` then
-                            // `objMain.setBaseUrls(...)` (a method call). Only a
-                            // genuine primitive string returns as Datum::String.
-                            let is_object_coercion =
-                                s.starts_with("[object ") || s.starts_with("[type ");
-                            if !is_object_coercion {
-                                return runtime.with_player_and_symbols(|player, symbols| {
-                                    Ok(player.alloc_datum(Datum::String(s)))
-                                });
-                            }
-                        }
-                        // Object / object-coercion / undefined → FlashObjectRef.
-                    }
-                    // Return a sprite-bound FlashObjectRef for use with
-                    // setCallback / call / play etc. Never VOID for the object form.
-                    return runtime.with_player_and_symbols(|player, symbols| {
-                        use crate::director::lingo::datum::FlashObjectRef;
-                        Ok(player.alloc_datum(Datum::FlashObjectRef(
-                            FlashObjectRef::from_path_with_sprite(&rooted, cl, cm, sn as i32),
-                        )))
-                    });
-                }
-
-                // Member-swap guard: when the score has just swapped this
-                // sprite to a NEW Flash member, the PREVIOUS member's Ruffle
-                // instance can still be resident until the new one loads.
-                // Reading the old member's variables is wrong — e.g. BioBoxing's
-                // menu frame swaps sprite 1 loading.swf -> start.swf, and reading
-                // loading.swf's stale `/:cont="1"` (instead of start.swf's "00")
-                // skips the whole menu. If the sprite's CURRENT (cl,cm) isn't in
-                // `flash_sprite_loaded`, treat the value read as not-ready (VOID)
-                // so the frame's `if cont = 1 ... else go(the frame)` loop holds
-                // until the new member loads and its real value can be read.
-                let member_ready = runtime.with_player_and_symbols(|player, symbols| {
-                    (cl == 0 && cm == 0)
-                        || player.flash_sprite_loaded.contains(&(sn, cl, cm))
-                });
-                if !member_ready {
-                    return Ok(DatumRef::Void);
-                }
-
-                match ruffle_get_variable(sn as i32, &root_flash_path(&path)) {
-                    Ok(val) => {
-                        // Convert the AS value to a Lingo datum. GetVariable's
-                        // value form (2nd arg non-zero) isn't string-only — an AS
-                        // number or boolean must come back as a comparable value,
-                        // not VOID. Neopets DGS state 81 polls
-                        // `getVariable("preloaderTranslationSuccess", 1) = 1`,
-                        // where the AS var is a Number/Boolean; returning VOID for
-                        // those (`as_string()` is None) made the comparison never
-                        // true and stalled the loader. Bools → Int(0/1), integral
-                        // Numbers → Int, else Float, matching the callFunction
-                        // converter that already let `includeIsLoaded() = 1` work.
-                        let datum = if let Some(s) = val.as_string() {
-                            Datum::String(s)
-                        } else if let Some(b) = val.as_bool() {
-                            Datum::Int(if b { 1 } else { 0 })
-                        } else if let Some(n) = val.as_f64() {
-                            if n.fract() == 0.0 && n.abs() < i32::MAX as f64 {
-                                Datum::Int(n as i32)
-                            } else {
-                                Datum::Float(n)
-                            }
-                        } else {
-                            Datum::Void
-                        };
-                        return runtime.with_player_and_symbols(|player, symbols| Ok(player.alloc_datum(datum)));
-                    }
-                    Err(e) => warn!("sprite.getVariable error: {:?}", e),
-                }
-                Ok(DatumRef::Void)
+                Err(ScriptError::new(
+                    "sprite.getVariable requires the owner-bound async path".to_owned(),
+                ))
             }
             "setvariable" => {
-                if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member_explicit(runtime.player, runtime.symbols, datum)? {
-                    let path = runtime.with_player_and_symbols(|player, symbols| {
-                        player.get_datum(&args[0]).string_value(symbols)
-                    })?;
-                    let value = runtime.with_player_and_symbols(|player, symbols| {
-                        player.get_datum(&args[1]).string_value(symbols)
-                    })?;
-                    if let Err(e) = ruffle_set_variable(sn, &root_flash_path(&path), &value) {
-                        warn!("sprite.setVariable error: {:?}", e);
-                    }
-                }
-                Ok(DatumRef::Void)
+                Err(ScriptError::new(
+                    "sprite.setVariable requires the owner-bound async path".to_owned(),
+                ))
             }
             "callfunction" => {
                 if let Some((sn, _cl, _cm)) = Self::resolve_sprite_flash_member_explicit(runtime.player, runtime.symbols, datum)? {
@@ -1580,136 +2529,9 @@ impl SpriteDatumHandlers {
             "setcallback" => {
                 // setCallback(flashObject, flashMethod, lingoHandler, lingoTarget)
                 if args.len() >= 3 {
-                    checked_datum(runtime, &args[0])?;
-                    if let Some(target) = args.get(3) {
-                        checked_datum(runtime, target)?;
-                    }
-                    let lingo_value = checked_datum(runtime, &args[2])?.clone();
-                    let lingo_handler = lingo_value
-                        .symbol_value(runtime.symbols)
-                        .unwrap_or_else(|_| Symbol::empty());
-                    let lingo_name = runtime
-                        .symbols
-                        .display(&lingo_handler)
-                        .unwrap_or_default()
-                        .to_owned();
-                    let flash_method = checked_datum(runtime, &args[1])
-                        .and_then(|value| value.string_value(runtime.symbols))?;
-                    runtime.with_player_and_symbols(|player, symbols| {
-                        let flash_object_path = match player.get_datum(&args[0]) {
-                            Datum::FlashObjectRef(fo) => fo.path.clone(),
-                            Datum::String(s) => s.clone(),
-                            other => {
-                                let type_name = other.type_str();
-                                return Err(ScriptError::new(format!("setCallback: first argument must be a Flash object or string, got {}", type_name)));
-                            }
-                        };
-                        // Translate _level0 to _root
-                        let translated_path = if flash_object_path.starts_with("_level0") {
-                            flash_object_path.replace("_level0", "_root")
-                        } else {
-                            flash_object_path.clone()
-                        };
-
-                        // Resolve the lingo target's cast_lib/cast_member for callback dispatch
-                        // args[3] (if present) is the lingo target (a script instance)
-                        let (cast_lib, cast_member) = if args.len() >= 4 {
-                            match player.get_datum(&args[3]) {
-                                Datum::ScriptInstanceRef(si_ref) => {
-                                    use crate::player::allocator::ScriptInstanceAllocatorTrait;
-                                    let si = player.allocator.get_script_instance(&si_ref);
-                                    (si.script.cast_lib, si.script.cast_member)
-                                }
-                                _ => {
-                                    // Fallback to sprite's Flash member
-                                    let sprite_num = player.get_datum(datum).to_sprite_ref()?;
-                                    if let Some(sprite) = player.movie.score.get_sprite(sprite_num) {
-                                        if let Some(member_ref) = &sprite.member {
-                                            (member_ref.cast_lib, member_ref.cast_member)
-                                        } else {
-                                            (0, 0)
-                                        }
-                                    } else {
-                                        (0, 0)
-                                    }
-                                }
-                            }
-                        } else {
-                            // No target specified, use sprite's Flash member
-                            let sprite_num = player.get_datum(datum).to_sprite_ref()?;
-                            if let Some(sprite) = player.movie.score.get_sprite(sprite_num) {
-                                if let Some(member_ref) = &sprite.member {
-                                    (member_ref.cast_lib, member_ref.cast_member)
-                                } else {
-                                    (0, 0)
-                                }
-                            } else {
-                                (0, 0)
-                            }
-                        };
-
-                        // Get Flash member's cast_lib/cast_member from the flash object ref or sprite
-                        let (flash_cl, flash_cm) = match player.get_datum(&args[0]) {
-                            Datum::FlashObjectRef(fo) => (fo.cast_lib, fo.cast_member),
-                            _ => {
-                                // Fallback: get from sprite's member
-                                let sprite_num = player.get_datum(datum).to_sprite_ref().unwrap_or(0);
-                                if let Some(sprite) = player.movie.score.get_sprite(sprite_num) {
-                                    if let Some(member_ref) = &sprite.member {
-                                        (member_ref.cast_lib, member_ref.cast_member)
-                                    } else { (0, 0) }
-                                } else { (0, 0) }
-                            }
-                        };
-
-                        // dirplayer LocalConnection: also record
-                        // (lc_path, method) -> (handler, target instance) so a
-                        // forwarded AS `LocalConnection.send` can dispatch the
-                        // Lingo handler on the ORIGINAL instance (keeps `me`
-                        // correct in `on myOnStatus me, aInfo, aMessage`). Harmless
-                        // for non-LC setCallbacks — never looked up unless a
-                        // matching connect()+send() arrives for that path/method.
-                        let lc_target = if args.len() >= 4 {
-                            match player.get_datum(&args[3]) {
-                                Datum::ScriptInstanceRef(r) => Some(r.clone()),
-                                _ => None,
-                            }
-                        } else {
-                            None
-                        };
-                        if let Some(target_ref) = lc_target {
-                            player.flash_lc_callbacks.insert(
-                                (translated_path.clone(), flash_method.clone()),
-                                (
-                                    lingo_name.clone(),
-                                    target_ref,
-                                ),
-                            );
-                        }
-
-                        // Call the JS bridge to register the callback in Ruffle.
-                        // The export is exposed under the dirplayer_ prefix
-                        // (see ruffle/web/src/lib.rs and the matching JS in
-                        // src/services/flashPlayerManager.ts).
-                        if let Some(window) = web_sys::window() {
-                            if let Ok(func) = js_sys::Reflect::get(&window, &"dirplayer_ruffleRegisterLingoCallback".into()) {
-                                if func.is_function() {
-                                    let func = js_sys::Function::from(func);
-                                    let js_args = js_sys::Array::new();
-                                    js_args.push(&translated_path.clone().into());
-                                    js_args.push(&flash_method.clone().into());
-                                    js_args.push(&cast_lib.into());
-                                    js_args.push(&cast_member.into());
-                                    js_args.push(&lingo_name.clone().into());
-                                    js_args.push(&flash_cl.into());
-                                    js_args.push(&flash_cm.into());
-                                    let _ = func.apply(&JsValue::NULL, &js_args);
-                                }
-                            }
-                        }
-
-                        Ok(player.alloc_datum(Datum::Int(1)))
-                    })
+                    return Err(ScriptError::new(
+                        "setCallback requires the owner-bound async path".to_owned(),
+                    ));
                 } else {
                     Ok(DatumRef::Void)
                 }
@@ -1818,7 +2640,7 @@ impl SpriteDatumHandlers {
                 // We return a sprite-bound FlashObjectRef with a unique synthetic
                 // path — never VOID — mirroring getVariable()'s object form so the
                 // chained setCallback()/connect() calls resolve. The callback bridge
-                // (dirplayer_ruffleRegisterLingoCallback) and method dispatch
+                // (dirplayer_registerLingoCallbackOwned) and method dispatch
                 // (dirplayer_ruffleCallFunction) key off this path. NOTE: extra
                 // constructor args are not yet forwarded to a real AS constructor —
                 // that needs a Ruffle-side newObject bridge to physically host the

@@ -36,6 +36,9 @@ extern "C" {
     #[wasm_bindgen(js_name = "dirplayer_ruffleGetVariableOwnedAtGeneration", catch)]
     fn ruffle_get_variable_owned_at_generation(owner_key: &str, sprite_num: i32, generation: f64, path: &str, return_as_object: bool) -> Result<JsValue, JsValue>;
 
+    #[wasm_bindgen(js_name = "dirplayer_ruffleGetSpriteVariableOwnedAtGeneration", catch)]
+    fn ruffle_get_sprite_variable_owned_at_generation(owner_key: &str, sprite_num: i32, generation: f64, path: &str) -> Result<JsValue, JsValue>;
+
     #[wasm_bindgen(js_name = "dirplayer_isFlashInstanceReadyOwned", catch)]
     fn is_flash_instance_ready_owned(owner_key: &str, sprite_num: i32, generation: f64) -> Result<JsValue, JsValue>;
 
@@ -63,6 +66,97 @@ extern "C" {
         sprite_w: i32,
         sprite_h: i32,
     ) -> Result<JsValue, JsValue>;
+
+    #[wasm_bindgen(js_name = "dirplayer_ruffleDispatchMouseOwned", catch)]
+    fn ruffle_dispatch_mouse_event_owned_bridge(
+        owner_key: &str,
+        sprite_num: i32,
+        generation: f64,
+        event_type: &str,
+        local_x: i32,
+        local_y: i32,
+        sprite_w: i32,
+        sprite_h: i32,
+    ) -> Result<JsValue, JsValue>;
+}
+
+pub(crate) fn ruffle_dispatch_mouse_event_owned(
+    owner_key: &OwnerToken,
+    sprite_num: i32,
+    generation: u64,
+    event_type: &str,
+    local_x: i32,
+    local_y: i32,
+    sprite_w: i32,
+    sprite_h: i32,
+) -> Result<(), ScriptError> {
+    let owner_key = owner_key_string(owner_key);
+    #[cfg(target_arch = "wasm32")]
+    {
+        if generation == 0 || generation > 9_007_199_254_740_991 {
+            return Err(ScriptError::new_code(
+                crate::player::ScriptErrorCode::InvalidReference,
+                "Flash mouse dispatch has an invalid instance generation".to_owned(),
+            ));
+        }
+        if !owner_key.is_empty() {
+            let response = ruffle_dispatch_mouse_event_owned_bridge(
+                &owner_key,
+                sprite_num,
+                generation as f64,
+                event_type,
+                local_x,
+                local_y,
+                sprite_w,
+                sprite_h,
+            ).map_err(|error| ScriptError::new(format!("Flash mouse dispatch failed: {error:?}")))?;
+            decode_mouse_dispatch_response(response, generation)
+        } else {
+            Err(ScriptError::new("Flash mouse dispatch has no owner".to_owned()))
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = (owner_key, sprite_num, generation, event_type, local_x, local_y, sprite_w, sprite_h);
+        Err(ScriptError::new("Flash mouse dispatch is unavailable on native".to_owned()))
+    }
+}
+
+pub(crate) fn decode_mouse_dispatch_response(value: JsValue, expected_generation: u64) -> Result<(), ScriptError> {
+    let ok = js_sys::Reflect::get(&value, &JsValue::from_str("ok"))
+        .map_err(|error| ScriptError::new(format!("Flash mouse response lookup failed: {error:?}")))?
+        .as_bool()
+        .ok_or_else(|| ScriptError::new("Flash mouse response has non-boolean ok".to_owned()))?;
+    if !ok {
+        let code = js_sys::Reflect::get(&value, &JsValue::from_str("code"))
+            .ok()
+            .and_then(|value| value.as_string())
+            .unwrap_or_else(|| "host-error".to_owned());
+        let message = js_sys::Reflect::get(&value, &JsValue::from_str("message"))
+            .ok()
+            .and_then(|value| value.as_string())
+            .unwrap_or_else(|| format!("Flash mouse dispatch failed: {code}"));
+        if matches!(code.as_str(), "unknown-owner" | "disposed-owner" | "stale-generation" | "invalid-generation") {
+            return Err(ScriptError::new_code(
+                crate::player::ScriptErrorCode::InvalidReference,
+                message,
+            ));
+        }
+        return Err(ScriptError::new(message));
+    }
+    let generation = js_sys::Reflect::get(&value, &JsValue::from_str("generation"))
+        .map_err(|error| ScriptError::new(format!("Flash mouse generation lookup failed: {error:?}")))?
+        .as_f64()
+        .filter(|value| value.is_finite() && *value >= 1.0 && *value <= 9_007_199_254_740_991.0 && value.fract() == 0.0)
+        .map(|value| value as u64)
+        .ok_or_else(|| ScriptError::new("Flash mouse response has invalid generation".to_owned()))?;
+    if generation != expected_generation {
+        return Err(ScriptError::new_code(
+            crate::player::ScriptErrorCode::InvalidReference,
+            "Flash mouse response generation is stale".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 /// Owned Flash work crosses the browser boundary only after the VM borrow has
@@ -72,6 +166,7 @@ extern "C" {
 pub(crate) enum FlashOperation {
     BindGet { return_mode: FlashReturnMode },
     Get { return_mode: FlashReturnMode },
+    SpriteGet { return_mode: FlashReturnMode },
     Set { value: String },
     Call { args_xml: String },
 }
@@ -93,6 +188,17 @@ impl FlashReturnMode {
             Self::Object { fallback_path } => fallback_path.as_deref().or(Some(request_path)),
         }
     }
+}
+
+fn is_canonical_stored_flash_path(path: &str) -> bool {
+    const PREFIX: &str = "_level0.__dirplayer_ref_";
+    let Some(suffix) = path.strip_prefix(PREFIX) else {
+        return false;
+    };
+    if suffix.is_empty() || suffix.len() > 10 || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    suffix.parse::<u64>().is_ok_and(|value| value <= u32::MAX as u64)
 }
 
 #[derive(Clone, Debug)]
@@ -170,7 +276,10 @@ pub fn find_sprite_for_flash_member(cast_lib: i32, cast_member: i32) -> Option<i
     })
 }
 
-fn owned_binding(player: &DirPlayer, flash_ref: &FlashObjectRef) -> Result<(String, u64, i32), ScriptError> {
+pub(crate) fn validate_owned_binding(
+    player: &DirPlayer,
+    flash_ref: &FlashObjectRef,
+) -> Result<(String, u64, i32), ScriptError> {
     let owner_key = owner_key_string(&player.owner);
     let Some(handle_owner) = flash_ref.owner_key.as_deref() else {
         return Err(ScriptError::new_code(
@@ -206,6 +315,36 @@ fn owned_binding(player: &DirPlayer, flash_ref: &FlashObjectRef) -> Result<(Stri
     Ok((owner_key, generation, sprite_num))
 }
 
+fn owned_binding(player: &DirPlayer, flash_ref: &FlashObjectRef) -> Result<(String, u64, i32), ScriptError> {
+    validate_owned_binding(player, flash_ref)
+}
+
+fn owned_cast_pair(
+    player: &DirPlayer,
+    flash_ref: &FlashObjectRef,
+    generation: u64,
+    sprite_num: i32,
+) -> Result<(i32, i32), ScriptError> {
+    if flash_ref.cast_lib != 0 || flash_ref.cast_member != 0 {
+        return Ok((flash_ref.cast_lib, flash_ref.cast_member));
+    }
+    if player.flash_instance_generation(sprite_num as i16) != Some(generation) {
+        return Err(ScriptError::new_code(
+            crate::player::ScriptErrorCode::InvalidReference,
+            "Flash object binding generation is stale".to_owned(),
+        ));
+    }
+    match player.flash_binding_origin(sprite_num as i16) {
+        crate::player::FlashBindingOrigin::FirstPublished { cast_lib, cast_member } => {
+            Ok((cast_lib, cast_member))
+        }
+        _ => Err(ScriptError::new_code(
+            crate::player::ScriptErrorCode::InvalidReference,
+            "Flash object has no published cast binding".to_owned(),
+        )),
+    }
+}
+
 fn owned_player_id(player: &DirPlayer) -> Result<u32, ScriptError> {
     u32::try_from(player.owner.key().player).map_err(|_| {
         ScriptError::new_code(
@@ -237,12 +376,13 @@ fn owned_path(player: &DirPlayer, datum: &DatumRef, suffix: &str) -> Result<(Str
         .as_flash_object()
         .ok_or_else(|| ScriptError::new("Not a Flash object".to_owned()))?;
     let (_owner_key, generation, sprite_num) = owned_binding(player, flash_ref)?;
+    let (cast_lib, cast_member) = owned_cast_pair(player, flash_ref, generation, sprite_num)?;
     Ok((
         format!("{}.{}", flash_ref.path, suffix),
         generation,
         sprite_num,
-        flash_ref.cast_lib,
-        flash_ref.cast_member,
+        cast_lib,
+        cast_member,
     ))
 }
 
@@ -374,6 +514,132 @@ pub(crate) fn decode_owned_response(value: JsValue, fallback_path: Option<&str>)
     })
 }
 
+fn decode_sprite_value(
+    value: JsValue,
+    return_mode: &FlashReturnMode,
+) -> Result<FlashDecodedValue, FlashRequestError> {
+    match return_mode {
+        FlashReturnMode::Object { fallback_path } => {
+            let fallback_path = fallback_path.as_deref().ok_or_else(|| {
+                FlashRequestError::Script(ScriptError::new(
+                    "Sprite object get has no requested path".to_owned(),
+                ))
+            })?;
+            if let Some(value) = value.as_string() {
+                if value.starts_with("[object ") || value.starts_with("[type ") {
+                    return Ok(FlashDecodedValue::Object(fallback_path.to_owned()));
+                }
+                return Ok(FlashDecodedValue::String(value));
+            }
+            if value.is_object() {
+                if let Some(path) = js_sys::Reflect::get(
+                    &value,
+                    &JsValue::from_str("__dirplayer_stored_path"),
+                )
+                .ok()
+                .and_then(|value| value.as_string())
+                .filter(|path| is_canonical_stored_flash_path(path))
+                {
+                    return Ok(FlashDecodedValue::Object(path));
+                }
+            }
+            Ok(FlashDecodedValue::Object(fallback_path.to_owned()))
+        }
+        FlashReturnMode::Scalar => {
+            if value.is_null() || value.is_undefined() {
+                return Ok(FlashDecodedValue::Void);
+            }
+            if let Some(value) = value.as_string() {
+                return Ok(FlashDecodedValue::String(value));
+            }
+            if let Some(value) = value.as_bool() {
+                return Ok(FlashDecodedValue::Int(if value { 1 } else { 0 }));
+            }
+            if let Some(value) = value.as_f64() {
+                if !value.is_finite() {
+                    return Err(FlashRequestError::Script(ScriptError::new(
+                        "Flash host returned a non-finite sprite value".to_owned(),
+                    )));
+                }
+                if value.fract() == 0.0 && value.abs() < i32::MAX as f64 {
+                    return Ok(FlashDecodedValue::Int(value as i32));
+                }
+                return Ok(FlashDecodedValue::Float(value));
+            }
+            Ok(FlashDecodedValue::Void)
+        }
+    }
+}
+
+#[cfg(test)]
+mod sprite_decode_tests {
+    use super::is_canonical_stored_flash_path;
+
+    #[test]
+    fn stored_flash_path_shape_is_bounded_and_canonical() {
+        assert!(is_canonical_stored_flash_path("_level0.__dirplayer_ref_1"));
+        assert!(is_canonical_stored_flash_path("_level0.__dirplayer_ref_4294967295"));
+        assert!(!is_canonical_stored_flash_path("_level0.__dirplayer_ref_0x1"));
+        assert!(!is_canonical_stored_flash_path("_level0.__dirplayer_ref_4294967296"));
+        assert!(!is_canonical_stored_flash_path("_root.__dirplayer_ref_1"));
+    }
+}
+
+fn decode_sprite_response(
+    value: JsValue,
+    return_mode: &FlashReturnMode,
+) -> Result<FlashOwnedResponse, FlashRequestError> {
+    let ok = envelope_property(&value, "ok")?
+        .as_bool()
+        .ok_or_else(|| FlashRequestError::Script(ScriptError::new(
+            "Flash host response has non-boolean ok".to_owned(),
+        )))?;
+    if !ok {
+        let code = envelope_property(&value, "code")?
+            .as_string()
+            .unwrap_or_else(|| "host-error".to_owned());
+        if code == "not-ready" {
+            let generation = envelope_property(&value, "generation")?
+                .as_f64()
+                .filter(|value| {
+                    value.is_finite()
+                        && *value >= 1.0
+                        && *value <= 9_007_199_254_740_991.0
+                        && value.fract() == 0.0
+                })
+                .map(|value| value as u64)
+                .ok_or_else(|| {
+                    FlashRequestError::Script(ScriptError::new(
+                        "Flash not-ready response has invalid generation".to_owned(),
+                    ))
+                })?;
+            return Err(FlashRequestError::NotReady { generation });
+        }
+        let message = envelope_property(&value, "message")?.as_string();
+        return Err(FlashRequestError::Script(ScriptError::new(
+            message.unwrap_or_else(|| format!("Flash host operation failed: {code}")),
+        )));
+    }
+    let generation = envelope_property(&value, "generation")?
+        .as_f64()
+        .filter(|value| {
+            value.is_finite()
+                && *value >= 1.0
+                && *value <= 9_007_199_254_740_991.0
+                && value.fract() == 0.0
+        })
+        .map(|value| value as u64)
+        .ok_or_else(|| {
+            FlashRequestError::Script(ScriptError::new(
+                "Flash host response has invalid generation".to_owned(),
+            ))
+        })?;
+    Ok(FlashOwnedResponse {
+        generation,
+        value: decode_sprite_value(envelope_property(&value, "value")?, return_mode)?,
+    })
+}
+
 pub(crate) fn execute_flash_request(request: &FlashRequest) -> Result<FlashOwnedResponse, FlashRequestError> {
     let owner_key = owner_key_string(&request.owner);
     let generation_as_number = |generation: u64| {
@@ -403,6 +669,13 @@ pub(crate) fn execute_flash_request(request: &FlashRequest) -> Result<FlashOwned
                 &owner_key, request.sprite_num, generation_as_number(generation)?, &request.path,
                 return_mode.is_object(),
             ),
+            (FlashOperation::SpriteGet { .. }, Some(generation)) =>
+                ruffle_get_sprite_variable_owned_at_generation(
+                    &owner_key,
+                    request.sprite_num,
+                    generation_as_number(generation)?,
+                    &request.path,
+                ),
             (FlashOperation::Set { value }, Some(generation)) => ruffle_set_variable_owned_at_generation(
                 &owner_key, request.sprite_num, generation_as_number(generation)?, &request.path, value,
             ),
@@ -416,12 +689,19 @@ pub(crate) fn execute_flash_request(request: &FlashRequest) -> Result<FlashOwned
             "Flash host invocation failed: {error:?}"
         ))))?;
         let fallback_path = match &request.operation {
-            FlashOperation::BindGet { return_mode } | FlashOperation::Get { return_mode } => {
+            FlashOperation::BindGet { return_mode }
+            | FlashOperation::Get { return_mode }
+            | FlashOperation::SpriteGet { return_mode } => {
                 return_mode.fallback_path(&request.path)
             }
             FlashOperation::Set { .. } | FlashOperation::Call { .. } => None,
         };
-        decode_owned_response(response, fallback_path)
+        match &request.operation {
+            FlashOperation::SpriteGet { return_mode } => {
+                decode_sprite_response(response, return_mode)
+            }
+            _ => decode_owned_response(response, fallback_path),
+        }
     }
 }
 
@@ -451,28 +731,77 @@ pub(crate) async fn wait_for_flash_ready_owned(
             }
             let response = is_flash_instance_ready_owned(&owner_key, sprite_num as i32, generation_js)
                 .map_err(|error| ScriptError::new(format!("Flash readiness query failed: {error:?}")))?;
-            let response_generation = js_sys::Reflect::get(
-                &response,
-                &JsValue::from_str("generation"),
-            )
-            .map_err(|error| ScriptError::new(format!("Flash readiness response missing generation: {error:?}")))?
-            .as_f64()
-            .filter(|value| value.is_finite() && *value >= 1.0 && *value <= 9_007_199_254_740_991.0 && value.fract() == 0.0)
-            .map(|value| value as u64)
-            .ok_or_else(|| ScriptError::new("Flash readiness response has invalid generation".to_owned()))?;
-            if response_generation != generation_u64 {
-                return Err(ScriptError::new("Flash readiness generation changed".to_owned()));
-            }
             let ok = js_sys::Reflect::get(&response, &JsValue::from_str("ok"))
-                .ok()
-                .and_then(|value| value.as_bool())
-                .unwrap_or(false);
+                .map_err(|error| ScriptError::new(format!("Flash readiness response ok lookup failed: {error:?}")))?
+                .as_bool()
+                .ok_or_else(|| ScriptError::new("Flash readiness response has non-boolean ok".to_owned()))?;
             if !ok {
                 let code = js_sys::Reflect::get(&response, &JsValue::from_str("code"))
                     .ok()
                     .and_then(|value| value.as_string())
                     .unwrap_or_else(|| "host-error".to_owned());
+                if code == "missing-instance" {
+                    let response_generation = js_sys::Reflect::get(
+                        &response,
+                        &JsValue::from_str("generation"),
+                    )
+                    .map_err(|error| {
+                        ScriptError::new(format!(
+                            "Flash readiness response generation lookup failed: {error:?}"
+                        ))
+                    })?;
+                    if !response_generation.is_undefined() {
+                        let response_generation = response_generation
+                            .as_f64()
+                            .filter(|value| {
+                                value.is_finite()
+                                    && *value >= 1.0
+                                    && *value <= 9_007_199_254_740_991.0
+                                    && value.fract() == 0.0
+                            })
+                            .map(|value| value as u64)
+                            .ok_or_else(|| {
+                                ScriptError::new(
+                                    "Flash readiness response has invalid generation".to_owned(),
+                                )
+                            })?;
+                        if response_generation != generation_u64 {
+                            return Err(ScriptError::new("Flash readiness generation changed".to_owned()));
+                        }
+                    }
+                    if !owner.is_arena_live() {
+                        return Err(ScriptError::new("Flash readiness wait was cancelled".to_owned()));
+                    }
+                    async_std::task::sleep(std::time::Duration::from_millis(100)).await;
+                    continue;
+                }
                 return Err(ScriptError::new(format!("Flash readiness rejected: {code}")));
+            }
+            if !owner.is_arena_live() {
+                return Err(ScriptError::new("Flash readiness wait was cancelled".to_owned()));
+            }
+            let response_generation = js_sys::Reflect::get(
+                &response,
+                &JsValue::from_str("generation"),
+            )
+            .map_err(|error| {
+                ScriptError::new(format!(
+                    "Flash readiness response generation lookup failed: {error:?}"
+                ))
+            })?
+            .as_f64()
+            .filter(|value| {
+                value.is_finite()
+                    && *value >= 1.0
+                    && *value <= 9_007_199_254_740_991.0
+                    && value.fract() == 0.0
+            })
+            .map(|value| value as u64)
+            .ok_or_else(|| {
+                ScriptError::new("Flash readiness response has invalid generation".to_owned())
+            })?;
+            if response_generation != generation_u64 {
+                return Err(ScriptError::new("Flash readiness generation changed".to_owned()));
             }
             let ready = js_sys::Reflect::get(&response, &JsValue::from_str("ready"))
                 .ok()
@@ -514,6 +843,7 @@ pub fn prepare_set_prop(
         .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
         .to_owned();
     let (_owner_key, generation, sprite_num) = owned_binding(player, &flash_ref)?;
+    let (cast_lib, cast_member) = owned_cast_pair(player, &flash_ref, generation, sprite_num)?;
     let value = match value {
         Datum::Int(i) => i.to_string(),
         Datum::Float(f) => f.to_string(),
@@ -528,8 +858,8 @@ pub fn prepare_set_prop(
         expected_generation: Some(generation),
         path: format!("{}.{}", flash_ref.path, prop_name),
         operation: FlashOperation::Set { value },
-        cast_lib: flash_ref.cast_lib,
-        cast_member: flash_ref.cast_member,
+        cast_lib,
+        cast_member,
     })
 }
 
@@ -667,6 +997,7 @@ impl FlashObjectDatumHandlers {
             .cloned()
             .ok_or_else(|| ScriptError::new("Not a Flash object".to_owned()))?;
         let (_owner_key, generation, sprite_num) = owned_binding(player, &flash_ref)?;
+        let (cast_lib, cast_member) = owned_cast_pair(player, &flash_ref, generation, sprite_num)?;
         let handler_name = symbols
             .display(&handler_name)
             .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
@@ -692,8 +1023,36 @@ impl FlashObjectDatumHandlers {
             expected_generation: Some(generation),
             path: format!("{}.{}", flash_ref.path, handler_name),
             operation: FlashOperation::Call { args_xml },
-            cast_lib: flash_ref.cast_lib,
-            cast_member: flash_ref.cast_member,
+            cast_lib,
+            cast_member,
+        })
+    }
+
+    pub(crate) fn prepare_sprite_call(
+        player: &DirPlayer,
+        sprite_num: i16,
+        generation: u64,
+        path: String,
+        args_xml: String,
+        cast_lib: i32,
+        cast_member: i32,
+    ) -> Result<FlashRequest, ScriptError> {
+        checked_sprite_number(sprite_num as i32)?;
+        if generation == 0 || generation > 9_007_199_254_740_991 {
+            return Err(ScriptError::new_code(
+                crate::player::ScriptErrorCode::InvalidReference,
+                "Flash sprite call has an invalid or unsafe instance generation".to_owned(),
+            ));
+        }
+        Ok(FlashRequest {
+            player_id: owned_player_id(player)?,
+            owner: player.owner.clone(),
+            sprite_num: sprite_num as i32,
+            expected_generation: Some(generation),
+            path,
+            operation: FlashOperation::Call { args_xml },
+            cast_lib,
+            cast_member,
         })
     }
 

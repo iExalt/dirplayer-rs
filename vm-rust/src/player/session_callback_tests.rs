@@ -196,6 +196,7 @@ fn pump_child_to_completion(
             }
             EvalRequestTurn::Child(DriverTurn::Complete(_))
             | EvalRequestTurn::Child(DriverTurn::Error(_))
+            | EvalRequestTurn::SpriteAsync(_)
             | EvalRequestTurn::MovieAsync(_)
             | EvalRequestTurn::Flash(_)
             | EvalRequestTurn::ExternalXtra(_)
@@ -229,6 +230,7 @@ fn pending_child_internal(
                 turn_kind(&other)
             ),
             EvalRequestTurn::Evaluator(_)
+            | EvalRequestTurn::SpriteAsync(_)
             | EvalRequestTurn::MovieAsync(_)
             | EvalRequestTurn::Flash(_)
             | EvalRequestTurn::ExternalXtra(_)
@@ -389,6 +391,57 @@ fn evaluator_object_xtra_call_leaves_the_host_request_owned() {
         },
     );
     assert!(matches!(turn, EvalRequestTurn::ExternalXtra(_)));
+}
+
+#[test]
+fn attached_sprite_handler_takes_precedence_over_sprite_async_host_turn() {
+    let (mut session, _primary, pass_handler, _error_handler) = callback_session();
+    let (receiver, owner) = session
+        .with_player(1, |context| {
+            let (instance_ref, _instance_datum) =
+                crate::player::handlers::datum_handlers::script::ScriptDatumHandlers::create_script_instance(
+                    context.player,
+                    context.symbols,
+                    &CastMemberRef {
+                        cast_lib: 1,
+                        cast_member: 1,
+                    },
+                )
+                .expect("callback fixture script instance should be creatable");
+            context.player.movie.score.channels = vec![
+                SpriteChannel::new(0),
+                SpriteChannel::new(1),
+            ];
+            context.player.movie.score.channels[1]
+                .sprite
+                .script_instance_list
+                .push(instance_ref);
+            (
+                context.player.alloc_datum(Datum::SpriteRef(1)),
+                context.player.owner.clone(),
+            )
+        })
+        .expect("callback fixture player exists");
+    let (id, capability) = waiting_evaluator_action(&mut session);
+    let turn = session.execute_eval_request(
+        id,
+        EvalPending::Object {
+            capability,
+            request: InternalVmRequest::SpriteAsync(crate::player::driver::SpriteAsyncRequest {
+                player_id: 1,
+                owner,
+                receiver,
+                sprite_num: 1,
+                handler: pass_handler.1,
+                args: vec![],
+            }),
+            reason: None,
+        },
+    );
+    assert!(
+        matches!(turn, EvalRequestTurn::Child(_)),
+        "attached handler must win before the Flash host turn"
+    );
 }
 
 #[test]
@@ -640,6 +693,7 @@ fn evaluator_child_prepared_route_runs_real_child_to_completion() {
             }
             EvalRequestTurn::Child(DriverTurn::Complete(_))
             | EvalRequestTurn::Child(DriverTurn::Error(_))
+            | EvalRequestTurn::SpriteAsync(_)
             | EvalRequestTurn::MovieAsync(_)
             | EvalRequestTurn::Flash(_)
             | EvalRequestTurn::ExternalXtra(_)

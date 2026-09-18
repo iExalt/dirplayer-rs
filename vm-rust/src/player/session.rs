@@ -4,7 +4,12 @@
 //! by those players. A context borrow is intentionally synchronous: callers
 //! must finish the borrow before awaiting host I/O or dispatching a callback.
 
-use std::{cell::{Cell, RefCell}, collections::{HashMap, HashSet, VecDeque}, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    collections::{HashMap, HashSet, VecDeque},
+    rc::Rc,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use async_std::channel::{self, Receiver, Sender};
 use log::warn;
@@ -38,6 +43,26 @@ use super::host_events::{
 use super::host_events::{BrowserHostSinkRef, BrowserHostSinkWeak, HostEventDelivery};
 
 pub type PlayerId = u32;
+
+static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
+
+pub(crate) fn allocate_session_id() -> Result<u64, ScriptError> {
+    allocate_session_id_from(&NEXT_SESSION_ID)
+}
+
+fn allocate_session_id_from(counter: &AtomicU64) -> Result<u64, ScriptError> {
+    counter
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+            if next == 0 {
+                None
+            } else if next == u64::MAX {
+                Some(0)
+            } else {
+                Some(next + 1)
+            }
+        })
+        .map_err(|_| ScriptError::new("session id namespace exhausted".to_owned()))
+}
 use super::symbols::symbol_table::{SymbolOwner, SymbolTable};
 
 /// An evaluator child driver is separate from a player's primary handler
@@ -72,6 +97,10 @@ struct EvalBroadcastContinuation {
 pub(crate) enum EvalRequestTurn {
     Evaluator(crate::player::eval::EvalTurn),
     Child(DriverTurn),
+    /// An owner-bound sprite operation with no attached script handler. The
+    /// request is executed by the command/evaluator pump after releasing the
+    /// session borrow, then resumed through the typed owner fence.
+    SpriteAsync(super::driver::SpriteAsyncRequest),
     MovieAsync(super::handlers::movie::MovieAsyncRequest),
     /// An owner-bound Flash request executed outside the session borrow. The
     /// command pump retains the mutable request clone so an initial BindGet
@@ -171,6 +200,55 @@ pub struct PlayerGraph {
     players: HashMap<PlayerId, DirPlayer>,
 }
 
+pub(crate) struct NestedFlashRetirement {
+    pub(crate) parent_owner: OwnerToken,
+    pub(crate) child_owner: OwnerToken,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct InputFlagSnapshot {
+    pub(crate) is_in_frame_update: bool,
+    pub(crate) in_frame_script: bool,
+    pub(crate) in_enter_frame: bool,
+    pub(crate) in_prepare_frame: bool,
+    pub(crate) in_event_dispatch: bool,
+    pub(crate) in_mouse_command: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DeferredInputFlagCleanup {
+    pub(crate) player_id: PlayerId,
+    pub(crate) owner: OwnerToken,
+    pub(crate) scope_id: u64,
+    pub(crate) snapshot: InputFlagSnapshot,
+}
+
+pub(crate) enum DeferredEventCleanup {
+    Stop {
+        player_id: PlayerId,
+        owner: OwnerToken,
+        scope_id: u64,
+    },
+    Static {
+        player_id: PlayerId,
+        guard: super::driver::StaticEventGuard,
+    },
+}
+
+struct ActiveInputFlagScope {
+    scope_id: u64,
+    owner: OwnerToken,
+    snapshot: InputFlagSnapshot,
+    restored: bool,
+}
+
+struct ActiveEventStopScope {
+    scope_id: u64,
+    owner: OwnerToken,
+    previous: bool,
+    restored: bool,
+}
+
 impl PlayerGraph {
     pub fn new() -> Self {
         Self {
@@ -229,6 +307,9 @@ pub struct RuntimeSession {
     /// Host resources retired while this session is mutably borrowed. The
     /// owner boundary drains this queue only after releasing the RefMut.
     pending_host_teardowns: Vec<crate::player::xtra::manager::XtraTeardownRequest>,
+    /// Exact owner keys whose nested Flash hosts must be retired after the
+    /// session borrow ends. Frontend cleanup may re-enter the session.
+    nested_flash_retirements: Vec<NestedFlashRetirement>,
     /// Native host events are retained in an explicit bounded sink when the
     /// wasm callback surface is unavailable. They are drained by the native
     /// adapter, never silently discarded by notification pumping.
@@ -260,6 +341,12 @@ pub struct RuntimeSession {
     playback_epochs: HashMap<PlayerId, u64>,
     playback_cancellations: HashMap<PlayerId, (OwnerToken, u64, bool)>,
     playback_replay_requests: HashMap<PlayerId, (OwnerToken, u64)>,
+    input_flag_cleanups: Rc<RefCell<VecDeque<DeferredInputFlagCleanup>>>,
+    next_input_scope_id: u64,
+    active_input_scopes: HashMap<PlayerId, Vec<ActiveInputFlagScope>>,
+    event_cleanups: Rc<RefCell<VecDeque<DeferredEventCleanup>>>,
+    next_event_scope_id: u64,
+    active_event_scopes: HashMap<PlayerId, Vec<ActiveEventStopScope>>,
 }
 
 /// Shared owner of a runtime session for host operations that may await.
@@ -490,6 +577,7 @@ impl RuntimeSession {
             js_lingo: JsRuntimeRegistry::default(),
             renderer_bindings: HashMap::new(),
             pending_host_teardowns: Vec::new(),
+            nested_flash_retirements: Vec::new(),
             native_host_events: NativeHostEventMailbox::default(),
             native_player_notifications: HashMap::new(),
             native_notification_errors: HashMap::new(),
@@ -504,6 +592,12 @@ impl RuntimeSession {
             playback_epochs: HashMap::new(),
             playback_cancellations: HashMap::new(),
             playback_replay_requests: HashMap::new(),
+            input_flag_cleanups: Rc::new(RefCell::new(VecDeque::new())),
+            next_input_scope_id: 1,
+            active_input_scopes: HashMap::new(),
+            event_cleanups: Rc::new(RefCell::new(VecDeque::new())),
+            next_event_scope_id: 1,
+            active_event_scopes: HashMap::new(),
         }
     }
 
@@ -1227,6 +1321,7 @@ impl RuntimeSession {
                             false,
                         );
                     }
+                    return EvalRequestTurn::SpriteAsync(sprite_request.clone());
                 }
                 let request = match request {
                     crate::player::driver::InternalVmRequest::Flash(request) => {
@@ -1234,8 +1329,7 @@ impl RuntimeSession {
                     }
                     request => request,
                 };
-                if existing_reason.is_some()
-                    || matches!(
+                if matches!(
                         request,
                         crate::player::driver::InternalVmRequest::CastMemberAsync(_)
                             | crate::player::driver::InternalVmRequest::Flash(_)
@@ -1344,7 +1438,7 @@ impl RuntimeSession {
                             request: crate::player::eval::EvalPending::Object {
                                 capability,
                                 request,
-                                reason: existing_reason.or(Some(reason)),
+                                reason: Some(reason),
                             },
                         })
                     }
@@ -1919,6 +2013,76 @@ impl RuntimeSession {
         accepted
     }
 
+    fn validate_typed_async_eval(
+        &mut self,
+        id: &crate::player::eval::EvalId,
+        action: &crate::player::eval::EvalAction,
+        request: &super::driver::InternalVmRequest,
+        owner: &OwnerToken,
+    ) -> Option<OwnerToken> {
+        let (anchored_player, anchored_owner) = self.eval_action_anchor(id, action)?;
+        let (player_id, request_owner) = match request {
+            super::driver::InternalVmRequest::SpriteAsync(request) => {
+                (request.player_id, &request.owner)
+            }
+            super::driver::InternalVmRequest::CastMemberAsync(request) => {
+                (request.player_id, &request.owner)
+            }
+            super::driver::InternalVmRequest::Flash(request) => {
+                (request.player_id, &request.owner)
+            }
+            _ => return None,
+        };
+        if anchored_player != player_id
+            || !owner.is_arena_live()
+            || !owner.same_identity(&anchored_owner)
+            || !owner.same_identity(request_owner)
+        {
+            return None;
+        }
+        let current_owner = self
+            .with_player(player_id, |context| {
+                (owner.same_identity(&context.player.owner)
+                    && context.player.owner.is_arena_live())
+                    .then(|| context.player.owner.clone())
+            })
+            .flatten()?;
+        if !owner.same_identity(&current_owner) {
+            return None;
+        }
+        if let super::driver::InternalVmRequest::Flash(request) = request {
+            let current = request.expected_generation?;
+            if !self
+                .with_player(player_id, |context| {
+                    context
+                        .player
+                        .is_flash_instance_generation_current(request.sprite_num as i16, current)
+                })
+                .unwrap_or(false)
+            {
+                return None;
+            }
+        }
+        Some(current_owner)
+    }
+
+    pub(crate) fn resume_typed_async_eval(
+        &mut self,
+        id: crate::player::eval::EvalId,
+        action: &crate::player::eval::EvalAction,
+        request: &super::driver::InternalVmRequest,
+        owner: &OwnerToken,
+        result: Result<DatumRef, ScriptError>,
+    ) -> EvalRequestTurn {
+        let Some(current_owner) = self.validate_typed_async_eval(&id, action, request, owner) else {
+            self.cancel_eval_action(&id, action, owner);
+            return EvalRequestTurn::Evaluator(crate::player::eval::EvalTurn::Complete(
+                Err(super::cancelled_scope_error()),
+            ));
+        };
+        EvalRequestTurn::Evaluator(self.resume_eval(id, action, &current_owner, result))
+    }
+
     /// Complete a typed sprite/cast async request after its owner-side host
     /// executor has finished. The request's embedded owner and player identity
     /// are checked against the current arena before the evaluator sees the
@@ -1932,43 +2096,9 @@ impl RuntimeSession {
         owner: &OwnerToken,
         result: Result<DatumRef, ScriptError>,
     ) -> bool {
-        if id.is_cancelled() {
+        let Some(current_owner) = self.validate_typed_async_eval(&id, action, request, owner) else {
             return false;
-        }
-        let (player_id, request_owner) = match request {
-            super::driver::InternalVmRequest::SpriteAsync(request) => {
-                (request.player_id, &request.owner)
-            }
-            super::driver::InternalVmRequest::CastMemberAsync(request) => {
-                (request.player_id, &request.owner)
-            }
-            super::driver::InternalVmRequest::Flash(request) => {
-                (request.player_id, &request.owner)
-            }
-            _ => return false,
         };
-        let current_owner = self.with_player(player_id, |context| context.player.owner.clone());
-        let Some(current_owner) = current_owner else { return false };
-        if !owner.is_arena_live()
-            || !owner.same_identity(request_owner)
-            || !owner.same_identity(&current_owner)
-            || !current_owner.is_arena_live()
-        {
-            return false;
-        }
-        if let super::driver::InternalVmRequest::Flash(request) = request {
-            let Some(current) = request.expected_generation else {
-                return false;
-            };
-            if !self.with_player(player_id, |context| {
-                context.player.is_flash_instance_generation_current(
-                    request.sprite_num as i16,
-                    current,
-                )
-            }).unwrap_or(false) {
-                return false;
-            }
-        }
         self.complete_eval(id, action, &current_owner, result)
     }
 
@@ -2411,7 +2541,9 @@ impl RuntimeSession {
             return Err(ScriptError::new("nested player id collision".into()));
         }
         self.with_player(child_id, |context| {
-            context.player.flash_host_is_nested = true;
+            context
+                .player
+                .set_nested_flash_host_route(super::FlashHostRoute::NestedPending);
         });
         let child_owner = self
             .players
@@ -2427,6 +2559,10 @@ impl RuntimeSession {
             child_owner: child_owner.clone(),
             command_tx,
             event_tx,
+            // Publication is recorded only after the frontend accepts the
+            // exact parent/child registration. A failed registration has no
+            // host to retire.
+            flash_owner_registered: false,
         };
         if let Err(error) = self.nested.insert(record) {
             let _ = self.remove_player(child_id);
@@ -2457,6 +2593,31 @@ impl RuntimeSession {
                     })
             })
             .cloned()
+    }
+
+    pub(crate) fn nested_child_owned(
+        &self,
+        child_id: PlayerId,
+        child_owner: &OwnerToken,
+    ) -> Option<NestedChildRecord> {
+        self.nested.child(child_id, child_owner).cloned()
+    }
+
+    pub(crate) fn replace_nested_child_runtime(
+        &mut self,
+        child_id: PlayerId,
+        old_owner: &OwnerToken,
+        new_owner: OwnerToken,
+        command_tx: Sender<PlayerVMExecutionItem>,
+        event_tx: Sender<super::events::PlayerVMEvent>,
+    ) -> Result<(PlayerId, OwnerToken), ScriptError> {
+        self.nested.replace_child_runtime(
+            child_id,
+            old_owner,
+            new_owner,
+            command_tx,
+            event_tx,
+        )
     }
 
     pub(crate) fn nested_children_for(
@@ -2499,8 +2660,71 @@ impl RuntimeSession {
         parent_id: PlayerId,
         parent_owner: &OwnerToken,
     ) -> Vec<NestedChildRecord> {
+        self.nested.take_children_for_parent(parent_id, parent_owner)
+    }
+
+    pub(crate) fn activate_nested_flash_route(
+        &mut self,
+        parent_id: PlayerId,
+        parent_owner: &OwnerToken,
+        child_id: PlayerId,
+        child_owner: &OwnerToken,
+    ) -> Result<(), ScriptError> {
+        let Some(record) = self.nested.child(child_id, child_owner) else {
+            return Err(super::cancelled_scope_error());
+        };
+        if record.parent_id != parent_id
+            || !record.parent_owner.same_identity(parent_owner)
+            || !parent_owner.is_arena_live()
+        {
+            return Err(super::cancelled_scope_error());
+        }
+        self.with_player(child_id, |context| {
+            if !context.player.owner.same_identity(child_owner) {
+                return Err(super::cancelled_scope_error());
+            }
+            context
+                .player
+                .set_nested_flash_host_route(super::FlashHostRoute::LocalOwned);
+            Ok(())
+        })
+        .ok_or_else(super::cancelled_scope_error)??;
+        Ok(())
+    }
+
+    pub(crate) fn mark_nested_flash_owner_registered(
+        &mut self,
+        parent_id: PlayerId,
+        parent_owner: &OwnerToken,
+        child_id: PlayerId,
+        child_owner: &OwnerToken,
+    ) -> Result<(), ScriptError> {
+        let Some(record) = self.nested.child(child_id, child_owner) else {
+            return Err(super::cancelled_scope_error());
+        };
+        if record.parent_id != parent_id
+            || !record.parent_owner.same_identity(parent_owner)
+        {
+            return Err(super::cancelled_scope_error());
+        }
         self.nested
-            .take_children_for_parent(parent_id, parent_owner)
+            .child_mut(child_id, child_owner)
+            .expect("nested child was checked above")
+            .flash_owner_registered = true;
+        self.activate_nested_flash_route(parent_id, parent_owner, child_id, child_owner)
+    }
+
+    fn queue_nested_flash_retirement(&mut self, child: &NestedChildRecord) {
+        if child.flash_owner_registered {
+            self.nested_flash_retirements.push(NestedFlashRetirement {
+                parent_owner: child.parent_owner.clone(),
+                child_owner: child.child_owner.clone(),
+            });
+        }
+    }
+
+    pub(crate) fn take_nested_flash_retirements(&mut self) -> Vec<NestedFlashRetirement> {
+        std::mem::take(&mut self.nested_flash_retirements)
     }
 
     pub(crate) fn retire_nested_child_if_owner(
@@ -2804,12 +3028,29 @@ impl RuntimeSession {
                 "player owner generation high-water invariant violated".to_owned(),
             ));
         }
+        let nested_child_reset = self.nested.child(player_id, owner).cloned();
+        self.active_input_scopes.remove(&player_id);
+        self.input_flag_cleanups
+            .borrow_mut()
+            .retain(|record| record.player_id != player_id);
+        self.active_event_scopes.remove(&player_id);
+        self.event_cleanups.borrow_mut().retain(|record| match record {
+            DeferredEventCleanup::Stop { player_id: record_player, .. }
+            | DeferredEventCleanup::Static { player_id: record_player, .. } => *record_player != player_id,
+        });
         self.drain_eval_cancellations();
         let nested_children = self.take_nested_children_for(player_id, &current_owner);
         for child in nested_children {
             child.command_tx.close();
             child.event_tx.close();
             let _ = self.remove_player(child.child_id);
+            self.queue_nested_flash_retirement(&child);
+        }
+        if let Some(child) = nested_child_reset {
+            self.queue_nested_flash_retirement(&child);
+            if let Some(record) = self.nested.child_mut_identity(player_id, owner) {
+                record.flash_owner_registered = false;
+            }
         }
         self.cancel_playback_loop(player_id, &current_owner, false);
         self.cancel_owner_work(player_id, &current_owner);
@@ -2827,6 +3068,29 @@ impl RuntimeSession {
         // carried by the separate host-event queue.
         self.native_player_notifications.remove(&player_id);
         self.native_notification_errors.remove(&player_id);
+        // Cancellation can drop an old suspended guard while the session is
+        // still mutably borrowed, which queues cleanup after the first
+        // retirement pass above.  Discard those records before installing the
+        // replacement owner so they cannot survive the generation boundary.
+        self.input_flag_cleanups
+            .borrow_mut()
+            .retain(|record| record.player_id != player_id);
+        self.event_cleanups.borrow_mut().retain(|record| match record {
+            DeferredEventCleanup::Stop { player_id: record_player, .. }
+            | DeferredEventCleanup::Static { player_id: record_player, .. } => *record_player != player_id,
+        });
+        // Finalize the replacement baseline only after every old-generation
+        // cancellation and teardown guard has run.  A suspended old command
+        // may restore one of these flags while it is being cancelled; that
+        // restoration must never leak into the new owner.
+        self.with_player(player_id, |context| {
+            context.player.is_in_frame_update = false;
+            context.player.in_frame_script = false;
+            context.player.in_enter_frame = false;
+            context.player.in_prepare_frame = false;
+            context.player.in_event_dispatch = false;
+            context.player.in_mouse_command = false;
+        });
         let new_owner = {
             let player = self
                 .players
@@ -2856,6 +3120,15 @@ impl RuntimeSession {
     }
 
     pub fn remove_player(&mut self, id: PlayerId) -> Option<DirPlayer> {
+        self.active_input_scopes.remove(&id);
+        self.input_flag_cleanups
+            .borrow_mut()
+            .retain(|record| record.player_id != id);
+        self.active_event_scopes.remove(&id);
+        self.event_cleanups.borrow_mut().retain(|record| match record {
+            DeferredEventCleanup::Stop { player_id, .. }
+            | DeferredEventCleanup::Static { player_id, .. } => *player_id != id,
+        });
         self.notification_drains.remove(&id);
         self.native_player_notifications.remove(&id);
         self.native_notification_errors.remove(&id);
@@ -2869,8 +3142,10 @@ impl RuntimeSession {
                 child.command_tx.close();
                 child.event_tx.close();
                 let _ = self.remove_player(child.child_id);
+                self.queue_nested_flash_retirement(&child);
             }
             if let Some(child) = self.nested.remove_child(id) {
+                self.queue_nested_flash_retirement(&child);
                 child.command_tx.close();
                 child.event_tx.close();
             }
@@ -3739,6 +4014,13 @@ impl RuntimeSession {
             .any(|pending| pending.player_id == player_id)
     }
 
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn test_scheduler_ticket(&mut self, owner: &OwnerToken) -> CompletionTicket {
+        self.actions
+            .allocate(owner, None, ActionKind::InternalInvocation, ResumePhase::ApplyOpcode)
+            .expect("scheduler test action ticket should allocate")
+    }
+
     /// Detach one evaluator request for this owner. Detaching a single
     /// capability lets the scheduler run nested requests concurrently while
     /// an outer host action is awaiting completion.
@@ -3910,7 +4192,8 @@ impl RuntimeSession {
                 // future dispatcher routes one here. Retaining the command
                 // forever would leak its action ticket and leave the callback
                 // receiver waiting indefinitely.
-                EvalRequestTurn::MovieAsync(_)
+                EvalRequestTurn::SpriteAsync(_)
+                | EvalRequestTurn::MovieAsync(_)
                 | EvalRequestTurn::Flash(_)
                 | EvalRequestTurn::ExternalXtra(_)
                 | EvalRequestTurn::ExternalXtraLoad(_)
@@ -4072,16 +4355,240 @@ impl RuntimeSession {
         }))
     }
 
+    pub(crate) fn begin_input_flag_scope(
+        &mut self,
+        player_id: PlayerId,
+        owner: &OwnerToken,
+    ) -> Result<(u64, InputFlagSnapshot, Rc<RefCell<VecDeque<DeferredInputFlagCleanup>>>, Sender<PlayerVMExecutionItem>), ScriptError> {
+        let Some(next_scope_id) = self.next_input_scope_id.checked_add(1) else {
+            return Err(ScriptError::new("input flag scope generation exhausted".to_owned()));
+        };
+        let (snapshot, queue_tx) = self
+            .with_player(player_id, |context| {
+                if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                    return Err(super::cancelled_scope_error());
+                }
+                let player = context.player;
+                let snapshot = InputFlagSnapshot {
+                    is_in_frame_update: player.is_in_frame_update,
+                    in_frame_script: player.in_frame_script,
+                    in_enter_frame: player.in_enter_frame,
+                    in_prepare_frame: player.in_prepare_frame,
+                    in_event_dispatch: player.in_event_dispatch,
+                    in_mouse_command: player.in_mouse_command,
+                };
+                player.is_in_frame_update = false;
+                player.in_frame_script = false;
+                player.in_enter_frame = false;
+                player.in_prepare_frame = false;
+                player.in_event_dispatch = false;
+                player.in_mouse_command = true;
+                Ok((snapshot, player.queue_tx.clone()))
+            })
+            .ok_or_else(super::cancelled_scope_error)??;
+        let scope_id = self.next_input_scope_id;
+        self.next_input_scope_id = next_scope_id;
+        self.active_input_scopes
+            .entry(player_id)
+            .or_default()
+            .push(ActiveInputFlagScope { scope_id, owner: owner.clone(), snapshot, restored: false });
+        Ok((scope_id, snapshot, self.input_flag_cleanups.clone(), queue_tx))
+    }
+
+    pub(crate) fn restore_input_flag_scope(
+        &mut self,
+        player_id: PlayerId,
+        owner: &OwnerToken,
+        scope_id: u64,
+        snapshot: InputFlagSnapshot,
+    ) -> bool {
+        let (snapshots, remove_scope) = {
+            let Some(scopes) = self.active_input_scopes.get_mut(&player_id) else { return false };
+            let Some(index) = scopes.iter().position(|scope| scope.scope_id == scope_id) else { return false };
+            if !scopes[index].owner.same_identity(owner) || !owner.is_arena_live() {
+                return false;
+            }
+            scopes[index].restored = true;
+            if index + 1 != scopes.len() {
+                return true;
+            }
+            let mut snapshots = Vec::new();
+            while scopes.last().is_some_and(|scope| scope.restored) {
+                snapshots.push(scopes.pop().expect("checked scope stack entry").snapshot);
+            }
+            (snapshots, scopes.is_empty())
+        };
+        if remove_scope {
+            self.active_input_scopes.remove(&player_id);
+        }
+        let restored = self
+            .with_player(player_id, |context| {
+                if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                    return false;
+                }
+                let player = context.player;
+                let snapshot = snapshots.last().copied().unwrap_or(snapshot);
+                player.is_in_frame_update = snapshot.is_in_frame_update;
+                player.in_frame_script = snapshot.in_frame_script;
+                player.in_enter_frame = snapshot.in_enter_frame;
+                player.in_prepare_frame = snapshot.in_prepare_frame;
+                player.in_event_dispatch = snapshot.in_event_dispatch;
+                player.in_mouse_command = snapshot.in_mouse_command;
+                true
+            })
+            .unwrap_or(false);
+        restored
+    }
+
+    pub(crate) fn drain_input_flag_cleanups(&mut self) {
+        let records: Vec<_> = self.input_flag_cleanups.borrow_mut().drain(..).collect();
+        for record in records {
+            let _ = self.restore_input_flag_scope(
+                record.player_id,
+                &record.owner,
+                record.scope_id,
+                record.snapshot,
+            );
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_next_input_scope_id_for_test(&mut self, next: u64) {
+        self.next_input_scope_id = next;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_event_scope_count_for_test(&self, player_id: PlayerId) -> usize {
+        self.active_event_scopes
+            .get(&player_id)
+            .map_or(0, Vec::len)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_owned_work_count_for_test(&self, player_id: PlayerId) -> usize {
+        self.pending_commands
+            .iter()
+            .filter(|pending| pending.player_id == player_id)
+            .count()
+            + self
+                .pending_eval_requests
+                .iter()
+                .filter(|pending| pending.player_id == player_id)
+                .count()
+            + self
+                .inflight_eval_routes
+                .iter()
+                .filter(|route| route.player_id == player_id)
+                .count()
+            + self
+                .eval_drivers
+                .values()
+                .filter(|child| child.driver.player_id == player_id)
+                .count()
+            + self
+                .evals
+                .values()
+                .filter(|continuation| continuation.player_id == player_id)
+                .count()
+    }
+
+    pub(crate) fn event_cleanup_resources(
+        &mut self,
+        player_id: PlayerId,
+    ) -> Result<(Rc<RefCell<VecDeque<DeferredEventCleanup>>>, Sender<PlayerVMExecutionItem>), ScriptError> {
+        let queue_tx = self
+            .with_player(player_id, |context| context.player.queue_tx.clone())
+            .ok_or_else(super::cancelled_scope_error)?;
+        Ok((self.event_cleanups.clone(), queue_tx))
+    }
+
+    pub(crate) fn begin_event_stop_scope(
+        &mut self,
+        player_id: PlayerId,
+        owner: &OwnerToken,
+    ) -> Result<(u64, bool, Rc<RefCell<VecDeque<DeferredEventCleanup>>>, Sender<PlayerVMExecutionItem>), ScriptError> {
+        let Some(next_scope_id) = self.next_event_scope_id.checked_add(1) else {
+            return Err(ScriptError::new("event stop scope generation exhausted".to_owned()));
+        };
+        let (previous, queue_tx) = self
+            .with_player(player_id, |context| {
+                if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                    return Err(super::cancelled_scope_error());
+                }
+                Ok((std::mem::replace(&mut context.player.event_stopped, false), context.player.queue_tx.clone()))
+            })
+            .ok_or_else(super::cancelled_scope_error)??;
+        let scope_id = self.next_event_scope_id;
+        self.next_event_scope_id = next_scope_id;
+        self.active_event_scopes
+            .entry(player_id)
+            .or_default()
+            .push(ActiveEventStopScope { scope_id, owner: owner.clone(), previous, restored: false });
+        Ok((scope_id, previous, self.event_cleanups.clone(), queue_tx))
+    }
+
+    pub(crate) fn restore_event_stop_scope(
+        &mut self,
+        player_id: PlayerId,
+        owner: &OwnerToken,
+        scope_id: u64,
+    ) -> bool {
+        let snapshots = {
+            let Some(scopes) = self.active_event_scopes.get_mut(&player_id) else { return false };
+            let Some(index) = scopes.iter().position(|scope| scope.scope_id == scope_id) else { return false };
+            if !scopes[index].owner.same_identity(owner) || !owner.is_arena_live() {
+                return false;
+            }
+            scopes[index].restored = true;
+            if index + 1 != scopes.len() {
+                return true;
+            }
+            let mut snapshots = Vec::new();
+            while scopes.last().is_some_and(|scope| scope.restored) {
+                snapshots.push(scopes.pop().expect("checked event scope entry").previous);
+            }
+            (snapshots, scopes.is_empty())
+        };
+        if snapshots.1 {
+            self.active_event_scopes.remove(&player_id);
+        }
+        self.with_player(player_id, |context| {
+            if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                return false;
+            }
+            context.player.event_stopped = *snapshots.0.last().unwrap_or(&false);
+            true
+        }).unwrap_or(false)
+    }
+
+    pub(crate) fn drain_event_cleanups(&mut self) {
+        let records: Vec<_> = self.event_cleanups.borrow_mut().drain(..).collect();
+        for record in records {
+            match record {
+                DeferredEventCleanup::Stop { player_id, owner, scope_id } => {
+                    let _ = self.restore_event_stop_scope(player_id, &owner, scope_id);
+                }
+                DeferredEventCleanup::Static { player_id, guard } => {
+                    let _ = self.release_static_event_guard(player_id, &guard);
+                }
+            }
+        }
+    }
+
     pub(crate) fn enter_static_event_guard(
         &mut self,
         player_id: PlayerId,
         call: &super::driver::StaticEventCall,
     ) -> Result<Option<super::driver::StaticEventGuard>, ScriptError> {
+        self.drain_event_cleanups();
+        let Some(next_registration_id) = self.next_static_event_guard_id.checked_add(1) else {
+            return Err(ScriptError::new("static event guard generation exhausted".to_owned()));
+        };
         let owner = self
             .with_player(player_id, |context| context.player.owner.clone())
             .ok_or_else(super::cancelled_scope_error)?;
         let registration_id = self.next_static_event_guard_id;
-        self.next_static_event_guard_id = self.next_static_event_guard_id.wrapping_add(1).max(1);
+        self.next_static_event_guard_id = next_registration_id;
         let already_active = self.with_player(player_id, |mut context| {
             let handler_name = context
                 .symbols
@@ -5107,6 +5614,31 @@ impl RuntimeSession {
         self.actions.details(ticket)
     }
 
+    /// Confirm that an admitted action still belongs to the exact live owner
+    /// and remains parked on its started command. A dropped caller may cancel
+    /// this ticket after admission but before the executor future is polled.
+    pub(crate) fn is_admitted_action_current(
+        &self,
+        player_id: PlayerId,
+        owner: &OwnerToken,
+        ticket: &CompletionTicket,
+    ) -> bool {
+        self.actions.is_current(ticket, owner)
+            && self.pending_commands.iter().any(|pending| {
+                pending.player_id == player_id
+                    && pending.owner.same_identity(owner)
+                    && pending.started
+                    && pending
+                        .ticket
+                        .as_ref()
+                        .is_some_and(|queued| queued.same_identity(ticket))
+                    && pending
+                        .action
+                        .as_ref()
+                        .is_some_and(|action| action.ticket().same_identity(ticket))
+            })
+    }
+
     /// Complete exactly one queued action. The ticket carries a private Arc
     /// capability while owner/scope identity are checked against this session.
     pub(crate) fn complete_handler_action(
@@ -5506,6 +6038,19 @@ mod tests {
     use crate::player::cast_lib::CastLibState;
     use crate::player::cast_manager::CastPreloadState;
     use url::Url;
+
+    #[test]
+    fn session_id_allocator_is_unique_and_checked_at_exhaustion() {
+        let counter = AtomicU64::new(1);
+        assert_eq!(allocate_session_id_from(&counter).unwrap(), 1);
+        assert_eq!(allocate_session_id_from(&counter).unwrap(), 2);
+
+        let near_max = AtomicU64::new(u64::MAX - 1);
+        assert_eq!(allocate_session_id_from(&near_max).unwrap(), u64::MAX - 1);
+        assert_eq!(allocate_session_id_from(&near_max).unwrap(), u64::MAX);
+        assert!(allocate_session_id_from(&near_max).is_err());
+        assert!(allocate_session_id_from(&near_max).is_err());
+    }
 
     fn session_with_casts(modes: &[u16]) -> RuntimeSession {
         let mut session = RuntimeSession::new(SymbolOwner {
