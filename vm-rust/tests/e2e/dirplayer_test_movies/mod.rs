@@ -5,3 +5,4 @@ mod fileio;
 mod nested;
 mod sysmenu;
 mod budapi;
+mod native_probe;
