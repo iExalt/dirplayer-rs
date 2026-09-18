@@ -1,4 +1,7 @@
-use std::{collections::{HashMap, HashSet}, iter::FromIterator};
+use std::{
+    collections::{HashMap, HashSet},
+    iter::FromIterator,
+};
 
 use itertools::Itertools;
 use js_sys::Array;
@@ -19,7 +22,9 @@ use crate::{
         bitmap::bitmap::PaletteRef,
         cast_lib::{CastMemberRef, PlayerNotification, PlayerNotificationKind},
         cast_member::{CastMember, CastMemberType, ScriptMember},
-        datum_formatting::{format_concrete_datum, format_datum, format_float_with_precision, format_numeric_value},
+        datum_formatting::{
+            format_concrete_datum, format_datum, format_float_with_precision, format_numeric_value,
+        },
         datum_ref::{DatumId, DatumRef},
         handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers,
         score::get_channel_number_from_index,
@@ -83,9 +88,12 @@ fn format_atom_summary(a: &crate::player::js_lingo::xdr::JsAtom) -> String {
         JsAtom::Function(f) => format!(
             "function {}({})",
             f.name.as_deref().unwrap_or("<anonymous>"),
-            f.bindings.iter()
+            f.bindings
+                .iter()
                 .filter(|b| b.kind == crate::player::js_lingo::xdr::JsBindingKind::Argument)
-                .map(|b| b.name.as_str()).collect::<Vec<_>>().join(", ")
+                .map(|b| b.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
         JsAtom::Unsupported(t) => format!("<unsupported tag={}>", t),
     }
@@ -195,7 +203,10 @@ impl Into<js_sys::Map> for JsBridgeScope {
     fn into(self) -> js_sys::Map {
         let map = js_sys::Map::new();
         map.str_set("script_member_ref", &self.script_member_ref.to_js_value());
-        map.str_set("script_member_name", &safe_js_string(&self.script_member_name));
+        map.str_set(
+            "script_member_name",
+            &safe_js_string(&self.script_member_name),
+        );
         map.str_set("bytecode_index", &JsValue::from(self.bytecode_index));
         map.str_set("handler_name", &safe_js_string(&self.handler_name));
 
@@ -280,17 +291,31 @@ extern "C" {
     pub fn onCastListChanged(names: Array);
     pub fn onCastLibNameChanged(cast_number: u32, name: &str);
     #[wasm_bindgen(catch)]
-    pub fn onCastMemberListChanged(cast_number: u32, members: js_sys::Object) -> Result<(), JsValue>;
+    pub fn onCastMemberListChanged(
+        cast_number: u32,
+        members: js_sys::Object,
+    ) -> Result<(), JsValue>;
     #[wasm_bindgen(catch)]
     pub fn onCastMemberChanged(member_ref: JsValue, member: js_sys::Object) -> Result<(), JsValue>;
     #[wasm_bindgen(catch)]
     pub fn onScoreChanged(snapshot: js_sys::Object, owner_key: &str) -> Result<(), JsValue>;
     #[wasm_bindgen(catch)]
-    pub fn onChannelChanged(channel: i16, snapshot: js_sys::Object, owner_key: &str) -> Result<(), JsValue>;
+    pub fn onChannelChanged(
+        channel: i16,
+        snapshot: js_sys::Object,
+        owner_key: &str,
+    ) -> Result<(), JsValue>;
     #[wasm_bindgen(catch)]
-    pub fn onChannelDisplayNameChanged(channel: i16, display_name: &str, owner_key: &str) -> Result<(), JsValue>;
+    pub fn onChannelDisplayNameChanged(
+        channel: i16,
+        display_name: &str,
+        owner_key: &str,
+    ) -> Result<(), JsValue>;
     #[wasm_bindgen(catch)]
-    pub fn onChannelDisplayNamesChanged(names: js_sys::Object, owner_key: &str) -> Result<(), JsValue>;
+    pub fn onChannelDisplayNamesChanged(
+        names: js_sys::Object,
+        owner_key: &str,
+    ) -> Result<(), JsValue>;
     pub fn onFrameChanged(frame: u32);
     #[wasm_bindgen(catch)]
     pub fn onScriptError(data: js_sys::Object) -> Result<(), JsValue>;
@@ -309,19 +334,57 @@ extern "C" {
     #[wasm_bindgen(catch)]
     pub fn onDatumSnapshot(datum_id: DatumId, data: js_sys::Object) -> Result<(), JsValue>;
     #[wasm_bindgen(catch)]
-    pub fn onDatumSnapshotOwned(owner_key: &str, datum_id: DatumId, data: js_sys::Object) -> Result<(), JsValue>;
+    pub fn onDatumSnapshotOwned(
+        owner_key: &str,
+        datum_id: DatumId,
+        data: js_sys::Object,
+    ) -> Result<(), JsValue>;
     #[wasm_bindgen(catch)]
-    pub fn onScriptInstanceSnapshot(script_ref: ScriptInstanceId, data: js_sys::Object) -> Result<(), JsValue>;
+    pub fn onScriptInstanceSnapshot(
+        script_ref: ScriptInstanceId,
+        data: js_sys::Object,
+    ) -> Result<(), JsValue>;
     #[wasm_bindgen(catch)]
-    pub fn onScriptInstanceSnapshotOwned(owner_key: &str, script_ref: ScriptInstanceId, data: js_sys::Object) -> Result<(), JsValue>;
+    pub fn onScriptInstanceSnapshotOwned(
+        owner_key: &str,
+        script_ref: ScriptInstanceId,
+        data: js_sys::Object,
+    ) -> Result<(), JsValue>;
     #[wasm_bindgen(catch)]
     pub fn onScriptErrorOwned(owner_key: &str, data: js_sys::Object) -> Result<(), JsValue>;
     pub fn onExternalEvent(event: &str);
-    pub fn onFlashMemberLoaded(sprite_num: i32, cast_lib: i32, cast_member: i32, swf_data: &[u8], width: u32, height: u32, paused_at_start: bool, asserted_frame: i32, owner_key: &str);
-    pub fn onFlashMemberLoadedPrepared(sprite_num: i32, cast_lib: i32, cast_member: i32, swf_data: &[u8], width: u32, height: u32, paused_at_start: bool, asserted_frame: i32, owner_key: &str, generation: f64);
+    pub fn onFlashMemberLoaded(
+        sprite_num: i32,
+        cast_lib: i32,
+        cast_member: i32,
+        swf_data: &[u8],
+        width: u32,
+        height: u32,
+        paused_at_start: bool,
+        asserted_frame: i32,
+        owner_key: &str,
+    );
+    pub fn onFlashMemberLoadedPrepared(
+        sprite_num: i32,
+        cast_lib: i32,
+        cast_member: i32,
+        swf_data: &[u8],
+        width: u32,
+        height: u32,
+        paused_at_start: bool,
+        asserted_frame: i32,
+        owner_key: &str,
+        generation: f64,
+    );
     pub fn onFlashMemberUnloaded(sprite_num: i32, owner_key: &str);
     pub fn onFlashMemberUnloadedAtGeneration(sprite_num: i32, generation: f64, owner_key: &str);
-    pub fn onFlashMemberResized(sprite_num: i32, generation: f64, width: u32, height: u32, owner_key: &str);
+    pub fn onFlashMemberResized(
+        sprite_num: i32,
+        generation: f64,
+        width: u32,
+        height: u32,
+        owner_key: &str,
+    );
     pub fn onFlashResetAll(owner_key: &str);
     #[wasm_bindgen(js_name = "dirplayer_registerLingoCallbackOwned", catch)]
     pub fn registerLingoCallbackOwned(
@@ -373,7 +436,10 @@ impl JsApi {
             Datum::ScriptInstanceRef(script_ref.clone().unwrap())
         };
         let snapshot = concrete_datum_to_js_bridge(&datum, symbols, player, 0);
-        onScriptInstanceSnapshot(script_ref.map(|script_ref| *script_ref).unwrap_or(0), snapshot);
+        onScriptInstanceSnapshot(
+            script_ref.map(|script_ref| *script_ref).unwrap_or(0),
+            snapshot,
+        );
     }
     pub fn dispatch_schedule_timeout(timeout_name: &str, interval: u32) {
         onScheduleTimeout(timeout_name, interval);
@@ -385,19 +451,71 @@ impl JsApi {
     pub fn dispatch_clear_timeouts() {
         onClearTimeouts();
     }
-    pub fn dispatch_flash_member_loaded(sprite_num: i32, cast_lib: i32, cast_member: i32, swf_data: &[u8], width: u32, height: u32, paused_at_start: bool, asserted_frame: i32, owner_key: &str) {
-        onFlashMemberLoaded(sprite_num, cast_lib, cast_member, swf_data, width, height, paused_at_start, asserted_frame, owner_key);
+    pub fn dispatch_flash_member_loaded(
+        sprite_num: i32,
+        cast_lib: i32,
+        cast_member: i32,
+        swf_data: &[u8],
+        width: u32,
+        height: u32,
+        paused_at_start: bool,
+        asserted_frame: i32,
+        owner_key: &str,
+    ) {
+        onFlashMemberLoaded(
+            sprite_num,
+            cast_lib,
+            cast_member,
+            swf_data,
+            width,
+            height,
+            paused_at_start,
+            asserted_frame,
+            owner_key,
+        );
     }
-    pub fn dispatch_flash_member_loaded_prepared(sprite_num: i32, cast_lib: i32, cast_member: i32, swf_data: &[u8], width: u32, height: u32, paused_at_start: bool, asserted_frame: i32, owner_key: &str, generation: u64) {
-        onFlashMemberLoadedPrepared(sprite_num, cast_lib, cast_member, swf_data, width, height, paused_at_start, asserted_frame, owner_key, generation as f64);
+    pub fn dispatch_flash_member_loaded_prepared(
+        sprite_num: i32,
+        cast_lib: i32,
+        cast_member: i32,
+        swf_data: &[u8],
+        width: u32,
+        height: u32,
+        paused_at_start: bool,
+        asserted_frame: i32,
+        owner_key: &str,
+        generation: u64,
+    ) {
+        onFlashMemberLoadedPrepared(
+            sprite_num,
+            cast_lib,
+            cast_member,
+            swf_data,
+            width,
+            height,
+            paused_at_start,
+            asserted_frame,
+            owner_key,
+            generation as f64,
+        );
     }
     pub fn dispatch_flash_member_unloaded(sprite_num: i32, owner_key: &str) {
         onFlashMemberUnloaded(sprite_num, owner_key);
     }
-    pub fn dispatch_flash_member_unloaded_at_generation(sprite_num: i32, generation: u64, owner_key: &str) {
+    pub fn dispatch_flash_member_unloaded_at_generation(
+        sprite_num: i32,
+        generation: u64,
+        owner_key: &str,
+    ) {
         onFlashMemberUnloadedAtGeneration(sprite_num, generation as f64, owner_key);
     }
-    pub fn dispatch_flash_member_resized(sprite_num: i32, generation: u64, width: u32, height: u32, owner_key: &str) {
+    pub fn dispatch_flash_member_resized(
+        sprite_num: i32,
+        generation: u64,
+        width: u32,
+        height: u32,
+        owner_key: &str,
+    ) {
         onFlashMemberResized(sprite_num, generation as f64, width, height, owner_key);
     }
     /// Tear down every live Flash/Ruffle instance. Called on movie reset so
@@ -431,9 +549,13 @@ impl JsApi {
             flash_cast_lib,
             flash_cast_member,
         )
-        .map_err(|error| ScriptError::new(format!("Flash callback registration failed: {error:?}")))?;
+        .map_err(|error| {
+            ScriptError::new(format!("Flash callback registration failed: {error:?}"))
+        })?;
         if result.as_bool() != Some(true) {
-            return Err(ScriptError::new("Flash callback registration was not acknowledged".to_owned()));
+            return Err(ScriptError::new(
+                "Flash callback registration was not acknowledged".to_owned(),
+            ));
         }
         Ok(())
     }
@@ -442,15 +564,17 @@ impl JsApi {
         child_owner_key: &str,
         capability: &JsValue,
     ) -> Result<(), ScriptError> {
-        registerNestedFlashOwner(parent_owner_key, child_owner_key, capability)
-            .map_err(|error| ScriptError::new(format!("nested Flash owner registration failed: {error:?}")))
+        registerNestedFlashOwner(parent_owner_key, child_owner_key, capability).map_err(|error| {
+            ScriptError::new(format!("nested Flash owner registration failed: {error:?}"))
+        })
     }
     pub fn retire_nested_flash_owner(
         parent_owner_key: &str,
         child_owner_key: &str,
     ) -> Result<(), ScriptError> {
-        retireNestedFlashOwner(parent_owner_key, child_owner_key)
-            .map_err(|error| ScriptError::new(format!("nested Flash owner retirement failed: {error:?}")))
+        retireNestedFlashOwner(parent_owner_key, child_owner_key).map_err(|error| {
+            ScriptError::new(format!("nested Flash owner retirement failed: {error:?}"))
+        })
     }
     pub fn dispatch_stage_size_changed(width: u32, height: u32, center: bool) {
         // Only the host player (id 0) owns the frontend stage. A nested `#movie`
@@ -523,7 +647,10 @@ impl JsApi {
         let mut children_map: HashMap<u32, Vec<u32>> = HashMap::new();
         if let Some(kt) = dir_file.key_table.as_ref() {
             for entry in kt.entries.iter().take(kt.used_count as usize) {
-                children_map.entry(entry.cast_id).or_default().push(entry.section_id);
+                children_map
+                    .entry(entry.cast_id)
+                    .or_default()
+                    .push(entry.section_id);
             }
         }
         children_map
@@ -539,7 +666,10 @@ impl JsApi {
 
         // Find the DirectorFile that contains the chunks
         let dir_file = if cast_lib.is_external {
-            player.dir_cache.get(cast_lib.file_name.as_str()).map(|file| file.as_ref())
+            player
+                .dir_cache
+                .get(cast_lib.file_name.as_str())
+                .map(|file| file.as_ref())
         } else {
             player.movie.file.as_ref()
         };
@@ -553,10 +683,10 @@ impl JsApi {
         let cast_def = if cast_lib.is_external {
             dir_file.casts.first()
         } else {
-            let cast_entry = dir_file.cast_entries.get((cast_number as usize).wrapping_sub(1));
-            cast_entry.and_then(|entry| {
-                dir_file.casts.iter().find(|cd| cd.id == entry.id)
-            })
+            let cast_entry = dir_file
+                .cast_entries
+                .get((cast_number as usize).wrapping_sub(1));
+            cast_entry.and_then(|entry| dir_file.casts.iter().find(|cd| cd.id == entry.id))
         };
 
         let cast_def = match cast_def {
@@ -570,7 +700,8 @@ impl JsApi {
         // Build owner_map (child → parent) from KeyTable
         let owner_map: HashMap<u32, u32> = key_table
             .map(|kt| {
-                kt.entries.iter()
+                kt.entries
+                    .iter()
                     .take(kt.used_count as usize)
                     .map(|e| (e.section_id, e.cast_id))
                     .collect()
@@ -693,7 +824,8 @@ impl JsApi {
         // Build owner_map from KeyTable
         let owner_map: HashMap<u32, u32> = key_table
             .map(|kt| {
-                kt.entries.iter()
+                kt.entries
+                    .iter()
                     .take(kt.used_count as usize)
                     .map(|e| (e.section_id, e.cast_id))
                     .collect()
@@ -732,14 +864,21 @@ impl JsApi {
         } else {
             let cast_lib = player.movie.cast_manager.get_cast_or_null(cast_number)?;
             if cast_lib.is_external {
-                player.dir_cache.get(cast_lib.file_name.as_str()).map(|file| file.as_ref())
+                player
+                    .dir_cache
+                    .get(cast_lib.file_name.as_str())
+                    .map(|file| file.as_ref())
             } else {
                 player.movie.file.as_ref()
             }
         };
 
         let dir_file = dir_file?;
-        dir_file.chunk_container.cached_chunk_views.get(&chunk_id).cloned()
+        dir_file
+            .chunk_container
+            .cached_chunk_views
+            .get(&chunk_id)
+            .cloned()
     }
 
     fn chunk_to_js(chunk: &Chunk, symbols: &SymbolTable) -> js_sys::Object {
@@ -755,13 +894,22 @@ impl JsApi {
             }
             Chunk::CastMember(c) => {
                 map.str_set("type", &JsValue::from_str("CASt"));
-                map.str_set("member_type", &JsValue::from_str(&format!("{:?}", c.member_type)));
+                map.str_set(
+                    "member_type",
+                    &JsValue::from_str(&format!("{:?}", c.member_type)),
+                );
                 if let Some(info) = &c.member_info {
                     map.str_set("name", &JsValue::from_str(&ascii_safe(&info.name)));
                     if !info.script_src_text.is_empty() {
-                        map.str_set("script_src_text", &JsValue::from_str(&ascii_safe(&info.script_src_text)));
+                        map.str_set(
+                            "script_src_text",
+                            &JsValue::from_str(&ascii_safe(&info.script_src_text)),
+                        );
                     }
-                    map.str_set("script_id", &JsValue::from_f64(info.header.script_id as f64));
+                    map.str_set(
+                        "script_id",
+                        &JsValue::from_f64(info.header.script_id as f64),
+                    );
                     map.str_set("flags", &JsValue::from_f64(info.header.flags as f64));
                 }
                 // Serialize type-specific data
@@ -802,11 +950,17 @@ impl JsApi {
                 for entry in &c.entries {
                     let em = js_sys::Map::new();
                     em.str_set("name", &JsValue::from_str(&ascii_safe(&entry.name)));
-                    em.str_set("file_path", &JsValue::from_str(&ascii_safe(&entry.file_path)));
+                    em.str_set(
+                        "file_path",
+                        &JsValue::from_str(&ascii_safe(&entry.file_path)),
+                    );
                     em.str_set("id", &JsValue::from_f64(entry.id as f64));
                     em.str_set("min_member", &JsValue::from_f64(entry.min_member as f64));
                     em.str_set("max_member", &JsValue::from_f64(entry.max_member as f64));
-                    em.str_set("preload_settings", &JsValue::from_f64(entry.preload_settings as f64));
+                    em.str_set(
+                        "preload_settings",
+                        &JsValue::from_f64(entry.preload_settings as f64),
+                    );
                     entries.push(&em.to_js_object());
                 }
                 map.str_set("entries", &entries);
@@ -820,7 +974,10 @@ impl JsApi {
                     let em = js_sys::Map::new();
                     em.str_set("section_id", &JsValue::from_f64(entry.section_id as f64));
                     em.str_set("cast_id", &JsValue::from_f64(entry.cast_id as f64));
-                    em.str_set("fourcc", &JsValue::from_str(&fourcc_to_string(entry.fourcc)));
+                    em.str_set(
+                        "fourcc",
+                        &JsValue::from_str(&fourcc_to_string(entry.fourcc)),
+                    );
                     entries.push(&em.to_js_object());
                 }
                 map.str_set("entries", &entries);
@@ -828,7 +985,10 @@ impl JsApi {
             Chunk::ScriptContext(sc) => {
                 map.str_set("type", &JsValue::from_str("Lctx"));
                 map.str_set("entry_count", &JsValue::from_f64(sc.entry_count as f64));
-                map.str_set("lnam_section_id", &JsValue::from_f64(sc.lnam_section_id as f64));
+                map.str_set(
+                    "lnam_section_id",
+                    &JsValue::from_f64(sc.lnam_section_id as f64),
+                );
                 let entries = js_sys::Array::new();
                 for entry in &sc.section_map {
                     let em = js_sys::Map::new();
@@ -847,8 +1007,14 @@ impl JsApi {
             }
             Chunk::Script(sc) => {
                 map.str_set("type", &JsValue::from_str("Lscr"));
-                map.str_set("handler_count", &JsValue::from_f64(sc.handlers.len() as f64));
-                map.str_set("literal_count", &JsValue::from_f64(sc.literals.len() as f64));
+                map.str_set(
+                    "handler_count",
+                    &JsValue::from_f64(sc.handlers.len() as f64),
+                );
+                map.str_set(
+                    "literal_count",
+                    &JsValue::from_f64(sc.literals.len() as f64),
+                );
                 let prop_ids = js_sys::Array::new();
                 for id in &sc.property_name_ids {
                     prop_ids.push(&JsValue::from_f64(*id as f64));
@@ -858,7 +1024,10 @@ impl JsApi {
                 for handler in &sc.handlers {
                     let hm = js_sys::Map::new();
                     hm.str_set("name_id", &JsValue::from_f64(handler.name_id as f64));
-                    hm.str_set("bytecode_count", &JsValue::from_f64(handler.bytecode_array.len() as f64));
+                    hm.str_set(
+                        "bytecode_count",
+                        &JsValue::from_f64(handler.bytecode_array.len() as f64),
+                    );
                     let arg_ids = js_sys::Array::new();
                     for id in &handler.argument_name_ids {
                         arg_ids.push(&JsValue::from_f64(*id as f64));
@@ -913,7 +1082,10 @@ impl JsApi {
             }
             Chunk::Config(c) => {
                 map.str_set("type", &JsValue::from_str("VWCF"));
-                map.str_set("director_version", &JsValue::from_f64(c.director_version as f64));
+                map.str_set(
+                    "director_version",
+                    &JsValue::from_f64(c.director_version as f64),
+                );
                 map.str_set("movie_top", &JsValue::from_f64(c.movie_top as f64));
                 map.str_set("movie_left", &JsValue::from_f64(c.movie_left as f64));
                 map.str_set("movie_bottom", &JsValue::from_f64(c.movie_bottom as f64));
@@ -932,7 +1104,10 @@ impl JsApi {
                 let runs_arr = js_sys::Array::new();
                 for run in &runs {
                     let rm = js_sys::Map::new();
-                    rm.str_set("start_position", &JsValue::from_f64(run.start_position as f64));
+                    rm.str_set(
+                        "start_position",
+                        &JsValue::from_f64(run.start_position as f64),
+                    );
                     rm.str_set("font_id", &JsValue::from_f64(run.font_id as f64));
                     rm.str_set("font_size", &JsValue::from_f64(run.font_size as f64));
                     rm.str_set("style", &JsValue::from_f64(run.style as f64));
@@ -952,15 +1127,24 @@ impl JsApi {
                 map.str_set("type", &JsValue::from_str("snd "));
                 map.str_set("channels", &JsValue::from_f64(s.channels() as f64));
                 map.str_set("sample_rate", &JsValue::from_f64(s.sample_rate() as f64));
-                map.str_set("bits_per_sample", &JsValue::from_f64(s.bits_per_sample() as f64));
+                map.str_set(
+                    "bits_per_sample",
+                    &JsValue::from_f64(s.bits_per_sample() as f64),
+                );
                 map.str_set("sample_count", &JsValue::from_f64(s.sample_count() as f64));
                 map.str_set("codec", &JsValue::from_str(&ascii_safe(&s.codec())));
                 map.str_set("data_size", &JsValue::from_f64(s.data().len() as f64));
             }
             Chunk::Score(sc) => {
                 map.str_set("type", &JsValue::from_str("VWSC"));
-                map.str_set("entry_count", &JsValue::from_f64(sc.header.entry_count as f64));
-                map.str_set("frame_interval_count", &JsValue::from_f64(sc.frame_intervals.len() as f64));
+                map.str_set(
+                    "entry_count",
+                    &JsValue::from_f64(sc.header.entry_count as f64),
+                );
+                map.str_set(
+                    "frame_interval_count",
+                    &JsValue::from_f64(sc.frame_intervals.len() as f64),
+                );
             }
             Chunk::FrameLabels(fl) => {
                 map.str_set("type", &JsValue::from_str("VWLB"));
@@ -984,21 +1168,39 @@ impl JsApi {
                 if xm.is_pfr_font() {
                     map.str_set("content_type", &JsValue::from_str("PFR1 Font"));
                     if let Some(font) = xm.parse_pfr_font() {
-                        map.str_set("font_name", &JsValue::from_str(&ascii_safe(&font.font_name)));
-                        map.str_set("outline_glyph_count", &JsValue::from_f64(font.parsed.glyphs.len() as f64));
-                        map.str_set("bitmap_glyph_count", &JsValue::from_f64(font.parsed.bitmap_glyphs.len() as f64));
-                        map.str_set("target_em_px", &JsValue::from_f64(font.parsed.target_em_px as f64));
+                        map.str_set(
+                            "font_name",
+                            &JsValue::from_str(&ascii_safe(&font.font_name)),
+                        );
+                        map.str_set(
+                            "outline_glyph_count",
+                            &JsValue::from_f64(font.parsed.glyphs.len() as f64),
+                        );
+                        map.str_set(
+                            "bitmap_glyph_count",
+                            &JsValue::from_f64(font.parsed.bitmap_glyphs.len() as f64),
+                        );
+                        map.str_set(
+                            "target_em_px",
+                            &JsValue::from_f64(font.parsed.target_em_px as f64),
+                        );
                     }
                 } else if xm.is_styled_text() {
                     map.str_set("content_type", &JsValue::from_str("Styled Text"));
                     if let Some(st) = xm.parse_styled_text() {
                         map.str_set("text", &JsValue::from_str(&ascii_safe(&st.text)));
-                        map.str_set("alignment", &JsValue::from_str(&format!("{:?}", st.alignment)));
+                        map.str_set(
+                            "alignment",
+                            &JsValue::from_str(&format!("{:?}", st.alignment)),
+                        );
                         map.str_set("word_wrap", &JsValue::from_bool(st.word_wrap));
                         map.str_set("width", &JsValue::from_f64(st.width as f64));
                         map.str_set("height", &JsValue::from_f64(st.height as f64));
                         map.str_set("line_count", &JsValue::from_f64(st.line_count as f64));
-                        map.str_set("fixed_line_space", &JsValue::from_f64(st.fixed_line_space as f64));
+                        map.str_set(
+                            "fixed_line_space",
+                            &JsValue::from_f64(st.fixed_line_space as f64),
+                        );
                         let spans = js_sys::Array::new();
                         for span in &st.styled_spans {
                             let sm = js_sys::Map::new();
@@ -1051,7 +1253,10 @@ impl JsApi {
                 None => return error_result("Cast not found"),
             };
             if cast_lib.is_external {
-                player.dir_cache.get(cast_lib.file_name.as_str()).map(|file| file.as_ref())
+                player
+                    .dir_cache
+                    .get(cast_lib.file_name.as_str())
+                    .map(|file| file.as_ref())
             } else {
                 player.movie.file.as_ref()
             }
@@ -1073,9 +1278,12 @@ impl JsApi {
         };
 
         // Determine lctx_capital_x for this chunk's cast
-        let lctx_capital_x = dir_file.casts.iter().find(|cd| {
-            cd.lctx_child_section_ids.contains(&chunk_id)
-        }).map(|cd| cd.capital_x).unwrap_or(false);
+        let lctx_capital_x = dir_file
+            .casts
+            .iter()
+            .find(|cd| cd.lctx_child_section_ids.contains(&chunk_id))
+            .map(|cd| cd.capital_x)
+            .unwrap_or(false);
 
         let mut rifx = RIFXReaderContext {
             after_burned: dir_file.after_burned,
@@ -1093,7 +1301,9 @@ impl JsApi {
     pub fn dispatch_cast_name_changed(cast_number: u32) {
         crate::player::spawn_player_local(async move {
             // Deferred task — the player may be gone by the time it runs.
-            if unsafe { PLAYER_OPT.is_none() } { return; }
+            if unsafe { PLAYER_OPT.is_none() } {
+                return;
+            }
             let player = unsafe { crate::player::player_ref() };
             let cast = player.movie.cast_manager.get_cast(cast_number).unwrap();
             onCastLibNameChanged(cast_number, &cast.name);
@@ -1103,7 +1313,9 @@ impl JsApi {
     pub fn dispatch_cast_list_changed() {
         crate::player::spawn_player_local(async move {
             // Deferred task — the player may be gone by the time it runs.
-            if unsafe { PLAYER_OPT.is_none() } { return; }
+            if unsafe { PLAYER_OPT.is_none() } {
+                return;
+            }
             let player = unsafe { crate::player::player_ref() };
             let names = player
                 .movie
@@ -1133,9 +1345,13 @@ impl JsApi {
         crate::player::spawn_player_local(async move {
             PENDING_CAST_LISTS.with(|pending| pending.borrow_mut().remove(&cast_number));
             // Deferred task — the player may be gone by the time it runs.
-            if unsafe { PLAYER_OPT.is_none() } { return; }
+            if unsafe { PLAYER_OPT.is_none() } {
+                return;
+            }
             let player = unsafe { crate::player::player_ref() };
-            if !player.subscribed_cast_member_lists.contains(&cast_number) { return; }
+            if !player.subscribed_cast_member_lists.contains(&cast_number) {
+                return;
+            }
             let cast = match player.movie.cast_manager.get_cast(cast_number) {
                 Ok(cast) => cast,
                 Err(_) => return,
@@ -1161,7 +1377,11 @@ impl JsApi {
             if !player.subscribed_member_refs.contains(&member_ref) {
                 return;
             }
-            let Ok(cast) = player.movie.cast_manager.get_cast(member_ref.cast_lib as u32) else {
+            let Ok(cast) = player
+                .movie
+                .cast_manager
+                .get_cast(member_ref.cast_lib as u32)
+            else {
                 return;
             };
             let Some(member) = cast.members.get(&(member_ref.cast_member as u32)) else {
@@ -1191,7 +1411,9 @@ impl JsApi {
     pub fn on_cast_member_name_changed(slot_number: u32) {
         crate::player::spawn_player_local(async move {
             // Deferred task — the player may be gone by the time it runs.
-            if unsafe { PLAYER_OPT.is_none() } { return; }
+            if unsafe { PLAYER_OPT.is_none() } {
+                return;
+            }
             let player = unsafe { crate::player::player_ref() };
 
             if player.is_subscribed_to_channel_names {
@@ -1224,10 +1446,14 @@ impl JsApi {
         crate::player::spawn_player_local(async move {
             SCORE_DIRTY.with(|dirty| dirty.set(false));
             // Deferred task — the player may be gone by the time it runs.
-            if unsafe { PLAYER_OPT.is_none() } { return; }
+            if unsafe { PLAYER_OPT.is_none() } {
+                return;
+            }
             let player = unsafe { crate::player::player_ref() };
             // Only when a score inspector is open. See is_subscribed_to_score.
-            if !player.is_subscribed_to_score { return; }
+            if !player.is_subscribed_to_score {
+                return;
+            }
 
             let snapshot = Self::get_score_snapshot(player, &player.movie.score);
             let owner_key = owner_key_string(&player.owner);
@@ -1235,9 +1461,7 @@ impl JsApi {
         });
     }
 
-    pub fn score_snapshot_for_player(
-        player: &DirPlayer,
-    ) -> Option<(js_sys::Object, String)> {
+    pub fn score_snapshot_for_player(player: &DirPlayer) -> Option<(js_sys::Object, String)> {
         player.is_subscribed_to_score.then(|| {
             (
                 Self::get_score_snapshot(player, &player.movie.score).to_js_object(),
@@ -1302,38 +1526,50 @@ impl JsApi {
                         .with_player(player_id, |context| {
                             let owner_key = owner_key_string(&context.player.owner);
                             match notification.kind {
-                                PlayerNotificationKind::ScoreChanged =>
-                                    Self::score_snapshot_for_player(context.player)
-                                        .map(|(snapshot, _)| PreparedNotification::Score(snapshot, owner_key)),
-                                PlayerNotificationKind::ChannelChanged(channel) => Some(
-                                    PreparedNotification::Channel(
+                                PlayerNotificationKind::ScoreChanged => {
+                                    Self::score_snapshot_for_player(context.player).map(
+                                        |(snapshot, _)| {
+                                            PreparedNotification::Score(snapshot, owner_key)
+                                        },
+                                    )
+                                }
+                                PlayerNotificationKind::ChannelChanged(channel) => {
+                                    Some(PreparedNotification::Channel(
                                         channel,
-                                        Self::channel_snapshot_for_player(context.player, channel).0,
+                                        Self::channel_snapshot_for_player(context.player, channel)
+                                            .0,
                                         owner_key,
-                                    ),
-                                ),
-                                PlayerNotificationKind::ChannelNameChanged(channel) =>
+                                    ))
+                                }
+                                PlayerNotificationKind::ChannelNameChanged(channel) => {
                                     Self::channel_name_snapshot_for_player(context.player, channel)
-                                        .map(|(name, _)| PreparedNotification::ChannelName(channel, name, owner_key)),
-                                PlayerNotificationKind::CastMemberNameChanged(slot) => Some(
-                                    PreparedNotification::ChannelNames(
-                                        Self::channel_name_snapshots_for_member_slot(context.player, slot),
+                                        .map(|(name, _)| {
+                                            PreparedNotification::ChannelName(
+                                                channel, name, owner_key,
+                                            )
+                                        })
+                                }
+                                PlayerNotificationKind::CastMemberNameChanged(slot) => {
+                                    Some(PreparedNotification::ChannelNames(
+                                        Self::channel_name_snapshots_for_member_slot(
+                                            context.player,
+                                            slot,
+                                        ),
                                         owner_key,
-                                    ),
-                                ),
+                                    ))
+                                }
                                 PlayerNotificationKind::ChannelNamesChanged => {
                                     if !context.player.is_subscribed_to_channel_names {
                                         return None;
                                     }
                                     let (names, owner_key) =
                                         Self::channel_names_snapshot_for_player(context.player);
-                                    Some(PreparedNotification::ChannelNamesSnapshot(names, owner_key))
+                                    Some(PreparedNotification::ChannelNamesSnapshot(
+                                        names, owner_key,
+                                    ))
                                 }
                                 PlayerNotificationKind::CastMemberChanged(member_ref) => {
-                                    if !context
-                                        .player
-                                        .subscribed_member_refs
-                                        .contains(&member_ref)
+                                    if !context.player.subscribed_member_refs.contains(&member_ref)
                                     {
                                         return None;
                                     }
@@ -1344,9 +1580,8 @@ impl JsApi {
                                         .get_cast(member_ref.cast_lib as u32)
                                         .ok();
                                     cast.and_then(|cast| {
-                                        cast.members
-                                            .get(&(member_ref.cast_member as u32))
-                                            .map(|member| {
+                                        cast.members.get(&(member_ref.cast_member as u32)).map(
+                                            |member| {
                                                 PreparedNotification::CastMemberChanged(
                                                     member_ref.clone(),
                                                     Self::get_member_snapshot(
@@ -1358,7 +1593,8 @@ impl JsApi {
                                                     )
                                                     .to_js_object(),
                                                 )
-                                            })
+                                            },
+                                        )
                                     })
                                 }
                                 PlayerNotificationKind::CastMemberListChanged(cast_number) => {
@@ -1390,20 +1626,21 @@ impl JsApi {
                                             )
                                         })
                                 }
-                                PlayerNotificationKind::DatumSnapshot(datum_ref) => Some(
-                                        PreparedNotification::DatumSnapshot(
-                                            datum_ref.unwrap(),
+                                PlayerNotificationKind::DatumSnapshot(datum_ref) => {
+                                    Some(PreparedNotification::DatumSnapshot(
+                                        datum_ref.unwrap(),
                                         datum_to_js_bridge(
                                             &datum_ref,
                                             context.symbols,
                                             context.player,
                                             0,
-                                            ),
-                                            owner_key,
-                                    ),
-                                ),
+                                        ),
+                                        owner_key,
+                                    ))
+                                }
                                 PlayerNotificationKind::ScriptInstanceSnapshot(instance_id) => {
-                                    let script_id = instance_id.as_ref().map(|instance| instance.id());
+                                    let script_id =
+                                        instance_id.as_ref().map(|instance| instance.id());
                                     let datum = instance_id
                                         .map(Datum::ScriptInstanceRef)
                                         .unwrap_or(Datum::Void);
@@ -1418,13 +1655,13 @@ impl JsApi {
                                         owner_key,
                                     ))
                                 }
-                                PlayerNotificationKind::Host(event) => Some(
-                                    PreparedNotification::Host(
+                                PlayerNotificationKind::Host(event) => {
+                                    Some(PreparedNotification::Host(
                                         event.clone(),
                                         Self::host_event_to_js(&event),
                                         owner_key,
-                                    ),
-                                ),
+                                    ))
+                                }
                                 PlayerNotificationKind::HostBackpressure(capacity) => {
                                     Some(PreparedNotification::Backpressure(capacity))
                                 }
@@ -1456,11 +1693,9 @@ impl JsApi {
                         if !session.borrow().player_owner_matches(player_id, &owner) {
                             break;
                         }
-                        if let Err(error) = Self::dispatch_channel_name_snapshot(
-                            channel,
-                            &name,
-                            &owner_key,
-                        ) {
+                        if let Err(error) =
+                            Self::dispatch_channel_name_snapshot(channel, &name, &owner_key)
+                        {
                             log::error!("owner channel-name callback failed: {:?}", error);
                             dispatch_error = Some(error);
                             break;
@@ -1542,9 +1777,12 @@ impl JsApi {
                 .collect();
             let restore_result = session.borrow_mut().with_player(player_id, |context| {
                 if context.player.owner.same_identity(&drain_owner) {
-                    context.player.prepend_host_events(pending).map_err(|error| {
-                        JsValue::from_str(&format!("host event mailbox overflow: {error:?}"))
-                    })?;
+                    context
+                        .player
+                        .prepend_host_events(pending)
+                        .map_err(|error| {
+                            JsValue::from_str(&format!("host event mailbox overflow: {error:?}"))
+                        })?;
                 }
                 Ok(())
             });
@@ -1579,13 +1817,20 @@ impl JsApi {
                 map.str_set("type", &safe_js_string("frameChanged"));
                 map.str_set("frame", &JsValue::from_f64(*frame as f64));
             }
-            HostEvent::StageSizeChanged { width, height, center } => {
+            HostEvent::StageSizeChanged {
+                width,
+                height,
+                center,
+            } => {
                 map.str_set("type", &safe_js_string("stageSizeChanged"));
                 map.str_set("width", &JsValue::from_f64(*width as f64));
                 map.str_set("height", &JsValue::from_f64(*height as f64));
                 map.str_set("center", &JsValue::from_bool(*center));
             }
-            HostEvent::MovieLoaded { version, cast_names } => {
+            HostEvent::MovieLoaded {
+                version,
+                cast_names,
+            } => {
                 map.str_set("type", &safe_js_string("movieLoaded"));
                 map.str_set("version", &JsValue::from_f64(*version as f64));
                 let names = js_sys::Array::new();
@@ -1639,7 +1884,10 @@ impl JsApi {
         map.to_js_object()
     }
 
-    pub fn dispatch_score_snapshot(snapshot: js_sys::Object, owner_key: &str) -> Result<(), JsValue> {
+    pub fn dispatch_score_snapshot(
+        snapshot: js_sys::Object,
+        owner_key: &str,
+    ) -> Result<(), JsValue> {
         onScoreChanged(snapshot, owner_key)
     }
 
@@ -1679,8 +1927,10 @@ impl JsApi {
         if selected_channel == Some(channel) {
             crate::player::spawn_player_local(async move {
                 // Deferred task — the player may be gone by the time it runs.
-            if unsafe { PLAYER_OPT.is_none() } { return; }
-            let player = unsafe { crate::player::player_ref() };
+                if unsafe { PLAYER_OPT.is_none() } {
+                    return;
+                }
+                let player = unsafe { crate::player::player_ref() };
                 let snapshot = Self::get_channel_snapshot(player, &channel);
                 let owner_key = owner_key_string(&player.owner);
                 onChannelChanged(channel, snapshot.to_js_object(), &owner_key);
@@ -1713,11 +1963,7 @@ impl JsApi {
         Self::dispatch_debug_content(map.to_js_object());
     }
 
-    pub fn dispatch_debug_datum(
-        datum_ref: &DatumRef,
-        symbols: &SymbolTable,
-        player: &DirPlayer,
-    ) {
+    pub fn dispatch_debug_datum(datum_ref: &DatumRef, symbols: &SymbolTable, player: &DirPlayer) {
         let map = js_sys::Map::new();
         map.str_set("type", &safe_js_string("datum"));
         map.str_set("datumRef", &JsValue::from_f64(datum_ref.unwrap() as f64));
@@ -1731,12 +1977,15 @@ impl JsApi {
         member_map.str_set("name", &safe_js_string(&member.name));
         member_map.str_set("type", &safe_js_string(&member.member_type.type_string()));
         if let CastMemberType::Script(script_data) = &member.member_type {
-            member_map.str_set("scriptType", &safe_js_string(match script_data.script_type {
-                ScriptType::Movie => "movie",
-                ScriptType::Parent => "parent",
-                ScriptType::Score => "score",
-                _ => "unknown",
-            }));
+            member_map.str_set(
+                "scriptType",
+                &safe_js_string(match script_data.script_type {
+                    ScriptType::Movie => "movie",
+                    ScriptType::Parent => "parent",
+                    ScriptType::Score => "score",
+                    _ => "unknown",
+                }),
+            );
         }
         return member_map;
     }
@@ -1759,9 +2008,18 @@ impl JsApi {
             }
             CastMemberType::Text(text_data) => {
                 member_map.str_set("text", &ascii_safe(&text_data.text).to_js_value());
-                member_map.str_set("htmlSource", &ascii_safe(&text_data.html_source).to_js_value());
-                member_map.str_set("alignment", &ascii_safe(text_data.alignment.as_str()).to_js_value());
-                member_map.str_set("boxType", &ascii_safe(&text_data.box_type.to_string()).to_js_value());
+                member_map.str_set(
+                    "htmlSource",
+                    &ascii_safe(&text_data.html_source).to_js_value(),
+                );
+                member_map.str_set(
+                    "alignment",
+                    &ascii_safe(text_data.alignment.as_str()).to_js_value(),
+                );
+                member_map.str_set(
+                    "boxType",
+                    &ascii_safe(&text_data.box_type.to_string()).to_js_value(),
+                );
                 member_map.str_set("wordWrap", &JsValue::from_bool(text_data.word_wrap));
                 member_map.str_set("antiAlias", &JsValue::from_bool(text_data.anti_alias));
                 member_map.str_set("font", &ascii_safe(&text_data.font).to_js_value());
@@ -1771,9 +2029,18 @@ impl JsApi {
                     font_style_array.push(&ascii_safe(&style.to_string()).to_js_value());
                 }
                 member_map.str_set("fontStyle", &font_style_array);
-                member_map.str_set("fixedLineSpace", &JsValue::from_f64(text_data.fixed_line_space as f64));
-                member_map.str_set("topSpacing", &JsValue::from_f64(text_data.top_spacing as f64));
-                member_map.str_set("bottomSpacing", &JsValue::from_f64(text_data.bottom_spacing as f64));
+                member_map.str_set(
+                    "fixedLineSpace",
+                    &JsValue::from_f64(text_data.fixed_line_space as f64),
+                );
+                member_map.str_set(
+                    "topSpacing",
+                    &JsValue::from_f64(text_data.top_spacing as f64),
+                );
+                member_map.str_set(
+                    "bottomSpacing",
+                    &JsValue::from_f64(text_data.bottom_spacing as f64),
+                );
                 member_map.str_set("width", &JsValue::from_f64(text_data.width as f64));
                 member_map.str_set("height", &JsValue::from_f64(text_data.height as f64));
                 // set spans array
@@ -1781,27 +2048,32 @@ impl JsApi {
                 for span in &text_data.html_styled_spans {
                     let span_map = js_sys::Map::new();
                     span_map.str_set("text", &ascii_safe(&span.text).to_js_value());
-                    span_map.str_set("fontFace", &ascii_safe(&span.style.font_face.clone().unwrap_or_default()).to_js_value());
-                    span_map.str_set("fontSize", &JsValue::from_f64(span.style.font_size.unwrap_or_default() as f64));
+                    span_map.str_set(
+                        "fontFace",
+                        &ascii_safe(&span.style.font_face.clone().unwrap_or_default())
+                            .to_js_value(),
+                    );
+                    span_map.str_set(
+                        "fontSize",
+                        &JsValue::from_f64(span.style.font_size.unwrap_or_default() as f64),
+                    );
                     span_map.str_set("bold", &JsValue::from_bool(span.style.bold));
                     span_map.str_set("italic", &JsValue::from_bool(span.style.italic));
                     span_map.str_set("underline", &JsValue::from_bool(span.style.underline));
-                    span_map.str_set("color", &JsValue::from_f64(span.style.color.unwrap_or_default() as f64));
+                    span_map.str_set(
+                        "color",
+                        &JsValue::from_f64(span.style.color.unwrap_or_default() as f64),
+                    );
                     spans_array.push(&span_map.to_js_object());
                 }
                 member_map.str_set("htmlStyledSpans", &spans_array);
-
             }
             CastMemberType::Script(script_data) => {
                 let lctx = lctx.unwrap();
                 let script = &lctx.scripts[&script_data.script_id];
 
                 // Get cast info for variable multiplier
-                let cast = player
-                    .movie
-                    .cast_manager
-                    .get_cast(cast_lib)
-                    .unwrap();
+                let cast = player.movie.cast_manager.get_cast(cast_lib).unwrap();
                 let capital_x = cast.capital_x;
                 let dir_version = cast.dir_version;
 
@@ -1814,7 +2086,8 @@ impl JsApi {
                         capital_x,
                         dir_version,
                         symbols,
-                    ).to_js_object(),
+                    )
+                    .to_js_object(),
                 );
             }
             CastMemberType::Bitmap(bitmap_data) => {
@@ -1832,12 +2105,21 @@ impl JsApi {
             CastMemberType::Sound(sound_member) => {
                 member_map.str_set("sampleRate", &JsValue::from(sound_member.info.sample_rate));
                 member_map.str_set("channels", &JsValue::from(sound_member.info.channels));
-                member_map.str_set("bitsPerSample", &JsValue::from(sound_member.info.sample_size));
-                member_map.str_set("sampleCount", &JsValue::from(sound_member.info.sample_count));
+                member_map.str_set(
+                    "bitsPerSample",
+                    &JsValue::from(sound_member.info.sample_size),
+                );
+                member_map.str_set(
+                    "sampleCount",
+                    &JsValue::from(sound_member.info.sample_count),
+                );
                 member_map.str_set("duration", &JsValue::from(sound_member.info.duration));
                 member_map.str_set("loop", &JsValue::from_bool(sound_member.info.loop_enabled));
                 member_map.str_set("codec", &safe_js_string(&sound_member.sound.codec()));
-                member_map.str_set("dataSize", &JsValue::from(sound_member.sound.data().len() as u32));
+                member_map.str_set(
+                    "dataSize",
+                    &JsValue::from(sound_member.sound.data().len() as u32),
+                );
             }
             CastMemberType::FilmLoop(film_loop_data) => {
                 member_map.str_set("width", &JsValue::from(film_loop_data.info.width));
@@ -1857,8 +2139,14 @@ impl JsApi {
                     member_map.str_set("flashRectTop", &JsValue::from(info.flash_rect.1));
                     member_map.str_set("flashRectRight", &JsValue::from(info.flash_rect.2));
                     member_map.str_set("flashRectBottom", &JsValue::from(info.flash_rect.3));
-                    member_map.str_set("width", &JsValue::from(info.flash_rect.2 - info.flash_rect.0));
-                    member_map.str_set("height", &JsValue::from(info.flash_rect.3 - info.flash_rect.1));
+                    member_map.str_set(
+                        "width",
+                        &JsValue::from(info.flash_rect.2 - info.flash_rect.0),
+                    );
+                    member_map.str_set(
+                        "height",
+                        &JsValue::from(info.flash_rect.3 - info.flash_rect.1),
+                    );
                     member_map.str_set("directToStage", &JsValue::from_bool(info.direct_to_stage));
                     member_map.str_set("imageEnabled", &JsValue::from_bool(info.image_enabled));
                     member_map.str_set("soundEnabled", &JsValue::from_bool(info.sound_enabled));
@@ -1866,7 +2154,8 @@ impl JsApi {
                     member_map.str_set("loop", &JsValue::from_bool(info.loop_enabled));
                     member_map.str_set("isStatic", &JsValue::from_bool(info.is_static));
                     member_map.str_set("preload", &JsValue::from_bool(info.preload));
-                    member_map.str_set("centerRegPoint", &JsValue::from_bool(info.center_reg_point));
+                    member_map
+                        .str_set("centerRegPoint", &JsValue::from_bool(info.center_reg_point));
                     member_map.str_set("buttonsEnabled", &JsValue::from_bool(info.buttons_enabled));
                     member_map.str_set("actionsEnabled", &JsValue::from_bool(info.actions_enabled));
                     member_map.str_set("fixedRate", &JsValue::from(info.fixed_rate));
@@ -1878,47 +2167,70 @@ impl JsApi {
                     member_map.str_set("originV", &JsValue::from_f64(info.origin_v as f64));
                     member_map.str_set("viewH", &JsValue::from_f64(info.view_h as f64));
                     member_map.str_set("viewV", &JsValue::from_f64(info.view_v as f64));
-                    member_map.str_set("originMode", &safe_js_string(match info.origin_mode {
-                        crate::director::enums::FlashOriginMode::Center => "center",
-                        crate::director::enums::FlashOriginMode::TopLeft => "topLeft",
-                        crate::director::enums::FlashOriginMode::Point => "point",
-                    }));
-                    member_map.str_set("playbackMode", &safe_js_string(match info.playback_mode {
-                        crate::director::enums::FlashPlaybackMode::Normal => "normal",
-                        crate::director::enums::FlashPlaybackMode::Fixed => "fixed",
-                        crate::director::enums::FlashPlaybackMode::LockStep => "lockStep",
-                    }));
-                    member_map.str_set("scaleMode", &safe_js_string(match info.scale_mode {
-                        crate::director::enums::FlashScaleMode::ShowAll => "showAll",
-                        crate::director::enums::FlashScaleMode::NoScale => "noScale",
-                        crate::director::enums::FlashScaleMode::AutoSize => "autoSize",
-                        crate::director::enums::FlashScaleMode::ExactFit => "exactFit",
-                        crate::director::enums::FlashScaleMode::NoBorder => "noBorder",
-                    }));
-                    member_map.str_set("streamMode", &safe_js_string(match info.stream_mode {
-                        crate::director::enums::FlashStreamMode::Frame => "frame",
-                        crate::director::enums::FlashStreamMode::Idle => "idle",
-                        crate::director::enums::FlashStreamMode::Manual => "manual",
-                    }));
-                    member_map.str_set("quality", &safe_js_string(match info.quality {
-                        crate::director::enums::FlashQuality::AutoHigh => "autoHigh",
-                        crate::director::enums::FlashQuality::AutoMedium => "autoMedium",
-                        crate::director::enums::FlashQuality::AutoLow => "autoLow",
-                        crate::director::enums::FlashQuality::High => "high",
-                        crate::director::enums::FlashQuality::Medium => "medium",
-                        crate::director::enums::FlashQuality::Low => "low",
-                    }));
-                    member_map.str_set("eventPassMode", &safe_js_string(match info.event_pass_mode {
-                        crate::director::enums::FlashEventPassMode::PassAlways => "passAlways",
-                        crate::director::enums::FlashEventPassMode::PassButton => "passButton",
-                        crate::director::enums::FlashEventPassMode::PassNotButton => "passNotButton",
-                        crate::director::enums::FlashEventPassMode::PassNever => "passNever",
-                    }));
-                    member_map.str_set("clickMode", &safe_js_string(match info.click_mode {
-                        crate::director::enums::FlashClickMode::BoundingBox => "boundingBox",
-                        crate::director::enums::FlashClickMode::Opaque => "opaque",
-                        crate::director::enums::FlashClickMode::Object => "object",
-                    }));
+                    member_map.str_set(
+                        "originMode",
+                        &safe_js_string(match info.origin_mode {
+                            crate::director::enums::FlashOriginMode::Center => "center",
+                            crate::director::enums::FlashOriginMode::TopLeft => "topLeft",
+                            crate::director::enums::FlashOriginMode::Point => "point",
+                        }),
+                    );
+                    member_map.str_set(
+                        "playbackMode",
+                        &safe_js_string(match info.playback_mode {
+                            crate::director::enums::FlashPlaybackMode::Normal => "normal",
+                            crate::director::enums::FlashPlaybackMode::Fixed => "fixed",
+                            crate::director::enums::FlashPlaybackMode::LockStep => "lockStep",
+                        }),
+                    );
+                    member_map.str_set(
+                        "scaleMode",
+                        &safe_js_string(match info.scale_mode {
+                            crate::director::enums::FlashScaleMode::ShowAll => "showAll",
+                            crate::director::enums::FlashScaleMode::NoScale => "noScale",
+                            crate::director::enums::FlashScaleMode::AutoSize => "autoSize",
+                            crate::director::enums::FlashScaleMode::ExactFit => "exactFit",
+                            crate::director::enums::FlashScaleMode::NoBorder => "noBorder",
+                        }),
+                    );
+                    member_map.str_set(
+                        "streamMode",
+                        &safe_js_string(match info.stream_mode {
+                            crate::director::enums::FlashStreamMode::Frame => "frame",
+                            crate::director::enums::FlashStreamMode::Idle => "idle",
+                            crate::director::enums::FlashStreamMode::Manual => "manual",
+                        }),
+                    );
+                    member_map.str_set(
+                        "quality",
+                        &safe_js_string(match info.quality {
+                            crate::director::enums::FlashQuality::AutoHigh => "autoHigh",
+                            crate::director::enums::FlashQuality::AutoMedium => "autoMedium",
+                            crate::director::enums::FlashQuality::AutoLow => "autoLow",
+                            crate::director::enums::FlashQuality::High => "high",
+                            crate::director::enums::FlashQuality::Medium => "medium",
+                            crate::director::enums::FlashQuality::Low => "low",
+                        }),
+                    );
+                    member_map.str_set(
+                        "eventPassMode",
+                        &safe_js_string(match info.event_pass_mode {
+                            crate::director::enums::FlashEventPassMode::PassAlways => "passAlways",
+                            crate::director::enums::FlashEventPassMode::PassButton => "passButton",
+                            crate::director::enums::FlashEventPassMode::PassNotButton => {
+                                "passNotButton"
+                            }
+                            crate::director::enums::FlashEventPassMode::PassNever => "passNever",
+                        }),
+                    );
+                    member_map.str_set(
+                        "clickMode",
+                        &safe_js_string(match info.click_mode {
+                            crate::director::enums::FlashClickMode::BoundingBox => "boundingBox",
+                            crate::director::enums::FlashClickMode::Opaque => "opaque",
+                            crate::director::enums::FlashClickMode::Object => "object",
+                        }),
+                    );
                     member_map.str_set("sourceFileName", &safe_js_string(&info.source_file_name));
                     member_map.str_set("commonPlayer", &safe_js_string(&info.common_player));
                     member_map.str_set("bgColor", &JsValue::from(info.bg_color));
@@ -1941,7 +2253,10 @@ impl JsApi {
                 member_map.str_set("regY", &JsValue::from(info.reg_point.1));
                 member_map.str_set("dataSize", &JsValue::from(s3d_data.w3d_data.len() as u32));
                 member_map.str_set("directToStage", &JsValue::from_bool(info.direct_to_stage));
-                member_map.str_set("animationEnabled", &JsValue::from_bool(info.animation_enabled));
+                member_map.str_set(
+                    "animationEnabled",
+                    &JsValue::from_bool(info.animation_enabled),
+                );
                 member_map.str_set("preload", &JsValue::from_bool(info.preload));
                 member_map.str_set("loop", &JsValue::from_bool(info.loops));
                 member_map.str_set("duration", &JsValue::from(info.duration));
@@ -1967,12 +2282,21 @@ impl JsApi {
                     member_map.str_set("cameraRotation", &arr);
                 }
                 if let Some(bg) = info.bg_color {
-                    member_map.str_set("bgColor", &safe_js_string(&format!("rgb({},{},{})", bg.0, bg.1, bg.2)));
+                    member_map.str_set(
+                        "bgColor",
+                        &safe_js_string(&format!("rgb({},{},{})", bg.0, bg.1, bg.2)),
+                    );
                 }
                 if let Some(ambient) = info.ambient_color {
-                    member_map.str_set("ambientColor", &safe_js_string(&format!("rgb({},{},{})", ambient.0, ambient.1, ambient.2)));
+                    member_map.str_set(
+                        "ambientColor",
+                        &safe_js_string(&format!("rgb({},{},{})", ambient.0, ambient.1, ambient.2)),
+                    );
                 }
-                member_map.str_set("hasScene", &JsValue::from_bool(s3d_data.parsed_scene.is_some()));
+                member_map.str_set(
+                    "hasScene",
+                    &JsValue::from_bool(s3d_data.parsed_scene.is_some()),
+                );
             }
             _ => {}
         };
@@ -2018,12 +2342,12 @@ impl JsApi {
 
         // Build sprite spans from the raw channel data
         let sprite_spans = Self::create_sprite_spans_from_channels(score, player);
-        
+
         member_map.str_set(
             "spriteSpans",
             &js_sys::Array::from_iter(sprite_spans.iter().map(|span| span.to_js_value())),
         );
-        
+
         return member_map;
     }
 
@@ -2046,12 +2370,15 @@ impl JsApi {
     }
 
     // Create sprite spans by examining actual channel state across frames
-    fn create_sprite_spans_from_channels(score: &Score, player: &DirPlayer) -> Vec<ScoreSpriteSpan> {
+    fn create_sprite_spans_from_channels(
+        score: &Score,
+        player: &DirPlayer,
+    ) -> Vec<ScoreSpriteSpan> {
         use std::collections::HashMap;
-        
+
         let mut spans = Vec::new();
         let mut channel_data: HashMap<u16, Vec<(u32, u16, u16)>> = HashMap::new();
-        
+
         // Collect all frame data per channel from channel_initialization_data.
         //
         // channel_initialization_data is keyed by a 0-based frame *index*, but
@@ -2066,28 +2393,28 @@ impl JsApi {
             let channel_num = get_channel_number_from_index(*channel_index as u32) as u16;
             let cast_lib = init_data.cast_lib;
             let cast_member = init_data.cast_member;
-            
+
             // Skip empty sprites
             if cast_lib == 0 && cast_member == 0 {
                 continue;
             }
-            
+
             channel_data
                 .entry(channel_num)
                 .or_insert_with(Vec::new)
                 .push((*frame_index, cast_lib, cast_member));
         }
-        
+
         // For each channel, create spans from consecutive frames
         for (channel_num, mut frames) in channel_data {
             // Sort by frame
             frames.sort_by_key(|(frame, _, _)| *frame);
-            
+
             let mut current_span: Option<ScoreSpriteSpan> = None;
-            
+
             for (frame, cast_lib, cast_member) in frames {
                 let member_ref = [cast_lib, cast_member];
-                
+
                 if let Some(ref mut span) = current_span {
                     // Check if this continues the current span
                     if span.member_ref == member_ref && span.end_frame + 1 == frame {
@@ -2115,16 +2442,16 @@ impl JsApi {
                     });
                 }
             }
-            
+
             // Don't forget the last span!
             if let Some(span) = current_span {
                 spans.push(span);
             }
         }
-        
+
         // Sort spans by channel, then start frame
         spans.sort_by_key(|s| (s.channel_number, s.start_frame));
-        
+
         spans
     }
 
@@ -2140,14 +2467,14 @@ impl JsApi {
         Self::dispatch_channel_names_snapshot(names, &owner_key);
     }
 
-    pub fn channel_names_snapshot_for_player(
-        player: &DirPlayer,
-    ) -> (js_sys::Object, String) {
+    pub fn channel_names_snapshot_for_player(player: &DirPlayer) -> (js_sys::Object, String) {
         let names = js_sys::Map::new();
         for channel in &player.movie.score.channels {
             let number = channel.number as i16;
             if let Some(display_name) = Self::get_channel_display_name(&number, player) {
-                if display_name.is_empty() { continue; }
+                if display_name.is_empty() {
+                    continue;
+                }
                 names.set(&JsValue::from(number), &JsValue::from(display_name));
             }
         }
@@ -2222,7 +2549,9 @@ impl JsApi {
     pub fn dispatch_channel_name_changed(channel: i16) {
         crate::player::spawn_player_local(async move {
             // Deferred task — the player may be gone by the time it runs.
-            if unsafe { PLAYER_OPT.is_none() } { return; }
+            if unsafe { PLAYER_OPT.is_none() } {
+                return;
+            }
             let player = unsafe { crate::player::player_ref() };
 
             if player.is_subscribed_to_channel_names {
@@ -2265,7 +2594,10 @@ impl JsApi {
             .then(|| player.movie.score.channels.get(*channel_num as usize))
             .flatten()
         else {
-            debug!("get_channel_snapshot: channel {} is outside the loaded score", channel_num);
+            debug!(
+                "get_channel_snapshot: channel {} is outside the loaded score",
+                channel_num
+            );
             return result;
         };
 
@@ -2333,14 +2665,26 @@ impl JsApi {
                     (false, Some(n)) => format!("{}.{}", path_prefix, n),
                     (false, None) => format!("{}.(anonymous)", path_prefix),
                 };
-                let arg_names: Vec<String> = fa.bindings.iter()
+                let arg_names: Vec<String> = fa
+                    .bindings
+                    .iter()
                     .filter(|b| b.kind == crate::player::js_lingo::xdr::JsBindingKind::Argument)
                     .map(|b| b.name.clone())
                     .collect();
-                Self::push_one_js_handler_with_bindings(&fa.script, &handler_name, &arg_names, &fa.bindings, out);
+                Self::push_one_js_handler_with_bindings(
+                    &fa.script,
+                    &handler_name,
+                    &arg_names,
+                    &fa.bindings,
+                    out,
+                );
                 // Only drill into nested closures if this function actually
                 // declares some (i.e. its atom map contains JsAtom::Function).
-                let has_nested = fa.script.atoms.iter().any(|a| matches!(a, JsAtom::Function(_)));
+                let has_nested = fa
+                    .script
+                    .atoms
+                    .iter()
+                    .any(|a| matches!(a, JsAtom::Function(_)));
                 if has_nested {
                     Self::push_js_handlers(&fa.script, &handler_name, out);
                 }
@@ -2372,7 +2716,9 @@ impl JsApi {
         handler_map.str_set("name", &name.to_owned().to_js_value());
 
         let args_array = js_sys::Array::new();
-        for a in arg_names { args_array.push(&a.clone().to_js_value()); }
+        for a in arg_names {
+            args_array.push(&a.clone().to_js_value());
+        }
         handler_map.str_set("args", &args_array);
 
         let bytecode_array = js_sys::Array::new();
@@ -2411,21 +2757,31 @@ impl JsApi {
             let operand_str = match info.format {
                 JsOpFormat::Byte => String::new(),
                 JsOpFormat::Uint16 | JsOpFormat::Qarg | JsOpFormat::Qvar | JsOpFormat::Local => {
-                    read_u16_operand(ins.operand).map(|v| format!(" {}", v)).unwrap_or_default()
+                    read_u16_operand(ins.operand)
+                        .map(|v| format!(" {}", v))
+                        .unwrap_or_default()
                 }
                 JsOpFormat::Const => {
                     if let Ok(idx) = read_u16_operand(ins.operand) {
-                        let lbl = ir.atoms.get(idx as usize).map(format_atom_summary).unwrap_or_else(|| "<oob>".into());
+                        let lbl = ir
+                            .atoms
+                            .get(idx as usize)
+                            .map(format_atom_summary)
+                            .unwrap_or_else(|| "<oob>".into());
                         format!(" #{} ; {}", idx, lbl)
-                    } else { String::new() }
+                    } else {
+                        String::new()
+                    }
                 }
-                JsOpFormat::Jump => {
-                    read_i16_operand(ins.operand).map(|d| format!(" {:+} ; -> {}", d, ins.offset as i32 + d as i32)).unwrap_or_default()
+                JsOpFormat::Jump => read_i16_operand(ins.operand)
+                    .map(|d| format!(" {:+} ; -> {}", d, ins.offset as i32 + d as i32))
+                    .unwrap_or_default(),
+                JsOpFormat::Object => read_u16_operand(ins.operand)
+                    .map(|v| format!(" obj#{}", v))
+                    .unwrap_or_default(),
+                JsOpFormat::Tableswitch | JsOpFormat::Lookupswitch => {
+                    format!(" <{} bytes>", ins.operand.len())
                 }
-                JsOpFormat::Object => {
-                    read_u16_operand(ins.operand).map(|v| format!(" obj#{}", v)).unwrap_or_default()
-                }
-                JsOpFormat::Tableswitch | JsOpFormat::Lookupswitch => format!(" <{} bytes>", ins.operand.len()),
             };
             let text = format!("{:>4}: {:<14}{}", ins.offset, info.mnemonic, operand_str);
             let map = js_sys::Map::new();
@@ -2445,7 +2801,12 @@ impl JsApi {
         handler_map.str_set("lingo", &lingo_array);
         let mapping_obj = js_sys::Object::new();
         for (bc, ln) in &decomp_bc_to_line {
-            js_sys::Reflect::set(&mapping_obj, &JsValue::from(*bc as u32), &JsValue::from(*ln as u32)).ok();
+            js_sys::Reflect::set(
+                &mapping_obj,
+                &JsValue::from(*bc as u32),
+                &JsValue::from(*ln as u32),
+            )
+            .ok();
         }
         handler_map.str_set("bytecodeToLine", &mapping_obj);
         out.push(&handler_map.to_js_object());
@@ -2511,7 +2872,9 @@ impl JsApi {
                 bytecode_map.str_set("pos", &JsValue::from(bytecode.pos));
                 bytecode_map.str_set(
                     "text",
-                    &bytecode.to_bytecode_text(lctx, &handler, multiplier).to_js_value(),
+                    &bytecode
+                        .to_bytecode_text(lctx, &handler, multiplier)
+                        .to_js_value(),
                 );
 
                 bytecode_array.push(&bytecode_map.to_js_object());
@@ -2580,7 +2943,8 @@ impl JsApi {
                     &mapping_obj,
                     &JsValue::from(bc_idx as u32),
                     &JsValue::from(line_idx as u32),
-                ).ok();
+                )
+                .ok();
             }
             handler_map.str_set("bytecodeToLine", &mapping_obj);
 
@@ -2711,7 +3075,9 @@ impl JsApi {
     }
 
     pub fn script_error_data(player: &DirPlayer, err: &ScriptError) -> js_sys::Object {
-        let is_paused = player.current_breakpoint.as_ref()
+        let is_paused = player
+            .current_breakpoint
+            .as_ref()
             .map(|bp| bp.error.is_some())
             .unwrap_or(false);
 
@@ -2790,7 +3156,9 @@ impl JsApi {
     pub fn dispatch_breakpoint_list_changed() {
         crate::player::spawn_player_local(async move {
             // Deferred task — the player may be gone by the time it runs.
-            if unsafe { PLAYER_OPT.is_none() } { return; }
+            if unsafe { PLAYER_OPT.is_none() } {
+                return;
+            }
             let player = unsafe { crate::player::player_ref() };
             onBreakpointListChanged(Self::get_breakpoint_list(player));
         });
@@ -2826,20 +3194,48 @@ impl JsApi {
         match datum {
             Datum::Int(_) | Datum::Float(_) => "number",
             Datum::String(_) | Datum::StringChunk(..) => "string",
-            Datum::Void => "void", Datum::VarRef(_) => "var_ref", Datum::List(..) => "list",
-            Datum::PropList(..) => "propList", Datum::Symbol(_) => "symbol", Datum::CastLib(_) => "castLib",
-            Datum::Stage => "stage", Datum::ScriptRef(_) => "scriptRef", Datum::ScriptInstanceRef(_) => "scriptInstance",
-            Datum::CastMember(_) => "castMember", Datum::SpriteRef(_) => "spriteRef", Datum::Rect(..) => "Rect",
-            Datum::Point(..) => "Point", Datum::SoundChannel(_) => "soundChannel", Datum::CursorRef(_) => "cursorRef",
-            Datum::TimeoutRef(_) => "timeout", Datum::TimeoutFactory => "timeoutFactory", Datum::TimeoutInstance(_) => "timeoutInstance",
-            Datum::ColorRef(_) => "colorRef", Datum::BitmapRef(_) => "bitmapRef", Datum::PaletteRef(_) => "paletteRef",
-            Datum::SoundRef(_) => "soundRef", Datum::Xtra(_) => "xtra", Datum::XtraInstance(..) => "xtraInstance",
-            Datum::Matte(_) => "matte", Datum::PlayerRef => "playerRef", Datum::MovieRef => "movieRef", Datum::MouseRef => "mouseRef",
-            Datum::XmlRef(_) => "xmlRef", Datum::DateRef(_) => "dateRef", Datum::MathRef(_) => "mathRef", Datum::Vector(_) => "vector",
-            Datum::Media(_) => "media", Datum::Null => "null", Datum::JavaScript(_) => "javascript", Datum::FlashObjectRef(_) => "flashObjectRef",
-            Datum::Shockwave3dObjectRef(_) => "shockwave3dObjectRef", Datum::Transform3d(_) => "transform3d",
-            Datum::HavokObjectRef(_) => "havokObjectRef", Datum::PhysXObjectRef(_) => "physXObjectRef",
-            Datum::VectorVertexRef(..) => "vectorVertexRef", Datum::JsObjectRef(_) => "jsObjectRef",
+            Datum::Void => "void",
+            Datum::VarRef(_) => "var_ref",
+            Datum::List(..) => "list",
+            Datum::PropList(..) => "propList",
+            Datum::Symbol(_) => "symbol",
+            Datum::CastLib(_) => "castLib",
+            Datum::Stage => "stage",
+            Datum::ScriptRef(_) => "scriptRef",
+            Datum::ScriptInstanceRef(_) => "scriptInstance",
+            Datum::CastMember(_) => "castMember",
+            Datum::SpriteRef(_) => "spriteRef",
+            Datum::Rect(..) => "Rect",
+            Datum::Point(..) => "Point",
+            Datum::SoundChannel(_) => "soundChannel",
+            Datum::CursorRef(_) => "cursorRef",
+            Datum::TimeoutRef(_) => "timeout",
+            Datum::TimeoutFactory => "timeoutFactory",
+            Datum::TimeoutInstance(_) => "timeoutInstance",
+            Datum::ColorRef(_) => "colorRef",
+            Datum::BitmapRef(_) => "bitmapRef",
+            Datum::PaletteRef(_) => "paletteRef",
+            Datum::SoundRef(_) => "soundRef",
+            Datum::Xtra(_) => "xtra",
+            Datum::XtraInstance(..) => "xtraInstance",
+            Datum::Matte(_) => "matte",
+            Datum::PlayerRef => "playerRef",
+            Datum::MovieRef => "movieRef",
+            Datum::MouseRef => "mouseRef",
+            Datum::XmlRef(_) => "xmlRef",
+            Datum::DateRef(_) => "dateRef",
+            Datum::MathRef(_) => "mathRef",
+            Datum::Vector(_) => "vector",
+            Datum::Media(_) => "media",
+            Datum::Null => "null",
+            Datum::JavaScript(_) => "javascript",
+            Datum::FlashObjectRef(_) => "flashObjectRef",
+            Datum::Shockwave3dObjectRef(_) => "shockwave3dObjectRef",
+            Datum::Transform3d(_) => "transform3d",
+            Datum::HavokObjectRef(_) => "havokObjectRef",
+            Datum::PhysXObjectRef(_) => "physXObjectRef",
+            Datum::VectorVertexRef(..) => "vectorVertexRef",
+            Datum::JsObjectRef(_) => "jsObjectRef",
         }
     }
 
@@ -2868,9 +3264,7 @@ impl JsApi {
         let content_limit = MAX_NATIVE_STRING.saturating_sub(TRUNCATION_MARKER.len());
         let end = value
             .char_indices()
-            .take_while(|(index, character)| {
-                *index + character.len_utf8() <= content_limit
-            })
+            .take_while(|(index, character)| *index + character.len_utf8() <= content_limit)
             .map(|(index, character)| index + character.len_utf8())
             .last()
             .unwrap_or(0);
@@ -2924,9 +3318,7 @@ impl JsApi {
                     let mut converted = Vec::new();
                     for (index, value) in values.iter().enumerate() {
                         if *budget == 0 {
-                            converted.push(NativeDatumValue::Opaque(
-                                "<omitted-tail>".to_owned(),
-                            ));
+                            converted.push(NativeDatumValue::Opaque("<omitted-tail>".to_owned()));
                             break;
                         }
                         let converted_value = Self::native_datum_value(
@@ -2940,9 +3332,7 @@ impl JsApi {
                         let exhausted = *budget == 0;
                         converted.push(converted_value);
                         if exhausted && index + 1 < values.len() {
-                            converted.push(NativeDatumValue::Opaque(
-                                "<omitted-tail>".to_owned(),
-                            ));
+                            converted.push(NativeDatumValue::Opaque("<omitted-tail>".to_owned()));
                             break;
                         }
                     }
@@ -2974,7 +3364,9 @@ impl JsApi {
                             break;
                         }
                         let key = match key_value {
-                            NativeDatumValue::String(value) | NativeDatumValue::Symbol(value) => value,
+                            NativeDatumValue::String(value) | NativeDatumValue::Symbol(value) => {
+                                value
+                            }
                             NativeDatumValue::Int(value) => value.to_string(),
                             other => Self::native_value_debug(&other),
                         };
@@ -2999,15 +3391,26 @@ impl JsApi {
                     Ok(NativeDatumValue::PropList(converted, *sorted))
                 }
                 Datum::StringChunk(source, _, value) => {
-                    if let crate::director::lingo::datum::StringChunkSource::Datum(source) = source {
-                        let _ = Self::native_datum_value(player, symbols, source, depth + 1, active, budget)?;
+                    if let crate::director::lingo::datum::StringChunkSource::Datum(source) = source
+                    {
+                        let _ = Self::native_datum_value(
+                            player,
+                            symbols,
+                            source,
+                            depth + 1,
+                            active,
+                            budget,
+                        )?;
                     }
                     Ok(NativeDatumValue::String(Self::native_bounded_string(value)))
                 }
                 Datum::VarRef(crate::director::lingo::datum::VarRef::ScriptInstance(instance)) => {
-                    player.allocator.get_script_instance_opt(instance).ok_or_else(|| {
-                        format!("foreign or stale script instance {}", instance.id())
-                    })?;
+                    player
+                        .allocator
+                        .get_script_instance_opt(instance)
+                        .ok_or_else(|| {
+                            format!("foreign or stale script instance {}", instance.id())
+                        })?;
                     Ok(NativeDatumValue::Reference {
                         kind: "scriptInstance".to_owned(),
                         id: instance.id().to_string(),
@@ -3015,17 +3418,41 @@ impl JsApi {
                 }
                 Datum::VarRef(_) => Ok(NativeDatumValue::Opaque("<var-ref>".to_owned())),
                 Datum::TimeoutInstance(timeout) => {
-                    let _ = Self::native_datum_value(player, symbols, &timeout.callback, depth + 1, active, budget)?;
-                    let _ = Self::native_datum_value(player, symbols, &timeout.target, depth + 1, active, budget)?;
+                    let _ = Self::native_datum_value(
+                        player,
+                        symbols,
+                        &timeout.callback,
+                        depth + 1,
+                        active,
+                        budget,
+                    )?;
+                    let _ = Self::native_datum_value(
+                        player,
+                        symbols,
+                        &timeout.target,
+                        depth + 1,
+                        active,
+                        budget,
+                    )?;
                     if let Some(script_instance) = &timeout.script_instance {
-                        let _ = Self::native_datum_value(player, symbols, script_instance, depth + 1, active, budget)?;
+                        let _ = Self::native_datum_value(
+                            player,
+                            symbols,
+                            script_instance,
+                            depth + 1,
+                            active,
+                            budget,
+                        )?;
                     }
                     Ok(NativeDatumValue::Opaque("<timeout-instance>".to_owned()))
                 }
                 Datum::ScriptInstanceRef(instance) => {
-                    player.allocator.get_script_instance_opt(instance).ok_or_else(|| {
-                        format!("foreign or stale script instance {}", instance.id())
-                    })?;
+                    player
+                        .allocator
+                        .get_script_instance_opt(instance)
+                        .ok_or_else(|| {
+                            format!("foreign or stale script instance {}", instance.id())
+                        })?;
                     Ok(NativeDatumValue::Reference {
                         kind: "scriptInstance".to_owned(),
                         id: instance.id().to_string(),
@@ -3079,9 +3506,15 @@ impl JsApi {
             }
             match value {
                 NativeDatumValue::Null => append_bounded(output, "void", truncated),
-                NativeDatumValue::Bool(value) => append_bounded(output, &value.to_string(), truncated),
-                NativeDatumValue::Int(value) => append_bounded(output, &value.to_string(), truncated),
-                NativeDatumValue::Float(value) => append_bounded(output, &value.to_string(), truncated),
+                NativeDatumValue::Bool(value) => {
+                    append_bounded(output, &value.to_string(), truncated)
+                }
+                NativeDatumValue::Int(value) => {
+                    append_bounded(output, &value.to_string(), truncated)
+                }
+                NativeDatumValue::Float(value) => {
+                    append_bounded(output, &value.to_string(), truncated)
+                }
                 NativeDatumValue::String(value) => {
                     append_bounded(output, "\"", truncated);
                     append_bounded(output, value, truncated);
@@ -3144,14 +3577,8 @@ impl JsApi {
         datum_ref: &DatumRef,
         budget: &mut usize,
     ) -> Result<NativeDatumSnapshot, String> {
-        let value = Self::native_datum_value(
-            player,
-            symbols,
-            datum_ref,
-            0,
-            &mut HashSet::new(),
-            budget,
-        )?;
+        let value =
+            Self::native_datum_value(player, symbols, datum_ref, 0, &mut HashSet::new(), budget)?;
         let datum = match datum_ref {
             DatumRef::Void => &Datum::Void,
             _ => player
@@ -3160,7 +3587,9 @@ impl JsApi {
                 .ok_or_else(|| format!("foreign or stale datum reference {datum_ref}"))?,
         };
         Ok(NativeDatumSnapshot {
-            datum_id: (!matches!(datum_ref, DatumRef::Void)).then(|| datum_ref.unwrap()).unwrap_or(0),
+            datum_id: (!matches!(datum_ref, DatumRef::Void))
+                .then(|| datum_ref.unwrap())
+                .unwrap_or(0),
             type_name: Self::native_datum_type_name(datum).to_owned(),
             debug_description: Self::native_bounded_string(&Self::native_value_debug(&value)),
             value,
@@ -3178,41 +3607,156 @@ impl JsApi {
     fn native_score_snapshot_for_score(player: &DirPlayer, score: &Score) -> NativeScoreSnapshot {
         const MAX_NATIVE_SCORE_SPANS: usize = 4096;
         let mut truncated = score.sprite_spans.len() > MAX_NATIVE_SCORE_SPANS;
-        let spans = score.sprite_spans.iter().take(MAX_NATIVE_SCORE_SPANS).map(|span| {
-            let mut span_truncated = span.scripts.len() > MAX_NATIVE_SCORE_SPANS;
-            truncated |= span_truncated;
-            let member_ref = span.scripts.first().map(|s| (s.cast_lib, s.cast_member)).unwrap_or((0,0));
-            let member_name = player.movie.cast_manager.find_member_by_ref(&CastMemberRef { cast_lib: member_ref.0 as i32, cast_member: member_ref.1 as i32 }).map(|m| Self::native_bounded_string(&m.name)).unwrap_or_default();
-            NativeScoreSpan { channel_number: span.channel_number, start_frame: span.start_frame, end_frame: span.end_frame, member_ref, member_name,
-                behavior_references: span.scripts.iter().take(MAX_NATIVE_SCORE_SPANS).map(|s| {
-                    let mut parameter_debug = s.parameter.iter().take(MAX_NATIVE_SCORE_SPANS)
-                        .map(|parameter| Self::native_bounded_string(&format!("{:?}", parameter)))
-                        .collect::<Vec<_>>();
-                    if s.parameter.len() > MAX_NATIVE_SCORE_SPANS {
-                        parameter_debug.push("<omitted-tail>".to_owned());
-                        span_truncated = true;
-                        truncated = true;
-                    }
-                    NativeBehaviorReference { cast_lib:s.cast_lib, cast_member:s.cast_member, parameter_debug }
-                }).collect(),
-                truncated: span_truncated,
-            }
-        }).collect();
-        NativeScoreSnapshot { channel_count: score.channels.len() as u16, frame_count: score.frame_count.unwrap_or(1), spans, truncated }
+        let spans = score
+            .sprite_spans
+            .iter()
+            .take(MAX_NATIVE_SCORE_SPANS)
+            .map(|span| {
+                let mut span_truncated = span.scripts.len() > MAX_NATIVE_SCORE_SPANS;
+                truncated |= span_truncated;
+                let member_ref = span
+                    .scripts
+                    .first()
+                    .map(|s| (s.cast_lib, s.cast_member))
+                    .unwrap_or((0, 0));
+                let member_name = player
+                    .movie
+                    .cast_manager
+                    .find_member_by_ref(&CastMemberRef {
+                        cast_lib: member_ref.0 as i32,
+                        cast_member: member_ref.1 as i32,
+                    })
+                    .map(|m| Self::native_bounded_string(&m.name))
+                    .unwrap_or_default();
+                NativeScoreSpan {
+                    channel_number: span.channel_number,
+                    start_frame: span.start_frame,
+                    end_frame: span.end_frame,
+                    member_ref,
+                    member_name,
+                    behavior_references: span
+                        .scripts
+                        .iter()
+                        .take(MAX_NATIVE_SCORE_SPANS)
+                        .map(|s| {
+                            let mut parameter_debug = s
+                                .parameter
+                                .iter()
+                                .take(MAX_NATIVE_SCORE_SPANS)
+                                .map(|parameter| {
+                                    Self::native_bounded_string(&format!("{:?}", parameter))
+                                })
+                                .collect::<Vec<_>>();
+                            if s.parameter.len() > MAX_NATIVE_SCORE_SPANS {
+                                parameter_debug.push("<omitted-tail>".to_owned());
+                                span_truncated = true;
+                                truncated = true;
+                            }
+                            NativeBehaviorReference {
+                                cast_lib: s.cast_lib,
+                                cast_member: s.cast_member,
+                                parameter_debug,
+                            }
+                        })
+                        .collect(),
+                    truncated: span_truncated,
+                }
+            })
+            .collect();
+        NativeScoreSnapshot {
+            channel_count: score.channels.len() as u16,
+            frame_count: score.frame_count.unwrap_or(1),
+            spans,
+            truncated,
+        }
     }
     fn native_score_snapshot(player: &DirPlayer) -> NativeScoreSnapshot {
         Self::native_score_snapshot_for_score(player, &player.movie.score)
     }
-    fn native_channel_snapshot(player: &DirPlayer, channel: i16) -> Result<NativeChannelSnapshot, String> {
-        let channel_data = channel.try_into().ok().and_then(|i: usize| player.movie.score.channels.get(i));
-        let Some(channel_data) = channel_data else { return Ok(NativeChannelSnapshot { channel, display_name:String::new(), member_ref:None, script_instance_ids:Vec::new(), width:0,height:0,loc_h:0,loc_v:0,visible:false,puppet:false,ink:0,blend:0,rotation:0.0,skew:0.0,flip_h:false,flip_v:false,color:String::new(),bg_color:String::new() }); };
-        let display_name = if !channel_data.name.is_empty() { channel_data.name.clone() } else if !channel_data.sprite.name.is_empty() { channel_data.sprite.name.clone() } else { channel_data.sprite.member.as_ref().and_then(|r| player.movie.cast_manager.find_member_by_ref(r)).map(|m|m.name.clone()).unwrap_or_default() };
-        let script_instance_ids = channel_data.sprite.script_instance_list.iter().map(|reference| {
-            player.allocator.get_script_instance_opt(reference)
-                .ok_or_else(|| format!("foreign or stale channel script instance {}", reference.id()))
-                .map(|_| reference.id())
-        }).collect::<Result<Vec<_>, _>>()?;
-        Ok(NativeChannelSnapshot { channel, display_name:Self::native_bounded_string(&display_name), member_ref:channel_data.sprite.member.as_ref().map(|r|(r.cast_lib,r.cast_member)), script_instance_ids, width:channel_data.sprite.width,height:channel_data.sprite.height,loc_h:channel_data.sprite.loc_h,loc_v:channel_data.sprite.loc_v,visible:channel_data.sprite.visible,puppet:channel_data.sprite.puppet,ink:channel_data.sprite.ink,blend:channel_data.sprite.blend,rotation:channel_data.sprite.rotation,skew:channel_data.sprite.skew,flip_h:channel_data.sprite.flip_h,flip_v:channel_data.sprite.flip_v,color:channel_data.sprite.color.to_string(),bg_color:channel_data.sprite.bg_color.to_string() })
+    fn native_channel_snapshot(
+        player: &DirPlayer,
+        channel: i16,
+    ) -> Result<NativeChannelSnapshot, String> {
+        let channel_data = channel
+            .try_into()
+            .ok()
+            .and_then(|i: usize| player.movie.score.channels.get(i));
+        let Some(channel_data) = channel_data else {
+            return Ok(NativeChannelSnapshot {
+                channel,
+                display_name: String::new(),
+                member_ref: None,
+                script_instance_ids: Vec::new(),
+                width: 0,
+                height: 0,
+                loc_h: 0,
+                loc_v: 0,
+                visible: false,
+                puppet: false,
+                ink: 0,
+                blend: 0,
+                rotation: 0.0,
+                skew: 0.0,
+                flip_h: false,
+                flip_v: false,
+                color: String::new(),
+                bg_color: String::new(),
+            });
+        };
+        let display_name = if !channel_data.name.is_empty() {
+            channel_data.name.clone()
+        } else if !channel_data.sprite.name.is_empty() {
+            channel_data.sprite.name.clone()
+        } else {
+            channel_data
+                .sprite
+                .member
+                .as_ref()
+                .and_then(|r| player.movie.cast_manager.find_member_by_ref(r))
+                .map(|m| m.name.clone())
+                .unwrap_or_default()
+        };
+        let script_instance_ids = channel_data
+            .sprite
+            .script_instance_list
+            .iter()
+            .map(|reference| {
+                player
+                    .allocator
+                    .get_script_instance_opt(reference)
+                    .ok_or_else(|| {
+                        format!(
+                            "foreign or stale channel script instance {}",
+                            reference.id()
+                        )
+                    })
+                    .map(|_| reference.id())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(NativeChannelSnapshot {
+            channel,
+            display_name: Self::native_bounded_string(&display_name),
+            member_ref: channel_data
+                .sprite
+                .member
+                .as_ref()
+                .map(|r| (r.cast_lib, r.cast_member)),
+            script_instance_ids,
+            width: channel_data.sprite.width,
+            height: channel_data.sprite.height,
+            loc_h: channel_data.sprite.loc_h,
+            loc_v: channel_data.sprite.loc_v,
+            visible: channel_data.sprite.visible,
+            puppet: channel_data.sprite.puppet,
+            ink: channel_data.sprite.ink,
+            blend: channel_data.sprite.blend,
+            rotation: channel_data.sprite.rotation,
+            skew: channel_data.sprite.skew,
+            flip_h: channel_data.sprite.flip_h,
+            flip_v: channel_data.sprite.flip_v,
+            color: channel_data.sprite.color.to_string(),
+            bg_color: channel_data.sprite.bg_color.to_string(),
+        })
     }
     fn native_script_type_name(script_type: ScriptType) -> &'static str {
         match script_type {
@@ -3247,10 +3791,18 @@ impl JsApi {
             .ok_or_else(|| format!("missing script context for cast {}", member_ref.cast_lib))?;
         let script = cast
             .get_script_for_member(member_ref.cast_member as u32)
-            .ok_or_else(|| format!("missing registered script {}:{}", member_ref.cast_lib, member_ref.cast_member))?;
+            .ok_or_else(|| {
+                format!(
+                    "missing registered script {}:{}",
+                    member_ref.cast_lib, member_ref.cast_member
+                )
+            })?;
         let multiplier = get_variable_multiplier(cast.capital_x, cast.dir_version);
         if multiplier == 0 {
-            return Err(format!("invalid variable multiplier for cast {}", member_ref.cast_lib));
+            return Err(format!(
+                "invalid variable multiplier for cast {}",
+                member_ref.cast_lib
+            ));
         }
         let source_bytes = script
             .chunk
@@ -3273,45 +3825,90 @@ impl JsApi {
             || lctx.names.iter().any(|name| name.len() > MAX_NATIVE_STRING);
         let mut budget = MAX_ITEMS;
         let mut fields = vec![
-            ("name".to_owned(), NativeDatumValue::String(Self::native_bounded_string(&script.name))),
-            ("script_type".to_owned(), NativeDatumValue::String(Self::native_script_type_name(member.script_type).to_owned())),
-            ("script_syntax".to_owned(), NativeDatumValue::String(
-                if script.chunk.literals.iter().any(|literal| matches!(literal, Datum::JavaScript(_))) { "javascript" } else { "lingo" }.to_owned(),
-            )),
+            (
+                "name".to_owned(),
+                NativeDatumValue::String(Self::native_bounded_string(&script.name)),
+            ),
+            (
+                "script_type".to_owned(),
+                NativeDatumValue::String(
+                    Self::native_script_type_name(member.script_type).to_owned(),
+                ),
+            ),
+            (
+                "script_syntax".to_owned(),
+                NativeDatumValue::String(
+                    if script
+                        .chunk
+                        .literals
+                        .iter()
+                        .any(|literal| matches!(literal, Datum::JavaScript(_)))
+                    {
+                        "javascript"
+                    } else {
+                        "lingo"
+                    }
+                    .to_owned(),
+                ),
+            ),
         ];
         let mut handlers = Vec::new();
-        for (handler_index, handler) in script.chunk.handlers.iter().take(MAX_HANDLERS).enumerate() {
-            if budget == 0 { break; }
+        for (handler_index, handler) in script.chunk.handlers.iter().take(MAX_HANDLERS).enumerate()
+        {
+            if budget == 0 {
+                break;
+            }
             budget -= 1;
-            let validate_instruction = |instruction: &crate::director::chunks::handler::Bytecode| -> Result<(), String> {
-                let needs_name = matches!(instruction.opcode,
-                    OpCode::ObjCall | OpCode::ExtCall | OpCode::GetObjProp | OpCode::SetObjProp |
-                    OpCode::PushSymb | OpCode::GetProp | OpCode::GetChainedProp | OpCode::GetGlobal | OpCode::SetGlobal);
-                if needs_name {
-                    let name_index = usize::try_from(instruction.obj).map_err(|_| format!("invalid name operand in script handler {handler_index}"))?;
-                    if lctx.names.get(name_index).is_none() {
-                        return Err(format!("invalid name operand {} in script handler {handler_index}", instruction.obj));
+            let validate_instruction =
+                |instruction: &crate::director::chunks::handler::Bytecode| -> Result<(), String> {
+                    let needs_name = matches!(
+                        instruction.opcode,
+                        OpCode::ObjCall
+                            | OpCode::ExtCall
+                            | OpCode::GetObjProp
+                            | OpCode::SetObjProp
+                            | OpCode::PushSymb
+                            | OpCode::GetProp
+                            | OpCode::GetChainedProp
+                            | OpCode::GetGlobal
+                            | OpCode::SetGlobal
+                    );
+                    if needs_name {
+                        let name_index = usize::try_from(instruction.obj).map_err(|_| {
+                            format!("invalid name operand in script handler {handler_index}")
+                        })?;
+                        if lctx.names.get(name_index).is_none() {
+                            return Err(format!(
+                                "invalid name operand {} in script handler {handler_index}",
+                                instruction.obj
+                            ));
+                        }
                     }
-                }
-                match instruction.opcode {
-                    OpCode::Jmp | OpCode::JmpIfZ => {
-                        let target = (instruction.pos as i128)
-                            .checked_add(instruction.obj as i128)
-                            .and_then(|target| usize::try_from(target).ok())
-                            .ok_or_else(|| format!("invalid jump target in script handler {handler_index}"))?;
-                        let _ = target;
+                    match instruction.opcode {
+                        OpCode::Jmp | OpCode::JmpIfZ => {
+                            let target = (instruction.pos as i128)
+                                .checked_add(instruction.obj as i128)
+                                .and_then(|target| usize::try_from(target).ok())
+                                .ok_or_else(|| {
+                                    format!("invalid jump target in script handler {handler_index}")
+                                })?;
+                            let _ = target;
+                        }
+                        OpCode::EndRepeat => {
+                            let target = (instruction.pos as i128)
+                                .checked_sub(instruction.obj as i128)
+                                .and_then(|target| usize::try_from(target).ok())
+                                .ok_or_else(|| {
+                                    format!(
+                                        "invalid repeat target in script handler {handler_index}"
+                                    )
+                                })?;
+                            let _ = target;
+                        }
+                        _ => {}
                     }
-                    OpCode::EndRepeat => {
-                        let target = (instruction.pos as i128)
-                            .checked_sub(instruction.obj as i128)
-                            .and_then(|target| usize::try_from(target).ok())
-                            .ok_or_else(|| format!("invalid repeat target in script handler {handler_index}"))?;
-                        let _ = target;
-                    }
-                    _ => {}
-                }
-                Ok(())
-            };
+                    Ok(())
+                };
             if handler.bytecode_array.len() <= MAX_BYTECODE {
                 for instruction in &handler.bytecode_array {
                     validate_instruction(instruction)?;
@@ -3325,9 +3922,14 @@ impl JsApi {
             let mut args = Vec::new();
             for name_id in handler.argument_name_ids.iter().take(MAX_ITEMS) {
                 let name = lctx.names.get(*name_id as usize).ok_or_else(|| {
-                    format!("invalid argument name {} in script handler {handler_index}", name_id)
+                    format!(
+                        "invalid argument name {} in script handler {handler_index}",
+                        name_id
+                    )
                 })?;
-                if budget == 0 { break; }
+                if budget == 0 {
+                    break;
+                }
                 budget -= 1;
                 args.push(NativeDatumValue::String(Self::native_bounded_string(name)));
             }
@@ -3336,7 +3938,9 @@ impl JsApi {
             }
             let mut bytecode = Vec::new();
             for instruction in handler.bytecode_array.iter().take(MAX_BYTECODE) {
-                if budget == 0 { break; }
+                if budget == 0 {
+                    break;
+                }
                 budget -= 1;
                 validate_instruction(instruction)?;
                 let text = if oversized_context_name {
@@ -3345,21 +3949,44 @@ impl JsApi {
                     let target = (instruction.pos as i128)
                         .checked_add(instruction.obj as i128)
                         .and_then(|target| usize::try_from(target).ok())
-                        .ok_or_else(|| format!("invalid jump target in script handler {handler_index}"))?;
-                    format!("[{}] {} [{}]", instruction.pos, crate::director::lingo::constants::get_opcode_name(instruction.opcode), target)
+                        .ok_or_else(|| {
+                            format!("invalid jump target in script handler {handler_index}")
+                        })?;
+                    format!(
+                        "[{}] {} [{}]",
+                        instruction.pos,
+                        crate::director::lingo::constants::get_opcode_name(instruction.opcode),
+                        target
+                    )
                 } else if matches!(instruction.opcode, OpCode::EndRepeat) {
                     let target = (instruction.pos as i128)
                         .checked_sub(instruction.obj as i128)
                         .and_then(|target| usize::try_from(target).ok())
-                        .ok_or_else(|| format!("invalid repeat target in script handler {handler_index}"))?;
-                    format!("[{}] {} [{}]", instruction.pos, crate::director::lingo::constants::get_opcode_name(instruction.opcode), target)
+                        .ok_or_else(|| {
+                            format!("invalid repeat target in script handler {handler_index}")
+                        })?;
+                    format!(
+                        "[{}] {} [{}]",
+                        instruction.pos,
+                        crate::director::lingo::constants::get_opcode_name(instruction.opcode),
+                        target
+                    )
                 } else {
                     instruction.to_bytecode_text(lctx, handler, multiplier)
                 };
-                bytecode.push(NativeDatumValue::PropList(vec![
-                    ("pos".to_owned(), NativeDatumValue::Int(instruction.pos as i32)),
-                    ("text".to_owned(), NativeDatumValue::String(Self::native_bounded_string(&text))),
-                ], false));
+                bytecode.push(NativeDatumValue::PropList(
+                    vec![
+                        (
+                            "pos".to_owned(),
+                            NativeDatumValue::Int(instruction.pos as i32),
+                        ),
+                        (
+                            "text".to_owned(),
+                            NativeDatumValue::String(Self::native_bounded_string(&text)),
+                        ),
+                    ],
+                    false,
+                ));
             }
             if handler.bytecode_array.len() > MAX_BYTECODE || budget == 0 {
                 bytecode.push(NativeDatumValue::Opaque("<omitted-tail>".to_owned()));
@@ -3371,58 +3998,117 @@ impl JsApi {
                 && source_bytes <= MAX_SOURCE_BYTES
                 && !oversized_context_name
             {
-                let decompiled = decompiler::decompile_handler(handler, &script.chunk, lctx, cast.dir_version, multiplier, symbols)
-                    .map_err(|error| format!("script handler {handler_index} decompile failed: {}", error.message))?;
+                let decompiled = decompiler::decompile_handler(
+                    handler,
+                    &script.chunk,
+                    lctx,
+                    cast.dir_version,
+                    multiplier,
+                    symbols,
+                )
+                .map_err(|error| {
+                    format!(
+                        "script handler {handler_index} decompile failed: {}",
+                        error.message
+                    )
+                })?;
                 for line in decompiled.lines.iter().take(MAX_ITEMS) {
-                    if budget == 0 { break; }
+                    if budget == 0 {
+                        break;
+                    }
                     budget -= 1;
                     let mut spans = Vec::new();
                     for span in line.spans.iter().take(MAX_ITEMS) {
-                        if budget == 0 { break; }
+                        if budget == 0 {
+                            break;
+                        }
                         budget -= 1;
-                        spans.push(NativeDatumValue::PropList(vec![
-                            ("text".to_owned(), NativeDatumValue::String(Self::native_bounded_string(&span.text))),
-                            ("type".to_owned(), NativeDatumValue::String(span.token_type.as_str().to_owned())),
-                        ], false));
+                        spans.push(NativeDatumValue::PropList(
+                            vec![
+                                (
+                                    "text".to_owned(),
+                                    NativeDatumValue::String(Self::native_bounded_string(
+                                        &span.text,
+                                    )),
+                                ),
+                                (
+                                    "type".to_owned(),
+                                    NativeDatumValue::String(span.token_type.as_str().to_owned()),
+                                ),
+                            ],
+                            false,
+                        ));
                     }
                     if line.spans.len() > spans.len() {
                         spans.push(NativeDatumValue::Opaque("<omitted-tail>".to_owned()));
                     }
                     let mut bytecode_indices = Vec::new();
                     for index in line.bytecode_indices.iter().take(MAX_ITEMS) {
-                        if budget == 0 { break; }
+                        if budget == 0 {
+                            break;
+                        }
                         budget -= 1;
                         bytecode_indices.push(NativeDatumValue::Int(*index as i32));
                     }
                     if line.bytecode_indices.len() > bytecode_indices.len() {
-                        bytecode_indices.push(NativeDatumValue::Opaque("<omitted-tail>".to_owned()));
+                        bytecode_indices
+                            .push(NativeDatumValue::Opaque("<omitted-tail>".to_owned()));
                     }
-                    lingo.push(NativeDatumValue::PropList(vec![
-                        ("text".to_owned(), NativeDatumValue::String(Self::native_bounded_string(&line.text))),
-                        ("indent".to_owned(), NativeDatumValue::Int(line.indent as i32)),
-                        ("bytecodeIndices".to_owned(), NativeDatumValue::Array(bytecode_indices)),
-                        ("spans".to_owned(), NativeDatumValue::Array(spans)),
-                    ], false));
+                    lingo.push(NativeDatumValue::PropList(
+                        vec![
+                            (
+                                "text".to_owned(),
+                                NativeDatumValue::String(Self::native_bounded_string(&line.text)),
+                            ),
+                            (
+                                "indent".to_owned(),
+                                NativeDatumValue::Int(line.indent as i32),
+                            ),
+                            (
+                                "bytecodeIndices".to_owned(),
+                                NativeDatumValue::Array(bytecode_indices),
+                            ),
+                            ("spans".to_owned(), NativeDatumValue::Array(spans)),
+                        ],
+                        false,
+                    ));
                 }
-                if decompiled.lines.len() > lingo.len() { lingo.push(NativeDatumValue::Opaque("<omitted-tail>".to_owned())); }
+                if decompiled.lines.len() > lingo.len() {
+                    lingo.push(NativeDatumValue::Opaque("<omitted-tail>".to_owned()));
+                }
                 for (bytecode, line) in decompiled.bytecode_to_line.iter().take(MAX_ITEMS) {
-                    if budget == 0 { break; }
+                    if budget == 0 {
+                        break;
+                    }
                     budget -= 1;
-                    bytecode_to_line.push((bytecode.to_string(), NativeDatumValue::Int(*line as i32)));
+                    bytecode_to_line
+                        .push((bytecode.to_string(), NativeDatumValue::Int(*line as i32)));
                 }
                 if decompiled.bytecode_to_line.len() > bytecode_to_line.len() {
-                    bytecode_to_line.push(("<omitted-tail>".to_owned(), NativeDatumValue::Opaque("<omitted-tail>".to_owned())));
+                    bytecode_to_line.push((
+                        "<omitted-tail>".to_owned(),
+                        NativeDatumValue::Opaque("<omitted-tail>".to_owned()),
+                    ));
                 }
             } else {
                 lingo.push(NativeDatumValue::Opaque("<omitted-tail>".to_owned()));
             }
-            handlers.push(NativeDatumValue::PropList(vec![
-                ("name".to_owned(), NativeDatumValue::String(Self::native_bounded_string(&handler_name))),
-                ("args".to_owned(), NativeDatumValue::Array(args)),
-                ("bytecode".to_owned(), NativeDatumValue::Array(bytecode)),
-                ("lingo".to_owned(), NativeDatumValue::Array(lingo)),
-                ("bytecodeToLine".to_owned(), NativeDatumValue::PropList(bytecode_to_line, false)),
-            ], false));
+            handlers.push(NativeDatumValue::PropList(
+                vec![
+                    (
+                        "name".to_owned(),
+                        NativeDatumValue::String(Self::native_bounded_string(&handler_name)),
+                    ),
+                    ("args".to_owned(), NativeDatumValue::Array(args)),
+                    ("bytecode".to_owned(), NativeDatumValue::Array(bytecode)),
+                    ("lingo".to_owned(), NativeDatumValue::Array(lingo)),
+                    (
+                        "bytecodeToLine".to_owned(),
+                        NativeDatumValue::PropList(bytecode_to_line, false),
+                    ),
+                ],
+                false,
+            ));
         }
         if script.chunk.handlers.len() > MAX_HANDLERS || budget == 0 {
             handlers.push(NativeDatumValue::Opaque("<omitted-tail>".to_owned()));
@@ -3448,61 +4134,172 @@ impl JsApi {
             })?;
         let mut fields = Vec::new();
         {
-            fields.push(("type".to_owned(), NativeDatumValue::String(member.member_type.type_string().to_owned())));
-            fields.push(("name".to_owned(), NativeDatumValue::String(Self::native_bounded_string(&member.name))));
-            fields.push(("number".to_owned(), NativeDatumValue::Int(member.number as i32)));
-            fields.push(("color".to_owned(), NativeDatumValue::String(member.color.to_string())));
-            fields.push(("bgColor".to_owned(), NativeDatumValue::String(member.bg_color.to_string())));
+            fields.push((
+                "type".to_owned(),
+                NativeDatumValue::String(member.member_type.type_string().to_owned()),
+            ));
+            fields.push((
+                "name".to_owned(),
+                NativeDatumValue::String(Self::native_bounded_string(&member.name)),
+            ));
+            fields.push((
+                "number".to_owned(),
+                NativeDatumValue::Int(member.number as i32),
+            ));
+            fields.push((
+                "color".to_owned(),
+                NativeDatumValue::String(member.color.to_string()),
+            ));
+            fields.push((
+                "bgColor".to_owned(),
+                NativeDatumValue::String(member.bg_color.to_string()),
+            ));
             fields.push(("regX".to_owned(), NativeDatumValue::Int(member.reg_point.0)));
             fields.push(("regY".to_owned(), NativeDatumValue::Int(member.reg_point.1)));
             match &member.member_type {
                 CastMemberType::Field(data) => {
-                    fields.push(("text".to_owned(), NativeDatumValue::String(Self::native_bounded_string(&data.text))));
+                    fields.push((
+                        "text".to_owned(),
+                        NativeDatumValue::String(Self::native_bounded_string(&data.text)),
+                    ));
                     fields.push(("width".to_owned(), NativeDatumValue::Int(data.width as i32)));
-                    fields.push(("height".to_owned(), NativeDatumValue::Int(data.height as i32)));
+                    fields.push((
+                        "height".to_owned(),
+                        NativeDatumValue::Int(data.height as i32),
+                    ));
                     fields.push(("editable".to_owned(), NativeDatumValue::Bool(data.editable)));
-                    fields.push(("wordWrap".to_owned(), NativeDatumValue::Bool(data.word_wrap)));
+                    fields.push((
+                        "wordWrap".to_owned(),
+                        NativeDatumValue::Bool(data.word_wrap),
+                    ));
                 }
                 CastMemberType::Text(data) => {
-                    fields.push(("text".to_owned(), NativeDatumValue::String(Self::native_bounded_string(&data.text))));
-                    fields.push(("htmlSource".to_owned(), NativeDatumValue::String(Self::native_bounded_string(&data.html_source))));
-                    fields.push(("alignment".to_owned(), NativeDatumValue::String(Self::native_bounded_string(data.alignment.as_str()))));
-                    fields.push(("boxType".to_owned(), NativeDatumValue::String(Self::native_bounded_string(&data.box_type.to_string()))));
+                    fields.push((
+                        "text".to_owned(),
+                        NativeDatumValue::String(Self::native_bounded_string(&data.text)),
+                    ));
+                    fields.push((
+                        "htmlSource".to_owned(),
+                        NativeDatumValue::String(Self::native_bounded_string(&data.html_source)),
+                    ));
+                    fields.push((
+                        "alignment".to_owned(),
+                        NativeDatumValue::String(Self::native_bounded_string(
+                            data.alignment.as_str(),
+                        )),
+                    ));
+                    fields.push((
+                        "boxType".to_owned(),
+                        NativeDatumValue::String(Self::native_bounded_string(
+                            &data.box_type.to_string(),
+                        )),
+                    ));
                     fields.push(("width".to_owned(), NativeDatumValue::Int(data.width as i32)));
-                    fields.push(("height".to_owned(), NativeDatumValue::Int(data.height as i32)));
-                    fields.push(("wordWrap".to_owned(), NativeDatumValue::Bool(data.word_wrap)));
-                    fields.push(("antiAlias".to_owned(), NativeDatumValue::Bool(data.anti_alias)));
-                    fields.push(("font".to_owned(), NativeDatumValue::String(Self::native_bounded_string(&data.font))));
-                    let mut font_style = data.font_style.iter().take(4096).map(|style| {
-                        NativeDatumValue::String(Self::native_bounded_string(&style.to_string()))
-                    }).collect::<Vec<_>>();
+                    fields.push((
+                        "height".to_owned(),
+                        NativeDatumValue::Int(data.height as i32),
+                    ));
+                    fields.push((
+                        "wordWrap".to_owned(),
+                        NativeDatumValue::Bool(data.word_wrap),
+                    ));
+                    fields.push((
+                        "antiAlias".to_owned(),
+                        NativeDatumValue::Bool(data.anti_alias),
+                    ));
+                    fields.push((
+                        "font".to_owned(),
+                        NativeDatumValue::String(Self::native_bounded_string(&data.font)),
+                    ));
+                    let mut font_style = data
+                        .font_style
+                        .iter()
+                        .take(4096)
+                        .map(|style| {
+                            NativeDatumValue::String(Self::native_bounded_string(
+                                &style.to_string(),
+                            ))
+                        })
+                        .collect::<Vec<_>>();
                     if data.font_style.len() > 4096 {
                         font_style.push(NativeDatumValue::Opaque("<omitted-tail>".to_owned()));
                     }
                     fields.push(("fontStyle".to_owned(), NativeDatumValue::Array(font_style)));
-                    fields.push(("fixedLineSpace".to_owned(), NativeDatumValue::Float(data.fixed_line_space as f64)));
-                    fields.push(("topSpacing".to_owned(), NativeDatumValue::Float(data.top_spacing as f64)));
-                    fields.push(("bottomSpacing".to_owned(), NativeDatumValue::Float(data.bottom_spacing as f64)));
-                    let mut html_styled_spans = data.html_styled_spans.iter().take(4096).map(|span| {
-                        NativeDatumValue::PropList(vec![
-                            ("text".to_owned(), NativeDatumValue::String(Self::native_bounded_string(&span.text))),
-                            ("fontFace".to_owned(), NativeDatumValue::String(Self::native_bounded_string(&span.style.font_face.clone().unwrap_or_default()))),
-                            ("fontSize".to_owned(), NativeDatumValue::Float(span.style.font_size.unwrap_or_default() as f64)),
-                            ("bold".to_owned(), NativeDatumValue::Bool(span.style.bold)),
-                            ("italic".to_owned(), NativeDatumValue::Bool(span.style.italic)),
-                            ("underline".to_owned(), NativeDatumValue::Bool(span.style.underline)),
-                            ("color".to_owned(), NativeDatumValue::Int(span.style.color.unwrap_or_default() as i32)),
-                        ], false)
-                    }).collect::<Vec<_>>();
+                    fields.push((
+                        "fixedLineSpace".to_owned(),
+                        NativeDatumValue::Float(data.fixed_line_space as f64),
+                    ));
+                    fields.push((
+                        "topSpacing".to_owned(),
+                        NativeDatumValue::Float(data.top_spacing as f64),
+                    ));
+                    fields.push((
+                        "bottomSpacing".to_owned(),
+                        NativeDatumValue::Float(data.bottom_spacing as f64),
+                    ));
+                    let mut html_styled_spans = data
+                        .html_styled_spans
+                        .iter()
+                        .take(4096)
+                        .map(|span| {
+                            NativeDatumValue::PropList(
+                                vec![
+                                    (
+                                        "text".to_owned(),
+                                        NativeDatumValue::String(Self::native_bounded_string(
+                                            &span.text,
+                                        )),
+                                    ),
+                                    (
+                                        "fontFace".to_owned(),
+                                        NativeDatumValue::String(Self::native_bounded_string(
+                                            &span.style.font_face.clone().unwrap_or_default(),
+                                        )),
+                                    ),
+                                    (
+                                        "fontSize".to_owned(),
+                                        NativeDatumValue::Float(
+                                            span.style.font_size.unwrap_or_default() as f64,
+                                        ),
+                                    ),
+                                    ("bold".to_owned(), NativeDatumValue::Bool(span.style.bold)),
+                                    (
+                                        "italic".to_owned(),
+                                        NativeDatumValue::Bool(span.style.italic),
+                                    ),
+                                    (
+                                        "underline".to_owned(),
+                                        NativeDatumValue::Bool(span.style.underline),
+                                    ),
+                                    (
+                                        "color".to_owned(),
+                                        NativeDatumValue::Int(
+                                            span.style.color.unwrap_or_default() as i32
+                                        ),
+                                    ),
+                                ],
+                                false,
+                            )
+                        })
+                        .collect::<Vec<_>>();
                     if data.html_styled_spans.len() > 4096 {
-                        html_styled_spans.push(NativeDatumValue::Opaque("<omitted-tail>".to_owned()));
+                        html_styled_spans
+                            .push(NativeDatumValue::Opaque("<omitted-tail>".to_owned()));
                     }
-                    fields.push(("htmlStyledSpans".to_owned(), NativeDatumValue::Array(html_styled_spans)));
+                    fields.push((
+                        "htmlStyledSpans".to_owned(),
+                        NativeDatumValue::Array(html_styled_spans),
+                    ));
                 }
                 CastMemberType::Script(data) => {
                     fields.push((
                         "script".to_owned(),
-                        Self::native_member_script_snapshot(player, symbols, member_ref.clone(), data)?,
+                        Self::native_member_script_snapshot(
+                            player,
+                            symbols,
+                            member_ref.clone(),
+                            data,
+                        )?,
                     ));
                 }
                 CastMemberType::Shape(data) => {
@@ -3515,73 +4312,242 @@ impl JsApi {
                         crate::director::enums::ShapeType::Unknown => "rect",
                     };
                     fields.extend([
-                        ("shapeType".to_owned(), NativeDatumValue::String(shape_type.to_owned())),
-                        ("width".to_owned(), NativeDatumValue::Int(info.width() as i32)),
-                        ("height".to_owned(), NativeDatumValue::Int(info.height() as i32)),
-                        ("rectLeft".to_owned(), NativeDatumValue::Int(info.rect_left as i32)),
-                        ("rectTop".to_owned(), NativeDatumValue::Int(info.rect_top as i32)),
-                        ("rectRight".to_owned(), NativeDatumValue::Int(info.rect_right as i32)),
-                        ("rectBottom".to_owned(), NativeDatumValue::Int(info.rect_bottom as i32)),
-                        ("pattern".to_owned(), NativeDatumValue::Int(info.pattern as i32)),
-                        ("foreColor".to_owned(), NativeDatumValue::Int(info.fore_color as i32)),
-                        ("backColor".to_owned(), NativeDatumValue::Int(info.back_color as i32)),
-                        ("filled".to_owned(), NativeDatumValue::Bool(info.fill_type != 0)),
-                        ("lineSize".to_owned(), NativeDatumValue::Int((info.line_thickness as i32 - 1).max(0))),
-                        ("lineDirection".to_owned(), NativeDatumValue::Int(info.line_direction as i32)),
+                        (
+                            "shapeType".to_owned(),
+                            NativeDatumValue::String(shape_type.to_owned()),
+                        ),
+                        (
+                            "width".to_owned(),
+                            NativeDatumValue::Int(info.width() as i32),
+                        ),
+                        (
+                            "height".to_owned(),
+                            NativeDatumValue::Int(info.height() as i32),
+                        ),
+                        (
+                            "rectLeft".to_owned(),
+                            NativeDatumValue::Int(info.rect_left as i32),
+                        ),
+                        (
+                            "rectTop".to_owned(),
+                            NativeDatumValue::Int(info.rect_top as i32),
+                        ),
+                        (
+                            "rectRight".to_owned(),
+                            NativeDatumValue::Int(info.rect_right as i32),
+                        ),
+                        (
+                            "rectBottom".to_owned(),
+                            NativeDatumValue::Int(info.rect_bottom as i32),
+                        ),
+                        (
+                            "pattern".to_owned(),
+                            NativeDatumValue::Int(info.pattern as i32),
+                        ),
+                        (
+                            "foreColor".to_owned(),
+                            NativeDatumValue::Int(info.fore_color as i32),
+                        ),
+                        (
+                            "backColor".to_owned(),
+                            NativeDatumValue::Int(info.back_color as i32),
+                        ),
+                        (
+                            "filled".to_owned(),
+                            NativeDatumValue::Bool(info.fill_type != 0),
+                        ),
+                        (
+                            "lineSize".to_owned(),
+                            NativeDatumValue::Int((info.line_thickness as i32 - 1).max(0)),
+                        ),
+                        (
+                            "lineDirection".to_owned(),
+                            NativeDatumValue::Int(info.line_direction as i32),
+                        ),
                     ]);
                 }
                 CastMemberType::Bitmap(data) => {
-                    let bitmap = player.bitmap_manager.get_bitmap(data.image_ref).ok_or_else(|| {
-                        format!("missing bitmap for cast member {}:{}", member_ref.cast_lib, member_ref.cast_member)
-                    })?;
-                    fields.push(("width".to_owned(), NativeDatumValue::Int(bitmap.width as i32)));
-                    fields.push(("height".to_owned(), NativeDatumValue::Int(bitmap.height as i32)));
-                    fields.push(("bitDepth".to_owned(), NativeDatumValue::Int(bitmap.bit_depth as i32)));
-                    fields.push(("paletteRef".to_owned(), NativeDatumValue::String(Self::native_bounded_string(&format!("{:?}", bitmap.palette_ref)))));
+                    let bitmap = player
+                        .bitmap_manager
+                        .get_bitmap(data.image_ref)
+                        .ok_or_else(|| {
+                            format!(
+                                "missing bitmap for cast member {}:{}",
+                                member_ref.cast_lib, member_ref.cast_member
+                            )
+                        })?;
+                    fields.push((
+                        "width".to_owned(),
+                        NativeDatumValue::Int(bitmap.width as i32),
+                    ));
+                    fields.push((
+                        "height".to_owned(),
+                        NativeDatumValue::Int(bitmap.height as i32),
+                    ));
+                    fields.push((
+                        "bitDepth".to_owned(),
+                        NativeDatumValue::Int(bitmap.bit_depth as i32),
+                    ));
+                    fields.push((
+                        "paletteRef".to_owned(),
+                        NativeDatumValue::String(Self::native_bounded_string(&format!(
+                            "{:?}",
+                            bitmap.palette_ref
+                        ))),
+                    ));
                 }
                 CastMemberType::Sound(data) => {
-                    fields.push(("sampleRate".to_owned(), NativeDatumValue::Int(data.info.sample_rate as i32)));
-                    fields.push(("channels".to_owned(), NativeDatumValue::Int(data.info.channels as i32)));
-                    fields.push(("bitsPerSample".to_owned(), NativeDatumValue::Int(data.info.sample_size as i32)));
-                    fields.push(("sampleCount".to_owned(), NativeDatumValue::Int(data.info.sample_count as i32)));
-                    fields.push(("duration".to_owned(), NativeDatumValue::Float(data.info.duration as f64)));
-                    fields.push(("loop".to_owned(), NativeDatumValue::Bool(data.info.loop_enabled)));
-                    fields.push(("codec".to_owned(), NativeDatumValue::String(data.sound.codec())));
-                    fields.push(("dataSize".to_owned(), NativeDatumValue::Int(data.sound.data().len() as i32)));
+                    fields.push((
+                        "sampleRate".to_owned(),
+                        NativeDatumValue::Int(data.info.sample_rate as i32),
+                    ));
+                    fields.push((
+                        "channels".to_owned(),
+                        NativeDatumValue::Int(data.info.channels as i32),
+                    ));
+                    fields.push((
+                        "bitsPerSample".to_owned(),
+                        NativeDatumValue::Int(data.info.sample_size as i32),
+                    ));
+                    fields.push((
+                        "sampleCount".to_owned(),
+                        NativeDatumValue::Int(data.info.sample_count as i32),
+                    ));
+                    fields.push((
+                        "duration".to_owned(),
+                        NativeDatumValue::Float(data.info.duration as f64),
+                    ));
+                    fields.push((
+                        "loop".to_owned(),
+                        NativeDatumValue::Bool(data.info.loop_enabled),
+                    ));
+                    fields.push((
+                        "codec".to_owned(),
+                        NativeDatumValue::String(data.sound.codec()),
+                    ));
+                    fields.push((
+                        "dataSize".to_owned(),
+                        NativeDatumValue::Int(data.sound.data().len() as i32),
+                    ));
                 }
                 CastMemberType::FilmLoop(data) => {
-                    fields.push(("width".to_owned(), NativeDatumValue::Int(data.info.width as i32)));
-                    fields.push(("height".to_owned(), NativeDatumValue::Int(data.info.height as i32)));
-                    fields.push(("center".to_owned(), NativeDatumValue::Int(data.info.center as i32)));
-                    fields.push(("regX".to_owned(), NativeDatumValue::Int(data.info.reg_point.0.into())));
-                    fields.push(("regY".to_owned(), NativeDatumValue::Int(data.info.reg_point.1.into())));
+                    fields.push((
+                        "width".to_owned(),
+                        NativeDatumValue::Int(data.info.width as i32),
+                    ));
+                    fields.push((
+                        "height".to_owned(),
+                        NativeDatumValue::Int(data.info.height as i32),
+                    ));
+                    fields.push((
+                        "center".to_owned(),
+                        NativeDatumValue::Int(data.info.center as i32),
+                    ));
+                    fields.push((
+                        "regX".to_owned(),
+                        NativeDatumValue::Int(data.info.reg_point.0.into()),
+                    ));
+                    fields.push((
+                        "regY".to_owned(),
+                        NativeDatumValue::Int(data.info.reg_point.1.into()),
+                    ));
                     let score = Self::native_score_snapshot_for_score(player, &data.score);
-                    let spans = score.spans.into_iter().map(|span| {
-                        let behaviors = NativeDatumValue::Array(span.behavior_references.into_iter().map(|behavior| {
-                            NativeDatumValue::PropList(vec![
-                                ("castLib".to_owned(), NativeDatumValue::Int(behavior.cast_lib as i32)),
-                                ("castMember".to_owned(), NativeDatumValue::Int(behavior.cast_member as i32)),
-                                ("parameterDebug".to_owned(), NativeDatumValue::Array(behavior.parameter_debug.into_iter().map(NativeDatumValue::String).collect())),
-                            ], false)
-                        }).collect());
-                        NativeDatumValue::PropList(vec![
-                            ("channelNumber".to_owned(), NativeDatumValue::Int(span.channel_number as i32)),
-                            ("startFrame".to_owned(), NativeDatumValue::Int(span.start_frame as i32)),
-                            ("endFrame".to_owned(), NativeDatumValue::Int(span.end_frame as i32)),
-                            ("memberName".to_owned(), NativeDatumValue::String(Self::native_bounded_string(&span.member_name))),
-                            ("behaviorReferences".to_owned(), behaviors),
-                        ], false)
-                    }).collect();
-                    fields.push(("score".to_owned(), NativeDatumValue::PropList(vec![
-                        ("channelCount".to_owned(), NativeDatumValue::Int(score.channel_count as i32)),
-                        ("frameCount".to_owned(), NativeDatumValue::Int(score.frame_count as i32)),
-                        ("behaviorReferences".to_owned(), NativeDatumValue::Array(spans)),
-                    ], false)));
+                    let spans = score
+                        .spans
+                        .into_iter()
+                        .map(|span| {
+                            let behaviors = NativeDatumValue::Array(
+                                span.behavior_references
+                                    .into_iter()
+                                    .map(|behavior| {
+                                        NativeDatumValue::PropList(
+                                            vec![
+                                                (
+                                                    "castLib".to_owned(),
+                                                    NativeDatumValue::Int(behavior.cast_lib as i32),
+                                                ),
+                                                (
+                                                    "castMember".to_owned(),
+                                                    NativeDatumValue::Int(
+                                                        behavior.cast_member as i32,
+                                                    ),
+                                                ),
+                                                (
+                                                    "parameterDebug".to_owned(),
+                                                    NativeDatumValue::Array(
+                                                        behavior
+                                                            .parameter_debug
+                                                            .into_iter()
+                                                            .map(NativeDatumValue::String)
+                                                            .collect(),
+                                                    ),
+                                                ),
+                                            ],
+                                            false,
+                                        )
+                                    })
+                                    .collect(),
+                            );
+                            NativeDatumValue::PropList(
+                                vec![
+                                    (
+                                        "channelNumber".to_owned(),
+                                        NativeDatumValue::Int(span.channel_number as i32),
+                                    ),
+                                    (
+                                        "startFrame".to_owned(),
+                                        NativeDatumValue::Int(span.start_frame as i32),
+                                    ),
+                                    (
+                                        "endFrame".to_owned(),
+                                        NativeDatumValue::Int(span.end_frame as i32),
+                                    ),
+                                    (
+                                        "memberName".to_owned(),
+                                        NativeDatumValue::String(Self::native_bounded_string(
+                                            &span.member_name,
+                                        )),
+                                    ),
+                                    ("behaviorReferences".to_owned(), behaviors),
+                                ],
+                                false,
+                            )
+                        })
+                        .collect();
+                    fields.push((
+                        "score".to_owned(),
+                        NativeDatumValue::PropList(
+                            vec![
+                                (
+                                    "channelCount".to_owned(),
+                                    NativeDatumValue::Int(score.channel_count as i32),
+                                ),
+                                (
+                                    "frameCount".to_owned(),
+                                    NativeDatumValue::Int(score.frame_count as i32),
+                                ),
+                                (
+                                    "behaviorReferences".to_owned(),
+                                    NativeDatumValue::Array(spans),
+                                ),
+                            ],
+                            false,
+                        ),
+                    ));
                 }
                 CastMemberType::Flash(data) => {
-                    fields.push(("regX".to_owned(), NativeDatumValue::Int(data.reg_point.0.into())));
-                    fields.push(("regY".to_owned(), NativeDatumValue::Int(data.reg_point.1.into())));
-                    fields.push(("dataSize".to_owned(), NativeDatumValue::Int(data.data.len() as i32)));
+                    fields.push((
+                        "regX".to_owned(),
+                        NativeDatumValue::Int(data.reg_point.0.into()),
+                    ));
+                    fields.push((
+                        "regY".to_owned(),
+                        NativeDatumValue::Int(data.reg_point.1.into()),
+                    ));
+                    fields.push((
+                        "dataSize".to_owned(),
+                        NativeDatumValue::Int(data.data.len() as i32),
+                    ));
                     if let Some(info) = &data.flash_info {
                         fields.extend([
                             ("flashRectLeft".to_owned(), NativeDatumValue::Int(info.flash_rect.0)),
@@ -3657,25 +4623,48 @@ impl JsApi {
                     }
                 }
                 CastMemberType::Palette(data) => {
-                    fields.push(("colors".to_owned(), NativeDatumValue::Array(data.colors.iter().map(|color| {
-                        NativeDatumValue::Array(vec![
-                            NativeDatumValue::Int(color.0 as i32),
-                            NativeDatumValue::Int(color.1 as i32),
-                            NativeDatumValue::Int(color.2 as i32),
-                        ])
-                    }).collect())));
-                    fields.push(("colorCount".to_owned(), NativeDatumValue::Int(data.colors.len() as i32)));
+                    fields.push((
+                        "colors".to_owned(),
+                        NativeDatumValue::Array(
+                            data.colors
+                                .iter()
+                                .map(|color| {
+                                    NativeDatumValue::Array(vec![
+                                        NativeDatumValue::Int(color.0 as i32),
+                                        NativeDatumValue::Int(color.1 as i32),
+                                        NativeDatumValue::Int(color.2 as i32),
+                                    ])
+                                })
+                                .collect(),
+                        ),
+                    ));
+                    fields.push((
+                        "colorCount".to_owned(),
+                        NativeDatumValue::Int(data.colors.len() as i32),
+                    ));
                 }
                 CastMemberType::Shockwave3d(data) => {
                     let info = &data.info;
                     fields.push(("regX".to_owned(), NativeDatumValue::Int(info.reg_point.0)));
                     fields.push(("regY".to_owned(), NativeDatumValue::Int(info.reg_point.1)));
-                    fields.push(("dataSize".to_owned(), NativeDatumValue::Int(data.w3d_data.len() as i32)));
-                    fields.push(("directToStage".to_owned(), NativeDatumValue::Bool(info.direct_to_stage)));
-                    fields.push(("animationEnabled".to_owned(), NativeDatumValue::Bool(info.animation_enabled)));
+                    fields.push((
+                        "dataSize".to_owned(),
+                        NativeDatumValue::Int(data.w3d_data.len() as i32),
+                    ));
+                    fields.push((
+                        "directToStage".to_owned(),
+                        NativeDatumValue::Bool(info.direct_to_stage),
+                    ));
+                    fields.push((
+                        "animationEnabled".to_owned(),
+                        NativeDatumValue::Bool(info.animation_enabled),
+                    ));
                     fields.push(("preload".to_owned(), NativeDatumValue::Bool(info.preload)));
                     fields.push(("loop".to_owned(), NativeDatumValue::Bool(info.loops)));
-                    fields.push(("duration".to_owned(), NativeDatumValue::Float(info.duration as f64)));
+                    fields.push((
+                        "duration".to_owned(),
+                        NativeDatumValue::Float(info.duration as f64),
+                    ));
                     let rect = info.default_rect;
                     fields.extend([
                         ("width".to_owned(), NativeDatumValue::Int(rect.2 - rect.0)),
@@ -3686,22 +4675,44 @@ impl JsApi {
                         ("rectBottom".to_owned(), NativeDatumValue::Int(rect.3)),
                     ]);
                     if let Some(pos) = info.camera_position {
-                        fields.push(("cameraPosition".to_owned(), NativeDatumValue::Array(vec![
-                            NativeDatumValue::Float(pos.0 as f64), NativeDatumValue::Float(pos.1 as f64), NativeDatumValue::Float(pos.2 as f64),
-                        ])));
+                        fields.push((
+                            "cameraPosition".to_owned(),
+                            NativeDatumValue::Array(vec![
+                                NativeDatumValue::Float(pos.0 as f64),
+                                NativeDatumValue::Float(pos.1 as f64),
+                                NativeDatumValue::Float(pos.2 as f64),
+                            ]),
+                        ));
                     }
                     if let Some(rot) = info.camera_rotation {
-                        fields.push(("cameraRotation".to_owned(), NativeDatumValue::Array(vec![
-                            NativeDatumValue::Float(rot.0 as f64), NativeDatumValue::Float(rot.1 as f64), NativeDatumValue::Float(rot.2 as f64),
-                        ])));
+                        fields.push((
+                            "cameraRotation".to_owned(),
+                            NativeDatumValue::Array(vec![
+                                NativeDatumValue::Float(rot.0 as f64),
+                                NativeDatumValue::Float(rot.1 as f64),
+                                NativeDatumValue::Float(rot.2 as f64),
+                            ]),
+                        ));
                     }
                     if let Some(bg) = info.bg_color {
-                        fields.push(("bgColor".to_owned(), NativeDatumValue::String(format!("rgb({},{},{})", bg.0, bg.1, bg.2))));
+                        fields.push((
+                            "bgColor".to_owned(),
+                            NativeDatumValue::String(format!("rgb({},{},{})", bg.0, bg.1, bg.2)),
+                        ));
                     }
                     if let Some(ambient) = info.ambient_color {
-                        fields.push(("ambientColor".to_owned(), NativeDatumValue::String(format!("rgb({},{},{})", ambient.0, ambient.1, ambient.2))));
+                        fields.push((
+                            "ambientColor".to_owned(),
+                            NativeDatumValue::String(format!(
+                                "rgb({},{},{})",
+                                ambient.0, ambient.1, ambient.2
+                            )),
+                        ));
                     }
-                    fields.push(("hasScene".to_owned(), NativeDatumValue::Bool(data.parsed_scene.is_some())));
+                    fields.push((
+                        "hasScene".to_owned(),
+                        NativeDatumValue::Bool(data.parsed_scene.is_some()),
+                    ));
                 }
                 CastMemberType::Button(data) => {
                     fields.push(("hilite".to_owned(), NativeDatumValue::Bool(data.hilite)));
@@ -3735,7 +4746,9 @@ impl JsApi {
         let mut cursor = Some(instance_ref.clone());
         let mut instance = None;
         for _ in 0..=20 {
-            let Some(reference) = cursor.take() else { break };
+            let Some(reference) = cursor.take() else {
+                break;
+            };
             if !ancestors.insert(reference.id()) {
                 return Err(format!("cyclic script ancestor {}", reference.id()));
             }
@@ -3798,136 +4811,154 @@ impl JsApi {
             {
                 continue;
             }
-            let prepared = session.borrow_mut().with_player(player_id, |context| -> Result<_, String> {
-                let player = context.player;
-                let symbols = context.symbols;
-                match &notification.kind {
-                    PlayerNotificationKind::ScoreChanged => Ok(Some(
-                        NativePlayerNotificationKind::ScoreChanged(Self::native_score_snapshot(player)),
-                    )),
-                    PlayerNotificationKind::ChannelChanged(channel) => Ok(Some(
-                        NativePlayerNotificationKind::ChannelChanged(
-                            Self::native_channel_snapshot(player, *channel)?,
-                        ),
-                    )),
-                    PlayerNotificationKind::ChannelNameChanged(channel) => {
-                        let snapshot = Self::native_channel_snapshot(player, *channel)?;
-                        Ok(Some(NativePlayerNotificationKind::ChannelNameChanged {
-                            channel: *channel,
-                            name: snapshot.display_name,
-                        }))
-                    }
-                    PlayerNotificationKind::ChannelNamesChanged => {
-                        let names = player
-                            .movie
-                            .score
-                            .channels
-                            .iter()
-                            .enumerate()
-                            .map(|(index, channel)| {
-                                let name = if !channel.name.is_empty() {
-                                    channel.name.clone()
-                                } else if !channel.sprite.name.is_empty() {
-                                    channel.sprite.name.clone()
-                                } else {
-                                    channel
-                                        .sprite
-                                        .member
-                                        .as_ref()
-                                        .and_then(|member_ref| {
-                                            player.movie.cast_manager.find_member_by_ref(member_ref)
-                                        })
-                                        .map(|member| member.name.clone())
-                                        .unwrap_or_default()
-                                };
-                                (index as i16, name)
-                            })
-                            .collect();
-                        Ok(Some(NativePlayerNotificationKind::ChannelNamesChanged(names)))
-                    }
-                    PlayerNotificationKind::CastMemberChanged(member_ref) => Ok(Some(
-                        NativePlayerNotificationKind::CastMemberChanged(
-                            Self::native_member_snapshot(player, symbols, member_ref.clone())?,
-                        ),
-                    )),
-                    PlayerNotificationKind::CastMemberListChanged(cast) => {
-                        let cast_lib = player
-                            .movie
-                            .cast_manager
-                            .get_cast(*cast)
-                            .map_err(|error| error.message.clone())?;
-                        let members = cast_lib
-                            .members
-                            .values()
-                            .map(|member| {
-                                Self::native_member_snapshot(
-                                    player,
-                                    symbols,
-                                    CastMemberRef {
-                                        cast_lib: *cast as i32,
-                                        cast_member: member.number as i32,
-                                    },
-                                )
-                            })
-                            .collect::<Result<Vec<_>, _>>()?;
-                        Ok(Some(NativePlayerNotificationKind::CastMemberListChanged {
-                            cast: *cast,
-                            members,
-                        }))
-                    }
-                    PlayerNotificationKind::CastMemberNameChanged(slot) => {
-                        let names = player
-                            .movie
-                            .score
-                            .channels
-                            .iter()
-                            .enumerate()
-                            .filter_map(|(index, channel)| {
-                                let member = channel.sprite.member.as_ref()?;
-                                if member.cast_member as u32 != *slot {
-                                    return None;
-                                }
-                                let name = if !channel.name.is_empty() {
-                                    channel.name.clone()
-                                } else if !channel.sprite.name.is_empty() {
-                                    channel.sprite.name.clone()
-                                } else {
-                                    player
-                                        .movie
-                                        .cast_manager
-                                        .find_member_by_ref(member)
-                                        .map(|member| member.name.clone())
-                                        .unwrap_or_default()
-                                };
-                                Some((index as i16, name))
-                            })
-                            .collect();
-                        Ok(Some(NativePlayerNotificationKind::CastMemberNameChanged {
-                            slot: *slot,
-                            names,
-                        }))
-                    }
-                    PlayerNotificationKind::DatumSnapshot(datum_ref) => Ok(Some(
-                        NativePlayerNotificationKind::DatumSnapshot(Self::native_datum_snapshot(
-                            player, symbols, datum_ref,
-                        )?),
-                    )),
-                    PlayerNotificationKind::ScriptInstanceSnapshot(instance_ref) => Ok(Some(
-                        NativePlayerNotificationKind::ScriptInstanceSnapshot(
-                            Self::native_script_snapshot(player, symbols, instance_ref.clone())?,
-                        ),
-                    )),
-                    PlayerNotificationKind::Host(event) => {
-                        Ok(Some(NativePlayerNotificationKind::Host(event.clone())))
-                    }
-                    PlayerNotificationKind::HostBackpressure(capacity) => {
-                        push_error = Some(crate::player::host_events::HostEventOverflow {
-                            capacity: *capacity,
-                        });
-                        Ok(None)
-                    }
-                }
-            });
+            let prepared =
+                session
+                    .borrow_mut()
+                    .with_player(player_id, |context| -> Result<_, String> {
+                        let player = context.player;
+                        let symbols = context.symbols;
+                        match &notification.kind {
+                            PlayerNotificationKind::ScoreChanged => {
+                                Ok(Some(NativePlayerNotificationKind::ScoreChanged(
+                                    Self::native_score_snapshot(player),
+                                )))
+                            }
+                            PlayerNotificationKind::ChannelChanged(channel) => {
+                                Ok(Some(NativePlayerNotificationKind::ChannelChanged(
+                                    Self::native_channel_snapshot(player, *channel)?,
+                                )))
+                            }
+                            PlayerNotificationKind::ChannelNameChanged(channel) => {
+                                let snapshot = Self::native_channel_snapshot(player, *channel)?;
+                                Ok(Some(NativePlayerNotificationKind::ChannelNameChanged {
+                                    channel: *channel,
+                                    name: snapshot.display_name,
+                                }))
+                            }
+                            PlayerNotificationKind::ChannelNamesChanged => {
+                                let names = player
+                                    .movie
+                                    .score
+                                    .channels
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(index, channel)| {
+                                        let name = if !channel.name.is_empty() {
+                                            channel.name.clone()
+                                        } else if !channel.sprite.name.is_empty() {
+                                            channel.sprite.name.clone()
+                                        } else {
+                                            channel
+                                                .sprite
+                                                .member
+                                                .as_ref()
+                                                .and_then(|member_ref| {
+                                                    player
+                                                        .movie
+                                                        .cast_manager
+                                                        .find_member_by_ref(member_ref)
+                                                })
+                                                .map(|member| member.name.clone())
+                                                .unwrap_or_default()
+                                        };
+                                        (index as i16, name)
+                                    })
+                                    .collect();
+                                Ok(Some(NativePlayerNotificationKind::ChannelNamesChanged(
+                                    names,
+                                )))
+                            }
+                            PlayerNotificationKind::CastMemberChanged(member_ref) => {
+                                Ok(Some(NativePlayerNotificationKind::CastMemberChanged(
+                                    Self::native_member_snapshot(
+                                        player,
+                                        symbols,
+                                        member_ref.clone(),
+                                    )?,
+                                )))
+                            }
+                            PlayerNotificationKind::CastMemberListChanged(cast) => {
+                                let cast_lib = player
+                                    .movie
+                                    .cast_manager
+                                    .get_cast(*cast)
+                                    .map_err(|error| error.message.clone())?;
+                                let members = cast_lib
+                                    .members
+                                    .values()
+                                    .map(|member| {
+                                        Self::native_member_snapshot(
+                                            player,
+                                            symbols,
+                                            CastMemberRef {
+                                                cast_lib: *cast as i32,
+                                                cast_member: member.number as i32,
+                                            },
+                                        )
+                                    })
+                                    .collect::<Result<Vec<_>, _>>()?;
+                                Ok(Some(NativePlayerNotificationKind::CastMemberListChanged {
+                                    cast: *cast,
+                                    members,
+                                }))
+                            }
+                            PlayerNotificationKind::CastMemberNameChanged(slot) => {
+                                let names = player
+                                    .movie
+                                    .score
+                                    .channels
+                                    .iter()
+                                    .enumerate()
+                                    .filter_map(|(index, channel)| {
+                                        let member = channel.sprite.member.as_ref()?;
+                                        if member.cast_member as u32 != *slot {
+                                            return None;
+                                        }
+                                        let name = if !channel.name.is_empty() {
+                                            channel.name.clone()
+                                        } else if !channel.sprite.name.is_empty() {
+                                            channel.sprite.name.clone()
+                                        } else {
+                                            player
+                                                .movie
+                                                .cast_manager
+                                                .find_member_by_ref(member)
+                                                .map(|member| member.name.clone())
+                                                .unwrap_or_default()
+                                        };
+                                        Some((index as i16, name))
+                                    })
+                                    .collect();
+                                Ok(Some(NativePlayerNotificationKind::CastMemberNameChanged {
+                                    slot: *slot,
+                                    names,
+                                }))
+                            }
+                            PlayerNotificationKind::DatumSnapshot(datum_ref) => {
+                                Ok(Some(NativePlayerNotificationKind::DatumSnapshot(
+                                    Self::native_datum_snapshot(player, symbols, datum_ref)?,
+                                )))
+                            }
+                            PlayerNotificationKind::ScriptInstanceSnapshot(instance_ref) => {
+                                Ok(Some(NativePlayerNotificationKind::ScriptInstanceSnapshot(
+                                    Self::native_script_snapshot(
+                                        player,
+                                        symbols,
+                                        instance_ref.clone(),
+                                    )?,
+                                )))
+                            }
+                            PlayerNotificationKind::Host(event) => {
+                                Ok(Some(NativePlayerNotificationKind::Host(event.clone())))
+                            }
+                            PlayerNotificationKind::HostBackpressure(capacity) => {
+                                push_error = Some(crate::player::host_events::HostEventOverflow {
+                                    capacity: *capacity,
+                                });
+                                Ok(None)
+                            }
+                        }
+                    });
             let Some(prepared) = prepared else {
                 continue;
             };
@@ -4003,18 +5034,67 @@ impl JsApi {
         Ok(())
     }
     pub fn dispatch_datum_snapshot(_: &DatumRef, _: &SymbolTable, _: &DirPlayer) {}
-    pub fn dispatch_script_instance_snapshot(_: Option<ScriptInstanceRef>, _: &SymbolTable, _: &DirPlayer) {}
+    pub fn dispatch_script_instance_snapshot(
+        _: Option<ScriptInstanceRef>,
+        _: &SymbolTable,
+        _: &DirPlayer,
+    ) {
+    }
     pub fn dispatch_schedule_timeout(_: &str, _: u32) {}
     pub fn dispatch_clear_timeout(_: &str) {}
     #[allow(dead_code)]
     pub fn dispatch_clear_timeouts() {}
     pub fn dispatch_movie_loaded(_: &DirectorFile) {}
     pub fn dispatch_movie_load_failed(_: &str, _: &str) {}
-    pub fn dispatch_flash_member_loaded(_: i32, _: i32, _: i32, _: &[u8], _: u32, _: u32, _: bool, _: i32, _: &str) {}
-    pub fn dispatch_flash_member_loaded_prepared(_: i32, _: i32, _: i32, _: &[u8], _: u32, _: u32, _: bool, _: i32, _: &str, _: u64) -> Result<(), ScriptError> { Err(ScriptError::new("Flash host load is unavailable on native".to_owned())) }
+    pub fn dispatch_flash_member_loaded(
+        _: i32,
+        _: i32,
+        _: i32,
+        _: &[u8],
+        _: u32,
+        _: u32,
+        _: bool,
+        _: i32,
+        _: &str,
+    ) {
+    }
+    pub fn dispatch_flash_member_loaded_prepared(
+        _: i32,
+        _: i32,
+        _: i32,
+        _: &[u8],
+        _: u32,
+        _: u32,
+        _: bool,
+        _: i32,
+        _: &str,
+        _: u64,
+    ) -> Result<(), ScriptError> {
+        Err(ScriptError::new(
+            "Flash host load is unavailable on native".to_owned(),
+        ))
+    }
     pub fn dispatch_flash_member_unloaded(_: i32, _: &str) {}
-    pub fn dispatch_flash_member_unloaded_at_generation(_: i32, _: u64, _: &str) -> Result<(), ScriptError> { Err(ScriptError::new("Flash host unload is unavailable on native".to_owned())) }
-    pub fn dispatch_flash_member_resized(_: i32, _: u64, _: u32, _: u32, _: &str) -> Result<(), ScriptError> { Err(ScriptError::new("Flash host resize is unavailable on native".to_owned())) }
+    pub fn dispatch_flash_member_unloaded_at_generation(
+        _: i32,
+        _: u64,
+        _: &str,
+    ) -> Result<(), ScriptError> {
+        Err(ScriptError::new(
+            "Flash host unload is unavailable on native".to_owned(),
+        ))
+    }
+    pub fn dispatch_flash_member_resized(
+        _: i32,
+        _: u64,
+        _: u32,
+        _: u32,
+        _: &str,
+    ) -> Result<(), ScriptError> {
+        Err(ScriptError::new(
+            "Flash host resize is unavailable on native".to_owned(),
+        ))
+    }
     pub fn dispatch_flash_reset_all(_: &str) {}
     pub fn register_flash_lingo_callback(
         _: &str,
@@ -4028,7 +5108,9 @@ impl JsApi {
         _: i32,
         _: i32,
     ) -> Result<(), ScriptError> {
-        Err(ScriptError::new("Flash host is unavailable on native".to_owned()))
+        Err(ScriptError::new(
+            "Flash host is unavailable on native".to_owned(),
+        ))
     }
     pub fn dispatch_stage_size_changed(_: u32, _: u32, _: bool) {}
     pub fn dispatch_cast_name_changed(_: u32) {}
@@ -4038,24 +5120,46 @@ impl JsApi {
     pub fn on_cast_member_name_changed(_: u32) {}
     pub fn on_sprite_member_changed(_: i16) {}
     pub fn dispatch_score_changed() {}
-    pub fn score_snapshot_for_player(_: &DirPlayer) -> Option<(js_sys::Object, String)> { None }
-    pub fn dispatch_score_snapshot(_: js_sys::Object, _: &str) -> Result<(), JsValue> { Ok(()) }
+    pub fn score_snapshot_for_player(_: &DirPlayer) -> Option<(js_sys::Object, String)> {
+        None
+    }
+    pub fn dispatch_score_snapshot(_: js_sys::Object, _: &str) -> Result<(), JsValue> {
+        Ok(())
+    }
     pub fn dispatch_channel_changed(_: i16) {}
-    pub fn channel_snapshot_for_player(_: &DirPlayer, _: i16) -> (js_sys::Object, String) { (js_sys::Object::new(), String::new()) }
-    pub fn dispatch_channel_snapshot(_: i16, _: js_sys::Object, _: &str) -> Result<(), JsValue> { Ok(()) }
+    pub fn channel_snapshot_for_player(_: &DirPlayer, _: i16) -> (js_sys::Object, String) {
+        (js_sys::Object::new(), String::new())
+    }
+    pub fn dispatch_channel_snapshot(_: i16, _: js_sys::Object, _: &str) -> Result<(), JsValue> {
+        Ok(())
+    }
     pub fn dispatch_frame_changed(_: u32) {}
-    pub fn dispatch_debug_message(_: &str) -> Result<(), JsValue> { Ok(()) }
-    pub fn dispatch_debug_message_owned(_: &str, _: &str) -> Result<(), JsValue> { Ok(()) }
+    pub fn dispatch_debug_message(_: &str) -> Result<(), JsValue> {
+        Ok(())
+    }
+    pub fn dispatch_debug_message_owned(_: &str, _: &str) -> Result<(), JsValue> {
+        Ok(())
+    }
     pub fn dispatch_debug_content(_: js_sys::Object) {}
     pub fn dispatch_debug_bitmap(_: u32, _: u32, _: &[u8]) {}
     pub fn dispatch_debug_datum(_: &DatumRef, _: &SymbolTable, _: &DirPlayer) {}
     pub fn dispatch_channel_name_changed(_: i16) {}
-    pub fn channel_name_snapshots_for_member_slot(_: &DirPlayer, _: u32) -> Vec<(i16, String)> { vec![] }
-    pub fn channel_name_snapshot_for_player(_: &DirPlayer, _: i16) -> Option<(String, String)> { None }
+    pub fn channel_name_snapshots_for_member_slot(_: &DirPlayer, _: u32) -> Vec<(i16, String)> {
+        vec![]
+    }
+    pub fn channel_name_snapshot_for_player(_: &DirPlayer, _: i16) -> Option<(String, String)> {
+        None
+    }
     pub fn dispatch_all_channel_names(_: &DirPlayer) {}
-    pub fn channel_names_snapshot_for_player(_: &DirPlayer) -> (js_sys::Object, String) { (js_sys::Object::new(), String::new()) }
-    pub fn dispatch_channel_names_snapshot(_: js_sys::Object, _: &str) -> Result<(), JsValue> { Ok(()) }
-    pub fn dispatch_channel_name_snapshot(_: i16, _: &str, _: &str) -> Result<(), JsValue> { Ok(()) }
+    pub fn channel_names_snapshot_for_player(_: &DirPlayer) -> (js_sys::Object, String) {
+        (js_sys::Object::new(), String::new())
+    }
+    pub fn dispatch_channel_names_snapshot(_: js_sys::Object, _: &str) -> Result<(), JsValue> {
+        Ok(())
+    }
+    pub fn dispatch_channel_name_snapshot(_: i16, _: &str, _: &str) -> Result<(), JsValue> {
+        Ok(())
+    }
     pub fn dispatch_scope_list(_: &mut DirPlayer) {}
     pub fn dispatch_global_list(_: &SymbolTable, _: &DirPlayer) {}
     pub fn dispatch_debug_update(_: &SymbolTable, _: &mut DirPlayer) {}
@@ -4063,24 +5167,70 @@ impl JsApi {
         js_sys::Object::new()
     }
     pub fn dispatch_script_error(_: &DirPlayer, _: &ScriptError) {}
-    pub fn dispatch_script_error_data(_: js_sys::Object) -> Result<(), JsValue> { Ok(()) }
-    pub fn dispatch_script_error_data_owned(_: &str, _: js_sys::Object) -> Result<(), JsValue> { Ok(()) }
+    pub fn dispatch_script_error_data(_: js_sys::Object) -> Result<(), JsValue> {
+        Ok(())
+    }
+    pub fn dispatch_script_error_data_owned(_: &str, _: js_sys::Object) -> Result<(), JsValue> {
+        Ok(())
+    }
     pub fn dispatch_breakpoint_list_changed() {}
-    pub fn get_breakpoint_list(_: &DirPlayer) -> Vec<js_sys::Object> { vec![] }
+    pub fn get_breakpoint_list(_: &DirPlayer) -> Vec<js_sys::Object> {
+        vec![]
+    }
     pub fn dispatch_script_error_cleared() {}
     pub fn dispatch_external_event(_: &str) {}
-    pub fn get_cast_chunk_list_for(_: &DirPlayer, _: u32) -> js_sys::Object { unimplemented!() }
-    pub fn get_movie_top_level_chunks(_: &DirPlayer) -> js_sys::Object { unimplemented!() }
-    pub fn get_chunk_bytes(_: &DirPlayer, _: u32, _: u32) -> Option<Vec<u8>> { unimplemented!() }
-    pub fn get_parsed_chunk(_: &DirPlayer, _: &SymbolTable, _: u32, _: u32) -> js_sys::Object { unimplemented!() }
-    pub fn get_mini_member_snapshot(_: &CastMember) -> js_sys::Map { unimplemented!() }
-    pub fn get_member_snapshot(_: &CastMember, _: u32, _: Option<&ScriptContext>, _: &SymbolTable, _: &DirPlayer) -> js_sys::Map { unimplemented!() }
-    pub fn get_score_snapshot(_: &DirPlayer, _: &Score) -> js_sys::Map { unimplemented!() }
-    pub fn get_channel_snapshot(_: &DirPlayer, _: &i16) -> js_sys::Map { unimplemented!() }
-    fn get_channel_display_name(_: &i16, _: &DirPlayer) -> Option<String> { unimplemented!() }
-    pub fn get_script_snapshot(_: &ScriptMember, _: &ScriptChunk, _: &ScriptContext, _: bool, _: u16, _: &SymbolTable) -> js_sys::Map { unimplemented!() }
-    fn collect_cast_descendants(_: u32, _: &HashMap<u32, Vec<u32>>) -> std::collections::HashSet<u32> { unimplemented!() }
-    fn build_children_map(_: &DirectorFile) -> HashMap<u32, Vec<u32>> { unimplemented!() }
+    pub fn get_cast_chunk_list_for(_: &DirPlayer, _: u32) -> js_sys::Object {
+        unimplemented!()
+    }
+    pub fn get_movie_top_level_chunks(_: &DirPlayer) -> js_sys::Object {
+        unimplemented!()
+    }
+    pub fn get_chunk_bytes(_: &DirPlayer, _: u32, _: u32) -> Option<Vec<u8>> {
+        unimplemented!()
+    }
+    pub fn get_parsed_chunk(_: &DirPlayer, _: &SymbolTable, _: u32, _: u32) -> js_sys::Object {
+        unimplemented!()
+    }
+    pub fn get_mini_member_snapshot(_: &CastMember) -> js_sys::Map {
+        unimplemented!()
+    }
+    pub fn get_member_snapshot(
+        _: &CastMember,
+        _: u32,
+        _: Option<&ScriptContext>,
+        _: &SymbolTable,
+        _: &DirPlayer,
+    ) -> js_sys::Map {
+        unimplemented!()
+    }
+    pub fn get_score_snapshot(_: &DirPlayer, _: &Score) -> js_sys::Map {
+        unimplemented!()
+    }
+    pub fn get_channel_snapshot(_: &DirPlayer, _: &i16) -> js_sys::Map {
+        unimplemented!()
+    }
+    fn get_channel_display_name(_: &i16, _: &DirPlayer) -> Option<String> {
+        unimplemented!()
+    }
+    pub fn get_script_snapshot(
+        _: &ScriptMember,
+        _: &ScriptChunk,
+        _: &ScriptContext,
+        _: bool,
+        _: u16,
+        _: &SymbolTable,
+    ) -> js_sys::Map {
+        unimplemented!()
+    }
+    fn collect_cast_descendants(
+        _: u32,
+        _: &HashMap<u32, Vec<u32>>,
+    ) -> std::collections::HashSet<u32> {
+        unimplemented!()
+    }
+    fn build_children_map(_: &DirectorFile) -> HashMap<u32, Vec<u32>> {
+        unimplemented!()
+    }
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -4097,7 +5247,10 @@ mod native_snapshot_tests {
     use crate::player::allocator::ScriptInstanceAllocatorTrait;
     use crate::player::bitmap::bitmap::{Bitmap, PaletteRef};
     use crate::player::cast_lib::CastLib;
-    use crate::player::cast_member::{BitmapMember, CastMemberType, FilmLoopMember, FlashMember, PaletteMember, ScriptMember, ShapeMember, TextMember};
+    use crate::player::cast_member::{
+        BitmapMember, CastMemberType, FilmLoopMember, FlashMember, PaletteMember, ScriptMember,
+        ShapeMember, TextMember,
+    };
     use crate::player::geometry::IntRect;
     use crate::player::host_events::{NativeNotificationError, MAX_HOST_EVENTS};
     use crate::player::score::Score;
@@ -4117,9 +5270,7 @@ mod native_snapshot_tests {
 
     #[test]
     fn native_wide_debug_value_is_bounded() {
-        let value = NativeDatumValue::Array(
-            (0..20_000).map(NativeDatumValue::Int).collect(),
-        );
+        let value = NativeDatumValue::Array((0..20_000).map(NativeDatumValue::Int).collect());
         let rendered = JsApi::native_value_debug(&value);
         assert!(rendered.len() <= 64 * 1024);
         assert!(rendered.ends_with("<truncated>"));
@@ -4127,80 +5278,136 @@ mod native_snapshot_tests {
 
     #[test]
     fn native_nested_foreign_list_and_proplist_are_rejected() {
-        let mut session = RuntimeSession::new(SymbolOwner { session: 910, generation: 1 });
+        let mut session = RuntimeSession::new(SymbolOwner {
+            session: 910,
+            generation: 1,
+        });
         assert!(session.add_player(1, channel::unbounded().0));
         assert!(session.add_player(2, channel::unbounded().0));
-        let foreign = session.with_player(2, |context| {
-            context.player.alloc_datum(Datum::Int(7))
-        }).unwrap();
-        let (list, properties) = session.with_player(1, |context| {
-            let list = context.player.alloc_datum(Datum::List(
-                DatumType::List,
-                VecDeque::from(vec![foreign.clone()]),
-                false,
-            ));
-            let key = context.player.alloc_datum(Datum::String("foreign".to_owned()));
-            let properties = context.player.alloc_datum(Datum::PropList(
-                VecDeque::from(vec![(key, list.clone())]),
-                false,
-            ));
-            (list, properties)
-        }).unwrap();
-        session.with_player(1, |context| {
-            assert!(JsApi::native_datum_snapshot(context.player, context.symbols, &list).is_err());
-            assert!(JsApi::native_datum_snapshot(context.player, context.symbols, &properties).is_err());
-        }).unwrap();
+        let foreign = session
+            .with_player(2, |context| context.player.alloc_datum(Datum::Int(7)))
+            .unwrap();
+        let (list, properties) = session
+            .with_player(1, |context| {
+                let list = context.player.alloc_datum(Datum::List(
+                    DatumType::List,
+                    VecDeque::from(vec![foreign.clone()]),
+                    false,
+                ));
+                let key = context
+                    .player
+                    .alloc_datum(Datum::String("foreign".to_owned()));
+                let properties = context.player.alloc_datum(Datum::PropList(
+                    VecDeque::from(vec![(key, list.clone())]),
+                    false,
+                ));
+                (list, properties)
+            })
+            .unwrap();
+        session
+            .with_player(1, |context| {
+                assert!(
+                    JsApi::native_datum_snapshot(context.player, context.symbols, &list).is_err()
+                );
+                assert!(
+                    JsApi::native_datum_snapshot(context.player, context.symbols, &properties)
+                        .is_err()
+                );
+            })
+            .unwrap();
     }
 
     #[test]
     fn native_foreign_symbol_and_stale_script_are_rejected() {
-        let mut session = RuntimeSession::new(SymbolOwner { session: 911, generation: 1 });
+        let mut session = RuntimeSession::new(SymbolOwner {
+            session: 911,
+            generation: 1,
+        });
         assert!(session.add_player(1, channel::unbounded().0));
         assert!(session.add_player(2, channel::unbounded().0));
-        let foreign_symbol = crate::player::symbols::symbol_table::SymbolTable::new()
-            .intern("foreign-symbol");
-        let (symbol_datum, stale_instance) = session.with_player(1, |context| {
-            let symbol_datum = context.player.alloc_datum(Datum::Symbol(foreign_symbol));
-            let instance = context.player.allocator.alloc_script_instance(ScriptInstance {
-                instance_id: 999,
-                script: CastMemberRef { cast_lib: 1, cast_member: 1 },
-                ancestor: None,
-                properties: Default::default(),
-                begin_sprite_called: false,
-            });
-            let stale_script = context.player.alloc_datum(Datum::ScriptInstanceRef(instance.clone()));
-            (symbol_datum, (instance, stale_script))
-        }).unwrap();
-        session.with_player(1, |context| {
-            assert!(JsApi::native_datum_snapshot(context.player, context.symbols, &symbol_datum).is_err());
-        }).unwrap();
-        let live_with_stale_ancestor = session.with_player(2, |context| {
-            context.player.allocator.alloc_script_instance(ScriptInstance {
-                instance_id: 1000,
-                script: CastMemberRef { cast_lib: 1, cast_member: 2 },
-                ancestor: Some(stale_instance.0.clone()),
-                properties: Default::default(),
-                begin_sprite_called: false,
+        let foreign_symbol =
+            crate::player::symbols::symbol_table::SymbolTable::new().intern("foreign-symbol");
+        let (symbol_datum, stale_instance) = session
+            .with_player(1, |context| {
+                let symbol_datum = context.player.alloc_datum(Datum::Symbol(foreign_symbol));
+                let instance = context
+                    .player
+                    .allocator
+                    .alloc_script_instance(ScriptInstance {
+                        instance_id: 999,
+                        script: CastMemberRef {
+                            cast_lib: 1,
+                            cast_member: 1,
+                        },
+                        ancestor: None,
+                        properties: Default::default(),
+                        begin_sprite_called: false,
+                    });
+                let stale_script = context
+                    .player
+                    .alloc_datum(Datum::ScriptInstanceRef(instance.clone()));
+                (symbol_datum, (instance, stale_script))
             })
-        }).unwrap();
+            .unwrap();
+        session
+            .with_player(1, |context| {
+                assert!(
+                    JsApi::native_datum_snapshot(context.player, context.symbols, &symbol_datum)
+                        .is_err()
+                );
+            })
+            .unwrap();
+        let live_with_stale_ancestor = session
+            .with_player(2, |context| {
+                context
+                    .player
+                    .allocator
+                    .alloc_script_instance(ScriptInstance {
+                        instance_id: 1000,
+                        script: CastMemberRef {
+                            cast_lib: 1,
+                            cast_member: 2,
+                        },
+                        ancestor: Some(stale_instance.0.clone()),
+                        properties: Default::default(),
+                        begin_sprite_called: false,
+                    })
+            })
+            .unwrap();
         session.remove_player(1);
-        assert!(session.with_player(2, |context| {
-            JsApi::native_script_snapshot(context.player, context.symbols, Some(live_with_stale_ancestor))
-        }).unwrap().is_err());
+        assert!(
+            session
+                .with_player(2, |context| {
+                    JsApi::native_script_snapshot(
+                        context.player,
+                        context.symbols,
+                        Some(live_with_stale_ancestor),
+                    )
+                })
+                .unwrap()
+                .is_err()
+        );
     }
 
     fn contains_native_marker(value: &NativeDatumValue, marker: &str) -> bool {
         match value {
             NativeDatumValue::Opaque(text) => text == marker,
-            NativeDatumValue::Array(values) => values.iter().any(|value| contains_native_marker(value, marker)),
-            NativeDatumValue::PropList(values, _) => values.iter().any(|(_, value)| contains_native_marker(value, marker)),
+            NativeDatumValue::Array(values) => values
+                .iter()
+                .any(|value| contains_native_marker(value, marker)),
+            NativeDatumValue::PropList(values, _) => values
+                .iter()
+                .any(|(_, value)| contains_native_marker(value, marker)),
             _ => false,
         }
     }
 
     #[test]
     fn native_datum_snapshot_handles_cycles_depth_and_wide_lists() {
-        let mut session = RuntimeSession::new(SymbolOwner { session: 912, generation: 1 });
+        let mut session = RuntimeSession::new(SymbolOwner {
+            session: 912,
+            generation: 1,
+        });
         assert!(session.add_player(1, channel::unbounded().0));
         session.with_player(1, |context| {
             let cycle = context.player.alloc_datum(Datum::List(DatumType::List, VecDeque::new(), false));
@@ -4239,86 +5446,155 @@ mod native_snapshot_tests {
 
     #[test]
     fn native_member_snapshot_uses_filmloop_score_and_typed_media_fields() {
-        let mut session = RuntimeSession::new(SymbolOwner { session: 913, generation: 1 });
+        let mut session = RuntimeSession::new(SymbolOwner {
+            session: 913,
+            generation: 1,
+        });
         assert!(session.add_player(1, channel::unbounded().0));
-        session.with_player(1, |context| {
-            context.player.movie.score.frame_count = Some(2);
-            let mut filmloop_score = Score::empty();
-            filmloop_score.frame_count = Some(37);
-            let filmloop = CastMember::new(1, CastMemberType::FilmLoop(FilmLoopMember {
-                info: FilmLoopInfo {
-                    reg_point: (0, 0), width: 1, height: 1, center: 0,
-                    crop: 0, sound: 0, loops: 0,
-                },
-                score_chunk: ScoreChunk {
-                    header: ScoreChunkHeader {
-                        total_length: 0, unk1: 0, unk2: 0, entry_count: 0,
-                        unk3: 0, entry_size_sum: 0,
-                    },
-                    entries: Vec::new(), frame_intervals: Vec::new(),
-                    frame_data: Default::default(), sprite_details: Default::default(),
-                },
-                score: filmloop_score,
-                current_frame: 1,
-                initial_rect: IntRect { left: 0, top: 0, right: 1, bottom: 1 },
-                cached_total_frames: Some(37),
-            }));
-            let mut text = TextMember::new();
-            text.text = "typed text".to_owned();
-            let text = CastMember::new(2, CastMemberType::Text(text));
-            let bitmap_ref = context.player.bitmap_manager.add_bitmap(Bitmap::new(
-                3, 4, 32, 32, 8, PaletteRef::Default,
-            ));
-            let bitmap = CastMember::new(3, CastMemberType::Bitmap(BitmapMember {
-                image_ref: bitmap_ref, ..BitmapMember::default()
-            }));
-            let flash = CastMember::new(4, CastMemberType::Flash(FlashMember {
-                data: vec![1, 2, 3], reg_point: (2, 3), flash_info: None,
-            }));
-            let palette = CastMember::new(5, CastMemberType::Palette(PaletteMember::new()));
-            let mut cast = CastLib::test_external(1, 0);
-            cast.members.insert(1, filmloop);
-            cast.members.insert(2, text);
-            cast.members.insert(3, bitmap);
-            cast.members.insert(4, flash);
-            cast.members.insert(5, palette);
-            context.player.movie.cast_manager.casts.push(cast);
+        session
+            .with_player(1, |context| {
+                context.player.movie.score.frame_count = Some(2);
+                let mut filmloop_score = Score::empty();
+                filmloop_score.frame_count = Some(37);
+                let filmloop = CastMember::new(
+                    1,
+                    CastMemberType::FilmLoop(FilmLoopMember {
+                        info: FilmLoopInfo {
+                            reg_point: (0, 0),
+                            width: 1,
+                            height: 1,
+                            center: 0,
+                            crop: 0,
+                            sound: 0,
+                            loops: 0,
+                        },
+                        score_chunk: ScoreChunk {
+                            header: ScoreChunkHeader {
+                                total_length: 0,
+                                unk1: 0,
+                                unk2: 0,
+                                entry_count: 0,
+                                unk3: 0,
+                                entry_size_sum: 0,
+                            },
+                            entries: Vec::new(),
+                            frame_intervals: Vec::new(),
+                            frame_data: Default::default(),
+                            sprite_details: Default::default(),
+                        },
+                        score: filmloop_score,
+                        current_frame: 1,
+                        initial_rect: IntRect {
+                            left: 0,
+                            top: 0,
+                            right: 1,
+                            bottom: 1,
+                        },
+                        cached_total_frames: Some(37),
+                    }),
+                );
+                let mut text = TextMember::new();
+                text.text = "typed text".to_owned();
+                let text = CastMember::new(2, CastMemberType::Text(text));
+                let bitmap_ref = context.player.bitmap_manager.add_bitmap(Bitmap::new(
+                    3,
+                    4,
+                    32,
+                    32,
+                    8,
+                    PaletteRef::Default,
+                ));
+                let bitmap = CastMember::new(
+                    3,
+                    CastMemberType::Bitmap(BitmapMember {
+                        image_ref: bitmap_ref,
+                        ..BitmapMember::default()
+                    }),
+                );
+                let flash = CastMember::new(
+                    4,
+                    CastMemberType::Flash(FlashMember {
+                        data: vec![1, 2, 3],
+                        reg_point: (2, 3),
+                        flash_info: None,
+                    }),
+                );
+                let palette = CastMember::new(5, CastMemberType::Palette(PaletteMember::new()));
+                let mut cast = CastLib::test_external(1, 0);
+                cast.members.insert(1, filmloop);
+                cast.members.insert(2, text);
+                cast.members.insert(3, bitmap);
+                cast.members.insert(4, flash);
+                cast.members.insert(5, palette);
+                context.player.movie.cast_manager.casts.push(cast);
 
-            let filmloop_snapshot = JsApi::native_member_snapshot(
-                context.player,
-                context.symbols,
-                CastMemberRef { cast_lib: 1, cast_member: 1 },
-            ).unwrap();
-            let score = filmloop_snapshot.fields.iter().find(|(key, _)| key == "score").unwrap();
-            let NativeDatumValue::PropList(score_fields, _) = &score.1 else { panic!("filmloop score must be owned data") };
-            assert!(score_fields.iter().any(|(key, value)| key == "frameCount" && matches!(value, NativeDatumValue::Int(37))));
-            assert!(!score_fields.iter().any(|(key, value)| key == "frameCount" && matches!(value, NativeDatumValue::Int(2))));
-
-            let typed = [
-                (2, "text"), (3, "paletteRef"), (4, "dataSize"), (5, "colors"),
-            ];
-            for (member, field) in typed {
-                let snapshot = JsApi::native_member_snapshot(
+                let filmloop_snapshot = JsApi::native_member_snapshot(
                     context.player,
                     context.symbols,
-                    CastMemberRef { cast_lib: 1, cast_member: member },
-                ).unwrap();
-                assert!(snapshot.fields.iter().any(|(key, _)| key == field), "missing {field} for member {member}");
-            }
-            let text_snapshot = JsApi::native_member_snapshot(
-                context.player,
-                context.symbols,
-                CastMemberRef { cast_lib: 1, cast_member: 2 },
-            ).unwrap();
-            assert!(text_snapshot.fields.iter().any(|(key, value)| {
-                key == "htmlStyledSpans" && matches!(value, NativeDatumValue::Array(_))
-            }));
-        }).unwrap();
+                    CastMemberRef {
+                        cast_lib: 1,
+                        cast_member: 1,
+                    },
+                )
+                .unwrap();
+                let score = filmloop_snapshot
+                    .fields
+                    .iter()
+                    .find(|(key, _)| key == "score")
+                    .unwrap();
+                let NativeDatumValue::PropList(score_fields, _) = &score.1 else {
+                    panic!("filmloop score must be owned data")
+                };
+                assert!(score_fields.iter().any(|(key, value)| key == "frameCount"
+                    && matches!(value, NativeDatumValue::Int(37))));
+                assert!(
+                    !score_fields.iter().any(|(key, value)| key == "frameCount"
+                        && matches!(value, NativeDatumValue::Int(2)))
+                );
+
+                let typed = [
+                    (2, "text"),
+                    (3, "paletteRef"),
+                    (4, "dataSize"),
+                    (5, "colors"),
+                ];
+                for (member, field) in typed {
+                    let snapshot = JsApi::native_member_snapshot(
+                        context.player,
+                        context.symbols,
+                        CastMemberRef {
+                            cast_lib: 1,
+                            cast_member: member,
+                        },
+                    )
+                    .unwrap();
+                    assert!(
+                        snapshot.fields.iter().any(|(key, _)| key == field),
+                        "missing {field} for member {member}"
+                    );
+                }
+                let text_snapshot = JsApi::native_member_snapshot(
+                    context.player,
+                    context.symbols,
+                    CastMemberRef {
+                        cast_lib: 1,
+                        cast_member: 2,
+                    },
+                )
+                .unwrap();
+                assert!(text_snapshot.fields.iter().any(|(key, value)| {
+                    key == "htmlStyledSpans" && matches!(value, NativeDatumValue::Array(_))
+                }));
+            })
+            .unwrap();
     }
 
     #[test]
     fn native_member_snapshot_includes_script_shape_and_checked_errors() {
-        let mut session = RuntimeSession::new(SymbolOwner { session: 915, generation: 1 });
+        let mut session = RuntimeSession::new(SymbolOwner {
+            session: 915,
+            generation: 1,
+        });
         assert!(session.add_player(1, channel::unbounded().0));
         session.with_player(1, |context| {
             let handler = HandlerDef {
@@ -4531,21 +5807,28 @@ mod native_snapshot_tests {
 
     #[test]
     fn native_error_and_mailbox_state_is_bounded_across_reset_remove() {
-        let mut session = RuntimeSession::new(SymbolOwner { session: 914, generation: 1 });
+        let mut session = RuntimeSession::new(SymbolOwner {
+            session: 914,
+            generation: 1,
+        });
         assert!(session.add_player(1, channel::unbounded().0));
         assert!(session.add_player(2, channel::unbounded().0));
-        let owner = session.with_player(1, |context| context.player.owner.clone()).unwrap();
+        let owner = session
+            .with_player(1, |context| context.player.owner.clone())
+            .unwrap();
         session.record_native_notification_error(NativeNotificationError {
             player_id: 1,
             owner: owner.clone(),
             notification: "DatumSnapshot".to_owned(),
             message: "foreign".to_owned(),
         });
-        session.push_native_player_notification(NativePlayerNotification {
-            player_id: 1,
-            owner: owner.clone(),
-            kind: NativePlayerNotificationKind::Host(HostEvent::FrameChanged { frame: 1 }),
-        }).unwrap();
+        session
+            .push_native_player_notification(NativePlayerNotification {
+                player_id: 1,
+                owner: owner.clone(),
+                kind: NativePlayerNotificationKind::Host(HostEvent::FrameChanged { frame: 1 }),
+            })
+            .unwrap();
         let replacement = session.reset_player_owned(1, &owner).unwrap();
         assert!(session.take_native_notification_error(1).is_none());
         assert!(session.take_native_player_notifications(1).is_empty());
@@ -4564,22 +5847,36 @@ mod native_snapshot_tests {
             notification: "current".to_owned(),
             message: "bounded".to_owned(),
         });
-        assert_eq!(session.take_native_notification_error(1).unwrap().notification, "current");
+        assert_eq!(
+            session
+                .take_native_notification_error(1)
+                .unwrap()
+                .notification,
+            "current"
+        );
 
         // Player 1 saturation cannot consume player 2's independent quota.
         for _ in 0..MAX_HOST_EVENTS {
-            session.push_native_player_notification(NativePlayerNotification {
-                player_id: 1,
-                owner: replacement.clone(),
-                kind: NativePlayerNotificationKind::Host(HostEvent::FrameChanged { frame: 2 }),
-            }).unwrap();
+            session
+                .push_native_player_notification(NativePlayerNotification {
+                    player_id: 1,
+                    owner: replacement.clone(),
+                    kind: NativePlayerNotificationKind::Host(HostEvent::FrameChanged { frame: 2 }),
+                })
+                .unwrap();
         }
-        let owner2 = session.with_player(2, |context| context.player.owner.clone()).unwrap();
-        assert!(session.push_native_player_notification(NativePlayerNotification {
-            player_id: 2,
-            owner: owner2,
-            kind: NativePlayerNotificationKind::Host(HostEvent::FrameChanged { frame: 3 }),
-        }).is_ok());
+        let owner2 = session
+            .with_player(2, |context| context.player.owner.clone())
+            .unwrap();
+        assert!(
+            session
+                .push_native_player_notification(NativePlayerNotification {
+                    player_id: 2,
+                    owner: owner2,
+                    kind: NativePlayerNotificationKind::Host(HostEvent::FrameChanged { frame: 3 }),
+                })
+                .is_ok()
+        );
         assert!(session.remove_player(1).is_some());
         assert!(session.take_native_player_notifications(1).is_empty());
         assert!(session.take_native_notification_error(1).is_none());
@@ -4606,12 +5903,22 @@ impl JsUtils for js_sys::Map {
     }
 }
 
-fn datum_to_js_bridge(datum_ref: &DatumRef, symbols: &SymbolTable, player: &DirPlayer, depth: u8) -> JsBridgeDatum {
+fn datum_to_js_bridge(
+    datum_ref: &DatumRef,
+    symbols: &SymbolTable,
+    player: &DirPlayer,
+    depth: u8,
+) -> JsBridgeDatum {
     let datum = player.get_datum(datum_ref);
     concrete_datum_to_js_bridge(datum, symbols, player, depth)
 }
 
-fn concrete_datum_to_js_bridge(datum: &Datum, symbols: &SymbolTable, player: &DirPlayer, depth: u8) -> JsBridgeDatum {
+fn concrete_datum_to_js_bridge(
+    datum: &Datum,
+    symbols: &SymbolTable,
+    player: &DirPlayer,
+    depth: u8,
+) -> JsBridgeDatum {
     if depth > 20 {
         let map = js_sys::Map::new();
         map.str_set("debugDescription", &safe_js_string("TOO DEEP"));
@@ -4635,7 +5942,10 @@ fn concrete_datum_to_js_bridge(datum: &Datum, symbols: &SymbolTable, player: &Di
         }
         Datum::Symbol(val) => {
             map.str_set("type", &safe_js_string("symbol"));
-            map.str_set("value", &safe_js_string(symbols.display(val).unwrap_or("<foreign-symbol>")));
+            map.str_set(
+                "value",
+                &safe_js_string(symbols.display(val).unwrap_or("<foreign-symbol>")),
+            );
         }
         Datum::List(_, item_refs, _) => {
             map.str_set("type", &safe_js_string("list"));
@@ -4654,7 +5964,10 @@ fn concrete_datum_to_js_bridge(datum: &Datum, symbols: &SymbolTable, player: &Di
         Datum::Float(val) => {
             map.str_set("type", &safe_js_string("number"));
             map.str_set("numericValue", &JsValue::from_f64(*val as f64));
-            map.str_set("value", &safe_js_string(&format_float_with_precision(*val, player)));
+            map.str_set(
+                "value",
+                &safe_js_string(&format_float_with_precision(*val, player)),
+            );
         }
         Datum::Void => {
             map.str_set("type", &safe_js_string("void"));
@@ -4696,7 +6009,10 @@ fn concrete_datum_to_js_bridge(datum: &Datum, symbols: &SymbolTable, player: &Di
 
             let props_map = js_sys::Map::new();
             for (k, v) in instance.properties.iter() {
-                props_map.set(&safe_js_string(symbols.display(k).unwrap_or("<foreign-symbol>")), &v.unwrap().to_js_value());
+                props_map.set(
+                    &safe_js_string(symbols.display(k).unwrap_or("<foreign-symbol>")),
+                    &v.unwrap().to_js_value(),
+                );
             }
             map.str_set("properties", &props_map.to_js_object());
         }
@@ -4713,30 +6029,78 @@ fn concrete_datum_to_js_bridge(datum: &Datum, symbols: &SymbolTable, player: &Di
             let y2 = Datum::inline_component_to_datum(vals[3], Datum::inline_is_float(*flags, 3));
 
             map.str_set("type", &safe_js_string("Rect"));
-            map.str_set("left", &concrete_datum_to_js_bridge(&x1, symbols, player, depth + 1));
-            map.str_set("top", &concrete_datum_to_js_bridge(&y1, symbols, player, depth + 1));
-            map.str_set("right", &concrete_datum_to_js_bridge(&x2, symbols, player, depth + 1));
-            map.str_set("bottom", &concrete_datum_to_js_bridge(&y2, symbols, player, depth + 1));
-            map.str_set("value", &safe_js_string(&format!(
-                "rect({}, {}, {}, {})",
-                if Datum::inline_is_float(*flags, 0) { format!("{:.4}", vals[0]) } else { format!("{}", vals[0] as i32) },
-                if Datum::inline_is_float(*flags, 1) { format!("{:.4}", vals[1]) } else { format!("{}", vals[1] as i32) },
-                if Datum::inline_is_float(*flags, 2) { format!("{:.4}", vals[2]) } else { format!("{}", vals[2] as i32) },
-                if Datum::inline_is_float(*flags, 3) { format!("{:.4}", vals[3]) } else { format!("{}", vals[3] as i32) },
-            )));
+            map.str_set(
+                "left",
+                &concrete_datum_to_js_bridge(&x1, symbols, player, depth + 1),
+            );
+            map.str_set(
+                "top",
+                &concrete_datum_to_js_bridge(&y1, symbols, player, depth + 1),
+            );
+            map.str_set(
+                "right",
+                &concrete_datum_to_js_bridge(&x2, symbols, player, depth + 1),
+            );
+            map.str_set(
+                "bottom",
+                &concrete_datum_to_js_bridge(&y2, symbols, player, depth + 1),
+            );
+            map.str_set(
+                "value",
+                &safe_js_string(&format!(
+                    "rect({}, {}, {}, {})",
+                    if Datum::inline_is_float(*flags, 0) {
+                        format!("{:.4}", vals[0])
+                    } else {
+                        format!("{}", vals[0] as i32)
+                    },
+                    if Datum::inline_is_float(*flags, 1) {
+                        format!("{:.4}", vals[1])
+                    } else {
+                        format!("{}", vals[1] as i32)
+                    },
+                    if Datum::inline_is_float(*flags, 2) {
+                        format!("{:.4}", vals[2])
+                    } else {
+                        format!("{}", vals[2] as i32)
+                    },
+                    if Datum::inline_is_float(*flags, 3) {
+                        format!("{:.4}", vals[3])
+                    } else {
+                        format!("{}", vals[3] as i32)
+                    },
+                )),
+            );
         }
         Datum::Point(vals, flags) => {
             let x = Datum::inline_component_to_datum(vals[0], Datum::inline_is_float(*flags, 0));
             let y = Datum::inline_component_to_datum(vals[1], Datum::inline_is_float(*flags, 1));
 
             map.str_set("type", &safe_js_string("Point"));
-            map.str_set("x", &concrete_datum_to_js_bridge(&x, symbols, player, depth + 1));
-            map.str_set("y", &concrete_datum_to_js_bridge(&y, symbols, player, depth + 1));
-            map.str_set("value", &safe_js_string(&format!(
-                "point({}, {})",
-                if Datum::inline_is_float(*flags, 0) { format!("{:.4}", vals[0]) } else { format!("{}", vals[0] as i32) },
-                if Datum::inline_is_float(*flags, 1) { format!("{:.4}", vals[1]) } else { format!("{}", vals[1] as i32) },
-            )));
+            map.str_set(
+                "x",
+                &concrete_datum_to_js_bridge(&x, symbols, player, depth + 1),
+            );
+            map.str_set(
+                "y",
+                &concrete_datum_to_js_bridge(&y, symbols, player, depth + 1),
+            );
+            map.str_set(
+                "value",
+                &safe_js_string(&format!(
+                    "point({}, {})",
+                    if Datum::inline_is_float(*flags, 0) {
+                        format!("{:.4}", vals[0])
+                    } else {
+                        format!("{}", vals[0] as i32)
+                    },
+                    if Datum::inline_is_float(*flags, 1) {
+                        format!("{:.4}", vals[1])
+                    } else {
+                        format!("{}", vals[1] as i32)
+                    },
+                )),
+            );
         }
         Datum::CursorRef(cursor_ref) => {
             map.str_set("type", &safe_js_string("cursorRef"));
@@ -4855,36 +6219,51 @@ fn concrete_datum_to_js_bridge(datum: &Datum, symbols: &SymbolTable, player: &Di
         }
         Datum::Shockwave3dObjectRef(s3d_ref) => {
             map.str_set("type", &safe_js_string("shockwave3dObject"));
-            map.str_set("value", &safe_js_string(&format!(
-                "{}(\"{}\")",
-                s3d_ref.object_type.as_str(),
-                symbols.display(&s3d_ref.name).unwrap_or("<foreign-symbol>"),
-            )));
+            map.str_set(
+                "value",
+                &safe_js_string(&format!(
+                    "{}(\"{}\")",
+                    s3d_ref.object_type.as_str(),
+                    symbols.display(&s3d_ref.name).unwrap_or("<foreign-symbol>"),
+                )),
+            );
         }
         Datum::Transform3d(_) => {
             map.str_set("type", &safe_js_string("transform"));
         }
         Datum::HavokObjectRef(hk_ref) => {
             map.str_set("type", &safe_js_string("havokObject"));
-            map.str_set("value", &safe_js_string(&format!(
-                "{}(\"{}\")",
-                hk_ref.object_type.as_str(),
-                symbols.display(&hk_ref.name).unwrap_or("<foreign-symbol>"),
-            )));
+            map.str_set(
+                "value",
+                &safe_js_string(&format!(
+                    "{}(\"{}\")",
+                    hk_ref.object_type.as_str(),
+                    symbols.display(&hk_ref.name).unwrap_or("<foreign-symbol>"),
+                )),
+            );
         }
         Datum::PhysXObjectRef(px_ref) => {
             map.str_set("type", &safe_js_string("physxObject"));
-            map.str_set("value", &safe_js_string(&format!(
-                "{}(\"{}\")",
-                px_ref.object_type.as_str(),
-                symbols.display(&px_ref.name).unwrap_or("<foreign-symbol>"),
-            )));
+            map.str_set(
+                "value",
+                &safe_js_string(&format!(
+                    "{}(\"{}\")",
+                    px_ref.object_type.as_str(),
+                    symbols.display(&px_ref.name).unwrap_or("<foreign-symbol>"),
+                )),
+            );
         }
         Datum::VectorVertexRef(member_ref, index) => {
             map.str_set("type", &safe_js_string("vectorVertexRef"));
-            map.str_set("value", &safe_js_string(&format!(
-                "vertex[{}] of member({}, {})", index + 1, member_ref.cast_member, member_ref.cast_lib
-            )));
+            map.str_set(
+                "value",
+                &safe_js_string(&format!(
+                    "vertex[{}] of member({}, {})",
+                    index + 1,
+                    member_ref.cast_member,
+                    member_ref.cast_lib
+                )),
+            );
         }
     }
     return map.to_js_object();

@@ -1,7 +1,12 @@
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 use manual_future::ManualFuture;
-use std::{cell::{Cell, RefCell}, collections::HashMap, rc::Rc, time::Duration};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    rc::Rc,
+    time::Duration,
+};
 
 use crate::player::{
     allocator::{DatumAllocatorTrait, ScriptInstanceAllocatorTrait},
@@ -10,7 +15,10 @@ use crate::player::{
     symbols::{builtin::BuiltInSymbol, symbol::Symbol},
 };
 use crate::director::{
-    chunks::{handler::{Bytecode, HandlerDef}, script::ScriptChunk},
+    chunks::{
+        handler::{Bytecode, HandlerDef},
+        script::ScriptChunk,
+    },
     enums::ScriptType,
     lingo::{datum::Datum, opcode::OpCode},
 };
@@ -72,7 +80,11 @@ fn playback_counter_handler(global_index: u16, names_len: usize) -> Rc<HandlerDe
     })
 }
 
-fn playback_end_sprite_handler(stop_index: u16, end_index: u16, names_len: usize) -> Rc<HandlerDef> {
+fn playback_end_sprite_handler(
+    stop_index: u16,
+    end_index: u16,
+    names_len: usize,
+) -> Rc<HandlerDef> {
     Rc::new(HandlerDef {
         name_id: 0,
         bytecode_array: vec![
@@ -155,19 +167,21 @@ async fn register_browser_handle_flash_owner(
         command_tx,
     );
     let window = web_sys::window().ok_or_else(|| "browser window is unavailable".to_owned())?;
-    let function = js_sys::Reflect::get(
-        &window,
-        &JsValue::from_str("dirplayer_registerFlashOwner"),
-    )
-    .map_err(|_| "production Flash owner registrar is unavailable".to_owned())?
-    .dyn_into::<js_sys::Function>()
-    .map_err(|_| "production Flash owner registrar is not callable".to_owned())?;
+    let function =
+        js_sys::Reflect::get(&window, &JsValue::from_str("dirplayer_registerFlashOwner"))
+            .map_err(|_| "production Flash owner registrar is unavailable".to_owned())?
+            .dyn_into::<js_sys::Function>()
+            .map_err(|_| "production Flash owner registrar is not callable".to_owned())?;
     // The fresh handle owner key is unique. Arm cleanup before the fallible
     // registrar call so a host that publishes a route and then throws still
     // gets reset/unregistered by the guard.
     owner_guard.mark_registered();
     let result = function
-        .call2(&window, &JsValue::from_str(&owner_key), &JsValue::from(js_capability))
+        .call2(
+            &window,
+            &JsValue::from_str(&owner_key),
+            &JsValue::from(js_capability),
+        )
         .map_err(|error| format!("registering Flash owner failed: {error:?}"))?;
     if let Ok(promise) = result.dyn_into::<js_sys::Promise>() {
         JsFuture::from(promise)
@@ -200,7 +214,10 @@ struct RegisteredFlashOwner {
 
 impl RegisteredFlashOwner {
     fn pending(owner_key: String) -> Self {
-        Self { owner_key, registered: false }
+        Self {
+            owner_key,
+            registered: false,
+        }
     }
 
     fn mark_registered(&mut self) {
@@ -233,7 +250,10 @@ fn nested_flash_owner_keys() -> Result<Vec<String>, String> {
     let values = values
         .dyn_into::<js_sys::Array>()
         .map_err(|_| "nested Flash owner inspection did not return an array".to_owned())?;
-    let mut keys = values.iter().filter_map(|value| value.as_string()).collect::<Vec<_>>();
+    let mut keys = values
+        .iter()
+        .filter_map(|value| value.as_string())
+        .collect::<Vec<_>>();
     keys.sort();
     Ok(keys)
 }
@@ -411,7 +431,10 @@ fn install_pointer_flash_fixture(
     handle: &crate::BrowserPlayerHandle,
     bytes: &[u8],
 ) -> Result<CastMemberRef, String> {
-    let member_ref = CastMemberRef { cast_lib: 1, cast_member: 1 };
+    let member_ref = CastMemberRef {
+        cast_lib: 1,
+        cast_member: 1,
+    };
     handle
         .with_context(|context| {
             let member = CastMember::new(
@@ -479,7 +502,10 @@ fn install_published_sprite_variable_fixture(
     handle: &crate::BrowserPlayerHandle,
     bytes: &[u8],
 ) -> Result<(), String> {
-    let member_ref = CastMemberRef { cast_lib: 1, cast_member: 1 };
+    let member_ref = CastMemberRef {
+        cast_lib: 1,
+        cast_member: 1,
+    };
     handle
         .with_context(|context| {
             let member = CastMember::new(
@@ -509,7 +535,9 @@ fn install_published_sprite_variable_fixture(
             // This is the production member-association boundary. In
             // particular, it preserves an object handle reserved while the
             // channel was absent instead of silently adopting a new generation.
-            context.player.transition_flash_member(1, previous, Some((1, 1)));
+            context
+                .player
+                .transition_flash_member(1, previous, Some((1, 1)));
             Ok::<_, JsValue>(())
         })
         .and_then(|result| result)
@@ -520,8 +548,14 @@ fn replace_sprite_variable_flash_fixture(
     handle: &crate::BrowserPlayerHandle,
     bytes: &[u8],
 ) -> Result<(), String> {
-    let previous_ref = CastMemberRef { cast_lib: 1, cast_member: 1 };
-    let replacement_ref = CastMemberRef { cast_lib: 1, cast_member: 2 };
+    let previous_ref = CastMemberRef {
+        cast_lib: 1,
+        cast_member: 1,
+    };
+    let replacement_ref = CastMemberRef {
+        cast_lib: 1,
+        cast_member: 2,
+    };
     handle
         .with_context(|context| {
             let member = CastMember::new(
@@ -576,11 +610,23 @@ fn install_callback_script_fixture(
             let text_value = context.player.alloc_datum(Datum::Void);
             let number_value = context.player.alloc_datum(Datum::Void);
             let object_value = context.player.alloc_datum(Datum::Void);
-            context.player.globals.insert(count_name.clone(), count_value);
+            context
+                .player
+                .globals
+                .insert(count_name.clone(), count_value);
             context.player.globals.insert(text_name.clone(), text_value);
-            context.player.globals.insert(number_name.clone(), number_value);
-            context.player.globals.insert(object_name.clone(), object_value);
-            let script_ref = CastMemberRef { cast_lib: 1, cast_member: 2 };
+            context
+                .player
+                .globals
+                .insert(number_name.clone(), number_value);
+            context
+                .player
+                .globals
+                .insert(object_name.clone(), object_value);
+            let script_ref = CastMemberRef {
+                cast_lib: 1,
+                cast_member: 2,
+            };
             let handler = Rc::new(HandlerDef {
                 name_id: 0,
                 bytecode_array: vec![
@@ -636,12 +682,24 @@ fn install_callback_script_fixture(
             {
                 cast.insert_member(2, member, context.symbols);
                 cast.scripts.insert(2, script);
-                cast.name_symbols = Rc::from(vec![handler_name.clone(), count_name.clone(), text_name.clone(), number_name.clone(), object_name.clone()]);
+                cast.name_symbols = Rc::from(vec![
+                    handler_name.clone(),
+                    count_name.clone(),
+                    text_name.clone(),
+                    number_name.clone(),
+                    object_name.clone(),
+                ]);
             } else {
                 let mut cast = CastLib::test_external(1, 0);
                 cast.insert_member(2, member, context.symbols);
                 cast.scripts.insert(2, script);
-                cast.name_symbols = Rc::from(vec![handler_name.clone(), count_name.clone(), text_name.clone(), number_name.clone(), object_name.clone()]);
+                cast.name_symbols = Rc::from(vec![
+                    handler_name.clone(),
+                    count_name.clone(),
+                    text_name.clone(),
+                    number_name.clone(),
+                    object_name.clone(),
+                ]);
                 context.player.movie.cast_manager.casts.push(cast);
             }
             Ok::<_, JsValue>((count_name, text_name, number_name, object_name))
@@ -695,7 +753,9 @@ fn prepare_owned_mouse_down(
             context.player.movie.mouse_down = true;
             Ok(())
         })
-        .map_err(|error| crate::player::ScriptError::new(format!("prepare mouse down failed: {error:?}")))?;
+        .map_err(|error| {
+            crate::player::ScriptError::new(format!("prepare mouse down failed: {error:?}"))
+        })?;
     input_state?;
     Ok((session, player_id, owner))
 }
@@ -751,16 +811,19 @@ async fn read_pointer_flash_int(
     .map_err(|error| format!("Flash pointer read failed for {name}: {error}"))?;
     session
         .borrow_mut()
-        .with_player(player_id, |context| match context.player.get_datum(&value) {
-            Datum::Int(value) => Ok(*value),
-            other => Err(format!("Flash pointer {name} returned {}", other.type_enum().type_str())),
+        .with_player(player_id, |context| {
+            match context.player.get_datum(&value) {
+                Datum::Int(value) => Ok(*value),
+                other => Err(format!(
+                    "Flash pointer {name} returned {}",
+                    other.type_enum().type_str()
+                )),
+            }
         })
         .ok_or_else(|| "Flash pointer player disappeared during read".to_owned())?
 }
 
-async fn wait_for_pointer_flash_ready(
-    handle: &crate::BrowserPlayerHandle,
-) -> Result<(), String> {
+async fn wait_for_pointer_flash_ready(handle: &crate::BrowserPlayerHandle) -> Result<(), String> {
     let generation = {
         let mut latched = None;
         for _ in 0..100 {
@@ -773,7 +836,9 @@ async fn wait_for_pointer_flash_ready(
             }
             async_std::task::sleep(std::time::Duration::from_millis(50)).await;
         }
-        latched.ok_or_else(|| "pointer Flash generation was not published within the bounded wait".to_owned())?
+        latched.ok_or_else(|| {
+            "pointer Flash generation was not published within the bounded wait".to_owned()
+        })?
     };
     let generation_current = handle
         .is_flash_instance_generation_current(1.0, generation as f64)
@@ -789,7 +854,9 @@ async fn wait_for_pointer_flash_ready(
         generation,
     )
     .await
-    .map_err(|error| format!("pointer Flash instance readiness failed for generation {generation}: {error}"))?;
+    .map_err(|error| {
+        format!("pointer Flash instance readiness failed for generation {generation}: {error}")
+    })?;
     let generation_current = handle
         .is_flash_instance_generation_current(1.0, generation as f64)
         .map_err(|error| format!("recheck pointer Flash generation failed: {error:?}"))?;
@@ -830,7 +897,9 @@ async fn wait_for_nested_flash_frame(
             .borrow_mut()
             .with_player(child_id, |context| {
                 if !owner.is_arena_live() || !owner.same_identity(&context.player.owner) {
-                    return Err("nested child owner became stale while awaiting Flash frame".to_owned());
+                    return Err(
+                        "nested child owner became stale while awaiting Flash frame".to_owned()
+                    );
                 }
                 let generation = context.player.flash_instance_generation(1);
                 let current = generation
@@ -869,7 +938,9 @@ async fn wait_for_nested_flash_frame(
             }
         }
         if latched_generation.is_some() && !current {
-            return Err("nested child Flash generation became stale while awaiting frame".to_owned());
+            return Err(
+                "nested child Flash generation became stale while awaiting frame".to_owned(),
+            );
         }
         if let Some(pixel) = frame_pixel {
             if pixel_matches(pixel, expected) && latched_generation.is_some() && current {
@@ -885,12 +956,15 @@ async fn wait_for_nested_flash_frame(
 
 async fn prepare_pointer_player(
     swf: &[u8],
-) -> Result<(
-    crate::BrowserPlayerHandle,
-    BrowserFlashCapability,
-    RegisteredFlashOwner,
-    web_sys::HtmlElement,
-), String> {
+) -> Result<
+    (
+        crate::BrowserPlayerHandle,
+        BrowserFlashCapability,
+        RegisteredFlashOwner,
+        web_sys::HtmlElement,
+    ),
+    String,
+> {
     let handle = crate::BrowserPlayerHandle::new()
         .map_err(|error| format!("pointer BrowserPlayerHandle construction failed: {error:?}"))?;
     let (capability, owner_guard) = register_browser_handle_flash_owner(&handle).await?;
@@ -916,11 +990,7 @@ async fn prepare_pointer_player(
     Ok((handle, capability, owner_guard, container))
 }
 
-fn read_canvas_pixel(
-    container: &web_sys::HtmlElement,
-    x: u32,
-    y: u32,
-) -> Result<[u8; 4], String> {
+fn read_canvas_pixel(container: &web_sys::HtmlElement, x: u32, y: u32) -> Result<[u8; 4], String> {
     let canvas = container
         .query_selector("canvas")
         .map_err(|error| format!("querying fixture canvas failed: {error:?}"))?
@@ -940,11 +1010,7 @@ fn read_canvas_pixel(
     Ok([data[0], data[1], data[2], data[3]])
 }
 
-fn read_webgl2_pixel(
-    container: &web_sys::HtmlElement,
-    x: u32,
-    y: u32,
-) -> Result<[u8; 4], String> {
+fn read_webgl2_pixel(container: &web_sys::HtmlElement, x: u32, y: u32) -> Result<[u8; 4], String> {
     let canvas = container
         .query_selector("canvas")
         .map_err(|error| format!("querying fixture WebGL canvas failed: {error:?}"))?
@@ -1009,16 +1075,9 @@ impl Drop for FlashOwnedRouteGuard {
     fn drop(&mut self) {
         for (name, value) in &self.entries {
             if value.is_undefined() {
-                let _ = js_sys::Reflect::delete_property(
-                    &self.window,
-                    &JsValue::from_str(name),
-                );
+                let _ = js_sys::Reflect::delete_property(&self.window, &JsValue::from_str(name));
             } else {
-                let _ = js_sys::Reflect::set(
-                    &self.window,
-                    &JsValue::from_str(name),
-                    value,
-                );
+                let _ = js_sys::Reflect::set(&self.window, &JsValue::from_str(name), value);
             }
         }
     }
@@ -1026,31 +1085,19 @@ impl Drop for FlashOwnedRouteGuard {
 
 fn flash_owned_test_response(generation: f64, value: JsValue) -> JsValue {
     let response = js_sys::Object::new();
-    let _ = js_sys::Reflect::set(
-        &response,
-        &JsValue::from_str("ok"),
-        &JsValue::TRUE,
-    );
+    let _ = js_sys::Reflect::set(&response, &JsValue::from_str("ok"), &JsValue::TRUE);
     let _ = js_sys::Reflect::set(
         &response,
         &JsValue::from_str("generation"),
         &JsValue::from_f64(generation),
     );
-    let _ = js_sys::Reflect::set(
-        &response,
-        &JsValue::from_str("value"),
-        &value,
-    );
+    let _ = js_sys::Reflect::set(&response, &JsValue::from_str("value"), &value);
     response.into()
 }
 
 fn flash_owned_test_error(code: &str, message: &str) -> JsValue {
     let response = js_sys::Object::new();
-    let _ = js_sys::Reflect::set(
-        &response,
-        &JsValue::from_str("ok"),
-        &JsValue::FALSE,
-    );
+    let _ = js_sys::Reflect::set(&response, &JsValue::from_str("ok"), &JsValue::FALSE);
     let _ = js_sys::Reflect::set(
         &response,
         &JsValue::from_str("code"),
@@ -1077,11 +1124,20 @@ impl BrowserTestPlayer {
                 command_session,
                 command_player_id,
                 command_owner,
-            ).await;
+            )
+            .await;
         });
         let renderer = crate::rendering::new_renderer_state();
-        runtime.session().borrow_mut().bind_renderer_state(runtime.player_id(), &renderer);
-        let mut harness = BrowserTestPlayer { runtime, renderer, command_tx, flash_capability: None };
+        runtime
+            .session()
+            .borrow_mut()
+            .bind_renderer_state(runtime.player_id(), &renderer);
+        let mut harness = BrowserTestPlayer {
+            runtime,
+            renderer,
+            command_tx,
+            flash_capability: None,
+        };
         // `preserve_external_params: false` — this is the per-TEST boundary, and
         // one movie's external params are never right for the next movie.
         harness.reset_player_with(false).await;
@@ -1090,21 +1146,29 @@ impl BrowserTestPlayer {
 
     pub async fn test_flash_mouse_dispatch_decoder(&mut self) -> Result<(), String> {
         let valid = flash_owned_test_response(7.0, JsValue::UNDEFINED);
-        crate::player::handlers::datum_handlers::flash_object::decode_mouse_dispatch_response(valid, 7)
-            .map_err(|error| format!("valid mouse response rejected: {error}"))?;
-
-        let host_error = crate::player::handlers::datum_handlers::flash_object::decode_mouse_dispatch_response(
-            flash_owned_test_error("host-error", "host failed"),
-            7,
+        crate::player::handlers::datum_handlers::flash_object::decode_mouse_dispatch_response(
+            valid, 7,
         )
-        .expect_err("host error unexpectedly decoded as success");
+        .map_err(|error| format!("valid mouse response rejected: {error}"))?;
+
+        let host_error =
+            crate::player::handlers::datum_handlers::flash_object::decode_mouse_dispatch_response(
+                flash_owned_test_error("host-error", "host failed"),
+                7,
+            )
+            .expect_err("host error unexpectedly decoded as success");
         if host_error.code != crate::player::ScriptErrorCode::Generic {
             return Err(format!("host-error mapped to {:?}", host_error.code));
         }
         if host_error.message != "host failed" {
             return Err(format!("host-error message was {:?}", host_error.message));
         }
-        for code in ["unknown-owner", "disposed-owner", "stale-generation", "invalid-generation"] {
+        for code in [
+            "unknown-owner",
+            "disposed-owner",
+            "stale-generation",
+            "invalid-generation",
+        ] {
             let message = format!("{code} rejected");
             let error = crate::player::handlers::datum_handlers::flash_object::decode_mouse_dispatch_response(
                 flash_owned_test_error(code, &message),
@@ -1126,12 +1190,17 @@ impl BrowserTestPlayer {
             &JsValue::TRUE,
         )
         .map_err(|_| "could not construct missing-generation response".to_owned())?;
-        let missing_generation_error = crate::player::handlers::datum_handlers::flash_object::decode_mouse_dispatch_response(
-            missing_generation.into(),
-            7,
-        ).expect_err("missing generation unexpectedly decoded");
+        let missing_generation_error =
+            crate::player::handlers::datum_handlers::flash_object::decode_mouse_dispatch_response(
+                missing_generation.into(),
+                7,
+            )
+            .expect_err("missing generation unexpectedly decoded");
         if missing_generation_error.message != "Flash mouse response has invalid generation" {
-            return Err(format!("missing-generation message was {:?}", missing_generation_error.message));
+            return Err(format!(
+                "missing-generation message was {:?}",
+                missing_generation_error.message
+            ));
         }
 
         for generation in [f64::NAN, 1.5, 9_007_199_254_740_992.0] {
@@ -1143,16 +1212,23 @@ impl BrowserTestPlayer {
                 return Err(format!("unsafe-generation message was {:?}", error.message));
             }
         }
-        let mismatch = crate::player::handlers::datum_handlers::flash_object::decode_mouse_dispatch_response(
-            flash_owned_test_response(8.0, JsValue::UNDEFINED),
-            7,
-        )
-        .expect_err("mismatched generation unexpectedly decoded");
+        let mismatch =
+            crate::player::handlers::datum_handlers::flash_object::decode_mouse_dispatch_response(
+                flash_owned_test_response(8.0, JsValue::UNDEFINED),
+                7,
+            )
+            .expect_err("mismatched generation unexpectedly decoded");
         if mismatch.code != crate::player::ScriptErrorCode::InvalidReference {
-            return Err(format!("mismatched generation mapped to {:?}", mismatch.code));
+            return Err(format!(
+                "mismatched generation mapped to {:?}",
+                mismatch.code
+            ));
         }
         if mismatch.message != "Flash mouse response generation is stale" {
-            return Err(format!("mismatched-generation message was {:?}", mismatch.message));
+            return Err(format!(
+                "mismatched-generation message was {:?}",
+                mismatch.message
+            ));
         }
 
         let malformed_ok = js_sys::Object::new();
@@ -1162,25 +1238,28 @@ impl BrowserTestPlayer {
             &JsValue::from_str("true"),
         )
         .map_err(|_| "could not construct malformed-ok response".to_owned())?;
-        let malformed_ok_error = crate::player::handlers::datum_handlers::flash_object::decode_mouse_dispatch_response(
-            malformed_ok.into(),
-            7,
-        ).expect_err("non-boolean ok unexpectedly decoded");
+        let malformed_ok_error =
+            crate::player::handlers::datum_handlers::flash_object::decode_mouse_dispatch_response(
+                malformed_ok.into(),
+                7,
+            )
+            .expect_err("non-boolean ok unexpectedly decoded");
         if malformed_ok_error.message != "Flash mouse response has non-boolean ok" {
-            return Err(format!("malformed-ok message was {:?}", malformed_ok_error.message));
+            return Err(format!(
+                "malformed-ok message was {:?}",
+                malformed_ok_error.message
+            ));
         }
         Ok(())
     }
 
     pub async fn test_owned_mouse_pointer(&mut self) -> Result<(), String> {
-        let (mut root_a, capability_a, owner_guard_a, _root_a_container) = prepare_pointer_player(
-            include_bytes!("../../tests/fixtures/flash_mouse_a.swf"),
-        )
-        .await?;
-        let (root_b, capability_b, owner_guard_b, _root_b_container) = prepare_pointer_player(
-            include_bytes!("../../tests/fixtures/flash_mouse_b.swf"),
-        )
-        .await?;
+        let (mut root_a, capability_a, owner_guard_a, _root_a_container) =
+            prepare_pointer_player(include_bytes!("../../tests/fixtures/flash_mouse_a.swf"))
+                .await?;
+        let (root_b, capability_b, owner_guard_b, _root_b_container) =
+            prepare_pointer_player(include_bytes!("../../tests/fixtures/flash_mouse_b.swf"))
+                .await?;
 
         let owner_key_a = root_a.owner().key();
         let owner_key_b = root_b.owner().key();
@@ -1195,7 +1274,9 @@ impl BrowserTestPlayer {
             for name in ["Moved", "Pressed", "PressSawMove", "Order"] {
                 let full_name = format!("{prefix}{name}");
                 if read_pointer_flash_int(handle, &full_name).await? != 0 {
-                    return Err(format!("pointer global {full_name} was non-zero before input"));
+                    return Err(format!(
+                        "pointer global {full_name} was non-zero before input"
+                    ));
                 }
             }
         }
@@ -1208,7 +1289,12 @@ impl BrowserTestPlayer {
         root_a
             .with_context(|context| context.player.movie.mouse_down = false)
             .map_err(|error| format!("root A mouse release state failed: {error:?}"))?;
-        for (name, expected) in [("aMoved", 1), ("aPressed", 1), ("aPressSawMove", 1), ("aOrder", 2)] {
+        for (name, expected) in [
+            ("aMoved", 1),
+            ("aPressed", 1),
+            ("aPressSawMove", 1),
+            ("aOrder", 2),
+        ] {
             if read_pointer_flash_int(&root_a, name).await? != expected {
                 return Err(format!("root A {name} did not equal {expected}"));
             }
@@ -1227,7 +1313,12 @@ impl BrowserTestPlayer {
         root_b
             .with_context(|context| context.player.movie.mouse_down = false)
             .map_err(|error| format!("root B mouse release state failed: {error:?}"))?;
-        for (name, expected) in [("bMoved", 1), ("bPressed", 1), ("bPressSawMove", 1), ("bOrder", 2)] {
+        for (name, expected) in [
+            ("bMoved", 1),
+            ("bPressed", 1),
+            ("bPressSawMove", 1),
+            ("bOrder", 2),
+        ] {
             if read_pointer_flash_int(&root_b, name).await? != expected {
                 return Err(format!("root B {name} did not equal {expected}"));
             }
@@ -1283,23 +1374,21 @@ impl BrowserTestPlayer {
                     && context.player.movie.rect.height() == 400
                     && score.frame_count == Some(1)
                     && score.sprite_spans.iter().any(|span| {
-                        span.channel_number == 1
-                            && span.start_frame == 1
-                            && span.end_frame == 1
+                        span.channel_number == 1 && span.start_frame == 1 && span.end_frame == 1
                     })
-                    && score
-                        .get_sprite(1)
-                        .is_some_and(|sprite| {
-                            sprite.member
-                                == Some(CastMemberRef {
-                                    cast_lib: 1,
-                                    cast_member: 1,
-                                })
-                        })
+                    && score.get_sprite(1).is_some_and(|sprite| {
+                        sprite.member
+                            == Some(CastMemberRef {
+                                cast_lib: 1,
+                                cast_member: 1,
+                            })
+                    })
             })
             .map_err(|error| format!("inspect recreated root A fixture failed: {error:?}"))?;
         if !preserved_pointer_fixture {
-            return Err("root A reset did not preserve its authored Flash score fixture".to_owned());
+            return Err(
+                "root A reset did not preserve its authored Flash score fixture".to_owned(),
+            );
         }
         if crate::player::eval_lingo_command_owned(
             stale_session,
@@ -1364,7 +1453,8 @@ impl BrowserTestPlayer {
         let armed = Rc::new(Cell::new(false));
         let reset_seen = Rc::new(Cell::new(false));
         let press_count = Rc::new(Cell::new(0u32));
-        let armed_slot: Rc<RefCell<Option<crate::BrowserPlayerHandle>>> = Rc::new(RefCell::new(None));
+        let armed_slot: Rc<RefCell<Option<crate::BrowserPlayerHandle>>> =
+            Rc::new(RefCell::new(None));
 
         let reset_slot = armed_slot.clone();
         let reset_armed = armed.clone();
@@ -1374,7 +1464,10 @@ impl BrowserTestPlayer {
                 return;
             }
             let mut handle = reset_slot.borrow_mut().take();
-            let succeeded = handle.as_mut().map(|handle| handle.reset().is_ok()).unwrap_or(false);
+            let succeeded = handle
+                .as_mut()
+                .map(|handle| handle.reset().is_ok())
+                .unwrap_or(false);
             if let Some(handle) = handle {
                 reset_slot.borrow_mut().replace(handle);
             }
@@ -1393,7 +1486,10 @@ impl BrowserTestPlayer {
         .map_err(|_| "could not install reset reentry hook".to_owned())?;
         let _reset_route = FlashOwnedRouteGuard {
             window: window.clone(),
-            entries: vec![("dirplayer_testResetOwnerDuringFlashMove".to_owned(), reset_previous)],
+            entries: vec![(
+                "dirplayer_testResetOwnerDuringFlashMove".to_owned(),
+                reset_previous,
+            )],
         };
 
         let press_count_for_closure = press_count.clone();
@@ -1416,74 +1512,86 @@ impl BrowserTestPlayer {
             entries: vec![("dirplayer_testRecordFlashPress".to_owned(), press_previous)],
         };
 
-        let (positive, positive_capability, positive_owner_guard, _positive_container) = prepare_pointer_player(
-            include_bytes!("../../tests/fixtures/flash_mouse_reentry.swf"),
-        )
-        .await?;
+        let (positive, positive_capability, positive_owner_guard, _positive_container) =
+            prepare_pointer_player(include_bytes!(
+                "../../tests/fixtures/flash_mouse_reentry.swf"
+            ))
+            .await?;
         let (session, player_id, owner) = prepare_owned_mouse_down(&positive, 250, 200)
             .map_err(|error| format!("positive-control mouse setup failed: {error}"))?;
         run_owned_mouse_down(session, player_id, owner, 250, 200)
             .await
             .map_err(|error| format!("positive-control mouse down failed: {error}"))?;
         if press_count.get() != 1 {
-            return Err(format!("positive-control press counter was {}", press_count.get()));
+            return Err(format!(
+                "positive-control press counter was {}",
+                press_count.get()
+            ));
         }
         drop(positive_owner_guard);
         drop(positive_capability);
         drop(positive);
 
         press_count.set(0);
-        let (root_b, capability_b, owner_guard_b, _root_b_container) = prepare_pointer_player(
-            include_bytes!("../../tests/fixtures/flash_mouse_b.swf"),
-        )
-        .await?;
+        let (root_b, capability_b, owner_guard_b, _root_b_container) =
+            prepare_pointer_player(include_bytes!("../../tests/fixtures/flash_mouse_b.swf"))
+                .await?;
         for name in ["bMoved", "bPressed", "bPressSawMove", "bOrder"] {
             if read_pointer_flash_int(&root_b, name).await? != 0 {
-                return Err(format!("B global {name} was non-zero before armed A dispatch"));
+                return Err(format!(
+                    "B global {name} was non-zero before armed A dispatch"
+                ));
             }
         }
         armed.set(true);
-        let (armed_handle, armed_capability, armed_owner_guard, _armed_container) = prepare_pointer_player(
-            include_bytes!("../../tests/fixtures/flash_mouse_reentry.swf"),
-        )
-        .await?;
+        let (armed_handle, armed_capability, armed_owner_guard, _armed_container) =
+            prepare_pointer_player(include_bytes!(
+                "../../tests/fixtures/flash_mouse_reentry.swf"
+            ))
+            .await?;
         let (session, player_id, owner) = prepare_owned_mouse_down(&armed_handle, 250, 200)
             .map_err(|error| format!("armed mouse setup failed: {error}"))?;
         armed_slot.borrow_mut().replace(armed_handle);
-        let result = run_owned_mouse_down_turn(session.clone(), player_id, owner.clone(), 250, 200).await;
+        let result =
+            run_owned_mouse_down_turn(session.clone(), player_id, owner.clone(), 250, 200).await;
         let stale_error = match result {
             crate::player::commands::CommandTurn::Complete(Err(error), _) => error,
             crate::player::commands::CommandTurn::Complete(Ok(_), _) => {
-                return Err("armed mouse down unexpectedly completed after synchronous reset".to_owned())
+                return Err(
+                    "armed mouse down unexpectedly completed after synchronous reset".to_owned(),
+                );
             }
             crate::player::commands::CommandTurn::Continue
             | crate::player::commands::CommandTurn::Waiting(_)
             | crate::player::commands::CommandTurn::Pending(_) => {
-                return Err("armed mouse down did not return a complete stale-owner result".to_owned())
+                return Err(
+                    "armed mouse down did not return a complete stale-owner result".to_owned(),
+                );
             }
         };
         if stale_error.code != crate::player::ScriptErrorCode::InvalidReference {
-            return Err(format!("armed mouse down returned {:?}, expected InvalidReference", stale_error.code));
+            return Err(format!(
+                "armed mouse down returned {:?}, expected InvalidReference",
+                stale_error.code
+            ));
         }
         if !reset_seen.get() {
             return Err("move reentry did not synchronously reset the owner".to_owned());
         }
         if press_count.get() != 0 {
-            return Err(format!("armed press counter incremented to {}", press_count.get()));
+            return Err(format!(
+                "armed press counter incremented to {}",
+                press_count.get()
+            ));
         }
         for name in ["bMoved", "bPressed", "bPressSawMove", "bOrder"] {
             if read_pointer_flash_int(&root_b, name).await? != 0 {
                 return Err(format!("B global {name} changed during armed A reset"));
             }
         }
-        if crate::player::eval_lingo_command_owned(
-            session,
-            player_id,
-            owner,
-            "1 + 1".to_owned(),
-        )
-        .await
-        .is_ok()
+        if crate::player::eval_lingo_command_owned(session, player_id, owner, "1 + 1".to_owned())
+            .await
+            .is_ok()
         {
             return Err("stale reentry owner accepted a post-reset command".to_owned());
         }
@@ -1516,7 +1624,9 @@ impl BrowserTestPlayer {
         let player_id = self.runtime.player_id();
         let owner = self.runtime.owner().clone();
         let object = Rc::new(RefCell::new(crate::player::js_lingo::value::JsObject::new()));
-        object.borrow_mut().set_own("value", crate::player::js_lingo::value::JsValue::Int(7));
+        object
+            .borrow_mut()
+            .set_own("value", crate::player::js_lingo::value::JsValue::Int(7));
         let interpreted_atom = Rc::new(crate::player::js_lingo::xdr::JsFunctionAtom {
             name: Some("interpretedThis".to_owned()),
             nargs: 0,
@@ -1535,7 +1645,9 @@ impl BrowserTestPlayer {
                 ],
                 prolog_length: 0,
                 version: 150,
-                atoms: vec![crate::player::js_lingo::xdr::JsAtom::String("value".to_owned())],
+                atoms: vec![crate::player::js_lingo::xdr::JsAtom::String(
+                    "value".to_owned(),
+                )],
                 source_notes: Vec::new(),
                 filename: None,
                 lineno: 1,
@@ -1589,14 +1701,21 @@ impl BrowserTestPlayer {
             crate::player::js_lingo::value::JsValue::Native(Rc::new(
                 crate::player::js_lingo::value::NativeFn {
                     name: "echo",
-                    call: Box::new(|args| Ok(args.first().cloned().unwrap_or(crate::player::js_lingo::value::JsValue::Undefined))),
+                    call: Box::new(|args| {
+                        Ok(args
+                            .first()
+                            .cloned()
+                            .unwrap_or(crate::player::js_lingo::value::JsValue::Undefined))
+                    }),
                 },
             )),
         );
         let handle = session
             .borrow_mut()
             .with_player_js(player_id, |context, registry| {
-                let runtime = Rc::new(RefCell::new(crate::player::js_lingo::interpreter::JsRuntime::new()));
+                let runtime = Rc::new(RefCell::new(
+                    crate::player::js_lingo::interpreter::JsRuntime::new(),
+                ));
                 registry
                     .register_object(player_id, &context.player.owner, &runtime, &object)
                     .map_err(|error| error.message)
@@ -1604,7 +1723,13 @@ impl BrowserTestPlayer {
             .ok_or_else(|| "browser fixture player disappeared".to_owned())??;
         let mut receiver = session
             .borrow_mut()
-            .with_player(player_id, |context| context.player.alloc_datum(crate::director::lingo::datum::Datum::JsObjectRef(handle.clone())))
+            .with_player(player_id, |context| {
+                context
+                    .player
+                    .alloc_datum(crate::director::lingo::datum::Datum::JsObjectRef(
+                        handle.clone(),
+                    ))
+            })
             .ok_or_else(|| "browser fixture player disappeared".to_owned())?;
         let (_, _, read_receiver) = session
             .borrow_mut()
@@ -1632,7 +1757,11 @@ impl BrowserTestPlayer {
         }
         let replacement = session
             .borrow_mut()
-            .with_player(player_id, |context| context.player.alloc_datum(crate::director::lingo::datum::Datum::Int(9)))
+            .with_player(player_id, |context| {
+                context
+                    .player
+                    .alloc_datum(crate::director::lingo::datum::Datum::Int(9))
+            })
             .ok_or_else(|| "browser fixture player disappeared".to_owned())?;
         let (_, _, set_receiver) = session
             .borrow_mut()
@@ -1671,7 +1800,9 @@ impl BrowserTestPlayer {
             .map_err(|_| "synthetic JS call completion was dropped".to_owned())??;
         let echoed_value = session
             .borrow_mut()
-            .with_player(player_id, |context| context.player.get_datum(&echoed).clone())
+            .with_player(player_id, |context| {
+                context.player.get_datum(&echoed).clone()
+            })
             .ok_or_else(|| "browser fixture player disappeared".to_owned())?;
         if !matches!(echoed_value, crate::director::lingo::datum::Datum::Int(9)) {
             return Err("synthetic JS call returned the wrong value".to_owned());
@@ -1695,9 +1826,14 @@ impl BrowserTestPlayer {
             .map_err(|_| "synthetic interpreted call completion was dropped".to_owned())??;
         let interpreted_value = session
             .borrow_mut()
-            .with_player(player_id, |context| context.player.get_datum(&interpreted).clone())
+            .with_player(player_id, |context| {
+                context.player.get_datum(&interpreted).clone()
+            })
             .ok_or_else(|| "browser fixture player disappeared".to_owned())?;
-        if !matches!(interpreted_value, crate::director::lingo::datum::Datum::Int(9)) {
+        if !matches!(
+            interpreted_value,
+            crate::director::lingo::datum::Datum::Int(9)
+        ) {
             return Err("interpreted this receiver returned the wrong value".to_owned());
         }
         let factory_name = session.borrow_mut().symbols_mut().intern("factory");
@@ -1720,7 +1856,10 @@ impl BrowserTestPlayer {
         let factory_is_object = session
             .borrow_mut()
             .with_player(player_id, |context| {
-                matches!(context.player.get_datum(&factory_result), crate::director::lingo::datum::Datum::JsObjectRef(_))
+                matches!(
+                    context.player.get_datum(&factory_result),
+                    crate::director::lingo::datum::Datum::JsObjectRef(_)
+                )
             })
             .ok_or_else(|| "browser fixture player disappeared".to_owned())?;
         if !factory_is_object {
@@ -1737,9 +1876,11 @@ impl BrowserTestPlayer {
         let source = session
             .borrow_mut()
             .with_player(player_id, |context| {
-                context.player.alloc_datum(crate::director::lingo::datum::Datum::String(
-                    "1 + \"2\".value".to_owned(),
-                ))
+                context
+                    .player
+                    .alloc_datum(crate::director::lingo::datum::Datum::String(
+                        "1 + \"2\".value".to_owned(),
+                    ))
             })
             .ok_or_else(|| "browser fixture player disappeared".to_owned())?;
         let nested = crate::player::eval::invoke_value_request_owned(
@@ -1753,7 +1894,9 @@ impl BrowserTestPlayer {
         .map_err(|error| error.message)?;
         let nested_value = session
             .borrow_mut()
-            .with_player(player_id, |context| context.player.get_datum(&nested).clone())
+            .with_player(player_id, |context| {
+                context.player.get_datum(&nested).clone()
+            })
             .ok_or_else(|| "browser fixture player disappeared".to_owned())?;
         if !matches!(nested_value, crate::director::lingo::datum::Datum::Int(3)) {
             return Err("synthetic nested value expression returned the wrong value".to_owned());
@@ -1761,9 +1904,11 @@ impl BrowserTestPlayer {
         let list_source = session
             .borrow_mut()
             .with_player(player_id, |context| {
-                context.player.alloc_datum(crate::director::lingo::datum::Datum::String(
-                    "[\"2\".value, 3]".to_owned(),
-                ))
+                context
+                    .player
+                    .alloc_datum(crate::director::lingo::datum::Datum::String(
+                        "[\"2\".value, 3]".to_owned(),
+                    ))
             })
             .ok_or_else(|| "browser fixture player disappeared".to_owned())?;
         let list = crate::player::eval::invoke_value_request_owned(
@@ -1780,22 +1925,36 @@ impl BrowserTestPlayer {
             .with_player(player_id, |context| context.player.get_datum(&list).clone())
             .ok_or_else(|| "browser fixture player disappeared".to_owned())?;
         let crate::director::lingo::datum::Datum::List(_, values, _) = list_value else {
-            return Err("synthetic nested list value expression returned the wrong type".to_owned());
+            return Err(
+                "synthetic nested list value expression returned the wrong type".to_owned(),
+            );
         };
         if values.len() != 2
-            || !self.runtime.with_context(|context| {
-                matches!(context.player.get_datum(&values[0]), crate::director::lingo::datum::Datum::Int(2))
-                    && matches!(context.player.get_datum(&values[1]), crate::director::lingo::datum::Datum::Int(3))
-            }).unwrap_or(false)
+            || !self
+                .runtime
+                .with_context(|context| {
+                    matches!(
+                        context.player.get_datum(&values[0]),
+                        crate::director::lingo::datum::Datum::Int(2)
+                    ) && matches!(
+                        context.player.get_datum(&values[1]),
+                        crate::director::lingo::datum::Datum::Int(3)
+                    )
+                })
+                .unwrap_or(false)
         {
-            return Err("synthetic nested list value expression returned the wrong values".to_owned());
+            return Err(
+                "synthetic nested list value expression returned the wrong values".to_owned(),
+            );
         }
         let global_source = session
             .borrow_mut()
             .with_player(player_id, |context| {
-                context.player.alloc_datum(crate::director::lingo::datum::Datum::String(
-                    "g.value".to_owned(),
-                ))
+                context
+                    .player
+                    .alloc_datum(crate::director::lingo::datum::Datum::String(
+                        "g.value".to_owned(),
+                    ))
             })
             .ok_or_else(|| "browser fixture player disappeared".to_owned())?;
         let global_value = crate::player::eval::invoke_value_request_owned(
@@ -1817,9 +1976,11 @@ impl BrowserTestPlayer {
         let fallback_source = self
             .runtime
             .with_context(|context| {
-                context.player.alloc_datum(crate::director::lingo::datum::Datum::String(
-                    "g.value".to_owned(),
-                ))
+                context
+                    .player
+                    .alloc_datum(crate::director::lingo::datum::Datum::String(
+                        "g.value".to_owned(),
+                    ))
             })
             .ok_or_else(|| "browser fixture player disappeared".to_owned())?;
         let fallback = crate::player::eval::invoke_value_request_owned(
@@ -1890,8 +2051,7 @@ impl BrowserTestPlayer {
                 top.sprite.height = 100;
                 top.sprite.loc_z = 2;
                 top.sprite.puppet = true;
-                context.player.movie.score.channels =
-                    vec![SpriteChannel::new(0), lower, top];
+                context.player.movie.score.channels = vec![SpriteChannel::new(0), lower, top];
                 context.player.movie.score.invalidate_render_channel_cache();
             })
             .map_err(|error| format!("parent fixture setup failed: {error:?}"))?;
@@ -2099,7 +2259,9 @@ impl BrowserTestPlayer {
             .set_flash_scripted_access_pending(true)
             .map_err(|error| format!("first readiness setter re-entered session: {error:?}"))?;
         let first_pending = first_borrow
-            .with_player(first.player_id, |context| context.player.flash_scripted_access_pending.get())
+            .with_player(first.player_id, |context| {
+                context.player.flash_scripted_access_pending.get()
+            })
             .ok_or_else(|| "first browser player disappeared".to_owned())?;
         if !first_pending {
             return Err("first readiness setter did not update its owner cell".to_owned());
@@ -2112,7 +2274,9 @@ impl BrowserTestPlayer {
         let second_pending = second
             .session
             .borrow_mut()
-            .with_player(second.player_id, |context| context.player.flash_scripted_access_pending.get())
+            .with_player(second.player_id, |context| {
+                context.player.flash_scripted_access_pending.get()
+            })
             .ok_or_else(|| "second browser player disappeared".to_owned())?;
         if !second_pending {
             return Err("second readiness setter did not update its owner cell".to_owned());
@@ -2131,7 +2295,9 @@ impl BrowserTestPlayer {
         let first_replacement = first
             .session
             .borrow_mut()
-            .with_player(first.player_id, |context| context.player.flash_scripted_access_pending.get())
+            .with_player(first.player_id, |context| {
+                context.player.flash_scripted_access_pending.get()
+            })
             .ok_or_else(|| "replacement browser player disappeared".to_owned())?;
         if first_replacement {
             return Err("replacement owner inherited retired readiness state".to_owned());
@@ -2178,7 +2344,9 @@ impl BrowserTestPlayer {
             .set_flash_scripted_access_pending(true)
             .map_err(|error| format!("fresh capability setter re-entered session: {error:?}"))?;
         let fresh_pending = fresh_borrow
-            .with_player(self.harness_runtime().player_id(), |context| context.player.flash_scripted_access_pending.get())
+            .with_player(self.harness_runtime().player_id(), |context| {
+                context.player.flash_scripted_access_pending.get()
+            })
             .ok_or_else(|| "fresh owner disappeared during capability test".to_owned())?;
         if !fresh_pending {
             return Err("fresh capability did not update its owner cell".to_owned());
@@ -2257,11 +2425,17 @@ impl BrowserTestPlayer {
         let root_b = crate::BrowserPlayerHandle::new()
             .map_err(|error| format!("root B construction failed: {error:?}"))?;
         crate::player::testing_shared::log_test_action("nested fixture: root A registration begin");
-        let (_root_a_capability, _root_a_owner_guard) = register_browser_handle_flash_owner(&root_a).await?;
-        crate::player::testing_shared::log_test_action("nested fixture: root A registration complete");
+        let (_root_a_capability, _root_a_owner_guard) =
+            register_browser_handle_flash_owner(&root_a).await?;
+        crate::player::testing_shared::log_test_action(
+            "nested fixture: root A registration complete",
+        );
         crate::player::testing_shared::log_test_action("nested fixture: root B registration begin");
-        let (_root_b_capability, _root_b_owner_guard) = register_browser_handle_flash_owner(&root_b).await?;
-        crate::player::testing_shared::log_test_action("nested fixture: root B registration complete");
+        let (_root_b_capability, _root_b_owner_guard) =
+            register_browser_handle_flash_owner(&root_b).await?;
+        crate::player::testing_shared::log_test_action(
+            "nested fixture: root B registration complete",
+        );
         let root_a_container = create_public_play_test_container("nested-root-a")?;
         let root_b_container = create_public_play_test_container("nested-root-b")?;
 
@@ -2304,21 +2478,21 @@ impl BrowserTestPlayer {
         let start_a = start_child(&root_a, member_a)?;
         let start_b = start_child(&root_b, member_b)?;
         crate::player::testing_shared::log_test_action("nested fixture: child A start begin");
-        let (child_a, child_owner_a) = crate::player::nested::start_nested_movie_owned(
-            root_a.session().clone(),
-            start_a,
-        )
-        .await
-        .map_err(|error| format!("root A nested startup failed: {error}"))?;
-        crate::player::testing_shared::log_test_action(&format!("nested fixture: child A start complete id={child_a}"));
+        let (child_a, child_owner_a) =
+            crate::player::nested::start_nested_movie_owned(root_a.session().clone(), start_a)
+                .await
+                .map_err(|error| format!("root A nested startup failed: {error}"))?;
+        crate::player::testing_shared::log_test_action(&format!(
+            "nested fixture: child A start complete id={child_a}"
+        ));
         crate::player::testing_shared::log_test_action("nested fixture: child B start begin");
-        let (child_b, child_owner_b) = crate::player::nested::start_nested_movie_owned(
-            root_b.session().clone(),
-            start_b,
-        )
-        .await
-        .map_err(|error| format!("root B nested startup failed: {error}"))?;
-        crate::player::testing_shared::log_test_action(&format!("nested fixture: child B start complete id={child_b}"));
+        let (child_b, child_owner_b) =
+            crate::player::nested::start_nested_movie_owned(root_b.session().clone(), start_b)
+                .await
+                .map_err(|error| format!("root B nested startup failed: {error}"))?;
+        crate::player::testing_shared::log_test_action(&format!(
+            "nested fixture: child B start complete id={child_b}"
+        ));
 
         let root_key_a = root_a.owner().key();
         let root_key_b = root_b.owner().key();
@@ -2335,45 +2509,53 @@ impl BrowserTestPlayer {
         {
             return Err(format!(
                 "nested fixture owner collision mismatch: child ids {child_a}/{child_b}, root sessions {}/{}, child keys {:?}/{:?}",
-                root_key_a.session,
-                root_key_b.session,
-                child_key_a,
-                child_key_b,
+                root_key_a.session, root_key_b.session, child_key_a, child_key_b,
             ));
         }
 
-        let read_fixture = |
-            session: crate::player::session::RuntimeSessionHandle,
-            child_id: u32,
-            child_owner: crate::player::ownership::OwnerToken,
-        | async move {
-            let value = crate::player::eval_lingo_command_owned(
-                session.clone(),
-                child_id,
-                child_owner.clone(),
-                "getVariable(sprite(1), \"_root.fixture\", 1)".to_owned(),
-            )
-            .await
-            .map_err(|error| format!("nested Flash read failed: {error}"))?;
-            session
-                .borrow_mut()
-                .with_player(child_id, |context| match context.player.get_datum(&value) {
-                    Datum::Int(value) => Ok(*value),
-                    other => Err(format!(
-                        "nested Flash read returned type {}",
-                        other.type_enum().type_str()
-                    )),
-                })
-                .ok_or_else(|| "nested child disappeared during Flash read".to_owned())?
-        };
-        crate::player::testing_shared::log_test_action(&format!("nested fixture: initial A read begin child={child_a}"));
-        let value_a = read_fixture(root_a.session().clone(), child_a, child_owner_a.clone()).await?;
-        crate::player::testing_shared::log_test_action(&format!("nested fixture: initial A read complete value={value_a}"));
-        crate::player::testing_shared::log_test_action(&format!("nested fixture: initial B read begin child={child_b}"));
-        let value_b = read_fixture(root_b.session().clone(), child_b, child_owner_b.clone()).await?;
-        crate::player::testing_shared::log_test_action(&format!("nested fixture: initial B read complete value={value_b}"));
+        let read_fixture =
+            |session: crate::player::session::RuntimeSessionHandle,
+             child_id: u32,
+             child_owner: crate::player::ownership::OwnerToken| async move {
+                let value = crate::player::eval_lingo_command_owned(
+                    session.clone(),
+                    child_id,
+                    child_owner.clone(),
+                    "getVariable(sprite(1), \"_root.fixture\", 1)".to_owned(),
+                )
+                .await
+                .map_err(|error| format!("nested Flash read failed: {error}"))?;
+                session
+                    .borrow_mut()
+                    .with_player(child_id, |context| match context.player.get_datum(&value) {
+                        Datum::Int(value) => Ok(*value),
+                        other => Err(format!(
+                            "nested Flash read returned type {}",
+                            other.type_enum().type_str()
+                        )),
+                    })
+                    .ok_or_else(|| "nested child disappeared during Flash read".to_owned())?
+            };
+        crate::player::testing_shared::log_test_action(&format!(
+            "nested fixture: initial A read begin child={child_a}"
+        ));
+        let value_a =
+            read_fixture(root_a.session().clone(), child_a, child_owner_a.clone()).await?;
+        crate::player::testing_shared::log_test_action(&format!(
+            "nested fixture: initial A read complete value={value_a}"
+        ));
+        crate::player::testing_shared::log_test_action(&format!(
+            "nested fixture: initial B read begin child={child_b}"
+        ));
+        let value_b =
+            read_fixture(root_b.session().clone(), child_b, child_owner_b.clone()).await?;
+        crate::player::testing_shared::log_test_action(&format!(
+            "nested fixture: initial B read complete value={value_b}"
+        ));
         if value_a != 7 || value_b != 9 || value_a == value_b {
-            return Err(format!("authored nested Flash values were {value_a} and {value_b}"));
+            return Err(format!(
+                "authored nested Flash values were {value_a} and {value_b}"
+            ));
         }
 
         wait_for_nested_flash_frame(
@@ -2404,7 +2586,9 @@ impl BrowserTestPlayer {
         )
         .map_err(|error| format!("root B nested render failed: {error}"))?;
         if rendered_a != 1 || rendered_b != 1 {
-            return Err(format!("nested render counts were {rendered_a} and {rendered_b}"));
+            return Err(format!(
+                "nested render counts were {rendered_a} and {rendered_b}"
+            ));
         }
         root_a
             .draw_frame()
@@ -2424,18 +2608,24 @@ impl BrowserTestPlayer {
         }
 
         let old_child_owner_a = child_owner_a.clone();
-        crate::player::testing_shared::log_test_action(&format!("nested fixture: child A reset begin child={child_a}"));
+        crate::player::testing_shared::log_test_action(&format!(
+            "nested fixture: child A reset begin child={child_a}"
+        ));
         let fresh_child_owner_a = crate::player::nested::reset_nested_player_owned(
             root_a.session().clone(),
             child_a,
             old_child_owner_a.clone(),
         )
         .map_err(|error| format!("nested child reset failed: {error}"))?;
-        crate::player::testing_shared::log_test_action(&format!("nested fixture: child A reset complete child={child_a}"));
+        crate::player::testing_shared::log_test_action(&format!(
+            "nested fixture: child A reset complete child={child_a}"
+        ));
         if old_child_owner_a.is_arena_live() || !fresh_child_owner_a.is_arena_live() {
             return Err("nested child reset did not rotate its owner".to_owned());
         }
-        crate::player::testing_shared::log_test_action(&format!("nested fixture: stale child read begin child={child_a}"));
+        crate::player::testing_shared::log_test_action(&format!(
+            "nested fixture: stale child read begin child={child_a}"
+        ));
         if crate::player::eval_lingo_command_owned(
             root_a.session().clone(),
             child_a,
@@ -2447,8 +2637,12 @@ impl BrowserTestPlayer {
         {
             return Err("stale nested child owner accepted a post-reset command".to_owned());
         }
-        crate::player::testing_shared::log_test_action(&format!("nested fixture: stale child read rejected child={child_a}"));
-        crate::player::testing_shared::log_test_action(&format!("nested fixture: fresh child command begin child={child_a}"));
+        crate::player::testing_shared::log_test_action(&format!(
+            "nested fixture: stale child read rejected child={child_a}"
+        ));
+        crate::player::testing_shared::log_test_action(&format!(
+            "nested fixture: fresh child command begin child={child_a}"
+        ));
         crate::player::eval_lingo_command_owned(
             root_a.session().clone(),
             child_a,
@@ -2457,15 +2651,35 @@ impl BrowserTestPlayer {
         )
         .await
         .map_err(|error| format!("fresh nested child command failed: {error}"))?;
-        crate::player::testing_shared::log_test_action(&format!("nested fixture: fresh child command complete child={child_a}"));
-        crate::player::testing_shared::log_test_action(&format!("nested fixture: fresh child value read begin child={child_a}"));
-        if read_fixture(root_a.session().clone(), child_a, fresh_child_owner_a.clone()).await? != 7 {
-            return Err("fresh nested child did not retain its authored Flash value after reset".to_owned());
+        crate::player::testing_shared::log_test_action(&format!(
+            "nested fixture: fresh child command complete child={child_a}"
+        ));
+        crate::player::testing_shared::log_test_action(&format!(
+            "nested fixture: fresh child value read begin child={child_a}"
+        ));
+        if read_fixture(
+            root_a.session().clone(),
+            child_a,
+            fresh_child_owner_a.clone(),
+        )
+        .await?
+            != 7
+        {
+            return Err(
+                "fresh nested child did not retain its authored Flash value after reset".to_owned(),
+            );
         }
-        crate::player::testing_shared::log_test_action(&format!("nested fixture: fresh child value read complete child={child_a}"));
-        crate::player::testing_shared::log_test_action(&format!("nested fixture: sibling B read begin child={child_b}"));
-        let value_b_after_child_reset = read_fixture(root_b.session().clone(), child_b, child_owner_b.clone()).await?;
-        crate::player::testing_shared::log_test_action(&format!("nested fixture: sibling B read complete value={value_b_after_child_reset}"));
+        crate::player::testing_shared::log_test_action(&format!(
+            "nested fixture: fresh child value read complete child={child_a}"
+        ));
+        crate::player::testing_shared::log_test_action(&format!(
+            "nested fixture: sibling B read begin child={child_b}"
+        ));
+        let value_b_after_child_reset =
+            read_fixture(root_b.session().clone(), child_b, child_owner_b.clone()).await?;
+        crate::player::testing_shared::log_test_action(&format!(
+            "nested fixture: sibling B read complete value={value_b_after_child_reset}"
+        ));
         if value_b_after_child_reset != 9 {
             return Err("resetting root A child changed root B".to_owned());
         }
@@ -2485,14 +2699,18 @@ impl BrowserTestPlayer {
                 cast_member: 2,
             },
         )?;
-        crate::player::testing_shared::log_test_action("nested fixture: failed child start begin under root B");
+        crate::player::testing_shared::log_test_action(
+            "nested fixture: failed child start begin under root B",
+        );
         if crate::player::nested::start_nested_movie_owned(root_b.session().clone(), invalid_start)
             .await
             .is_ok()
         {
             return Err("invalid nested startup unexpectedly succeeded".to_owned());
         }
-        crate::player::testing_shared::log_test_action("nested fixture: failed child start rejected under root B");
+        crate::player::testing_shared::log_test_action(
+            "nested fixture: failed child start rejected under root B",
+        );
         let owner_keys_after_failed_start = nested_flash_owner_keys()?;
         if owner_keys_after_failed_start != owner_keys_before_failed_start {
             return Err(format!(
@@ -2500,7 +2718,10 @@ impl BrowserTestPlayer {
             ));
         }
         let failed_owner_key = last_failed_nested_owner_key()?;
-        if owner_keys_after_failed_start.iter().any(|key| key == &failed_owner_key) {
+        if owner_keys_after_failed_start
+            .iter()
+            .any(|key| key == &failed_owner_key)
+        {
             return Err("failed nested child remained in the production controller".to_owned());
         }
         if !probe_failed_nested_callback_absent(&failed_owner_key)? {
@@ -2509,11 +2730,15 @@ impl BrowserTestPlayer {
         if !probe_failed_nested_host_absent(&failed_owner_key)? {
             return Err("failed nested child retained a production host route".to_owned());
         }
-        crate::player::testing_shared::log_test_action(&format!("nested fixture: root B post-failure read begin child={child_b}"));
+        crate::player::testing_shared::log_test_action(&format!(
+            "nested fixture: root B post-failure read begin child={child_b}"
+        ));
         if read_fixture(root_b.session().clone(), child_b, child_owner_b.clone()).await? != 9 {
             return Err("failed root B child startup changed root B".to_owned());
         }
-        crate::player::testing_shared::log_test_action(&format!("nested fixture: root B post-failure read complete child={child_b}"));
+        crate::player::testing_shared::log_test_action(&format!(
+            "nested fixture: root B post-failure read complete child={child_b}"
+        ));
 
         let root_a_key = root_a.owner_identity();
         unregister_browser_handle_flash_owner(&root_a_key);
@@ -2539,15 +2764,25 @@ impl BrowserTestPlayer {
         if probe_prepared_flash_owner(&root_a_key)? {
             return Err("prepared Flash action crossed the retired root A owner".to_owned());
         }
-        crate::player::testing_shared::log_test_action(&format!("nested fixture: root B delayed-publication read begin child={child_b}"));
-        let value_b_after_root_reset = read_fixture(root_b.session().clone(), child_b, child_owner_b.clone()).await?;
-        crate::player::testing_shared::log_test_action(&format!("nested fixture: root B delayed-publication read complete value={value_b_after_root_reset}"));
+        crate::player::testing_shared::log_test_action(&format!(
+            "nested fixture: root B delayed-publication read begin child={child_b}"
+        ));
+        let value_b_after_root_reset =
+            read_fixture(root_b.session().clone(), child_b, child_owner_b.clone()).await?;
+        crate::player::testing_shared::log_test_action(&format!(
+            "nested fixture: root B delayed-publication read complete value={value_b_after_root_reset}"
+        ));
         if value_b_after_root_reset != 9 {
             return Err("resetting root A changed root B after delayed publication".to_owned());
         }
-        crate::player::testing_shared::log_test_action("nested fixture: fresh root A registration begin");
-        let (_fresh_root_a_capability, _fresh_root_a_owner_guard) = register_browser_handle_flash_owner(&root_a).await?;
-        crate::player::testing_shared::log_test_action("nested fixture: fresh root A registration complete");
+        crate::player::testing_shared::log_test_action(
+            "nested fixture: fresh root A registration begin",
+        );
+        let (_fresh_root_a_capability, _fresh_root_a_owner_guard) =
+            register_browser_handle_flash_owner(&root_a).await?;
+        crate::player::testing_shared::log_test_action(
+            "nested fixture: fresh root A registration complete",
+        );
         let fresh_member_a = install_nested_movie_fixture(
             &root_a,
             1,
@@ -2562,12 +2797,25 @@ impl BrowserTestPlayer {
         )
         .await
         .map_err(|error| format!("fresh root A nested startup failed: {error}"))?;
-        crate::player::testing_shared::log_test_action(&format!("nested fixture: fresh child A start complete id={fresh_child_a}"));
-        crate::player::testing_shared::log_test_action(&format!("nested fixture: fresh child A read begin child={fresh_child_a}"));
-        if read_fixture(root_a.session().clone(), fresh_child_a, fresh_child_owner_a.clone()).await? != 7 {
+        crate::player::testing_shared::log_test_action(&format!(
+            "nested fixture: fresh child A start complete id={fresh_child_a}"
+        ));
+        crate::player::testing_shared::log_test_action(&format!(
+            "nested fixture: fresh child A read begin child={fresh_child_a}"
+        ));
+        if read_fixture(
+            root_a.session().clone(),
+            fresh_child_a,
+            fresh_child_owner_a.clone(),
+        )
+        .await?
+            != 7
+        {
             return Err("fresh root A child did not read its authored Flash value".to_owned());
         }
-        crate::player::testing_shared::log_test_action(&format!("nested fixture: fresh child A read complete child={fresh_child_a}"));
+        crate::player::testing_shared::log_test_action(&format!(
+            "nested fixture: fresh child A read complete child={fresh_child_a}"
+        ));
         wait_for_nested_flash_frame(
             root_a.session().clone(),
             fresh_child_a,
@@ -2580,7 +2828,8 @@ impl BrowserTestPlayer {
             root_a.player_id(),
             root_a.owner(),
         )
-        .map_err(|error| format!("fresh root A nested render failed: {error}"))? != 1
+        .map_err(|error| format!("fresh root A nested render failed: {error}"))?
+            != 1
         {
             return Err("fresh root A child did not compose".to_owned());
         }
@@ -2689,7 +2938,9 @@ impl BrowserTestPlayer {
         .map_err(|error| format!("callback owner {label} wrapper type read failed: {error}"))?;
         let observed = handle
             .with_context(|context| context.player.get_datum(&value).clone())
-            .map_err(|error| format!("callback owner {label} wrapper type datum failed: {error:?}"))?;
+            .map_err(|error| {
+                format!("callback owner {label} wrapper type datum failed: {error:?}")
+            })?;
         match observed {
             Datum::String(value) if value == "function" => Ok(()),
             Datum::String(value) => Err(format!(
@@ -2719,17 +2970,15 @@ impl BrowserTestPlayer {
                             .globals
                             .get(count_name)
                             .map(|value| context.player.get_datum(value).clone());
-                        let object_ref = context
-                            .player
-                            .globals
-                            .get(probe_object_name)
-                            .cloned();
+                        let object_ref = context.player.globals.get(probe_object_name).cloned();
                         let object = object_ref
                             .as_ref()
                             .map(|value| context.player.get_datum(value).clone());
                         (count, object_ref, object)
                     })
-                    .map_err(|error| format!("callback owner {label} probe state read failed: {error:?}"))?;
+                    .map_err(|error| {
+                        format!("callback owner {label} probe state read failed: {error:?}")
+                    })?;
                 match observed {
                     (Some(Datum::Int(value)), Some(object_ref), Some(Datum::FlashObjectRef(_)))
                         if value == 1 =>
@@ -2744,14 +2993,8 @@ impl BrowserTestPlayer {
                     }
                     (Some(Datum::Int(_)), _, _) => {}
                     (count, _, object) => {
-                        let count_type = count
-                            .as_ref()
-                            .map(Datum::type_str)
-                            .unwrap_or("missing");
-                        let object_type = object
-                            .as_ref()
-                            .map(Datum::type_str)
-                            .unwrap_or("missing");
+                        let count_type = count.as_ref().map(Datum::type_str).unwrap_or("missing");
+                        let object_type = object.as_ref().map(Datum::type_str).unwrap_or("missing");
                         return Err(format!(
                             "callback owner {label} probe state had unexpected count type={count_type} object type={object_type}"
                         ));
@@ -2759,41 +3002,53 @@ impl BrowserTestPlayer {
                 }
                 async_std::task::sleep(Duration::from_millis(10)).await;
             }
-            target.ok_or_else(|| format!("callback owner {label} did not publish the callback target"))?
+            target.ok_or_else(|| {
+                format!("callback owner {label} did not publish the callback target")
+            })?
         };
         let expected_owner = handle.owner_identity();
         let expected_generation = handle
             .with_context(|context| context.player.flash_instance_generation(1))
-            .map_err(|error| format!("callback owner {label} probe generation read failed: {error:?}"))?
+            .map_err(|error| {
+                format!("callback owner {label} probe generation read failed: {error:?}")
+            })?
             .ok_or_else(|| format!("callback owner {label} probe generation was not published"))?;
         let target_datum = handle
             .with_context(|context| context.player.get_datum(&target).clone())
-            .map_err(|error| format!("callback owner {label} probe target datum failed: {error:?}"))?;
+            .map_err(|error| {
+                format!("callback owner {label} probe target datum failed: {error:?}")
+            })?;
         match target_datum {
             Datum::FlashObjectRef(object)
                 if object.instance_id == 1
                     && object.owner_key.as_deref() == Some(expected_owner.as_str())
                     && object.instance_generation == Some(expected_generation) => {}
-            Datum::FlashObjectRef(object) => return Err(format!(
-                "callback owner {label} probe target lost its owner/sprite/generation binding: expected owner={expected_owner} sprite=1 generation={expected_generation}, observed owner={:?} sprite={} generation={:?}",
-                object.owner_key,
-                object.instance_id,
-                object.instance_generation,
-            )),
-            other => return Err(format!(
-                "callback owner {label} probe target had type {} instead of FlashObjectRef",
-                other.type_str(),
-            )),
+            Datum::FlashObjectRef(object) => {
+                return Err(format!(
+                    "callback owner {label} probe target lost its owner/sprite/generation binding: expected owner={expected_owner} sprite=1 generation={expected_generation}, observed owner={:?} sprite={} generation={:?}",
+                    object.owner_key, object.instance_id, object.instance_generation,
+                ));
+            }
+            other => {
+                return Err(format!(
+                    "callback owner {label} probe target had type {} instead of FlashObjectRef",
+                    other.type_str(),
+                ));
+            }
         }
         let saved_name = format!("dirplayerSavedCallbackTarget{label}");
         let saved_symbol = handle
             .with_context(|context| context.symbols.intern(&saved_name))
-            .map_err(|error| format!("callback owner {label} probe target symbol allocation failed: {error:?}"))?;
+            .map_err(|error| {
+                format!("callback owner {label} probe target symbol allocation failed: {error:?}")
+            })?;
         handle
             .with_context(|context| {
                 context.player.globals.insert(saved_symbol, target.clone());
             })
-            .map_err(|error| format!("callback owner {label} probe target global store failed: {error:?}"))?;
+            .map_err(|error| {
+                format!("callback owner {label} probe target global store failed: {error:?}")
+            })?;
         let kind = crate::player::eval_lingo_command_owned(
             handle.session().clone(),
             handle.player_id(),
@@ -2801,14 +3056,18 @@ impl BrowserTestPlayer {
             format!("{saved_name}.kind"),
         )
         .await
-        .map_err(|error| format!("callback owner {label} probe target kind read failed: {error}"))?;
+        .map_err(|error| {
+            format!("callback owner {label} probe target kind read failed: {error}")
+        })?;
         if !matches!(
             handle
                 .with_context(|context| context.player.get_datum(&kind).clone())
                 .map_err(|error| format!("callback owner {label} probe target kind datum failed: {error:?}"))?,
             Datum::String(value) if value == "object"
         ) {
-            return Err(format!("callback owner {label} probe target kind was not object"));
+            return Err(format!(
+                "callback owner {label} probe target kind was not object"
+            ));
         }
         Ok(saved_name)
     }
@@ -2824,8 +3083,10 @@ impl BrowserTestPlayer {
             .map_err(|error| format!("SpriteAsync owner A construction failed: {error:?}"))?;
         let mut second = crate::BrowserPlayerHandle::new()
             .map_err(|error| format!("SpriteAsync owner B construction failed: {error:?}"))?;
-        let (_first_capability, _first_owner_guard) = register_browser_handle_flash_owner(&first).await?;
-        let (_second_capability, _second_owner_guard) = register_browser_handle_flash_owner(&second).await?;
+        let (_first_capability, _first_owner_guard) =
+            register_browser_handle_flash_owner(&first).await?;
+        let (_second_capability, _second_owner_guard) =
+            register_browser_handle_flash_owner(&second).await?;
         let harness_owner_key = crate::player::owner_key_string(self.harness_runtime().owner());
         let first_owner_key = first.owner_identity();
         let second_owner_key = second.owner_identity();
@@ -2833,7 +3094,10 @@ impl BrowserTestPlayer {
             || first_owner_key == harness_owner_key
             || second_owner_key == harness_owner_key
         {
-            return Err("SpriteAsync fixture owners were not isolated from each other and the harness".to_owned());
+            return Err(
+                "SpriteAsync fixture owners were not isolated from each other and the harness"
+                    .to_owned(),
+            );
         }
 
         let first_container = create_public_play_test_container("sprite-variable-a")?;
@@ -2853,7 +3117,8 @@ impl BrowserTestPlayer {
         install_unpublished_flash_channel(&first)?;
         install_unpublished_flash_channel(&second)?;
 
-        let early_first = eval_sprite_variable_datum(&first, "sprite(1).getVariable(\"_root\", 0)").await?;
+        let early_first =
+            eval_sprite_variable_datum(&first, "sprite(1).getVariable(\"_root\", 0)").await?;
         let early_generation = match &early_first {
             Datum::FlashObjectRef(object) => {
                 if object.owner_key.as_deref() != Some(first_owner_key.as_str())
@@ -2861,13 +3126,20 @@ impl BrowserTestPlayer {
                     || object.cast_lib != 0
                     || object.cast_member != 0
                 {
-                    return Err(format!("owner A early object had unexpected binding: {object:?}"));
+                    return Err(format!(
+                        "owner A early object had unexpected binding: {object:?}"
+                    ));
                 }
-                object.instance_generation.ok_or_else(||
+                object.instance_generation.ok_or_else(|| {
                     "owner A early object did not capture an absent-instance generation".to_owned()
-                )?
+                })?
             }
-            other => return Err(format!("owner A early object had type {}", other.type_str())),
+            other => {
+                return Err(format!(
+                    "owner A early object had type {}",
+                    other.type_str()
+                ));
+            }
         };
         let early_first_name = first
             .with_context(|context| context.symbols.intern("dirplayerEarlySpriteObjectA"))
@@ -2883,7 +3155,8 @@ impl BrowserTestPlayer {
                     .insert(early_first_name, early_first_ref);
             })
             .map_err(|error| format!("owner A early object global store failed: {error:?}"))?;
-        let early_second = eval_sprite_variable_datum(&second, "sprite(1).getVariable(\"_root\", 0)").await?;
+        let early_second =
+            eval_sprite_variable_datum(&second, "sprite(1).getVariable(\"_root\", 0)").await?;
         let early_second_generation = match &early_second {
             Datum::FlashObjectRef(object) => {
                 if object.owner_key.as_deref() != Some(second_owner_key.as_str())
@@ -2891,13 +3164,20 @@ impl BrowserTestPlayer {
                     || object.cast_lib != 0
                     || object.cast_member != 0
                 {
-                    return Err(format!("owner B early object had unexpected binding: {object:?}"));
+                    return Err(format!(
+                        "owner B early object had unexpected binding: {object:?}"
+                    ));
                 }
-                object.instance_generation.ok_or_else(||
+                object.instance_generation.ok_or_else(|| {
                     "owner B early object did not capture an absent-instance generation".to_owned()
-                )?
+                })?
             }
-            other => return Err(format!("owner B early object had type {}", other.type_str())),
+            other => {
+                return Err(format!(
+                    "owner B early object had type {}",
+                    other.type_str()
+                ));
+            }
         };
         let early_second_name = second
             .with_context(|context| context.symbols.intern("dirplayerEarlySpriteObjectB"))
@@ -2917,12 +3197,16 @@ impl BrowserTestPlayer {
         install_published_sprite_variable_fixture(&first, &swf)?;
         install_published_sprite_variable_fixture(&second, &swf)?;
         for (label, handle) in [("A", &first), ("B", &second)] {
-            crate::player::run_movie_init_owned(handle.session().clone(), handle.player_id(), handle.owner().clone())
-                .await
-                .map_err(|error| format!("SpriteAsync owner {label} startup failed: {error}"))?;
-            handle
-                .play()
-                .map_err(|error| format!("SpriteAsync owner {label} playback start failed: {error:?}"))?;
+            crate::player::run_movie_init_owned(
+                handle.session().clone(),
+                handle.player_id(),
+                handle.owner().clone(),
+            )
+            .await
+            .map_err(|error| format!("SpriteAsync owner {label} startup failed: {error}"))?;
+            handle.play().map_err(|error| {
+                format!("SpriteAsync owner {label} playback start failed: {error:?}")
+            })?;
             wait_for_pointer_flash_ready(handle).await?;
         }
         let first_generation = first
@@ -2963,23 +3247,42 @@ impl BrowserTestPlayer {
         .await
         .map_err(|error| format!("owner A retained prepublication method call failed: {error}"))?;
         if !matches!(
-            eval_sprite_variable_datum(&first, "sprite(1).getVariable(\"_root.callbackProbeInvocationCount\", 1)").await?,
+            eval_sprite_variable_datum(
+                &first,
+                "sprite(1).getVariable(\"_root.callbackProbeInvocationCount\", 1)"
+            )
+            .await?,
             Datum::Int(1)
         ) || !matches!(
             eval_sprite_variable_datum(&first, "sprite(1).getVariable(\"_root.callbackProbeString\", 1)").await?,
             Datum::String(value) if value == "early-root"
         ) || !matches!(
-            eval_sprite_variable_datum(&first, "sprite(1).getVariable(\"_root.callbackProbeNumber\", 1)").await?,
+            eval_sprite_variable_datum(
+                &first,
+                "sprite(1).getVariable(\"_root.callbackProbeNumber\", 1)"
+            )
+            .await?,
             Datum::Int(17)
         ) || !matches!(
-            eval_sprite_variable_datum(&first, "sprite(1).getVariable(\"_root.callbackProbeObject\", 0)").await?,
+            eval_sprite_variable_datum(
+                &first,
+                "sprite(1).getVariable(\"_root.callbackProbeObject\", 0)"
+            )
+            .await?,
             Datum::FlashObjectRef(_)
         ) {
-            return Err("owner A retained prepublication method call did not preserve authored arguments".to_owned());
+            return Err(
+                "owner A retained prepublication method call did not preserve authored arguments"
+                    .to_owned(),
+            );
         }
 
         if !matches!(
-            eval_sprite_variable_datum(&first, "sprite(1).getVariable(\"_root.callbackProbeInvocationCount\", 1)").await?,
+            eval_sprite_variable_datum(
+                &first,
+                "sprite(1).getVariable(\"_root.callbackProbeInvocationCount\", 1)"
+            )
+            .await?,
             Datum::Int(1)
         ) {
             return Err("owner A authored invocation count was not an exact Int(1)".to_owned());
@@ -2990,14 +3293,24 @@ impl BrowserTestPlayer {
         ) {
             return Err("owner A UTF-8 SpriteAsync value did not round-trip".to_owned());
         }
-        eval_sprite_variable_datum(&first, "sprite(1).setVariable(\"_root.callbackProbeString\", \"owner-a\")").await?;
+        eval_sprite_variable_datum(
+            &first,
+            "sprite(1).setVariable(\"_root.callbackProbeString\", \"owner-a\")",
+        )
+        .await?;
         if !matches!(
             eval_sprite_variable_datum(&first, "sprite(1).getVariable(\"_root.callbackProbeString\", 1)").await?,
             Datum::String(value) if value == "owner-a"
         ) {
-            return Err("owner A SpriteAsync setter did not string-convert and read back".to_owned());
+            return Err(
+                "owner A SpriteAsync setter did not string-convert and read back".to_owned(),
+            );
         }
-        eval_sprite_variable_datum(&second, "sprite(1).setVariable(\"_root.callbackProbeString\", \"owner-b\")").await?;
+        eval_sprite_variable_datum(
+            &second,
+            "sprite(1).setVariable(\"_root.callbackProbeString\", \"owner-b\")",
+        )
+        .await?;
         if !matches!(
             eval_sprite_variable_datum(&second, "sprite(1).getVariable(\"_root.callbackProbeString\", 1)").await?,
             Datum::String(value) if value == "owner-b"
@@ -3032,7 +3345,9 @@ impl BrowserTestPlayer {
                 _ => false,
             };
             if !matches_expected {
-                return Err(format!("owner A {label} value was not the expected strict numeric form"));
+                return Err(format!(
+                    "owner A {label} value was not the expected strict numeric form"
+                ));
             }
         }
 
@@ -3065,23 +3380,35 @@ impl BrowserTestPlayer {
                 if object.owner_key.as_deref() == Some(first_owner_key.as_str())
                     && object.instance_id == 1
                     && object.instance_generation == Some(first_generation) => {}
-            other => return Err(format!(
-                "owner A retained object had unexpected datum type {}",
-                other.type_str()
-            )),
+            other => {
+                return Err(format!(
+                    "owner A retained object had unexpected datum type {}",
+                    other.type_str()
+                ));
+            }
         }
-        eval_sprite_variable_datum(&first, "sprite(1).setVariable(\"_root.callbackProbeObject\", \"repointed\")").await?;
+        eval_sprite_variable_datum(
+            &first,
+            "sprite(1).setVariable(\"_root.callbackProbeObject\", \"repointed\")",
+        )
+        .await?;
         if !matches!(
             eval_sprite_variable_datum(&first, "retainedSpriteObject.kind").await?,
             Datum::String(value) if value == "object"
         ) {
-            return Err("owner A retained object did not survive source-variable repointing".to_owned());
+            return Err(
+                "owner A retained object did not survive source-variable repointing".to_owned(),
+            );
         }
 
         replace_sprite_variable_flash_fixture(&first, &swf)?;
-        crate::player::run_movie_init_owned(first.session().clone(), first.player_id(), first.owner().clone())
-            .await
-            .map_err(|error| format!("owner A replacement startup failed: {error}"))?;
+        crate::player::run_movie_init_owned(
+            first.session().clone(),
+            first.player_id(),
+            first.owner().clone(),
+        )
+        .await
+        .map_err(|error| format!("owner A replacement startup failed: {error}"))?;
         wait_for_pointer_flash_ready(&first).await?;
         let replacement_generation = first
             .with_context(|context| context.player.flash_instance_generation(1))
@@ -3090,20 +3417,38 @@ impl BrowserTestPlayer {
         if replacement_generation == first_generation {
             return Err("owner A replacement did not rotate the generation".to_owned());
         }
-        if eval_sprite_variable_datum(&first, "dirplayerEarlySpriteObjectA.kind").await.is_ok() {
+        if eval_sprite_variable_datum(&first, "dirplayerEarlySpriteObjectA.kind")
+            .await
+            .is_ok()
+        {
             return Err("owner A retained prepublication object remained usable after generation replacement".to_owned());
         }
-        if eval_sprite_variable_datum(&first, "retainedSpriteObject.kind").await.is_ok() {
-            return Err("owner A retained object remained usable after generation replacement".to_owned());
+        if eval_sprite_variable_datum(&first, "retainedSpriteObject.kind")
+            .await
+            .is_ok()
+        {
+            return Err(
+                "owner A retained object remained usable after generation replacement".to_owned(),
+            );
         }
-        eval_sprite_variable_datum(&first, "sprite(1).setVariable(\"_root.callbackProbeString\", \"owner-a-replacement\")").await?;
+        eval_sprite_variable_datum(
+            &first,
+            "sprite(1).setVariable(\"_root.callbackProbeString\", \"owner-a-replacement\")",
+        )
+        .await?;
         if !matches!(
             eval_sprite_variable_datum(&first, "sprite(1).getVariable(\"_root.callbackProbeString\", 1)").await?,
             Datum::String(value) if value == "owner-a-replacement"
         ) {
-            return Err("owner A replacement SpriteAsync get/set did not use the fresh instance".to_owned());
+            return Err(
+                "owner A replacement SpriteAsync get/set did not use the fresh instance".to_owned(),
+            );
         }
-        eval_sprite_variable_datum(&second, "sprite(1).setVariable(\"_root.callbackProbeString\", \"b-after-replacement\")").await?;
+        eval_sprite_variable_datum(
+            &second,
+            "sprite(1).setVariable(\"_root.callbackProbeString\", \"b-after-replacement\")",
+        )
+        .await?;
         if !matches!(
             eval_sprite_variable_datum(&second, "sprite(1).getVariable(\"_root.callbackProbeString\", 1)").await?,
             Datum::String(value) if value == "b-after-replacement"
@@ -3145,7 +3490,11 @@ impl BrowserTestPlayer {
         if stale_after_dispose.is_ok() {
             return Err("owner A stale SpriteAsync command was accepted after disposal".to_owned());
         }
-        eval_sprite_variable_datum(&second, "sprite(1).setVariable(\"_root.callbackProbeString\", \"b-after-dispose\")").await?;
+        eval_sprite_variable_datum(
+            &second,
+            "sprite(1).setVariable(\"_root.callbackProbeString\", \"b-after-dispose\")",
+        )
+        .await?;
         if !matches!(
             eval_sprite_variable_datum(&second, "sprite(1).getVariable(\"_root.callbackProbeString\", 1)").await?,
             Datum::String(value) if value == "b-after-dispose"
@@ -3169,7 +3518,8 @@ impl BrowserTestPlayer {
         let second = crate::BrowserPlayerHandle::new()
             .map_err(|error| format!("callback owner B construction failed: {error:?}"))?;
         let (_first_capability, _first_guard) = register_browser_handle_flash_owner(&first).await?;
-        let (_second_capability, _second_guard) = register_browser_handle_flash_owner(&second).await?;
+        let (_second_capability, _second_guard) =
+            register_browser_handle_flash_owner(&second).await?;
         let first_container = create_public_play_test_container("callback-owner-a")?;
         let second_container = create_public_play_test_container("callback-owner-b")?;
         let callback_swf = include_bytes!("../../tests/fixtures/flash_lingo_callback_probe.swf");
@@ -3178,9 +3528,11 @@ impl BrowserTestPlayer {
         install_pointer_flash_fixture(&second, callback_swf)?;
         let first_probe = install_callback_script_fixture(&first)?;
         let second_probe = install_callback_script_fixture(&second)?;
-        first.create_canvas(first_container)
+        first
+            .create_canvas(first_container)
             .map_err(|error| format!("callback owner A renderer creation failed: {error:?}"))?;
-        second.create_canvas(second_container)
+        second
+            .create_canvas(second_container)
             .map_err(|error| format!("callback owner B renderer creation failed: {error:?}"))?;
 
         let mut first_saved_target = None;
@@ -3208,13 +3560,8 @@ impl BrowserTestPlayer {
             )
             .await
             .map_err(|error| format!("callback owner {label} prepublication callback failed: {error}"))?;
-            let saved_target = Self::store_callback_target_from_probe(
-                handle,
-                label,
-                &probe.0,
-                &probe.3,
-            )
-            .await?;
+            let saved_target =
+                Self::store_callback_target_from_probe(handle, label, &probe.0, &probe.3).await?;
             if label == "A" {
                 first_saved_target = Some(saved_target.clone());
             }
@@ -3248,15 +3595,23 @@ impl BrowserTestPlayer {
                     format!("getVariable(sprite(1), \"{path}\", 1)"),
                 )
                 .await
-                .map_err(|error| format!("callback owner {label} {expected} probe read failed: {error}"))?;
+                .map_err(|error| {
+                    format!("callback owner {label} {expected} probe read failed: {error}")
+                })?;
                 let observed = handle
                     .with_context(|context| context.player.get_datum(&value).clone())
-                    .map_err(|error| format!("callback owner {label} {expected} probe datum failed: {error:?}"))?;
+                    .map_err(|error| {
+                        format!("callback owner {label} {expected} probe datum failed: {error:?}")
+                    })?;
                 match (expected, observed) {
                     ("count", Datum::Int(value)) if value == 2 => {}
                     ("string", Datum::String(value)) if value == "雪だるま☃" => {}
                     ("number", Datum::Int(value)) if value == 7 => {}
-                    (_, _) => return Err(format!("callback owner {label} {expected} probe had an unexpected datum")),
+                    (_, _) => {
+                        return Err(format!(
+                            "callback owner {label} {expected} probe had an unexpected datum"
+                        ));
+                    }
                 }
             }
         }
@@ -3268,10 +3623,22 @@ impl BrowserTestPlayer {
             let values = handle
                 .with_context(|context| {
                     (
-                        context.player.get_datum(context.player.globals.get(&count_name).unwrap()).clone(),
-                        context.player.get_datum(context.player.globals.get(&text_name).unwrap()).clone(),
-                        context.player.get_datum(context.player.globals.get(&number_name).unwrap()).clone(),
-                        context.player.get_datum(context.player.globals.get(&object_name).unwrap()).clone(),
+                        context
+                            .player
+                            .get_datum(context.player.globals.get(&count_name).unwrap())
+                            .clone(),
+                        context
+                            .player
+                            .get_datum(context.player.globals.get(&text_name).unwrap())
+                            .clone(),
+                        context
+                            .player
+                            .get_datum(context.player.globals.get(&number_name).unwrap())
+                            .clone(),
+                        context
+                            .player
+                            .get_datum(context.player.globals.get(&object_name).unwrap())
+                            .clone(),
                     )
                 })
                 .map_err(|error| format!("callback owner {label} probe read failed: {error:?}"))?;
@@ -3311,7 +3678,9 @@ impl BrowserTestPlayer {
             || retained_object_ref.owner_key.as_deref() != Some(first_owner_key.as_str())
             || retained_object_ref.instance_generation != Some(old_generation)
         {
-            return Err("callback retained object lost its owner/sprite/generation binding".to_owned());
+            return Err(
+                "callback retained object lost its owner/sprite/generation binding".to_owned(),
+            );
         }
         let retained_kind = crate::player::eval_lingo_command_owned(
             first.session().clone(),
@@ -3329,7 +3698,8 @@ impl BrowserTestPlayer {
             return Err("retained callback object kind property did not round-trip".to_owned());
         }
 
-        let window = web_sys::window().ok_or_else(|| "callback browser window is unavailable".to_owned())?;
+        let window =
+            web_sys::window().ok_or_else(|| "callback browser window is unavailable".to_owned())?;
         let trigger = js_sys::Reflect::get(
             &window,
             &JsValue::from_str("dirplayer_triggerLingoCallbackOnScript"),
@@ -3367,7 +3737,9 @@ impl BrowserTestPlayer {
                 "1 + 1".to_owned(),
             )
             .await
-            .map_err(|error| format!("owner {label} did not survive stale callback rejection: {error}"))?;
+            .map_err(|error| {
+                format!("owner {label} did not survive stale callback rejection: {error}")
+            })?;
         }
         let stale_count = first
             .with_context(|context| {
@@ -3379,10 +3751,7 @@ impl BrowserTestPlayer {
             })
             .map_err(|error| format!("owner A stale callback count read failed: {error:?}"))?
             .ok_or_else(|| "owner A stale callback count global was missing".to_owned())?;
-        if !matches!(
-            stale_count,
-            Datum::Int(2)
-        ) {
+        if !matches!(stale_count, Datum::Int(2)) {
             return Err("stale callback changed owner A's Lingo handler count".to_owned());
         }
         if crate::player::eval_lingo_command_owned(
@@ -3415,7 +3784,8 @@ impl BrowserTestPlayer {
         .await
         .map_err(|error| format!("owner B sibling count read failed: {error}"))?;
         if !matches!(
-            second.with_context(|context| context.player.get_datum(&sibling_count).clone())
+            second
+                .with_context(|context| context.player.get_datum(&sibling_count).clone())
                 .map_err(|error| format!("owner B sibling count datum failed: {error:?}"))?,
             Datum::Int(3)
         ) {
@@ -3498,7 +3868,8 @@ impl BrowserTestPlayer {
         .await
         .map_err(|error| format!("fresh owner A authored count read failed: {error}"))?;
         if !matches!(
-            first.with_context(|context| context.player.get_datum(&fresh_count).clone())
+            first
+                .with_context(|context| context.player.get_datum(&fresh_count).clone())
                 .map_err(|error| format!("fresh owner A count datum failed: {error:?}"))?,
             Datum::Int(2)
         ) {
@@ -3506,8 +3877,12 @@ impl BrowserTestPlayer {
         }
         let fresh_values = first
             .with_context(|context| {
-                [fresh_probe.0, fresh_probe.1, fresh_probe.2, fresh_probe.3]
-                    .map(|name| context.player.get_datum(context.player.globals.get(&name).unwrap()).clone())
+                [fresh_probe.0, fresh_probe.1, fresh_probe.2, fresh_probe.3].map(|name| {
+                    context
+                        .player
+                        .get_datum(context.player.globals.get(&name).unwrap())
+                        .clone()
+                })
             })
             .map_err(|error| format!("fresh owner A Lingo probe read failed: {error:?}"))?;
         if !matches!(fresh_values[0], Datum::Int(2))
@@ -3515,7 +3890,9 @@ impl BrowserTestPlayer {
             || !matches!(fresh_values[2], Datum::Int(7))
             || !matches!(fresh_values[3], Datum::FlashObjectRef(_))
         {
-            return Err("fresh owner A Lingo callback values did not match both deliveries".to_owned());
+            return Err(
+                "fresh owner A Lingo callback values did not match both deliveries".to_owned(),
+            );
         }
 
         crate::player::eval_lingo_command_owned(
@@ -3537,7 +3914,11 @@ impl BrowserTestPlayer {
         .await
         .map_err(|error| format!("owner B count after owner A reset failed: {error}"))?;
         if !matches!(
-            second.with_context(|context| context.player.get_datum(&sibling_count_after_reset).clone())
+            second
+                .with_context(|context| context
+                    .player
+                    .get_datum(&sibling_count_after_reset)
+                    .clone())
                 .map_err(|error| format!("owner B count datum after reset failed: {error:?}"))?,
             Datum::Int(4)
         ) {
@@ -3551,7 +3932,12 @@ impl BrowserTestPlayer {
                     second_probe.2.clone(),
                     second_probe.3.clone(),
                 ]
-                    .map(|name| context.player.get_datum(context.player.globals.get(&name).unwrap()).clone())
+                .map(|name| {
+                    context
+                        .player
+                        .get_datum(context.player.globals.get(&name).unwrap())
+                        .clone()
+                })
             })
             .map_err(|error| format!("owner B Lingo probe after reset failed: {error:?}"))?;
         if !matches!(sibling_values[0], Datum::Int(4))
@@ -3604,7 +3990,11 @@ impl BrowserTestPlayer {
         .await
         .map_err(|error| format!("owner B count after owner A disposal failed: {error}"))?;
         if !matches!(
-            second.with_context(|context| context.player.get_datum(&sibling_count_after_dispose).clone())
+            second
+                .with_context(|context| context
+                    .player
+                    .get_datum(&sibling_count_after_dispose)
+                    .clone())
                 .map_err(|error| format!("owner B count datum after disposal failed: {error:?}"))?,
             Datum::Int(5)
         ) {
@@ -3612,8 +4002,18 @@ impl BrowserTestPlayer {
         }
         let sibling_values_after_dispose = second
             .with_context(|context| {
-                [second_probe.0, second_probe.1, second_probe.2, second_probe.3]
-                    .map(|name| context.player.get_datum(context.player.globals.get(&name).unwrap()).clone())
+                [
+                    second_probe.0,
+                    second_probe.1,
+                    second_probe.2,
+                    second_probe.3,
+                ]
+                .map(|name| {
+                    context
+                        .player
+                        .get_datum(context.player.globals.get(&name).unwrap())
+                        .clone()
+                })
             })
             .map_err(|error| format!("owner B Lingo probe after disposal failed: {error:?}"))?;
         if !matches!(sibling_values_after_dispose[0], Datum::Int(5))
@@ -3638,14 +4038,12 @@ impl BrowserTestPlayer {
                 .harness_runtime()
                 .with_context(|context| {
                     let symbol = context.symbols.intern(name);
-                    context
-                        .player
-                        .globals
-                        .get(&symbol)
-                        .and_then(|value| match context.player.get_datum(value) {
+                    context.player.globals.get(&symbol).and_then(|value| {
+                        match context.player.get_datum(value) {
                             Datum::Int(value) => Some(*value),
                             _ => None,
-                        })
+                        }
+                    })
                 })
                 .flatten()
                 .ok_or_else(|| format!("global {name} was not an integer"))
@@ -3666,7 +4064,10 @@ impl BrowserTestPlayer {
             );
             context.player.movie.cast_manager.casts.push(cast);
             let mut channel = SpriteChannel::new(1);
-            channel.sprite.member = Some(CastMemberRef { cast_lib: 1, cast_member: 1 });
+            channel.sprite.member = Some(CastMemberRef {
+                cast_lib: 1,
+                cast_member: 1,
+            });
             channel.sprite.width = 1;
             channel.sprite.height = 1;
             context.player.movie.score.channels = vec![SpriteChannel::new(0), channel];
@@ -3716,7 +4117,10 @@ impl BrowserTestPlayer {
                 );
             }
             if let Some(channel) = context.player.movie.score.channels.get_mut(1) {
-                channel.sprite.member = Some(CastMemberRef { cast_lib: 1, cast_member: 2 });
+                channel.sprite.member = Some(CastMemberRef {
+                    cast_lib: 1,
+                    cast_member: 2,
+                });
             }
             context.player.movie.score.invalidate_render_channel_cache();
         });
@@ -3752,14 +4156,16 @@ impl BrowserTestPlayer {
             );
             context.player.movie.cast_manager.casts.push(cast);
             let mut channel = SpriteChannel::new(1);
-            channel.sprite.member = Some(CastMemberRef { cast_lib: 1, cast_member: 1 });
+            channel.sprite.member = Some(CastMemberRef {
+                cast_lib: 1,
+                cast_member: 1,
+            });
             channel.sprite.width = 1;
             channel.sprite.height = 1;
             context.player.movie.score.channels = vec![SpriteChannel::new(0), channel];
             context.player.movie.score.invalidate_render_channel_cache();
             context.player.startup_do = Some(
-                "put getVariable(sprite(1), \"_root.fixture\", 1) into flashResetValue"
-                    .to_owned(),
+                "put getVariable(sprite(1), \"_root.fixture\", 1) into flashResetValue".to_owned(),
             );
         });
         crate::player::run_movie_init_owned(
@@ -3771,7 +4177,9 @@ impl BrowserTestPlayer {
         .map_err(|error| format!("reset replacement Flash startup failed: {error}"))?;
         let reset_value = read_global_int(self, "flashResetValue")?;
         if reset_value != 7 {
-            return Err(format!("unexpected reset replacement Flash value: {reset_value}"));
+            return Err(format!(
+                "unexpected reset replacement Flash value: {reset_value}"
+            ));
         }
         Ok(())
     }
@@ -3802,7 +4210,10 @@ impl BrowserTestPlayer {
             );
             context.player.movie.cast_manager.casts.push(cast);
             let mut channel = SpriteChannel::new(1);
-            channel.sprite.member = Some(CastMemberRef { cast_lib: 1, cast_member: 1 });
+            channel.sprite.member = Some(CastMemberRef {
+                cast_lib: 1,
+                cast_member: 1,
+            });
             context.player.movie.score.channels = vec![SpriteChannel::new(0), channel];
             context.player.movie.score.invalidate_render_channel_cache();
         });
@@ -3892,7 +4303,6 @@ impl BrowserTestPlayer {
         let bound_generation = Rc::new(Cell::new(None::<f64>));
         let successful_get_generation = Rc::new(Cell::new(None::<f64>));
 
-
         let bind_calls = calls.clone();
         let bind_error = route_error.clone();
         let bind_generation = replacement_generation.clone();
@@ -3905,7 +4315,8 @@ impl BrowserTestPlayer {
                   path: JsValue,
                   return_as_object: JsValue|
                   -> JsValue {
-                let owner_matches = requested_owner.as_string().as_deref() == Some(bind_owner_key.as_str());
+                let owner_matches =
+                    requested_owner.as_string().as_deref() == Some(bind_owner_key.as_str());
                 let sprite_matches = sprite.as_f64() == Some(1.0);
                 let path = path.as_string().unwrap_or_default();
                 let object_mode = return_as_object.as_bool().unwrap_or(false);
@@ -3932,7 +4343,10 @@ impl BrowserTestPlayer {
                     *bind_error.borrow_mut() = Some(format!(
                         "invalid BindGet arguments owner={owner_matches} sprite={sprite_matches} object={object_mode}"
                     ));
-                    return flash_owned_test_error("invalid-arguments", "invalid BindGet arguments");
+                    return flash_owned_test_error(
+                        "invalid-arguments",
+                        "invalid BindGet arguments",
+                    );
                 }
                 let value = js_sys::Object::new();
                 let _ = js_sys::Reflect::set(
@@ -3942,7 +4356,8 @@ impl BrowserTestPlayer {
                 );
                 flash_owned_test_response(current_generation, value.into())
             },
-        ) as Box<dyn FnMut(JsValue, JsValue, JsValue, JsValue) -> JsValue>);
+        )
+            as Box<dyn FnMut(JsValue, JsValue, JsValue, JsValue) -> JsValue>);
 
         let get_calls = calls.clone();
         let get_error = route_error.clone();
@@ -3959,15 +4374,21 @@ impl BrowserTestPlayer {
                   return_as_object: JsValue|
                   -> JsValue {
                 let requested_generation = generation.as_f64().unwrap_or(f64::NAN);
-                let owner_matches = requested_owner.as_string().as_deref() == Some(get_owner_key.as_str());
+                let owner_matches =
+                    requested_owner.as_string().as_deref() == Some(get_owner_key.as_str());
                 let sprite_matches = sprite.as_f64() == Some(1.0);
                 let path = path.as_string().unwrap_or_default();
-                get_calls.borrow_mut().push(format!(
-                    "get:{path}:{requested_generation}"
-                ));
-                if !owner_matches || !sprite_matches || !return_as_object.as_bool().unwrap_or(false) {
-                    *get_error.borrow_mut() = Some("invalid generation-qualified Get arguments".to_owned());
-                    return flash_owned_test_error("invalid-arguments", "invalid generation-qualified Get arguments");
+                get_calls
+                    .borrow_mut()
+                    .push(format!("get:{path}:{requested_generation}"));
+                if !owner_matches || !sprite_matches || !return_as_object.as_bool().unwrap_or(false)
+                {
+                    *get_error.borrow_mut() =
+                        Some("invalid generation-qualified Get arguments".to_owned());
+                    return flash_owned_test_error(
+                        "invalid-arguments",
+                        "invalid generation-qualified Get arguments",
+                    );
                 }
                 if !get_replace.get() {
                     get_successful_generation.set(Some(requested_generation));
@@ -3987,9 +4408,13 @@ impl BrowserTestPlayer {
                         ));
                     }
                 }
-                flash_owned_test_response(requested_generation, JsValue::from_str("stale-or-current-value"))
+                flash_owned_test_response(
+                    requested_generation,
+                    JsValue::from_str("stale-or-current-value"),
+                )
             },
-        ) as Box<dyn FnMut(JsValue, JsValue, JsValue, JsValue, JsValue) -> JsValue>);
+        )
+            as Box<dyn FnMut(JsValue, JsValue, JsValue, JsValue, JsValue) -> JsValue>);
 
         js_sys::Reflect::set(
             &window,
@@ -4019,7 +4444,9 @@ impl BrowserTestPlayer {
             crate::director::static_datum::StaticDatum::String(value)
                 if value == "stale-or-current-value"
         ) {
-            return Err(format!("unexpected generation-qualified Get value: {current_value:?}"));
+            return Err(format!(
+                "unexpected generation-qualified Get value: {current_value:?}"
+            ));
         }
         if let Some(error) = route_error.borrow_mut().take() {
             return Err(error);
@@ -4070,7 +4497,9 @@ impl BrowserTestPlayer {
             crate::director::static_datum::StaticDatum::String(value)
                 if value == "stale-or-current-value"
         ) {
-            return Err(format!("unexpected replacement Get value: {replacement_value:?}"));
+            return Err(format!(
+                "unexpected replacement Get value: {replacement_value:?}"
+            ));
         }
         if let Some(error) = route_error.borrow_mut().take() {
             return Err(error);
@@ -4126,9 +4555,13 @@ impl BrowserTestPlayer {
                 ..
             } => intent,
             crate::player::driver::GlobalDispatch::SyncResult(result) => {
-                return result.map_err(|error| error.message)
+                return result.map_err(|error| error.message);
             }
-            _ => return Err(format!("SysMenu global {name} did not produce a typed host intent")),
+            _ => {
+                return Err(format!(
+                    "SysMenu global {name} did not produce a typed host intent"
+                ));
+            }
         };
         crate::player::xtra::manager::execute_pending_intent(&session, player_id, intent)
             .await
@@ -4156,9 +4589,13 @@ impl BrowserTestPlayer {
                 ..
             } => intent,
             crate::player::driver::GlobalDispatch::SyncResult(result) => {
-                return result.map_err(|error| error.message)
+                return result.map_err(|error| error.message);
             }
-            _ => return Err(format!("BudAPI global {name} did not produce a typed host intent")),
+            _ => {
+                return Err(format!(
+                    "BudAPI global {name} did not produce a typed host intent"
+                ));
+            }
         };
         crate::player::xtra::manager::execute_pending_intent(&session, player_id, intent)
             .await
@@ -4218,23 +4655,29 @@ impl BrowserTestPlayer {
         let args = self
             .harness_runtime()
             .with_context(|mut context| {
-                vec![context.player.alloc_datum(
-                    crate::director::lingo::datum::Datum::String("BudAPI fixture".to_owned()),
-                )]
+                vec![
+                    context
+                        .player
+                        .alloc_datum(crate::director::lingo::datum::Datum::String(
+                            "BudAPI fixture".to_owned(),
+                        )),
+                ]
             })
             .ok_or_else(|| "BudAPI player disappeared before dispatch".to_owned())?;
         let result = self.dispatch_budapi_global("baMsgBox", args).await;
-        let reset_observed = js_sys::Reflect::get(
-            &window,
-            &JsValue::from_str("__budapiResetObserved"),
-        )
-        .ok()
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false);
+        let reset_observed =
+            js_sys::Reflect::get(&window, &JsValue::from_str("__budapiResetObserved"))
+                .ok()
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
 
         let _ = js_sys::Reflect::set(&window, &JsValue::from_str("alert"), &original_alert);
-        let _ = js_sys::Reflect::delete_property(&window, &JsValue::from_str("__budapiResetDuringAlert"));
-        let _ = js_sys::Reflect::delete_property(&window, &JsValue::from_str("__budapiResetObserved"));
+        let _ = js_sys::Reflect::delete_property(
+            &window,
+            &JsValue::from_str("__budapiResetDuringAlert"),
+        );
+        let _ =
+            js_sys::Reflect::delete_property(&window, &JsValue::from_str("__budapiResetObserved"));
         if !self.harness_runtime().owner_valid() {
             self.reset_player().await;
         }
@@ -4249,11 +4692,9 @@ impl BrowserTestPlayer {
         // the owner.  The executor must catch the rejection, then reject the
         // stale completion rather than mutating the replacement state.
         let navigator = window.navigator();
-        let original_clipboard = js_sys::Reflect::get(
-            navigator.as_ref(),
-            &JsValue::from_str("clipboard"),
-        )
-        .map_err(|_| "could not inspect browser clipboard capability".to_owned())?;
+        let original_clipboard =
+            js_sys::Reflect::get(navigator.as_ref(), &JsValue::from_str("clipboard"))
+                .map_err(|_| "could not inspect browser clipboard capability".to_owned())?;
         let mut clipboard_replaced = false;
         let clipboard = if original_clipboard.is_null() || original_clipboard.is_undefined() {
             let fake = js_sys::Object::new();
@@ -4273,7 +4714,8 @@ impl BrowserTestPlayer {
             .map_err(|_| "could not inspect browser clipboard writer".to_owned())?;
         let mut clipboard_reset: Option<Closure<dyn FnMut()>> = None;
         let mut rejection_write = None;
-        let throwing_write = js_sys::Function::new_no_args("throw new Error('clipboard fixture throw')");
+        let throwing_write =
+            js_sys::Function::new_no_args("throw new Error('clipboard fixture throw')");
         if !js_sys::Reflect::set(&clipboard, &JsValue::from_str("writeText"), &throwing_write)
             .map_err(|_| "could not install throwing clipboard writer".to_owned())?
         {
@@ -4282,12 +4724,22 @@ impl BrowserTestPlayer {
         let throwing_copy_args = self
             .harness_runtime()
             .with_context(|mut context| {
-                vec![context.player.alloc_datum(
-                    crate::director::lingo::datum::Datum::String("synchronous clipboard throw".to_owned()),
-                )]
+                vec![
+                    context
+                        .player
+                        .alloc_datum(crate::director::lingo::datum::Datum::String(
+                            "synchronous clipboard throw".to_owned(),
+                        )),
+                ]
             })
-            .ok_or_else(|| "BudAPI player disappeared before synchronous clipboard dispatch".to_owned())?;
-        if self.dispatch_budapi_global("baCopyText", throwing_copy_args).await.is_err() {
+            .ok_or_else(|| {
+                "BudAPI player disappeared before synchronous clipboard dispatch".to_owned()
+            })?;
+        if self
+            .dispatch_budapi_global("baCopyText", throwing_copy_args)
+            .await
+            .is_err()
+        {
             return Err("synchronous clipboard throw escaped the owner fallback".to_owned());
         }
 
@@ -4331,22 +4783,32 @@ impl BrowserTestPlayer {
             }
             js_sys::Promise::reject(&JsValue::from_str("clipboard fixture rejection"))
         }) as Box<dyn FnMut(JsValue) -> js_sys::Promise>);
-        if !js_sys::Reflect::set(&clipboard, &JsValue::from_str("writeText"), rejection.as_ref())
-            .map_err(|_| "could not install rejected clipboard writer".to_owned())?
+        if !js_sys::Reflect::set(
+            &clipboard,
+            &JsValue::from_str("writeText"),
+            rejection.as_ref(),
+        )
+        .map_err(|_| "could not install rejected clipboard writer".to_owned())?
         {
             return Err("browser clipboard writer cannot install rejection fixture".to_owned());
         }
         rejection_write = Some(rejection);
         {
-            let rejected_copy_args = self
-                .harness_runtime()
-                .with_context(|mut context| {
-                    vec![context.player.alloc_datum(
-                        crate::director::lingo::datum::Datum::String("rejected clipboard".to_owned()),
-                    )]
-                })
-                .ok_or_else(|| "BudAPI player disappeared before rejected clipboard dispatch".to_owned())?;
-            let rejected_copy = self.dispatch_budapi_global("baCopyText", rejected_copy_args).await;
+            let rejected_copy_args =
+                self.harness_runtime()
+                    .with_context(|mut context| {
+                        vec![context.player.alloc_datum(
+                            crate::director::lingo::datum::Datum::String(
+                                "rejected clipboard".to_owned(),
+                            ),
+                        )]
+                    })
+                    .ok_or_else(|| {
+                        "BudAPI player disappeared before rejected clipboard dispatch".to_owned()
+                    })?;
+            let rejected_copy = self
+                .dispatch_budapi_global("baCopyText", rejected_copy_args)
+                .await;
             let clipboard_reset_observed = js_sys::Reflect::get(
                 &window,
                 &JsValue::from_str("__budapiClipboardResetObserved"),
@@ -4354,11 +4816,18 @@ impl BrowserTestPlayer {
             .ok()
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
-            let _ = js_sys::Reflect::set(&clipboard, &JsValue::from_str("writeText"), &original_write);
+            let _ =
+                js_sys::Reflect::set(&clipboard, &JsValue::from_str("writeText"), &original_write);
             drop(rejection_write);
             drop(clipboard_reset);
-            let _ = js_sys::Reflect::delete_property(&window, &JsValue::from_str("__budapiResetDuringClipboard"));
-            let _ = js_sys::Reflect::delete_property(&window, &JsValue::from_str("__budapiClipboardResetObserved"));
+            let _ = js_sys::Reflect::delete_property(
+                &window,
+                &JsValue::from_str("__budapiResetDuringClipboard"),
+            );
+            let _ = js_sys::Reflect::delete_property(
+                &window,
+                &JsValue::from_str("__budapiClipboardResetObserved"),
+            );
             if rejected_copy.is_ok() || !clipboard_reset_observed {
                 return Err("rejected clipboard completion crossed the retired owner".to_owned());
             }
@@ -4377,28 +4846,40 @@ impl BrowserTestPlayer {
         let copy_args = self
             .harness_runtime()
             .with_context(|mut context| {
-                vec![context.player.alloc_datum(
-                    crate::director::lingo::datum::Datum::String("BudAPI clipboard fixture".to_owned()),
-                )]
+                vec![
+                    context
+                        .player
+                        .alloc_datum(crate::director::lingo::datum::Datum::String(
+                            "BudAPI clipboard fixture".to_owned(),
+                        )),
+                ]
             })
             .ok_or_else(|| "BudAPI player disappeared before clipboard dispatch".to_owned())?;
         self.dispatch_budapi_global("baCopyText", copy_args)
             .await
             .map_err(|error| format!("BudAPI clipboard write failed: {error}"))?;
-        let pasted = self.dispatch_budapi_global("baPasteText", Vec::new()).await
+        let pasted = self
+            .dispatch_budapi_global("baPasteText", Vec::new())
+            .await
             .map_err(|error| format!("BudAPI clipboard read failed: {error}"))?;
         let pasted_text = self
             .harness_runtime()
             .with_context(|context| {
-                context.player.allocator.try_get_datum(&pasted).and_then(|datum| match datum {
-                    crate::director::lingo::datum::Datum::String(value) => Some(value.clone()),
-                    _ => None,
-                })
+                context
+                    .player
+                    .allocator
+                    .try_get_datum(&pasted)
+                    .and_then(|datum| match datum {
+                        crate::director::lingo::datum::Datum::String(value) => Some(value.clone()),
+                        _ => None,
+                    })
             })
             .flatten()
             .ok_or_else(|| "BudAPI clipboard read returned a non-string".to_owned())?;
         if pasted_text != "BudAPI clipboard fixture" {
-            return Err(format!("unexpected BudAPI clipboard value: {pasted_text:?}"));
+            return Err(format!(
+                "unexpected BudAPI clipboard value: {pasted_text:?}"
+            ));
         }
         Ok(())
     }
@@ -4423,12 +4904,8 @@ impl BrowserTestPlayer {
                 log_events.push(&JsValue::from_str(&format!("print:{message}")));
             }
         }) as Box<dyn FnMut(JsValue)>);
-        js_sys::Reflect::set(
-            &console,
-            &JsValue::from_str("log"),
-            log_closure.as_ref(),
-        )
-        .map_err(|_| "could not install SysMenu console hook".to_owned())?;
+        js_sys::Reflect::set(&console, &JsValue::from_str("log"), log_closure.as_ref())
+            .map_err(|_| "could not install SysMenu console hook".to_owned())?;
 
         let reset_session = self.harness_runtime().session();
         let reset_player_id = self.harness_runtime().player_id();
@@ -4473,22 +4950,20 @@ impl BrowserTestPlayer {
             }
             JsValue::UNDEFINED
         }) as Box<dyn FnMut(JsValue) -> JsValue>);
-        js_sys::Reflect::set(
-            &window,
-            &JsValue::from_str("alert"),
-            alert_closure.as_ref(),
-        )
-        .map_err(|_| "could not install SysMenu alert hook".to_owned())?;
+        js_sys::Reflect::set(&window, &JsValue::from_str("alert"), alert_closure.as_ref())
+            .map_err(|_| "could not install SysMenu alert hook".to_owned())?;
 
         let result = async {
-            let print_args = self
-                .harness_runtime()
-                .with_context(|mut context| {
-                    vec![context.player.alloc_datum(
-                        crate::director::lingo::datum::Datum::String("print fixture".to_owned()),
-                    )]
-                })
-                .ok_or_else(|| "SysMenu player disappeared before print".to_owned())?;
+            let print_args =
+                self.harness_runtime()
+                    .with_context(|mut context| {
+                        vec![context.player.alloc_datum(
+                            crate::director::lingo::datum::Datum::String(
+                                "print fixture".to_owned(),
+                            ),
+                        )]
+                    })
+                    .ok_or_else(|| "SysMenu player disappeared before print".to_owned())?;
             self.dispatch_sysmenu_global("sysMenuPrintMsg", print_args)
                 .await
                 .map_err(|error| format!("SysMenu print failed: {error}"))?;
@@ -4497,13 +4972,19 @@ impl BrowserTestPlayer {
                 .harness_runtime()
                 .with_context(|mut context| {
                     vec![
-                        context.player.alloc_datum(
-                            crate::director::lingo::datum::Datum::String("message fixture".to_owned()),
-                        ),
-                        context.player.alloc_datum(
-                            crate::director::lingo::datum::Datum::String("caption fixture".to_owned()),
-                        ),
-                        context.player.alloc_datum(crate::director::lingo::datum::Datum::Int(1)),
+                        context
+                            .player
+                            .alloc_datum(crate::director::lingo::datum::Datum::String(
+                                "message fixture".to_owned(),
+                            )),
+                        context
+                            .player
+                            .alloc_datum(crate::director::lingo::datum::Datum::String(
+                                "caption fixture".to_owned(),
+                            )),
+                        context
+                            .player
+                            .alloc_datum(crate::director::lingo::datum::Datum::Int(1)),
                     ]
                 })
                 .ok_or_else(|| "SysMenu player disappeared before message box".to_owned())?;
@@ -4513,13 +4994,11 @@ impl BrowserTestPlayer {
             if late_result.is_ok() {
                 return Err("SysMenu message box completed after reset".to_owned());
             }
-            let reset_observed = js_sys::Reflect::get(
-                &window,
-                &JsValue::from_str("__sysmenuResetObserved"),
-            )
-            .ok()
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false);
+            let reset_observed =
+                js_sys::Reflect::get(&window, &JsValue::from_str("__sysmenuResetObserved"))
+                    .ok()
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false);
             if !reset_observed {
                 return Err("SysMenu alert did not re-enter the owner reset path".to_owned());
             }
@@ -4541,24 +5020,14 @@ impl BrowserTestPlayer {
         }
         .await;
 
-        let _ = js_sys::Reflect::set(
-            &console,
-            &JsValue::from_str("log"),
-            &original_log,
-        );
-        let _ = js_sys::Reflect::set(
-            &window,
-            &JsValue::from_str("alert"),
-            &original_alert,
-        );
+        let _ = js_sys::Reflect::set(&console, &JsValue::from_str("log"), &original_log);
+        let _ = js_sys::Reflect::set(&window, &JsValue::from_str("alert"), &original_alert);
         let _ = js_sys::Reflect::delete_property(
             &window,
             &JsValue::from_str("__sysmenuResetDuringAlert"),
         );
-        let _ = js_sys::Reflect::delete_property(
-            &window,
-            &JsValue::from_str("__sysmenuResetObserved"),
-        );
+        let _ =
+            js_sys::Reflect::delete_property(&window, &JsValue::from_str("__sysmenuResetObserved"));
 
         // The callback intentionally rotated the owner. Reinstall the harness
         // player so subsequent browser tests retain their normal lifecycle.
@@ -4620,24 +5089,18 @@ impl BrowserTestPlayer {
                     prepare_movie.clone(),
                     playback_counter_handler(1, names.len()),
                 );
-                movie_handlers.insert(
-                    start_movie,
-                    playback_counter_handler(1, names.len()),
-                );
-                movie_handlers.insert(
-                    prepare_frame,
-                    playback_counter_handler(2, names.len()),
-                );
-                movie_handlers.insert(
-                    enter_frame,
-                    playback_counter_handler(2, names.len()),
-                );
-                movie_handlers.insert(
-                    stop_movie.clone(),
-                    playback_counter_handler(3, names.len()),
-                );
-                let movie_ref = CastMemberRef { cast_lib: 1, cast_member: 2 };
-                let behavior_ref = CastMemberRef { cast_lib: 1, cast_member: 1 };
+                movie_handlers.insert(start_movie, playback_counter_handler(1, names.len()));
+                movie_handlers.insert(prepare_frame, playback_counter_handler(2, names.len()));
+                movie_handlers.insert(enter_frame, playback_counter_handler(2, names.len()));
+                movie_handlers.insert(stop_movie.clone(), playback_counter_handler(3, names.len()));
+                let movie_ref = CastMemberRef {
+                    cast_lib: 1,
+                    cast_member: 2,
+                };
+                let behavior_ref = CastMemberRef {
+                    cast_lib: 1,
+                    cast_member: 1,
+                };
                 let movie_script = Rc::new(Script {
                     member_ref: movie_ref,
                     name: "browser-playback-movie".to_owned(),
@@ -4679,13 +5142,16 @@ impl BrowserTestPlayer {
                 cast.scripts.insert(2, movie_script);
                 context.player.movie.cast_manager.casts.push(cast);
 
-                let instance = context.player.allocator.alloc_script_instance(ScriptInstance {
-                    instance_id: 1,
-                    script: behavior_ref,
-                    ancestor: None,
-                    properties: FxHashMap::default(),
-                    begin_sprite_called: false,
-                });
+                let instance = context
+                    .player
+                    .allocator
+                    .alloc_script_instance(ScriptInstance {
+                        instance_id: 1,
+                        script: behavior_ref,
+                        ancestor: None,
+                        properties: FxHashMap::default(),
+                        begin_sprite_called: false,
+                    });
                 let mut channel = SpriteChannel::new(1);
                 channel.sprite.entered = true;
                 channel.sprite.script_instance_list = vec![instance];
@@ -4766,7 +5232,10 @@ impl BrowserTestPlayer {
                 .session
                 .borrow_mut()
                 .with_player(second.player_id, |context| {
-                    (context.player.is_playing, context.player.last_initialized_frame)
+                    (
+                        context.player.is_playing,
+                        context.player.last_initialized_frame,
+                    )
                 })
                 .ok_or_else(|| "second owner disappeared during initial playback".to_string())?;
             if observed_first.0
@@ -4781,8 +5250,9 @@ impl BrowserTestPlayer {
                 break;
             }
         }
-        let first_effects = first_effects
-            .ok_or_else(|| "initial playback did not complete both owner initializations".to_string())?;
+        let first_effects = first_effects.ok_or_else(|| {
+            "initial playback did not complete both owner initializations".to_string()
+        })?;
         if !first_effects.0 || first_effects.1.is_none() {
             return Err(format!(
                 "initial playback did not complete owned init: playing={}, initialized_frame={:?}",
@@ -4793,7 +5263,9 @@ impl BrowserTestPlayer {
             || read_playback_marker(&first, &first_markers.frame)? == 0
             || read_playback_marker(&second, &second_markers.init)? == 0
         {
-            return Err("owned init/frame handlers did not update the expected owner globals".into());
+            return Err(
+                "owned init/frame handlers did not update the expected owner globals".into(),
+            );
         }
         if read_playback_marker(&first, &first_markers.stop_movie)? != 0
             || read_playback_marker(&first, &first_markers.end_sprite_after_stop)? != 0
@@ -4827,10 +5299,14 @@ impl BrowserTestPlayer {
                 break;
             }
         }
-        let (stop_marker, end_marker) = stop_lifecycle_markers
-            .ok_or_else(|| "StopMovie/endSprite handlers did not complete within the playback wait bound".to_owned())?;
+        let (stop_marker, end_marker) = stop_lifecycle_markers.ok_or_else(|| {
+            "StopMovie/endSprite handlers did not complete within the playback wait bound"
+                .to_owned()
+        })?;
         if stop_marker == 0 || end_marker != stop_marker {
-            return Err("StopMovie/endSprite handlers did not observe the real lifecycle order".into());
+            return Err(
+                "StopMovie/endSprite handlers did not observe the real lifecycle order".into(),
+            );
         }
         if read_playback_marker(&second, &second_markers.stop_movie)? != 0 {
             return Err("stopping the first owner mutated the second owner lifecycle".into());
@@ -4884,8 +5360,9 @@ impl BrowserTestPlayer {
                 break;
             }
         }
-        let replay_effects = replay_effects
-            .ok_or_else(|| "immediate replay did not claim a progressing replacement epoch".to_owned())?;
+        let replay_effects = replay_effects.ok_or_else(|| {
+            "immediate replay did not claim a progressing replacement epoch".to_owned()
+        })?;
         if !replay_effects.0 || replay_effects.1 != first_effects.1 {
             return Err(format!(
                 "replay did not restore playback without reinitializing: playing={}, initialized_frame={:?}, before={:?}",
@@ -4942,9 +5419,18 @@ impl BrowserTestPlayer {
     }
 
     async fn resolve_movie_xtras() {
-        let Some(window) = web_sys::window() else { return };
-        let Ok(hook) = js_sys::Reflect::get(&window, &JsValue::from_str("dirplayer_resolveAndLoadMovieXtras")) else { return };
-        let Ok(func) = hook.dyn_into::<js_sys::Function>() else { return };
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let Ok(hook) = js_sys::Reflect::get(
+            &window,
+            &JsValue::from_str("dirplayer_resolveAndLoadMovieXtras"),
+        ) else {
+            return;
+        };
+        let Ok(func) = hook.dyn_into::<js_sys::Function>() else {
+            return;
+        };
         let Ok(ret) = func.call0(&window) else { return };
         if let Ok(promise) = ret.dyn_into::<js_sys::Promise>() {
             let _ = JsFuture::from(promise).await;
@@ -4991,7 +5477,9 @@ impl BrowserTestPlayer {
         let owner_key = capability.owner_identity();
         let mut registration_ready = None;
         if let Some(window) = web_sys::window() {
-            if let Ok(value) = js_sys::Reflect::get(&window, &JsValue::from_str("dirplayer_registerFlashOwner")) {
+            if let Ok(value) =
+                js_sys::Reflect::get(&window, &JsValue::from_str("dirplayer_registerFlashOwner"))
+            {
                 if let Ok(function) = value.dyn_into::<js_sys::Function>() {
                     let js_capability: JsValue = js_capability.into();
                     registration_ready = function
@@ -5007,7 +5495,10 @@ impl BrowserTestPlayer {
 
     fn unregister_flash_owner(&mut self, owner_key: &str) {
         if let Some(window) = web_sys::window() {
-            if let Ok(value) = js_sys::Reflect::get(&window, &JsValue::from_str("dirplayer_unregisterFlashOwner")) {
+            if let Ok(value) = js_sys::Reflect::get(
+                &window,
+                &JsValue::from_str("dirplayer_unregisterFlashOwner"),
+            ) {
                 if let Ok(function) = value.dyn_into::<js_sys::Function>() {
                     let _ = function.call1(&window, &JsValue::from_str(owner_key));
                 }
@@ -5040,7 +5531,11 @@ impl BrowserTestPlayer {
         let preserved_startup = if preserve_external_params {
             self.harness_runtime()
                 .with_context(|context| {
-                    (context.player.startup_do.clone(), context.player.startup_do_before.clone(), context.player.startup_go)
+                    (
+                        context.player.startup_do.clone(),
+                        context.player.startup_do_before.clone(),
+                        context.player.startup_go,
+                    )
                 })
                 .unwrap_or_default()
         } else {
@@ -5071,7 +5566,8 @@ impl BrowserTestPlayer {
         // against the replacement player. Keep the original RAF drain: these
         // yields let stale browser tasks observe retirement and exit without
         // advancing Director simulation during teardown.
-        let had_active_handler = self.harness_runtime()
+        let had_active_handler = self
+            .harness_runtime()
             .with_context(|context| context.player.handler_stack_depth != 0)
             .unwrap_or(false);
         self.runtime.retire_current();
@@ -5093,12 +5589,21 @@ impl BrowserTestPlayer {
         let (tx, rx) = async_std::channel::unbounded();
         assert!(self.runtime.install_player(tx.clone()));
         self.command_tx = tx;
-        self.runtime.session().borrow_mut().bind_renderer_state(self.runtime.player_id(), &self.renderer);
+        self.runtime
+            .session()
+            .borrow_mut()
+            .bind_renderer_state(self.runtime.player_id(), &self.renderer);
         let command_session = self.runtime.session();
         let command_player_id = self.runtime.player_id();
         let command_owner = self.runtime.owner().clone();
         crate::player::spawn_player_local(async move {
-            crate::player::commands::run_command_loop(rx, command_session, command_player_id, command_owner).await;
+            crate::player::commands::run_command_loop(
+                rx,
+                command_session,
+                command_player_id,
+                command_owner,
+            )
+            .await;
         });
         if let Some(registration_ready) = self.register_flash_owner() {
             let _ = JsFuture::from(registration_ready).await;
@@ -5142,7 +5647,8 @@ impl BrowserTestPlayer {
     /// Wait for the next animation frame.
     async fn next_frame() {
         let promise = js_sys::Promise::new(&mut |resolve, _| {
-            web_sys::window().unwrap()
+            web_sys::window()
+                .unwrap()
                 .request_animation_frame(&resolve)
                 .unwrap();
         });
@@ -5152,7 +5658,8 @@ impl BrowserTestPlayer {
     /// Sleep for the given number of milliseconds.
     async fn sleep_ms(ms: u32) {
         let promise = js_sys::Promise::new(&mut |resolve, _| {
-            web_sys::window().unwrap()
+            web_sys::window()
+                .unwrap()
                 .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms as i32)
                 .unwrap();
         });
@@ -5177,7 +5684,8 @@ impl BrowserTestPlayer {
             self.harness_runtime().player_id(),
             self.harness_runtime().owner().clone(),
             &container,
-        ).unwrap_or_else(|error| panic!("test renderer creation failed: {:?}", error));
+        )
+        .unwrap_or_else(|error| panic!("test renderer creation failed: {:?}", error));
     }
 
     /// Fetch and register an external Xtra plugin .wasm. Call this from a
@@ -5192,26 +5700,38 @@ impl BrowserTestPlayer {
     /// prepare/execute/install path used by production Xtra dispatch. The
     /// socket executor runs outside the session borrow; only the instance
     /// allocation and final installation use short owner-checked borrows.
-    async fn connect_multiuser(&self, base_url: &str, label: &str) -> Result<MultiuserSocketProbe, String> {
+    async fn connect_multiuser(
+        &self,
+        base_url: &str,
+        label: &str,
+    ) -> Result<MultiuserSocketProbe, String> {
         let url = web_sys::Url::new(&format!("{}/{}", base_url.trim_end_matches('/'), label))
             .map_err(|_| "invalid Multiuser test WebSocket URL".to_owned())?;
         let host = url.hostname();
         let port = if url.port().is_empty() {
             if url.protocol() == "wss:" { 443 } else { 80 }
         } else {
-            url.port().parse::<i32>().map_err(|_| "invalid Multiuser test port".to_owned())?
+            url.port()
+                .parse::<i32>()
+                .map_err(|_| "invalid Multiuser test port".to_owned())?
         };
         let path = {
             let mut path = url.pathname();
             let search = url.search();
-            if !search.is_empty() { path.push_str(&search); }
+            if !search.is_empty() {
+                path.push_str(&search);
+            }
             path
         };
         let (owner, instance_id, generation) = self
             .harness_runtime()
             .with_context(|context| {
                 let owner = context.player.owner.clone();
-                let instance_id = context.player.xtra_manager_state.multiuser.create_instance(&Vec::new());
+                let instance_id = context
+                    .player
+                    .xtra_manager_state
+                    .multiuser
+                    .create_instance(&Vec::new());
                 let generation = context
                     .player
                     .xtra_manager_state
@@ -5244,8 +5764,8 @@ impl BrowserTestPlayer {
         let session = self.harness_runtime().session();
         let player_id = self.harness_runtime().player_id();
         crate::player::xtra::manager::execute_pending_intent(&session, player_id, intent)
-        .await
-        .map_err(|error| error.message)?;
+            .await
+            .map_err(|error| error.message)?;
         let sender = self
             .harness_runtime()
             .with_context(|context| {
@@ -5259,7 +5779,12 @@ impl BrowserTestPlayer {
             })
             .flatten()
             .ok_or_else(|| "Multiuser install did not retain its socket sender".to_owned())?;
-        Ok(MultiuserSocketProbe { sender, owner, instance_id, generation })
+        Ok(MultiuserSocketProbe {
+            sender,
+            owner,
+            instance_id,
+            generation,
+        })
     }
 
     fn break_multiuser_connection(&self, instance_id: u32) -> Result<(), String> {
@@ -5280,7 +5805,10 @@ impl BrowserTestPlayer {
             .map_err(|error| error.message)
     }
 
-    async fn inject_stale_multiuser_event(&self, probe: &MultiuserSocketProbe) -> Result<(), String> {
+    async fn inject_stale_multiuser_event(
+        &self,
+        probe: &MultiuserSocketProbe,
+    ) -> Result<(), String> {
         let (future, completer) = ManualFuture::new();
         self.command_tx
             .send(crate::player::PlayerVMExecutionItem {
@@ -5303,7 +5831,11 @@ impl BrowserTestPlayer {
         let http_url = base_url
             .strip_prefix("ws://")
             .map(|rest| format!("http://{rest}/state"))
-            .or_else(|| base_url.strip_prefix("wss://").map(|rest| format!("https://{rest}/state")))
+            .or_else(|| {
+                base_url
+                    .strip_prefix("wss://")
+                    .map(|rest| format!("https://{rest}/state"))
+            })
             .ok_or_else(|| "invalid Multiuser test state URL".to_owned())?;
         let window = web_sys::window().ok_or_else(|| "browser window is unavailable".to_owned())?;
         let response = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str(&http_url))
@@ -5313,12 +5845,17 @@ impl BrowserTestPlayer {
             .dyn_into()
             .map_err(|_| "Multiuser test state response was not a Response".to_owned())?;
         let body = wasm_bindgen_futures::JsFuture::from(
-            response.text().map_err(|_| "Multiuser test state body failed".to_owned())?,
+            response
+                .text()
+                .map_err(|_| "Multiuser test state body failed".to_owned())?,
         )
         .await
         .map_err(|_| "Multiuser test state body failed".to_owned())?;
-        let body = body.as_string().ok_or_else(|| "Multiuser test state was not text".to_owned())?;
-        let value = js_sys::JSON::parse(&body).map_err(|_| "Multiuser test state was not JSON".to_owned())?;
+        let body = body
+            .as_string()
+            .ok_or_else(|| "Multiuser test state was not text".to_owned())?;
+        let value = js_sys::JSON::parse(&body)
+            .map_err(|_| "Multiuser test state was not JSON".to_owned())?;
         let bool_field = |name: &str| -> Result<bool, String> {
             js_sys::Reflect::get(&value, &JsValue::from_str(name))
                 .map_err(|_| format!("Multiuser state is missing {name}"))?
@@ -5370,14 +5907,20 @@ impl BrowserTestPlayer {
             .unwrap_or(false)
     }
 
-    async fn wait_for_multiuser_text(&self, instance_id: u32, expected: &str) -> Result<(), String> {
+    async fn wait_for_multiuser_text(
+        &self,
+        instance_id: u32,
+        expected: &str,
+    ) -> Result<(), String> {
         for _ in 0..40 {
             if self.has_multiuser_text(instance_id, expected) {
                 return Ok(());
             }
             Self::sleep_ms(50).await;
         }
-        Err(format!("timed out waiting for Multiuser message {expected}"))
+        Err(format!(
+            "timed out waiting for Multiuser message {expected}"
+        ))
     }
 
     /// Browser-only lifecycle fixture used by the e2e harness. It keeps two
@@ -5390,14 +5933,19 @@ impl BrowserTestPlayer {
         let window = web_sys::window().ok_or_else(|| "browser window is unavailable".to_owned())?;
         let value = js_sys::Reflect::get(&window, &JsValue::from_str("__multiuserTestWsBase"))
             .map_err(|_| "Multiuser test server URL is unavailable".to_owned())?;
-        let base_url = value.as_string().ok_or_else(|| "Multiuser test server URL is not text".to_owned())?;
+        let base_url = value
+            .as_string()
+            .ok_or_else(|| "Multiuser test server URL is not text".to_owned())?;
 
         let first = self.connect_multiuser(&base_url, "A").await?;
         let mut second = BrowserTestPlayer::new().await;
         let second_socket = second.connect_multiuser(&base_url, "B").await?;
         Self::wait_for_multiuser_state(&base_url, |state| state.opened_a && state.opened_b).await?;
-        self.wait_for_multiuser_text(first.instance_id, "A-server-message").await?;
-        second.wait_for_multiuser_text(second_socket.instance_id, "B-server-message").await?;
+        self.wait_for_multiuser_text(first.instance_id, "A-server-message")
+            .await?;
+        second
+            .wait_for_multiuser_text(second_socket.instance_id, "B-server-message")
+            .await?;
 
         // This is the actual owner reset lifecycle, including resource
         // collection and outside-borrow teardown. No test-side drain is used.
@@ -5426,7 +5974,8 @@ impl BrowserTestPlayer {
 
         let state = Self::wait_for_multiuser_state(&base_url, |state| {
             state.closed_a && state.received_survival_b
-        }).await?;
+        })
+        .await?;
         if state.received_stale_a {
             return Err("retired A sender reached the server".to_owned());
         }
@@ -5441,7 +5990,9 @@ impl BrowserTestPlayer {
         let window = web_sys::window().ok_or_else(|| "browser window is unavailable".to_owned())?;
         let value = js_sys::Reflect::get(&window, &JsValue::from_str("__fileIoTestHttpBase"))
             .map_err(|_| "FileIO fixture URL is unavailable".to_owned())?;
-        let base = value.as_string().ok_or_else(|| "FileIO fixture URL is not text".to_owned())?;
+        let base = value
+            .as_string()
+            .ok_or_else(|| "FileIO fixture URL is not text".to_owned())?;
         let base_url = format!("{}/", base.trim_end_matches('/'));
         let expected_url = format!("{}fileio.txt", base_url);
         let (owner, instance_id, receiver, file_name, mode) = self
@@ -5456,16 +6007,22 @@ impl BrowserTestPlayer {
                     .player
                     .with_xtra_manager_state(|state, _| state.fileio.create_instance_explicit(&[]))
                     .map_err(|error| error.message)?;
-                let receiver = context
+                let receiver =
+                    context
+                        .player
+                        .alloc_datum(crate::director::lingo::datum::Datum::XtraInstance(
+                            "FileIO".to_owned(),
+                            instance_id,
+                        ));
+                let file_name =
+                    context
+                        .player
+                        .alloc_datum(crate::director::lingo::datum::Datum::String(
+                            "fileio.txt".to_owned(),
+                        ));
+                let mode = context
                     .player
-                    .alloc_datum(crate::director::lingo::datum::Datum::XtraInstance(
-                        "FileIO".to_owned(),
-                        instance_id,
-                    ));
-                let file_name = context
-                    .player
-                    .alloc_datum(crate::director::lingo::datum::Datum::String("fileio.txt".to_owned()));
-                let mode = context.player.alloc_datum(crate::director::lingo::datum::Datum::Int(1));
+                    .alloc_datum(crate::director::lingo::datum::Datum::Int(1));
                 Ok::<_, String>((owner, instance_id, receiver, file_name, mode))
             })
             .ok_or_else(|| "FileIO test player is stale".to_owned())??;
@@ -5486,7 +6043,7 @@ impl BrowserTestPlayer {
         let intent = match pending {
             crate::player::xtra::manager::XtraPendingOrValue::Pending(intent) => intent,
             crate::player::xtra::manager::XtraPendingOrValue::Value(_) => {
-                return Err("remote FileIO open unexpectedly completed synchronously".to_owned())
+                return Err("remote FileIO open unexpectedly completed synchronously".to_owned());
             }
         };
         if !intent.owner().same_identity(&owner) {
@@ -5543,7 +6100,9 @@ impl BrowserTestPlayer {
 }
 
 impl TestHarness for BrowserTestPlayer {
-    fn harness_runtime(&self) -> &HarnessRuntime { &self.runtime }
+    fn harness_runtime(&self) -> &HarnessRuntime {
+        &self.runtime
+    }
 
     fn asset_path(&self, relative: &str) -> String {
         format!("/assets/{}", relative)
@@ -5624,7 +6183,6 @@ impl TestHarness for BrowserTestPlayer {
         is_playing
     }
 
-
     // Override input methods to dispatch through the command channel
     // so they're processed by the command loop at the right time,
     // avoiding concurrent access with the frame loop.
@@ -5635,27 +6193,42 @@ impl TestHarness for BrowserTestPlayer {
             context.player.mouse_loc = (x, y);
             context.player.movie.mouse_down = true;
         });
-        let _ = self.harness_runtime().dispatch(PlayerVMCommand::MouseDown((x, y))).await;
+        let _ = self
+            .harness_runtime()
+            .dispatch(PlayerVMCommand::MouseDown((x, y)))
+            .await;
         self.step_frame().await;
         self.harness_runtime().with_context(|context| {
             context.player.mouse_loc = (x, y);
             context.player.movie.mouse_down = false;
         });
-        let _ = self.harness_runtime().dispatch(PlayerVMCommand::MouseUp((x, y))).await;
+        let _ = self
+            .harness_runtime()
+            .dispatch(PlayerVMCommand::MouseUp((x, y)))
+            .await;
     }
 
     async fn key_down(&mut self, key: &str, code: u16) {
         self.harness_runtime().with_context(|context| {
-            context.player.keyboard_manager.key_down(key.to_string(), code);
+            context
+                .player
+                .keyboard_manager
+                .key_down(key.to_string(), code);
         });
-        let _ = self.harness_runtime().dispatch(PlayerVMCommand::KeyDown(key.to_string(), code)).await;
+        let _ = self
+            .harness_runtime()
+            .dispatch(PlayerVMCommand::KeyDown(key.to_string(), code))
+            .await;
     }
 
     async fn key_up(&mut self, key: &str, code: u16) {
         self.harness_runtime().with_context(|context| {
             context.player.keyboard_manager.key_up(key, code);
         });
-        let _ = self.harness_runtime().dispatch(PlayerVMCommand::KeyUp(key.to_string(), code)).await;
+        let _ = self
+            .harness_runtime()
+            .dispatch(PlayerVMCommand::KeyUp(key.to_string(), code))
+            .await;
     }
 
     fn snapshot_stage(&self) -> SnapshotOutput {
@@ -5673,11 +6246,15 @@ impl TestHarness for BrowserTestPlayer {
         Self::canvas_to_snapshot(&self.renderer)
     }
 
-    async fn snapshot_sprite_isolated(&self, query: impl Into<SpriteQuery>) -> Result<SnapshotOutput, String> {
+    async fn snapshot_sprite_isolated(
+        &self,
+        query: impl Into<SpriteQuery>,
+    ) -> Result<SnapshotOutput, String> {
         self.ensure_renderer();
 
         let query = query.into();
-        let sprite_num = self.find_sprite(&query)
+        let sprite_num = self
+            .find_sprite(&query)
             .ok_or_else(|| format!("No sprite with {} found", query))?;
         let (l, t, r, b) = self.sprite_rect(sprite_num).await?;
 
@@ -5717,9 +6294,12 @@ impl BrowserTestPlayer {
     /// Remove and return the first pending Lingo script error, if any.
     fn take_script_error() -> Option<String> {
         let window = web_sys::window()?;
-        let val = js_sys::Reflect::get(&window, &wasm_bindgen::JsValue::from_str("__scriptErrors")).ok()?;
+        let val = js_sys::Reflect::get(&window, &wasm_bindgen::JsValue::from_str("__scriptErrors"))
+            .ok()?;
         let arr: js_sys::Array = wasm_bindgen::JsCast::dyn_into(val).ok()?;
-        if arr.length() == 0 { return None; }
+        if arr.length() == 0 {
+            return None;
+        }
         arr.shift().as_string()
     }
 
@@ -5728,7 +6308,8 @@ impl BrowserTestPlayer {
         let data_url = crate::rendering::canvas_data_url_for_handle(state)
             .unwrap_or_else(|error| panic!("renderer snapshot failed: {:?}", error));
 
-        let base64 = data_url.strip_prefix("data:image/png;base64,")
+        let base64 = data_url
+            .strip_prefix("data:image/png;base64,")
             .unwrap_or(&data_url)
             .to_string();
         SnapshotOutput::Base64Png(base64)
