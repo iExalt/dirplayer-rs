@@ -11,6 +11,37 @@ and Stages 3–6 remain open. See the [publication checkpoint](checkpoints/nativ
 for the archived review inputs and the [live integration receipt](checkpoints/stage2-checkpoint-integration-20260917/README.md)
 for current source identity and verification.
 
+## Current native readiness handoff — 2026-09-18
+
+The isolated branch `codex/native-dirplayer-readiness` at
+`/private/tmp/dirplayer-native-readiness-cumulative-20260918` is the source of
+the bounded single-session readiness receipts. The combined source is `7cd3cc78`
+with evidence `731b0d0a`; timer stabilization is `fff7dcc3` with evidence
+`a4aa876d`; the final native probe source is `1a99d618` with evidence `3675f526`.
+The initial probe commits `42c21c82` and `7ec67bcc` are superseded history.
+
+The combined baseline records native 636/0, browser 22/0, production WASM and
+frontend builds, plus same-source timer receipts of manager 18 and lifecycle 38.
+The final probe executes `prepareMovie`, `startMovie`, `enterFrame`, and
+`exitFrame`, and captures a 32x32 snapshot with a white corner, black center,
+and 576 opaque black pixels. The earlier all-white probe is not current evidence;
+its visible-pixel predicate counted the stage background.
+
+The probe does not complete a post-init frame step: the native route reaches the
+missing renderer binding. Native timer host dispatch remains
+`TimeoutHostDispatch::Unsupported`. The 47 licensed/public paths are absent,
+and the wasm all-tests exploration remains unresolved with 14 test-only `E0599`
+errors. No audio, Flash, Bevy, native Ruffle, Spybot, or native product claim is
+made. Stage 2 ownership and Stage 3 independent-session/lifecycle/static proof
+remain final acceptance gates.
+
+The first bounded implementation item is an owned native presentation
+service/policy and caller-driven monotonic frame/timeout pump around the existing
+`RuntimeSession`/player/owner command loop and `load_movie`/`init_movie`/
+`step_frame` entry points. Replay bounded step/per-frame state first; add input
+and RGBA capture afterward. This may start from the isolated branch while final
+Stage 3 remains incomplete, but it does not waive any Stage 2/3 gate.
+
 ## Current Stage 1 checkpoint
 
 Stage 1 remains accepted at its committed source identity. The runtime has since
@@ -157,7 +188,12 @@ verification and integration separately; its complete exit gate controls accepta
   operations, nested value evaluation and indexed property writeback.
 - [ ] **2.9–2.10:** finish player graph, render/audio effects, loading/cache ownership and remove temporary adapters in one verified checkout.
 - [ ] **3.1–3.2:** accept interleaved/separate-thread isolation, lifecycle/panic cleanup, static audit and applicable Miri.
-- [ ] **4.1–4.5:** implement native services, exact advancement, RGBA, PCM and the Director-only executable slice.
+- [ ] **Readiness handoff (bounded pre-final-Stage-3 item):** qualify the owned
+  native presentation policy and caller-driven monotonic frame/timeout pump;
+  replay bounded step/per-frame state before input and RGBA capture.
+- [ ] **4.1–4.5 final native slice:** implement native services, exact advancement,
+  RGBA, PCM and the Director-only executable slice after its Stage 3 acceptance
+  gate.
 - [ ] **5.1–5.4:** integrate native Ruffle/Bevy and accept Spybot title, START, tower 3 and a legal gameplay sequence.
 - [ ] **6.1–6.3:** deliver the parity worker/backend and certify repeatability, cleanup, performance, fidelity and provenance.
 
