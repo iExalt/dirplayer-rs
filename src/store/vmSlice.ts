@@ -23,7 +23,6 @@ interface VMSliceState {
   scriptError?: string
   breakpoints: JsBridgeBreakpoint[],
   globals: Record<string, DatumRef>,
-  timeoutHandles: Record<string, NodeJS.Timer>,
   datumSnapshots: Record<DatumRef, JsBridgeDatum>,
   scriptInstanceSnapshots: Record<ScriptInstanceId, JsBridgeDatum>,
   channelSnapshots: Record<number, ScoreSpriteSnapshot>,
@@ -41,7 +40,6 @@ const initialState: VMSliceState = {
   scopes: [],
   breakpoints: [],
   globals: {},
-  timeoutHandles: {},
   datumSnapshots: {},
   scriptInstanceSnapshots: {},
   channelSnapshots: {},
@@ -67,8 +65,6 @@ export const onScriptError = createAction<string>('vm/onScriptError')
 export const scriptErrorCleared = createAction('vm/scriptErrorCleared')
 export const breakpointListChanged = createAction<JsBridgeBreakpoint[]>('vm/breakpointListChanged')
 export const globalsChanged = createAction<Record<string, DatumRef>>('vm/globalsChanged')
-export const setTimeoutHandle = createAction<{ name: string, handle: NodeJS.Timer }>('vm/setTimeoutHandle')
-export const removeTimeoutHandle = createAction<string>('vm/removeTimeoutHandle')
 export const datumSnapshot = createAction<{ datumRef: DatumRef, datum: JsBridgeDatum }>('vm/datumSnapshot')
 export const scriptInstanceSnapshot = createAction<{ scriptInstanceId: ScriptInstanceId, datum: JsBridgeDatum }>('vm/scriptInstanceSnapshot')
 export const channelChanged = createAction<{ channelNumber: number, channelData: ScoreSpriteSnapshot }>('vm/channelChanged')
@@ -183,23 +179,6 @@ const vmReducer = createCompatReducer(initialState, (builder) => {
       return {
         ...state,
         globals: action.payload,
-      }
-    })
-    .addCase(setTimeoutHandle, (state, action) => {
-      return {
-        ...state,
-        timeoutHandles: {
-          ...state.timeoutHandles,
-          [action.payload.name]: action.payload.handle,
-        }
-      }
-    })
-    .addCase(removeTimeoutHandle, (state, action) => {
-      const newHandles = { ...state.timeoutHandles }
-      delete newHandles[action.payload]
-      return {
-        ...state,
-        timeoutHandles: newHandles,
       }
     })
     .addCase(datumSnapshot, (state, action) => {

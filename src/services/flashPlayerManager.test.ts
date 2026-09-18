@@ -1,15 +1,16 @@
 import {
   FlashPendingQueue,
+  OwnerTimerController,
   PendingOp,
-  createFlashOwnerController,
+  createBrowserOwnerController,
   deliverOwnedLingoCallback,
   publishFlashInstanceForOwner,
   registerLingoCallbackForOwner,
   dispatchMouseEventForOwnerAtGeneration,
   getSpriteVariableForOwnerAtGeneration,
-  registerFlashOwner,
-  registerNestedFlashOwner,
-  retireNestedFlashOwner,
+  registerBrowserOwner,
+  registerNestedBrowserOwner,
+  retireNestedBrowserOwner,
 } from "./flashPlayerManager";
 import {
   dispatchVmCallback,
@@ -23,6 +24,96 @@ import {
 
 const play: PendingOp = { kind: "play" };
 const stop: PendingOp = { kind: "stop" };
+
+test("owner timer controller rejects stale clears and delayed ticks", () => {
+  jest.useFakeTimers();
+  try {
+    const timers = new OwnerTimerController();
+    const first = jest.fn();
+    const replacement = jest.fn();
+    timers.schedule("heartbeat", 10, 1, first);
+    timers.schedule("heartbeat", 10, 2, replacement);
+    timers.clear("heartbeat", 1);
+    jest.advanceTimersByTime(25);
+    expect(first).not.toHaveBeenCalled();
+    expect(replacement).toHaveBeenCalledTimes(2);
+    timers.clear("heartbeat", 2);
+    jest.advanceTimersByTime(25);
+    expect(replacement).toHaveBeenCalledTimes(2);
+    timers.dispose();
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test("owner timer controller fences queued callbacks and synchronous reentry", () => {
+  const callbacks: Array<() => void> = [];
+  const setIntervalSpy = jest.spyOn(globalThis, "setInterval").mockImplementation(((callback: () => void) => {
+    callbacks.push(callback);
+    return callbacks.length as unknown as ReturnType<typeof setInterval>;
+  }) as typeof setInterval);
+  const clearIntervalSpy = jest.spyOn(globalThis, "clearInterval").mockImplementation(() => {});
+  try {
+    const timers = new OwnerTimerController();
+    const oldFire = jest.fn();
+    const newFire = jest.fn();
+    timers.schedule("Timer", 10, 1, oldFire);
+    timers.schedule("Timer", 10, 2, newFire);
+    callbacks[0]();
+    callbacks[1]();
+    expect(oldFire).not.toHaveBeenCalled();
+    expect(newFire).toHaveBeenCalledTimes(1);
+
+    const reentered = new OwnerTimerController();
+    const replacementFire = jest.fn();
+    const firstFire = jest.fn(() => reentered.schedule("Timer", 10, 4, replacementFire));
+    reentered.schedule("Timer", 10, 3, firstFire);
+    const firstCallback = callbacks[2];
+    firstCallback();
+    expect(firstFire).toHaveBeenCalledTimes(1);
+    expect(replacementFire).not.toHaveBeenCalled();
+    callbacks[3]();
+    expect(replacementFire).toHaveBeenCalledTimes(1);
+    expect(clearIntervalSpy).toHaveBeenCalledWith(3);
+  } finally {
+    setIntervalSpy.mockRestore();
+    clearIntervalSpy.mockRestore();
+  }
+});
+
+test("owner timer controller publishes before synchronous setInterval reentry", () => {
+  const callbacks: Array<() => void> = [];
+  let nextHandle = 100;
+  let setIntervalHook: (() => void) | undefined;
+  const setIntervalSpy = jest.spyOn(globalThis, "setInterval").mockImplementation(((callback: () => void) => {
+    callbacks.push(callback);
+    setIntervalHook?.();
+    return nextHandle++ as unknown as ReturnType<typeof setInterval>;
+  }) as typeof setInterval);
+  const clearIntervalSpy = jest.spyOn(globalThis, "clearInterval").mockImplementation(() => {});
+  try {
+    const timers = new OwnerTimerController();
+    const oldFire = jest.fn();
+    const replacementFire = jest.fn();
+    let reentered = false;
+    setIntervalHook = () => {
+      if (reentered) return;
+      reentered = true;
+      timers.schedule("sync", 10, 2, replacementFire);
+    };
+    timers.schedule("sync", 10, 1, oldFire);
+    setIntervalHook = undefined;
+
+    expect(clearIntervalSpy).toHaveBeenCalledWith(101);
+    callbacks[0]();
+    callbacks[1]();
+    expect(oldFire).not.toHaveBeenCalled();
+    expect(replacementFire).toHaveBeenCalledTimes(1);
+  } finally {
+    setIntervalSpy.mockRestore();
+    clearIntervalSpy.mockRestore();
+  }
+});
 
 test("owner-qualified Flash queues replay only at readiness and isolate same sprite numbers", () => {
   const queue = new FlashPendingQueue();
@@ -61,6 +152,7 @@ function fakeFlashCapability(ownerKey: string) {
   const current = new Map<number, number>();
   return {
     owner_identity: () => ownerKey,
+    trigger_timeout: () => {},
     reserve_flash_instance_generation: (spriteNum: number) => {
       const generation = nextGeneration++;
       current.set(spriteNum, generation);
@@ -84,7 +176,7 @@ function fakeFlashCapability(ownerKey: string) {
 }
 
 function publishTestFlashInstance(
-  host: ReturnType<typeof registerFlashOwner>["host"],
+  host: ReturnType<typeof registerBrowserOwner>["host"],
   generation: number,
   rufflePlayer: any,
   bridgeId: string | null = null,
@@ -154,8 +246,8 @@ test("sprite bridge getter preserves primitives and only the canonical stored ma
 });
 
 test("sprite getter fences exact owner and generation through direct and bridge routes", () => {
-  const rootA = registerFlashOwner("session-sprite-get:a", fakeFlashCapability("session-sprite-get:a"));
-  const rootB = registerFlashOwner("session-sprite-get:b", fakeFlashCapability("session-sprite-get:b"));
+  const rootA = registerBrowserOwner("session-sprite-get:a", fakeFlashCapability("session-sprite-get:a"));
+  const rootB = registerBrowserOwner("session-sprite-get:b", fakeFlashCapability("session-sprite-get:b"));
   const generationA = rootA.host.reserveInstanceGeneration(1);
   const generationB = rootB.host.reserveInstanceGeneration(1);
   const playerA = { GetVariable: () => "A", remove: () => {} };
@@ -174,7 +266,7 @@ test("sprite getter fences exact owner and generation through direct and bridge 
   expect(getSpriteVariableForOwnerAtGeneration(rootB.host, 1, generationB, "_root.value"))
     .toEqual({ ok: true, generation: generationB, value: "B" });
 
-  const bridge = registerFlashOwner("session-sprite-get:bridge", fakeFlashCapability("session-sprite-get:bridge"));
+  const bridge = registerBrowserOwner("session-sprite-get:bridge", fakeFlashCapability("session-sprite-get:bridge"));
   const bridgeGeneration = bridge.host.reserveInstanceGeneration(1);
   publishTestFlashInstance(bridge.host, bridgeGeneration, { remove: () => {} }, "bridge-sprite-get");
   const stop = installSyncBridgeResponder(() => 17);
@@ -190,7 +282,7 @@ test("sprite getter fences exact owner and generation through direct and bridge 
 });
 
 test("sprite getter rejects synchronous replacement during the host read", () => {
-  const root = registerFlashOwner("session-sprite-get:reentry", fakeFlashCapability("session-sprite-get:reentry"));
+  const root = registerBrowserOwner("session-sprite-get:reentry", fakeFlashCapability("session-sprite-get:reentry"));
   const generation = root.host.reserveInstanceGeneration(1);
   const player = {
     GetVariable: () => {
@@ -208,14 +300,14 @@ test("sprite getter rejects synchronous replacement during the host read", () =>
 });
 
 test("nested Flash hosts require the exact parent and isolate overlapping child channels", () => {
-  const rootA = registerFlashOwner("session-a:root:1", fakeFlashCapability("session-a:root:1"));
-  const rootB = registerFlashOwner("session-b:root:1", fakeFlashCapability("session-b:root:1"));
-  const childA = registerNestedFlashOwner(
+  const rootA = registerBrowserOwner("session-a:root:1", fakeFlashCapability("session-a:root:1"));
+  const rootB = registerBrowserOwner("session-b:root:1", fakeFlashCapability("session-b:root:1"));
+  const childA = registerNestedBrowserOwner(
     "session-a:root:1",
     "session-a:child:1",
     fakeFlashCapability("session-a:child:1"),
   );
-  const childB = registerNestedFlashOwner(
+  const childB = registerNestedBrowserOwner(
     "session-b:root:1",
     "session-b:child:1",
     fakeFlashCapability("session-b:child:1"),
@@ -223,12 +315,12 @@ test("nested Flash hosts require the exact parent and isolate overlapping child 
 
   expect(childA.host.parentHost).toBe(rootA.host);
   expect(childB.host.parentHost).toBe(rootB.host);
-  expect(() => retireNestedFlashOwner("session-b:root:1", "session-a:child:1"))
+  expect(() => retireNestedBrowserOwner("session-b:root:1", "session-a:child:1"))
     .toThrow("not owned");
-  retireNestedFlashOwner("session-a:root:1", "session-a:child:1");
+  retireNestedBrowserOwner("session-a:root:1", "session-a:child:1");
   expect(childA.host.disposed).toBe(true);
   expect(childB.host.disposed).toBe(false);
-  expect(() => retireNestedFlashOwner("session-a:root:1", "session-a:child:1"))
+  expect(() => retireNestedBrowserOwner("session-a:root:1", "session-a:child:1"))
     .not.toThrow();
 
   rootA.dispose();
@@ -236,10 +328,10 @@ test("nested Flash hosts require the exact parent and isolate overlapping child 
 });
 
 test("owner controller isolates two roots with the same local child channel", () => {
-  const rootA = registerFlashOwner("session-controller-a:root", fakeFlashCapability("session-controller-a:root"));
-  const rootB = registerFlashOwner("session-controller-b:root", fakeFlashCapability("session-controller-b:root"));
+  const rootA = registerBrowserOwner("session-controller-a:root", fakeFlashCapability("session-controller-a:root"));
+  const rootB = registerBrowserOwner("session-controller-b:root", fakeFlashCapability("session-controller-b:root"));
   const callbackTables = new Map<string, any>();
-  const controller = createFlashOwnerController((callbacks, ownerKey) => {
+  const controller = createBrowserOwnerController((callbacks, ownerKey) => {
     callbackTables.set(ownerKey, callbacks);
     return () => {
       if (callbackTables.get(ownerKey) === callbacks) callbackTables.delete(ownerKey);
@@ -271,10 +363,10 @@ test("owner controller isolates two roots with the same local child channel", ()
 });
 
 test("nested owner controller rolls back reentrant registration and retires descendants", () => {
-  const root = registerFlashOwner("session-controller:root", fakeFlashCapability("session-controller:root"));
+  const root = registerBrowserOwner("session-controller:root", fakeFlashCapability("session-controller:root"));
   const callbackTables = new Map<string, any>();
   let reenterRootDispose = true;
-  const controller = createFlashOwnerController((callbacks, ownerKey) => {
+  const controller = createBrowserOwnerController((callbacks, ownerKey) => {
     callbackTables.set(ownerKey, callbacks);
     if (reenterRootDispose && ownerKey === "session-controller:child") {
       reenterRootDispose = false;
@@ -298,7 +390,7 @@ test("nested owner controller rolls back reentrant registration and retires desc
   expect(callbackTables.has("session-controller:child")).toBe(false);
   expect(callbackTables.has("session-controller:grandchild")).toBe(false);
 
-  const replacementRoot = registerFlashOwner(
+  const replacementRoot = registerBrowserOwner(
     "session-controller:root",
     fakeFlashCapability("session-controller:root"),
   );
@@ -314,9 +406,9 @@ test("nested owner controller rolls back reentrant registration and retires desc
 });
 
 test("stale nested callbacks cannot borrow a replacement host", () => {
-  const root = registerFlashOwner("session-stale:root", fakeFlashCapability("session-stale:root"));
+  const root = registerBrowserOwner("session-stale:root", fakeFlashCapability("session-stale:root"));
   const callbacksByOwner = new Map<string, any>();
-  const controller = createFlashOwnerController((callbacks, ownerKey) => {
+  const controller = createBrowserOwnerController((callbacks, ownerKey) => {
     callbacksByOwner.set(ownerKey, callbacks);
     return () => {
       if (callbacksByOwner.get(ownerKey) === callbacks) callbacksByOwner.delete(ownerKey);
@@ -344,7 +436,7 @@ test("stale nested callbacks cannot borrow a replacement host", () => {
 });
 
 test("owner-qualified mouse forwarding rejects pending and retired generations", () => {
-  const root = registerFlashOwner("session-mouse:root", fakeFlashCapability("session-mouse:root"));
+  const root = registerBrowserOwner("session-mouse:root", fakeFlashCapability("session-mouse:root"));
   expect(dispatchMouseEventForOwnerAtGeneration(
     root.host, 1, 0, "down", 2, 3, 10, 10,
   )).toMatchObject({ ok: false, code: "invalid-generation" });
@@ -360,8 +452,8 @@ test("owner-qualified mouse forwarding rejects pending and retired generations",
 });
 
 test("owned Lingo callback registration uses the exact receiver and strict acknowledgement", () => {
-  const rootA = registerFlashOwner("session-lingo:a", fakeFlashCapability("session-lingo:a"));
-  const rootB = registerFlashOwner("session-lingo:b", fakeFlashCapability("session-lingo:b"));
+  const rootA = registerBrowserOwner("session-lingo:a", fakeFlashCapability("session-lingo:a"));
+  const rootB = registerBrowserOwner("session-lingo:b", fakeFlashCapability("session-lingo:b"));
   const generationA = rootA.host.reserveInstanceGeneration(7);
   const generationB = rootB.host.reserveInstanceGeneration(7);
   const receiverA = {
@@ -411,7 +503,7 @@ test("owned Lingo callback registration uses the exact receiver and strict ackno
   rootA.dispose();
   rootB.dispose();
 
-  const bridge = registerFlashOwner("session-lingo:bridge", fakeFlashCapability("session-lingo:bridge"));
+  const bridge = registerBrowserOwner("session-lingo:bridge", fakeFlashCapability("session-lingo:bridge"));
   const bridgeGeneration = bridge.host.reserveInstanceGeneration(7);
   publishFlashInstanceForOwner(bridge.host, {
     host: bridge.host,
@@ -448,8 +540,8 @@ test("stable Ruffle callback route validates generation, preserves wire payload,
     receivedB.push(args[6] as string);
     return true;
   };
-  const rootA = registerFlashOwner("session-route:a", capA);
-  const rootB = registerFlashOwner("session-route:b", capB);
+  const rootA = registerBrowserOwner("session-route:a", capA);
+  const rootB = registerBrowserOwner("session-route:b", capB);
   const generationA = rootA.host.reserveInstanceGeneration(7);
   const generationB = rootB.host.reserveInstanceGeneration(7);
   const instance = (host: typeof rootA.host, generation: number) => ({
@@ -510,9 +602,9 @@ test("capability failure retires the controller subtree and preserves replacemen
   failingCapability.set_flash_scripted_access_pending = () => {
     throw new Error("root capability retired");
   };
-  const root = registerFlashOwner(rootKey, failingCapability);
+  const root = registerBrowserOwner(rootKey, failingCapability);
   const callbackEntries = new Map<string, { callbacks: any; dispose: () => void }>();
-  const controller = createFlashOwnerController((callbacks, ownerKey, setAsDefault) => {
+  const controller = createBrowserOwnerController((callbacks, ownerKey, setAsDefault) => {
     const disposeRegistered = registerVmCallbacks(callbacks as any, ownerKey, setAsDefault);
     const dispose = () => {
       if (callbackEntries.get(ownerKey)?.callbacks === callbacks) callbackEntries.delete(ownerKey);
@@ -529,7 +621,7 @@ test("capability failure retires the controller subtree and preserves replacemen
   expect(root.host.disposed).toBe(true);
   expect(callbackEntries.has(childKey)).toBe(false);
 
-  const replacementRoot = registerFlashOwner(rootKey, fakeFlashCapability(rootKey));
+  const replacementRoot = registerBrowserOwner(rootKey, fakeFlashCapability(rootKey));
   controller.registerNested(rootKey, childKey, fakeFlashCapability(childKey));
   expect(callbackEntries.has(childKey)).toBe(true);
   staleRegistration?.dispose();
@@ -547,14 +639,14 @@ test("child capability failure retires its exact subtree while siblings and othe
   const grandchildKey = "session-child-failure:a:grandchild";
   const siblingKey = "session-child-failure:a:sibling";
   const independentKey = "session-child-failure:b:child";
-  const rootA = registerFlashOwner(rootAKey, fakeFlashCapability(rootAKey));
-  const rootB = registerFlashOwner(rootBKey, fakeFlashCapability(rootBKey));
+  const rootA = registerBrowserOwner(rootAKey, fakeFlashCapability(rootAKey));
+  const rootB = registerBrowserOwner(rootBKey, fakeFlashCapability(rootBKey));
   const failingChildCapability = fakeFlashCapability(childKey);
   failingChildCapability.set_flash_scripted_access_pending = () => {
     throw new Error("child capability retired");
   };
   const callbackEntries = new Map<string, { callbacks: any; dispose: () => void }>();
-  const controller = createFlashOwnerController((callbacks, ownerKey, setAsDefault) => {
+  const controller = createBrowserOwnerController((callbacks, ownerKey, setAsDefault) => {
     const disposeRegistered = registerVmCallbacks(callbacks as any, ownerKey, setAsDefault);
     const dispose = () => {
       if (callbackEntries.get(ownerKey)?.callbacks === callbacks) callbackEntries.delete(ownerKey);

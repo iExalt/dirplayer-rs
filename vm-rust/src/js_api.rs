@@ -45,6 +45,23 @@ use crate::{
     rendering::RENDERER_LOCK,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeoutHostOperation {
+    Schedule,
+    Clear,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TimeoutHostDispatch {
+    Published,
+    Unsupported {
+        operation: TimeoutHostOperation,
+        owner_key: String,
+        timeout_name: String,
+        incarnation: u64,
+    },
+}
+
 #[derive(Clone)]
 pub struct ScoreSpriteSpan {
     pub channel_number: u16,
@@ -328,9 +345,19 @@ extern "C" {
     #[wasm_bindgen(catch)]
     pub fn onDebugMessageOwned(owner_key: &str, message: &str) -> Result<(), JsValue>;
     pub fn onDebugContent(content: js_sys::Object);
-    pub fn onScheduleTimeout(timeout_name: &str, interval: u32);
-    pub fn onClearTimeout(timeout_name: &str);
-    pub fn onClearTimeouts();
+    #[wasm_bindgen(catch)]
+    pub fn onScheduleTimeoutOwned(
+        owner_key: &str,
+        timeout_name: &str,
+        interval: u32,
+        incarnation: f64,
+    ) -> Result<(), JsValue>;
+    #[wasm_bindgen(catch)]
+    pub fn onClearTimeoutOwned(
+        owner_key: &str,
+        timeout_name: &str,
+        incarnation: f64,
+    ) -> Result<(), JsValue>;
     #[wasm_bindgen(catch)]
     pub fn onDatumSnapshot(datum_id: DatumId, data: js_sys::Object) -> Result<(), JsValue>;
     #[wasm_bindgen(catch)]
@@ -401,13 +428,13 @@ extern "C" {
     ) -> Result<JsValue, JsValue>;
     pub fn onStageSizeChanged(width: u32, height: u32, center: bool);
     #[wasm_bindgen(catch)]
-    pub fn registerNestedFlashOwner(
+    pub fn registerNestedBrowserOwner(
         parent_owner_key: &str,
         child_owner_key: &str,
         capability: &JsValue,
     ) -> Result<(), JsValue>;
     #[wasm_bindgen(catch)]
-    pub fn retireNestedFlashOwner(
+    pub fn retireNestedBrowserOwner(
         parent_owner_key: &str,
         child_owner_key: &str,
     ) -> Result<(), JsValue>;
@@ -441,15 +468,24 @@ impl JsApi {
             snapshot,
         );
     }
-    pub fn dispatch_schedule_timeout(timeout_name: &str, interval: u32) {
-        onScheduleTimeout(timeout_name, interval);
+    pub fn dispatch_schedule_timeout(
+        owner_key: &str,
+        timeout_name: &str,
+        interval: u32,
+        incarnation: u64,
+    ) -> Result<TimeoutHostDispatch, ScriptError> {
+        onScheduleTimeoutOwned(owner_key, timeout_name, interval, incarnation as f64)
+            .map_err(|_| ScriptError::new("browser timeout schedule callback failed".to_owned()))?;
+        Ok(TimeoutHostDispatch::Published)
     }
-    pub fn dispatch_clear_timeout(timeout_name: &str) {
-        onClearTimeout(timeout_name);
-    }
-    #[allow(dead_code)]
-    pub fn dispatch_clear_timeouts() {
-        onClearTimeouts();
+    pub fn dispatch_clear_timeout(
+        owner_key: &str,
+        timeout_name: &str,
+        incarnation: u64,
+    ) -> Result<TimeoutHostDispatch, ScriptError> {
+        onClearTimeoutOwned(owner_key, timeout_name, incarnation as f64)
+            .map_err(|_| ScriptError::new("browser timeout clear callback failed".to_owned()))?;
+        Ok(TimeoutHostDispatch::Published)
     }
     pub fn dispatch_flash_member_loaded(
         sprite_num: i32,
@@ -559,21 +595,23 @@ impl JsApi {
         }
         Ok(())
     }
-    pub fn register_nested_flash_owner(
+    pub fn register_nested_browser_owner(
         parent_owner_key: &str,
         child_owner_key: &str,
         capability: &JsValue,
     ) -> Result<(), ScriptError> {
-        registerNestedFlashOwner(parent_owner_key, child_owner_key, capability).map_err(|error| {
-            ScriptError::new(format!("nested Flash owner registration failed: {error:?}"))
+        registerNestedBrowserOwner(parent_owner_key, child_owner_key, capability).map_err(|error| {
+            ScriptError::new(format!(
+                "nested browser owner registration failed: {error:?}"
+            ))
         })
     }
-    pub fn retire_nested_flash_owner(
+    pub fn retire_nested_browser_owner(
         parent_owner_key: &str,
         child_owner_key: &str,
     ) -> Result<(), ScriptError> {
-        retireNestedFlashOwner(parent_owner_key, child_owner_key).map_err(|error| {
-            ScriptError::new(format!("nested Flash owner retirement failed: {error:?}"))
+        retireNestedBrowserOwner(parent_owner_key, child_owner_key).map_err(|error| {
+            ScriptError::new(format!("nested browser owner retirement failed: {error:?}"))
         })
     }
     pub fn dispatch_stage_size_changed(width: u32, height: u32, center: bool) {
@@ -3175,7 +3213,7 @@ impl JsApi {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl JsApi {
-    pub fn retire_nested_flash_owner(
+    pub fn retire_nested_browser_owner(
         _parent_owner_key: &str,
         _child_owner_key: &str,
     ) -> Result<(), ScriptError> {
@@ -5040,10 +5078,31 @@ impl JsApi {
         _: &DirPlayer,
     ) {
     }
-    pub fn dispatch_schedule_timeout(_: &str, _: u32) {}
-    pub fn dispatch_clear_timeout(_: &str) {}
-    #[allow(dead_code)]
-    pub fn dispatch_clear_timeouts() {}
+    pub fn dispatch_schedule_timeout(
+        owner_key: &str,
+        timeout_name: &str,
+        _: u32,
+        incarnation: u64,
+    ) -> Result<TimeoutHostDispatch, ScriptError> {
+        Ok(TimeoutHostDispatch::Unsupported {
+            operation: TimeoutHostOperation::Schedule,
+            owner_key: owner_key.to_owned(),
+            timeout_name: timeout_name.to_owned(),
+            incarnation,
+        })
+    }
+    pub fn dispatch_clear_timeout(
+        owner_key: &str,
+        timeout_name: &str,
+        incarnation: u64,
+    ) -> Result<TimeoutHostDispatch, ScriptError> {
+        Ok(TimeoutHostDispatch::Unsupported {
+            operation: TimeoutHostOperation::Clear,
+            owner_key: owner_key.to_owned(),
+            timeout_name: timeout_name.to_owned(),
+            incarnation,
+        })
+    }
     pub fn dispatch_movie_loaded(_: &DirectorFile) {}
     pub fn dispatch_movie_load_failed(_: &str, _: &str) {}
     pub fn dispatch_flash_member_loaded(

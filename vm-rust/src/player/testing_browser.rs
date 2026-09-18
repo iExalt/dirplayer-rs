@@ -1,5 +1,3 @@
-use wasm_bindgen::prelude::*;
-use wasm_bindgen_futures::JsFuture;
 use manual_future::ManualFuture;
 use std::{
     cell::{Cell, RefCell},
@@ -7,13 +5,9 @@ use std::{
     rc::Rc,
     time::Duration,
 };
+use wasm_bindgen::prelude::*;
+use wasm_bindgen_futures::JsFuture;
 
-use crate::player::{
-    allocator::{DatumAllocatorTrait, ScriptInstanceAllocatorTrait},
-    cast_lib::CastLib,
-    script::{Script, ScriptInstance},
-    symbols::{builtin::BuiltInSymbol, symbol::Symbol},
-};
 use crate::director::{
     chunks::{
         handler::{Bytecode, HandlerDef},
@@ -22,7 +16,16 @@ use crate::director::{
     enums::ScriptType,
     lingo::{datum::Datum, opcode::OpCode},
 };
+
+use crate::player::{
+    allocator::{DatumAllocatorTrait, ScriptInstanceAllocatorTrait},
+    cast_lib::CastLib,
+    script::{Script, ScriptInstance},
+    symbols::{builtin::BuiltInSymbol, symbol::Symbol},
+};
 use fxhash::FxHashMap;
+
+use crate::player::testing_shared::{HarnessRuntime, SnapshotOutput, SpriteQuery, TestHarness};
 
 use crate::player::{
     cast_lib::CastMemberRef,
@@ -31,8 +34,7 @@ use crate::player::{
     geometry::IntRect,
     score::{ScoreSpriteSpan, SpriteChannel},
 };
-use crate::player::testing_shared::{HarnessRuntime, TestHarness, SnapshotOutput, SpriteQuery};
-use crate::BrowserFlashCapability;
+use crate::BrowserOwnerCapability;
 
 /// A sender retained by a browser lifecycle fixture so it can prove that a
 /// retired socket's send pump no longer reaches the host.  The owner and
@@ -139,11 +141,11 @@ fn create_public_play_test_container(label: &str) -> Result<web_sys::HtmlElement
 /// Register an explicitly owned browser handle through the production Flash
 /// manager, retaining the handle's real owner-bound command sender. Nested
 /// children receive their own owner-bound senders from `start_nested_movie_owned`.
-async fn register_browser_handle_flash_owner(
+async fn register_browser_handle_owner(
     handle: &crate::BrowserPlayerHandle,
-) -> Result<(BrowserFlashCapability, RegisteredFlashOwner), String> {
+) -> Result<(BrowserOwnerCapability, RegisteredBrowserOwner), String> {
     let owner_key = handle.owner_identity();
-    let mut owner_guard = RegisteredFlashOwner::pending(owner_key.clone());
+    let mut owner_guard = RegisteredBrowserOwner::pending(owner_key.clone());
     let (pending, command_tx) = handle
         .with_context(|context| {
             (
@@ -152,14 +154,14 @@ async fn register_browser_handle_flash_owner(
             )
         })
         .map_err(|error| format!("capture Flash readiness failed: {error:?}"))?;
-    let capability = BrowserFlashCapability::new(
+    let capability = BrowserOwnerCapability::new(
         handle.session().clone(),
         handle.player_id(),
         handle.owner().clone(),
         pending.clone(),
         command_tx.clone(),
     );
-    let js_capability = BrowserFlashCapability::new(
+    let js_capability = BrowserOwnerCapability::new(
         handle.session().clone(),
         handle.player_id(),
         handle.owner().clone(),
@@ -167,11 +169,13 @@ async fn register_browser_handle_flash_owner(
         command_tx,
     );
     let window = web_sys::window().ok_or_else(|| "browser window is unavailable".to_owned())?;
-    let function =
-        js_sys::Reflect::get(&window, &JsValue::from_str("dirplayer_registerFlashOwner"))
-            .map_err(|_| "production Flash owner registrar is unavailable".to_owned())?
-            .dyn_into::<js_sys::Function>()
-            .map_err(|_| "production Flash owner registrar is not callable".to_owned())?;
+    let function = js_sys::Reflect::get(
+        &window,
+        &JsValue::from_str("dirplayer_registerBrowserOwner"),
+    )
+    .map_err(|_| "production browser owner registrar is unavailable".to_owned())?
+    .dyn_into::<js_sys::Function>()
+    .map_err(|_| "production browser owner registrar is not callable".to_owned())?;
     // The fresh handle owner key is unique. Arm cleanup before the fallible
     // registrar call so a host that publishes a route and then throws still
     // gets reset/unregistered by the guard.
@@ -182,20 +186,20 @@ async fn register_browser_handle_flash_owner(
             &JsValue::from_str(&owner_key),
             &JsValue::from(js_capability),
         )
-        .map_err(|error| format!("registering Flash owner failed: {error:?}"))?;
+        .map_err(|error| format!("registering browser owner failed: {error:?}"))?;
     if let Ok(promise) = result.dyn_into::<js_sys::Promise>() {
         JsFuture::from(promise)
             .await
-            .map_err(|error| format!("Flash owner registration failed: {error:?}"))?;
+            .map_err(|error| format!("browser owner registration failed: {error:?}"))?;
     }
     Ok((capability, owner_guard))
 }
 
-fn unregister_browser_handle_flash_owner(owner_key: &str) {
+fn unregister_browser_handle_owner(owner_key: &str) {
     if let Some(window) = web_sys::window() {
         if let Ok(value) = js_sys::Reflect::get(
             &window,
-            &JsValue::from_str("dirplayer_unregisterFlashOwner"),
+            &JsValue::from_str("dirplayer_unregisterBrowserOwner"),
         ) {
             if let Ok(function) = value.dyn_into::<js_sys::Function>() {
                 let _ = function.call1(&window, &JsValue::from_str(owner_key));
@@ -204,15 +208,15 @@ fn unregister_browser_handle_flash_owner(owner_key: &str) {
     }
 }
 
-/// Owns one production Flash owner registration for the duration of a
+/// Owns one production browser owner registration for the duration of a
 /// fixture. Dropping it resets any live Ruffle instance before removing the
 /// owner route, including when a fixture exits through an early `?`.
-struct RegisteredFlashOwner {
+struct RegisteredBrowserOwner {
     owner_key: String,
     registered: bool,
 }
 
-impl RegisteredFlashOwner {
+impl RegisteredBrowserOwner {
     fn pending(owner_key: String) -> Self {
         Self {
             owner_key,
@@ -225,31 +229,31 @@ impl RegisteredFlashOwner {
     }
 }
 
-impl Drop for RegisteredFlashOwner {
+impl Drop for RegisteredBrowserOwner {
     fn drop(&mut self) {
         if !self.registered {
             return;
         }
         crate::js_api::JsApi::dispatch_flash_reset_all(&self.owner_key);
-        unregister_browser_handle_flash_owner(&self.owner_key);
+        unregister_browser_handle_owner(&self.owner_key);
     }
 }
 
-fn nested_flash_owner_keys() -> Result<Vec<String>, String> {
+fn nested_browser_owner_keys() -> Result<Vec<String>, String> {
     let window = web_sys::window().ok_or_else(|| "browser window is unavailable".to_owned())?;
     let function = js_sys::Reflect::get(
         &window,
-        &JsValue::from_str("dirplayer_testNestedFlashOwnerKeys"),
+        &JsValue::from_str("dirplayer_testNestedBrowserOwnerKeys"),
     )
-    .map_err(|_| "nested Flash owner inspection helper is unavailable".to_owned())?
+    .map_err(|_| "nested browser owner inspection helper is unavailable".to_owned())?
     .dyn_into::<js_sys::Function>()
-    .map_err(|_| "nested Flash owner inspection helper is not callable".to_owned())?;
+    .map_err(|_| "nested browser owner inspection helper is not callable".to_owned())?;
     let values = function
         .call0(&window)
-        .map_err(|error| format!("nested Flash owner inspection failed: {error:?}"))?;
+        .map_err(|error| format!("nested browser owner inspection failed: {error:?}"))?;
     let values = values
         .dyn_into::<js_sys::Array>()
-        .map_err(|_| "nested Flash owner inspection did not return an array".to_owned())?;
+        .map_err(|_| "nested browser owner inspection did not return an array".to_owned())?;
     let mut keys = values
         .iter()
         .filter_map(|value| value.as_string())
@@ -258,27 +262,27 @@ fn nested_flash_owner_keys() -> Result<Vec<String>, String> {
     Ok(keys)
 }
 
-fn dispatch_flash_owner_action(owner_key: &str, method: &str) -> Result<bool, String> {
+fn dispatch_browser_owner_action(owner_key: &str, method: &str) -> Result<bool, String> {
     let window = web_sys::window().ok_or_else(|| "browser window is unavailable".to_owned())?;
     let function = js_sys::Reflect::get(
         &window,
-        &JsValue::from_str("dirplayer_testDispatchFlashOwnerAction"),
+        &JsValue::from_str("dirplayer_testDispatchBrowserOwnerAction"),
     )
-    .map_err(|_| "Flash owner dispatch inspection helper is unavailable".to_owned())?
+    .map_err(|_| "browser owner dispatch inspection helper is unavailable".to_owned())?
     .dyn_into::<js_sys::Function>()
-    .map_err(|_| "Flash owner dispatch inspection helper is not callable".to_owned())?;
+    .map_err(|_| "browser owner dispatch inspection helper is not callable".to_owned())?;
     function
         .call2(
             &window,
             &JsValue::from_str(owner_key),
             &JsValue::from_str(method),
         )
-        .map_err(|error| format!("stale Flash owner dispatch failed: {error:?}"))?
+        .map_err(|error| format!("stale browser owner dispatch failed: {error:?}"))?
         .as_bool()
-        .ok_or_else(|| "stale Flash owner dispatch did not return a boolean".to_owned())
+        .ok_or_else(|| "stale browser owner dispatch did not return a boolean".to_owned())
 }
 
-fn queue_prepared_flash_action(owner_key: &str) -> Result<(), String> {
+fn queue_prepared_owner_action(owner_key: &str) -> Result<(), String> {
     let window = web_sys::window().ok_or_else(|| "browser window is unavailable".to_owned())?;
     let function = js_sys::Reflect::get(
         &window,
@@ -293,20 +297,20 @@ fn queue_prepared_flash_action(owner_key: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn probe_prepared_flash_owner(owner_key: &str) -> Result<bool, String> {
+fn probe_prepared_browser_owner(owner_key: &str) -> Result<bool, String> {
     let window = web_sys::window().ok_or_else(|| "browser window is unavailable".to_owned())?;
     let function = js_sys::Reflect::get(
         &window,
-        &JsValue::from_str("dirplayer_testProbePreparedFlashOwner"),
+        &JsValue::from_str("dirplayer_testProbePreparedBrowserOwner"),
     )
-    .map_err(|_| "prepared Flash owner probe is unavailable".to_owned())?
+    .map_err(|_| "prepared browser owner probe is unavailable".to_owned())?
     .dyn_into::<js_sys::Function>()
-    .map_err(|_| "prepared Flash owner probe is not callable".to_owned())?;
+    .map_err(|_| "prepared browser owner probe is not callable".to_owned())?;
     function
         .call1(&window, &JsValue::from_str(owner_key))
-        .map_err(|error| format!("probing prepared Flash owner failed: {error:?}"))?
+        .map_err(|error| format!("probing prepared browser owner failed: {error:?}"))?
         .as_bool()
-        .ok_or_else(|| "prepared Flash owner probe did not return a boolean".to_owned())
+        .ok_or_else(|| "prepared browser owner probe did not return a boolean".to_owned())
 }
 
 fn fail_next_nested_callback_registration() -> Result<(), String> {
@@ -370,6 +374,375 @@ fn probe_failed_nested_host_absent(owner_key: &str) -> Result<bool, String> {
         .map_err(|error| format!("failed nested host probe failed: {error:?}"))?
         .as_bool()
         .ok_or_else(|| "failed nested host probe did not return a boolean".to_owned())
+}
+
+async fn browser_owner_timer_probe(
+    owner_key: &str,
+    name: &str,
+    period: u32,
+    incarnation: u64,
+    operation: &str,
+) -> Result<bool, String> {
+    let window = web_sys::window().ok_or_else(|| "browser window is unavailable".to_owned())?;
+    let function = js_sys::Reflect::get(
+        &window,
+        &JsValue::from_str("dirplayer_testBrowserOwnerTimerProbe"),
+    )
+    .map_err(|_| "browser owner timer probe is unavailable".to_owned())?
+    .dyn_into::<js_sys::Function>()
+    .map_err(|_| "browser owner timer probe is not callable".to_owned())?;
+    let result = function
+        .call5(
+            &window,
+            &JsValue::from_str(owner_key),
+            &JsValue::from_str(name),
+            &JsValue::from_f64(period as f64),
+            &JsValue::from_f64(incarnation as f64),
+            &JsValue::from_str(operation),
+        )
+        .map_err(|error| format!("browser owner timer probe failed: {error:?}"))?;
+    let promise = result
+        .dyn_into::<js_sys::Promise>()
+        .map_err(|_| "browser owner timer probe did not return a promise".to_owned())?;
+    JsFuture::from(promise)
+        .await
+        .map_err(|error| format!("browser owner timer probe rejected: {error:?}"))?
+        .as_bool()
+        .ok_or_else(|| "browser owner timer probe did not return a boolean".to_owned())
+}
+
+fn install_browser_owner_timer_reset_reentry(
+    owner_key: &str,
+    handle: crate::BrowserPlayerHandle,
+) -> Result<(), String> {
+    let window = web_sys::window().ok_or_else(|| "browser window is unavailable".to_owned())?;
+    let function = js_sys::Reflect::get(
+        &window,
+        &JsValue::from_str("dirplayer_testInstallBrowserOwnerTimerResetReentry"),
+    )
+    .map_err(|_| "browser timer reentry installer is unavailable".to_owned())?
+    .dyn_into::<js_sys::Function>()
+    .map_err(|_| "browser timer reentry installer is not callable".to_owned())?;
+    let js_handle: JsValue = handle.into();
+    let installed = function
+        .call2(&window, &JsValue::from_str(owner_key), &js_handle)
+        .map_err(|error| format!("browser timer reentry installer failed: {error:?}"))?
+        .as_bool()
+        .unwrap_or(false);
+    if installed {
+        Ok(())
+    } else {
+        Err("browser timer reentry installer rejected the owner handle".to_owned())
+    }
+}
+
+fn clear_browser_owner_timer_reset_reentry(owner_key: &str) -> Result<(), String> {
+    let window = web_sys::window().ok_or_else(|| "browser window is unavailable".to_owned())?;
+    let function = js_sys::Reflect::get(
+        &window,
+        &JsValue::from_str("dirplayer_testClearBrowserOwnerTimerResetReentry"),
+    )
+    .map_err(|_| "browser timer reentry clearer is unavailable".to_owned())?
+    .dyn_into::<js_sys::Function>()
+    .map_err(|_| "browser timer reentry clearer is not callable".to_owned())?;
+    function
+        .call1(&window, &JsValue::from_str(owner_key))
+        .map_err(|error| format!("browser timer reentry clearer failed: {error:?}"))?;
+    Ok(())
+}
+
+fn reset_browser_owner_timer_clear_record(
+    owner_key: &str,
+    name: &str,
+    incarnation: u64,
+) -> Result<(), String> {
+    let window = web_sys::window().ok_or_else(|| "browser window is unavailable".to_owned())?;
+    let function = js_sys::Reflect::get(
+        &window,
+        &JsValue::from_str("dirplayer_testResetBrowserOwnerTimerClearRecord"),
+    )
+    .map_err(|_| "browser timer clear record reset is unavailable".to_owned())?
+    .dyn_into::<js_sys::Function>()
+    .map_err(|_| "browser timer clear record reset is not callable".to_owned())?;
+    function
+        .call3(
+            &window,
+            &JsValue::from_str(owner_key),
+            &JsValue::from_str(name),
+            &JsValue::from_f64(incarnation as f64),
+        )
+        .map_err(|error| format!("browser timer clear record reset failed: {error:?}"))?;
+    Ok(())
+}
+
+fn browser_owner_timer_clear_count(
+    owner_key: &str,
+    name: &str,
+    incarnation: u64,
+) -> Result<u32, String> {
+    let window = web_sys::window().ok_or_else(|| "browser window is unavailable".to_owned())?;
+    let function = js_sys::Reflect::get(
+        &window,
+        &JsValue::from_str("dirplayer_testBrowserOwnerTimerClearCount"),
+    )
+    .map_err(|_| "browser timer clear counter is unavailable".to_owned())?
+    .dyn_into::<js_sys::Function>()
+    .map_err(|_| "browser timer clear counter is not callable".to_owned())?;
+    let count = function
+        .call3(
+            &window,
+            &JsValue::from_str(owner_key),
+            &JsValue::from_str(name),
+            &JsValue::from_f64(incarnation as f64),
+        )
+        .map_err(|error| format!("browser timer clear counter failed: {error:?}"))?
+        .as_f64()
+        .ok_or_else(|| "browser timer clear counter did not return a number".to_owned())?;
+    if count.is_finite() && count >= 0.0 && count <= u32::MAX as f64 {
+        Ok(count as u32)
+    } else {
+        Err(format!("browser timer clear counter returned {count}"))
+    }
+}
+
+fn browser_owner_timer_clear_phases(
+    owner_key: &str,
+    name: &str,
+    incarnation: u64,
+) -> Result<Vec<String>, String> {
+    let window = web_sys::window().ok_or_else(|| "browser window is unavailable".to_owned())?;
+    let function = js_sys::Reflect::get(
+        &window,
+        &JsValue::from_str("dirplayer_testBrowserOwnerTimerClearPhases"),
+    )
+    .map_err(|_| "browser timer clear phases are unavailable".to_owned())?
+    .dyn_into::<js_sys::Function>()
+    .map_err(|_| "browser timer clear phases are not callable".to_owned())?;
+    let phases = function
+        .call3(
+            &window,
+            &JsValue::from_str(owner_key),
+            &JsValue::from_str(name),
+            &JsValue::from_f64(incarnation as f64),
+        )
+        .map_err(|error| format!("browser timer clear phases failed: {error:?}"))?;
+    Ok(js_sys::Array::from(&phases)
+        .iter()
+        .filter_map(|phase| phase.as_string())
+        .collect())
+}
+
+fn owned_timeout_incarnation(
+    session: crate::player::session::RuntimeSessionHandle,
+    player_id: u32,
+    owner: &crate::player::ownership::OwnerToken,
+    name: &str,
+) -> Result<u64, String> {
+    session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            if !owner.is_arena_live() || !owner.same_identity(&context.player.owner) {
+                return None;
+            }
+            context
+                .player
+                .timeout_manager
+                .get_timeout_exact(name)
+                .map(|timeout| timeout.incarnation)
+        })
+        .flatten()
+        .ok_or_else(|| format!("owned timeout {name:?} was not created"))
+}
+
+async fn create_owned_timeout(
+    session: crate::player::session::RuntimeSessionHandle,
+    player_id: u32,
+    owner: crate::player::ownership::OwnerToken,
+    name: &str,
+    period: u32,
+) -> Result<u64, String> {
+    create_owned_timeout_with_handler(session, player_id, owner, name, period, "timeout").await
+}
+
+async fn create_owned_timeout_with_handler(
+    session: crate::player::session::RuntimeSessionHandle,
+    player_id: u32,
+    owner: crate::player::ownership::OwnerToken,
+    name: &str,
+    period: u32,
+    handler: &str,
+) -> Result<u64, String> {
+    session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            context.player.is_playing = true;
+            context.player.is_script_paused = false;
+        })
+        .ok_or_else(|| "timeout owner player disappeared".to_owned())?;
+    crate::player::eval_lingo_command_owned(
+        session.clone(),
+        player_id,
+        owner.clone(),
+        format!("timeout().new(\"{name}\", {period}, #{handler})"),
+    )
+    .await
+    .map_err(|error| format!("creating timeout {name:?} failed: {error}"))?;
+    owned_timeout_incarnation(session, player_id, &owner, name)
+}
+
+fn install_timeout_observer(
+    session: crate::player::session::RuntimeSessionHandle,
+    player_id: u32,
+    owner: &crate::player::ownership::OwnerToken,
+) -> Result<(Symbol, Symbol, Symbol), String> {
+    session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            if !owner.is_arena_live() || !owner.same_identity(&context.player.owner) {
+                return None;
+            }
+            let handler_name = context.symbols.intern("browserTimeoutObserved");
+            let count_name = context.symbols.intern("browserTimeoutCount");
+            let argument_name = context.symbols.intern("browserTimeoutArgument");
+            let count_value = context.player.alloc_datum(Datum::Int(0));
+            let argument_value = context.player.alloc_datum(Datum::Void);
+            context
+                .player
+                .globals
+                .insert(count_name.clone(), count_value);
+            context
+                .player
+                .globals
+                .insert(argument_name.clone(), argument_value);
+
+            let handler = Rc::new(HandlerDef {
+                name_id: 0,
+                bytecode_array: vec![
+                    Bytecode::new(OpCode::GetGlobal, 1, 0),
+                    Bytecode::new(OpCode::PushInt8, 1, 1),
+                    Bytecode::new(OpCode::Add, 0, 2),
+                    Bytecode::new(OpCode::SetGlobal, 1, 3),
+                    // A timeout with no target receives the exact
+                    // TimeoutRef as its first handler argument.
+                    Bytecode::new(OpCode::GetParam, 6, 4),
+                    Bytecode::new(OpCode::SetGlobal, 2, 5),
+                    Bytecode::new(OpCode::Ret, 0, 6),
+                ],
+                bytecode_index_map: FxHashMap::default(),
+                argument_name_ids: vec![0],
+                local_name_ids: vec![],
+                global_name_ids: vec![1, 2],
+                compiled_ir: RefCell::new(None),
+            });
+            let cast_number = context
+                .player
+                .movie
+                .cast_manager
+                .casts
+                .iter()
+                .map(|cast| cast.number)
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1);
+            let script_ref = CastMemberRef {
+                cast_lib: cast_number as i32,
+                cast_member: 1,
+            };
+            let script = Rc::new(Script {
+                member_ref: script_ref,
+                name: "browser-timeout-observer".to_owned(),
+                chunk: ScriptChunk {
+                    script_number: 1,
+                    literals: vec![],
+                    handlers: vec![],
+                    property_name_ids: vec![],
+                    property_defaults: HashMap::new(),
+                },
+                script_type: ScriptType::Movie,
+                handlers: FxHashMap::from_iter([(handler_name.clone(), handler)]),
+                handler_names_raw: vec!["browserTimeoutObserved".to_owned()],
+                handler_names: vec![handler_name.clone()],
+                properties: RefCell::new(FxHashMap::default()),
+            });
+            let mut cast = CastLib::test_external(cast_number, 0);
+            cast.name_symbols = Rc::from(vec![
+                handler_name.clone(),
+                count_name.clone(),
+                argument_name.clone(),
+            ]);
+            cast.scripts.insert(1, script);
+            context.player.movie.cast_manager.casts.push(cast);
+            context.player.movie.cast_manager.clear_movie_script_cache();
+            Some((handler_name, count_name, argument_name))
+        })
+        .flatten()
+        .ok_or_else(|| "timeout observer owner player disappeared".to_owned())
+}
+
+fn read_timeout_observer(
+    session: crate::player::session::RuntimeSessionHandle,
+    player_id: u32,
+    owner: &crate::player::ownership::OwnerToken,
+    count_name: &Symbol,
+    argument_name: &Symbol,
+) -> Result<(i32, Option<String>), String> {
+    session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            if !owner.is_arena_live() || !owner.same_identity(&context.player.owner) {
+                return None;
+            }
+            let count = context
+                .player
+                .globals
+                .get(count_name)
+                .and_then(|value| match context.player.get_datum(value) {
+                    Datum::Int(value) => Some(*value),
+                    _ => None,
+                })
+                .unwrap_or(0);
+            let argument =
+                context.player.globals.get(argument_name).and_then(|value| {
+                    match context.player.get_datum(value) {
+                        Datum::TimeoutRef(name) => Some(name.to_owned()),
+                        _ => None,
+                    }
+                });
+            Some((count, argument))
+        })
+        .flatten()
+        .ok_or_else(|| "timeout observer owner player disappeared".to_owned())
+}
+
+async fn mutate_owned_timeout(
+    session: crate::player::session::RuntimeSessionHandle,
+    player_id: u32,
+    owner: crate::player::ownership::OwnerToken,
+    source: String,
+) -> Result<(), String> {
+    crate::player::eval_lingo_command_owned(session, player_id, owner, source)
+        .await
+        .map(|_| ())
+        .map_err(|error| format!("timeout mutation failed: {error}"))
+}
+
+fn child_browser_owner_capability(
+    session: crate::player::session::RuntimeSessionHandle,
+    player_id: u32,
+    owner: crate::player::ownership::OwnerToken,
+) -> Result<BrowserOwnerCapability, String> {
+    let (pending, command_tx) = session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            (
+                context.player.flash_scripted_access_pending.clone(),
+                context.player.queue_tx.clone(),
+            )
+        })
+        .ok_or_else(|| "nested timer child disappeared".to_owned())?;
+    Ok(BrowserOwnerCapability::new_child(
+        session, player_id, owner, pending, command_tx,
+    ))
 }
 
 fn install_nested_movie_fixture(
@@ -959,15 +1332,15 @@ async fn prepare_pointer_player(
 ) -> Result<
     (
         crate::BrowserPlayerHandle,
-        BrowserFlashCapability,
-        RegisteredFlashOwner,
+        BrowserOwnerCapability,
+        RegisteredBrowserOwner,
         web_sys::HtmlElement,
     ),
     String,
 > {
     let handle = crate::BrowserPlayerHandle::new()
         .map_err(|error| format!("pointer BrowserPlayerHandle construction failed: {error:?}"))?;
-    let (capability, owner_guard) = register_browser_handle_flash_owner(&handle).await?;
+    let (capability, owner_guard) = register_browser_handle_owner(&handle).await?;
     install_pointer_flash_fixture(&handle, swf)?;
     let container = create_public_play_test_container("pointer")?;
     handle
@@ -1059,7 +1432,7 @@ pub struct BrowserTestPlayer {
     runtime: HarnessRuntime,
     renderer: crate::rendering::RendererStateHandle,
     command_tx: async_std::channel::Sender<crate::player::PlayerVMExecutionItem>,
-    flash_capability: Option<BrowserFlashCapability>,
+    browser_owner_capability: Option<BrowserOwnerCapability>,
 }
 
 /// Restores the production Flash bridge globals after a transport fixture.
@@ -1136,7 +1509,7 @@ impl BrowserTestPlayer {
             runtime,
             renderer,
             command_tx,
-            flash_capability: None,
+            browser_owner_capability: None,
         };
         // `preserve_external_params: false` — this is the per-TEST boundary, and
         // one movie's external params are never right for the next movie.
@@ -1250,6 +1623,227 @@ impl BrowserTestPlayer {
                 malformed_ok_error.message
             ));
         }
+        Ok(())
+    }
+
+    /// Exercise the production owner-qualified timer callback path with two
+    /// real BrowserPlayerHandle registrations. The browser template dispatches
+    /// through the same callback factory/controller used by the application.
+    pub async fn test_browser_owner_timer_lifecycle(&mut self) -> Result<(), String> {
+        let mut root_a = crate::BrowserPlayerHandle::new()
+            .map_err(|error| format!("timer root A construction failed: {error:?}"))?;
+        let mut root_b = crate::BrowserPlayerHandle::new()
+            .map_err(|error| format!("timer root B construction failed: {error:?}"))?;
+        let (_capability_a, owner_guard_a) = register_browser_handle_owner(&root_a).await?;
+        let (_capability_b, owner_guard_b) = register_browser_handle_owner(&root_b).await?;
+        let owner_key_a = root_a.owner_identity();
+        let owner_key_b = root_b.owner_identity();
+        if owner_key_a == owner_key_b {
+            return Err("timer roots reused an owner key".to_owned());
+        }
+
+        let timer_a = create_owned_timeout(
+            root_a.session().clone(),
+            root_a.player_id(),
+            root_a.owner().clone(),
+            "Timer",
+            5,
+        )
+        .await?;
+        let timer_b = create_owned_timeout(
+            root_b.session().clone(),
+            root_b.player_id(),
+            root_b.owner().clone(),
+            "Timer",
+            5,
+        )
+        .await?;
+        if !browser_owner_timer_probe(&owner_key_a, "Timer", 5, timer_a, "current").await?
+            || !browser_owner_timer_probe(&owner_key_b, "Timer", 5, timer_b, "current").await?
+        {
+            return Err("same-name timers were not isolated by owner".to_owned());
+        }
+
+        let lower_timer_a = create_owned_timeout(
+            root_a.session().clone(),
+            root_a.player_id(),
+            root_a.owner().clone(),
+            "timer",
+            5,
+        )
+        .await?;
+        if !browser_owner_timer_probe(&owner_key_a, "Timer", 5, timer_a, "current").await?
+            || !browser_owner_timer_probe(&owner_key_a, "timer", 5, lower_timer_a, "current")
+                .await?
+        {
+            return Err("case-distinct timer names collided".to_owned());
+        }
+
+        let replacement_timer_a = create_owned_timeout(
+            root_a.session().clone(),
+            root_a.player_id(),
+            root_a.owner().clone(),
+            "Timer",
+            5,
+        )
+        .await?;
+        if browser_owner_timer_probe(&owner_key_a, "Timer", 5, timer_a, "current").await?
+            || !browser_owner_timer_probe(&owner_key_a, "Timer", 5, replacement_timer_a, "current")
+                .await?
+        {
+            return Err("replacement did not retire the old timer incarnation".to_owned());
+        }
+        // This direct old Clear is intentionally retained as a stale-action
+        // hook after the replacement itself came from Rust TimeoutManager.
+        browser_owner_timer_probe(&owner_key_a, "Timer", 5, timer_a, "clear").await?;
+        if !browser_owner_timer_probe(&owner_key_a, "Timer", 5, replacement_timer_a, "current")
+            .await?
+        {
+            return Err("retired timer Clear affected its replacement".to_owned());
+        }
+        mutate_owned_timeout(
+            root_a.session().clone(),
+            root_a.player_id(),
+            root_a.owner().clone(),
+            "timeout(\"Timer\").forget()".to_owned(),
+        )
+        .await?;
+        if browser_owner_timer_probe(&owner_key_a, "Timer", 5, replacement_timer_a, "current")
+            .await?
+        {
+            return Err("exact timer Clear did not retire the active timer".to_owned());
+        }
+
+        let dormant_timer_a = create_owned_timeout(
+            root_a.session().clone(),
+            root_a.player_id(),
+            root_a.owner().clone(),
+            "Dormant",
+            0,
+        )
+        .await?;
+        if browser_owner_timer_probe(&owner_key_a, "Dormant", 0, dormant_timer_a, "current").await?
+        {
+            return Err("period-zero timer became active in the browser host".to_owned());
+        }
+        mutate_owned_timeout(
+            root_a.session().clone(),
+            root_a.player_id(),
+            root_a.owner().clone(),
+            "timeout(\"Dormant\").period = 5".to_owned(),
+        )
+        .await?;
+        let active_dormant_timer_a = owned_timeout_incarnation(
+            root_a.session().clone(),
+            root_a.player_id(),
+            root_a.owner(),
+            "Dormant",
+        )?;
+        if !browser_owner_timer_probe(
+            &owner_key_a,
+            "Dormant",
+            5,
+            active_dormant_timer_a,
+            "current",
+        )
+        .await?
+        {
+            return Err("period-zero timer did not activate through period mutation".to_owned());
+        }
+
+        let reset_timer_b = create_owned_timeout(
+            root_b.session().clone(),
+            root_b.player_id(),
+            root_b.owner().clone(),
+            "ResetMe",
+            5,
+        )
+        .await?;
+        root_b
+            .reset()
+            .map_err(|error| format!("timer root B reset failed: {error:?}"))?;
+        if browser_owner_timer_probe(&owner_key_b, "ResetMe", 5, reset_timer_b, "current").await? {
+            return Err("reset left an owner timer active".to_owned());
+        }
+        let (_capability_b_after_reset, owner_guard_b_after_reset) =
+            register_browser_handle_owner(&root_b).await?;
+        let owner_key_b_after_reset = root_b.owner_identity();
+        let root_b_session = root_b.session().clone();
+        let root_b_player_id = root_b.player_id();
+        let root_b_owner = root_b.owner().clone();
+        let reentry_timer_b = create_owned_timeout(
+            root_b_session.clone(),
+            root_b_player_id,
+            root_b_owner.clone(),
+            "Reentry",
+            0,
+        )
+        .await?;
+        reset_browser_owner_timer_clear_record(
+            &owner_key_b_after_reset,
+            "Reentry",
+            reentry_timer_b,
+        )?;
+        install_browser_owner_timer_reset_reentry(&owner_key_b_after_reset, root_b)?;
+        mutate_owned_timeout(
+            root_b_session.clone(),
+            root_b_player_id,
+            root_b_owner.clone(),
+            "timeout(\"Reentry\").period = 5".to_owned(),
+        )
+        .await?;
+        clear_browser_owner_timer_reset_reentry(&owner_key_b_after_reset)?;
+        if browser_owner_timer_probe(
+            &owner_key_b_after_reset,
+            "Reentry",
+            5,
+            reentry_timer_b,
+            "current",
+        )
+        .await?
+        {
+            return Err(
+                "synchronous Rust Schedule reentry left the retired owner timer active".to_owned(),
+            );
+        }
+        let reentry_clear_count =
+            browser_owner_timer_clear_count(&owner_key_b_after_reset, "Reentry", reentry_timer_b)?;
+        let reentry_clear_phases =
+            browser_owner_timer_clear_phases(&owner_key_b_after_reset, "Reentry", reentry_timer_b)?;
+        if reentry_clear_count < 2
+            || reentry_clear_phases
+                .iter()
+                .filter(|phase| phase.as_str() == "during-reset")
+                .count()
+                != 1
+            || reentry_clear_phases
+                .iter()
+                .filter(|phase| phase.as_str() == "post-reset")
+                .count()
+                != 1
+        {
+            return Err(format!(
+                "synchronous Rust Schedule reentry Clear phases were {reentry_clear_phases:?} (count {reentry_clear_count}), expected one during-reset and one post-reset"
+            ));
+        }
+
+        let dispose_timer_a = create_owned_timeout(
+            root_a.session().clone(),
+            root_a.player_id(),
+            root_a.owner().clone(),
+            "DisposeMe",
+            5,
+        )
+        .await?;
+        drop(root_a);
+        if browser_owner_timer_probe(&owner_key_a, "DisposeMe", 5, dispose_timer_a, "current")
+            .await?
+        {
+            return Err("dropping the root handle left its timer active".to_owned());
+        }
+        drop(owner_guard_a);
+        drop(owner_guard_b);
+        drop(owner_guard_b_after_reset);
         Ok(())
     }
 
@@ -1403,7 +1997,7 @@ impl BrowserTestPlayer {
         }
         drop(capability_a);
         drop(owner_guard_a);
-        let (capability_a, owner_guard_a) = register_browser_handle_flash_owner(&root_a).await?;
+        let (capability_a, owner_guard_a) = register_browser_handle_owner(&root_a).await?;
         crate::player::run_movie_init_owned(
             root_a.session().clone(),
             root_a.player_id(),
@@ -2316,7 +2910,7 @@ impl BrowserTestPlayer {
         }
 
         let stale_capability = self
-            .flash_capability
+            .browser_owner_capability
             .take()
             .ok_or_else(|| "browser Flash capability was not registered".to_owned())?;
         self.reset_player_with(false).await;
@@ -2324,7 +2918,7 @@ impl BrowserTestPlayer {
             .set_flash_scripted_access_pending(true)
             .is_ok()
         {
-            return Err("retired BrowserFlashCapability accepted a readiness update".to_owned());
+            return Err("retired BrowserOwnerCapability accepted a readiness update".to_owned());
         }
         let fresh_pending = self
             .harness_runtime()
@@ -2335,7 +2929,7 @@ impl BrowserTestPlayer {
         }
 
         let fresh_capability = self
-            .flash_capability
+            .browser_owner_capability
             .as_ref()
             .ok_or_else(|| "fresh browser Flash capability was not registered".to_owned())?;
         let fresh_session = self.harness_runtime().session();
@@ -2356,11 +2950,11 @@ impl BrowserTestPlayer {
         let window = web_sys::window().ok_or_else(|| "browser window is unavailable".to_owned())?;
         let helper = js_sys::Reflect::get(
             &window,
-            &JsValue::from_str("dirplayer_testFlashOwnerCapability"),
+            &JsValue::from_str("dirplayer_testBrowserOwnerCapability"),
         )
-        .map_err(|_| "production FlashOwnerHost helper is unavailable".to_owned())?
+        .map_err(|_| "production BrowserOwnerHost helper is unavailable".to_owned())?
         .dyn_into::<js_sys::Function>()
-        .map_err(|_| "production FlashOwnerHost helper is not callable".to_owned())?;
+        .map_err(|_| "production BrowserOwnerHost helper is not callable".to_owned())?;
         let owner_key = fresh_capability.owner_identity();
         let observed_states = Rc::new(RefCell::new(Vec::<bool>::new()));
         let observed_states_for_callback = observed_states.clone();
@@ -2375,7 +2969,7 @@ impl BrowserTestPlayer {
                 .unwrap_or(false);
             observed_states_for_callback.borrow_mut().push(pending);
         }) as Box<dyn FnMut(JsValue)>);
-        let js_capability = BrowserFlashCapability::new(
+        let js_capability = BrowserOwnerCapability::new(
             self.harness_runtime().session(),
             self.harness_runtime().player_id(),
             self.harness_runtime().owner().clone(),
@@ -2392,25 +2986,27 @@ impl BrowserTestPlayer {
                 &js_capability,
                 observe.as_ref(),
             )
-            .map_err(|error| format!("production FlashOwnerHost invocation failed: {error:?}"))?
+            .map_err(|error| format!("production BrowserOwnerHost invocation failed: {error:?}"))?
             .dyn_into::<js_sys::Promise>()
-            .map_err(|_| "production FlashOwnerHost helper did not return a Promise".to_owned())?;
+            .map_err(|_| {
+                "production BrowserOwnerHost helper did not return a Promise".to_owned()
+            })?;
         JsFuture::from(promise)
             .await
-            .map_err(|error| format!("production FlashOwnerHost lifecycle failed: {error:?}"))?;
+            .map_err(|error| format!("production BrowserOwnerHost lifecycle failed: {error:?}"))?;
         drop(observe);
         let observed_states = observed_states.borrow().clone();
         if observed_states != [true, false, true, false] {
             return Err(format!(
-                "production FlashOwnerHost readiness transitions were {observed_states:?}"
+                "production BrowserOwnerHost readiness transitions were {observed_states:?}"
             ));
         }
         let final_pending = self
             .harness_runtime()
             .with_context(|context| context.player.flash_scripted_access_pending.get())
-            .ok_or_else(|| "fresh owner disappeared after FlashOwnerHost lifecycle".to_owned())?;
+            .ok_or_else(|| "fresh owner disappeared after BrowserOwnerHost lifecycle".to_owned())?;
         if final_pending {
-            return Err("production FlashOwnerHost did not clear scripted readiness".to_owned());
+            return Err("production BrowserOwnerHost did not clear scripted readiness".to_owned());
         }
         Ok(())
     }
@@ -2426,13 +3022,13 @@ impl BrowserTestPlayer {
             .map_err(|error| format!("root B construction failed: {error:?}"))?;
         crate::player::testing_shared::log_test_action("nested fixture: root A registration begin");
         let (_root_a_capability, _root_a_owner_guard) =
-            register_browser_handle_flash_owner(&root_a).await?;
+            register_browser_handle_owner(&root_a).await?;
         crate::player::testing_shared::log_test_action(
             "nested fixture: root A registration complete",
         );
         crate::player::testing_shared::log_test_action("nested fixture: root B registration begin");
         let (_root_b_capability, _root_b_owner_guard) =
-            register_browser_handle_flash_owner(&root_b).await?;
+            register_browser_handle_owner(&root_b).await?;
         crate::player::testing_shared::log_test_action(
             "nested fixture: root B registration complete",
         );
@@ -2442,7 +3038,7 @@ impl BrowserTestPlayer {
         let window = web_sys::window().ok_or_else(|| "browser window is unavailable".to_owned())?;
         let nested_registrar = js_sys::Reflect::get(
             &window,
-            &JsValue::from_str("dirplayer_registerNestedFlashOwner"),
+            &JsValue::from_str("dirplayer_registerNestedBrowserOwner"),
         )
         .map_err(|_| "production nested Flash registrar is unavailable".to_owned())?;
         if !nested_registrar.is_function() {
@@ -2511,6 +3107,150 @@ impl BrowserTestPlayer {
                 "nested fixture owner collision mismatch: child ids {child_a}/{child_b}, root sessions {}/{}, child keys {:?}/{:?}",
                 root_key_a.session, root_key_b.session, child_key_a, child_key_b,
             ));
+        }
+
+        let child_owner_key_a = format!(
+            "{}:{}:{}",
+            child_key_a.session, child_key_a.player, child_key_a.generation
+        );
+        let (timeout_handler, timeout_count, timeout_argument) =
+            install_timeout_observer(root_a.session().clone(), child_a, &child_owner_a)?;
+        let child_timer = create_owned_timeout_with_handler(
+            root_a.session().clone(),
+            child_a,
+            child_owner_a.clone(),
+            "ChildTimer",
+            1,
+            "browserTimeoutObserved",
+        )
+        .await?;
+        let timeout_contract = root_a
+            .session()
+            .borrow_mut()
+            .with_player(child_a, |context| {
+                context
+                    .player
+                    .timeout_manager
+                    .get_timeout_exact("ChildTimer")
+                    .map(|timeout| {
+                        (
+                            timeout.handler == timeout_handler,
+                            matches!(context.player.get_datum(&timeout.target_ref), Datum::Void),
+                        )
+                    })
+            })
+            .flatten();
+        if timeout_contract != Some((true, true)) {
+            return Err(format!(
+                "nested timeout target/handler contract was {:?}",
+                timeout_contract
+            ));
+        }
+        let child_capability = child_browser_owner_capability(
+            root_a.session().clone(),
+            child_a,
+            child_owner_a.clone(),
+        )?;
+        child_capability
+            .trigger_timeout("ChildTimer".to_owned(), child_timer as f64)
+            .map_err(|error| format!("nested child timeout tick failed: {error:?}"))?;
+        let mut observed_child_timeout = (0, None);
+        for _ in 0..20 {
+            async_std::task::sleep(Duration::from_millis(5)).await;
+            observed_child_timeout = read_timeout_observer(
+                root_a.session().clone(),
+                child_a,
+                &child_owner_a,
+                &timeout_count,
+                &timeout_argument,
+            )?;
+            if observed_child_timeout.0 >= 1 {
+                break;
+            }
+        }
+        if observed_child_timeout != (1, Some("ChildTimer".to_owned())) {
+            return Err(format!(
+                "nested child timeout handler observed {:?}",
+                observed_child_timeout
+            ));
+        }
+        let replacement_timer = create_owned_timeout_with_handler(
+            root_a.session().clone(),
+            child_a,
+            child_owner_a.clone(),
+            "ChildTimer",
+            1,
+            "browserTimeoutObserved",
+        )
+        .await?;
+        child_capability
+            .trigger_timeout("ChildTimer".to_owned(), child_timer as f64)
+            .map_err(|error| format!("nested stale child timeout tick failed: {error:?}"))?;
+        async_std::task::sleep(Duration::from_millis(10)).await;
+        let stale_observed = read_timeout_observer(
+            root_a.session().clone(),
+            child_a,
+            &child_owner_a,
+            &timeout_count,
+            &timeout_argument,
+        )?;
+        if stale_observed != (1, Some("ChildTimer".to_owned())) {
+            return Err(format!(
+                "nested stale timeout changed handler state: {stale_observed:?}"
+            ));
+        }
+        child_capability
+            .trigger_timeout("ChildTimer".to_owned(), replacement_timer as f64)
+            .map_err(|error| format!("nested replacement child timeout tick failed: {error:?}"))?;
+        for _ in 0..20 {
+            async_std::task::sleep(Duration::from_millis(5)).await;
+            observed_child_timeout = read_timeout_observer(
+                root_a.session().clone(),
+                child_a,
+                &child_owner_a,
+                &timeout_count,
+                &timeout_argument,
+            )?;
+            if observed_child_timeout.0 >= 2 {
+                break;
+            }
+        }
+        if observed_child_timeout != (2, Some("ChildTimer".to_owned())) {
+            return Err(format!(
+                "nested replacement timeout handler observed {:?}",
+                observed_child_timeout
+            ));
+        }
+        if browser_owner_timer_probe(&child_owner_key_a, "ChildTimer", 1, child_timer, "current")
+            .await?
+            || !browser_owner_timer_probe(
+                &child_owner_key_a,
+                "ChildTimer",
+                1,
+                replacement_timer,
+                "current",
+            )
+            .await?
+        {
+            return Err("nested child timer was not delivered through its owner host".to_owned());
+        }
+        mutate_owned_timeout(
+            root_a.session().clone(),
+            child_a,
+            child_owner_a.clone(),
+            "timeout(\"ChildTimer\").forget()".to_owned(),
+        )
+        .await?;
+        if browser_owner_timer_probe(
+            &child_owner_key_a,
+            "ChildTimer",
+            1,
+            replacement_timer,
+            "current",
+        )
+        .await?
+        {
+            return Err("nested child timer Clear did not retire the timer".to_owned());
         }
 
         let read_fixture =
@@ -2607,6 +3347,14 @@ impl BrowserTestPlayer {
             ));
         }
 
+        let retire_timer = create_owned_timeout(
+            root_a.session().clone(),
+            child_a,
+            child_owner_a.clone(),
+            "RetireMe",
+            1,
+        )
+        .await?;
         let old_child_owner_a = child_owner_a.clone();
         crate::player::testing_shared::log_test_action(&format!(
             "nested fixture: child A reset begin child={child_a}"
@@ -2622,6 +3370,11 @@ impl BrowserTestPlayer {
         ));
         if old_child_owner_a.is_arena_live() || !fresh_child_owner_a.is_arena_live() {
             return Err("nested child reset did not rotate its owner".to_owned());
+        }
+        if browser_owner_timer_probe(&child_owner_key_a, "RetireMe", 1, retire_timer, "current")
+            .await?
+        {
+            return Err("nested child reset left its retired timer active".to_owned());
         }
         crate::player::testing_shared::log_test_action(&format!(
             "nested fixture: stale child read begin child={child_a}"
@@ -2684,7 +3437,36 @@ impl BrowserTestPlayer {
             return Err("resetting root A child changed root B".to_owned());
         }
 
-        let owner_keys_before_failed_start = nested_flash_owner_keys()?;
+        let fresh_child_owner_key_a = format!(
+            "{}:{}:{}",
+            fresh_child_owner_a.key().session,
+            fresh_child_owner_a.key().player,
+            fresh_child_owner_a.key().generation
+        );
+        let remove_timer = create_owned_timeout(
+            root_a.session().clone(),
+            child_a,
+            fresh_child_owner_a.clone(),
+            "RemoveMe",
+            1,
+        )
+        .await?;
+        root_a.session().borrow_mut().remove_player(child_a);
+        crate::player::commands::drain_host_teardowns(root_a.session());
+        if fresh_child_owner_a.is_arena_live()
+            || browser_owner_timer_probe(
+                &fresh_child_owner_key_a,
+                "RemoveMe",
+                1,
+                remove_timer,
+                "current",
+            )
+            .await?
+        {
+            return Err("removing the nested child left its host timer active".to_owned());
+        }
+
+        let owner_keys_before_failed_start = nested_browser_owner_keys()?;
         install_nested_movie_fixture(
             &root_b,
             2,
@@ -2711,7 +3493,7 @@ impl BrowserTestPlayer {
         crate::player::testing_shared::log_test_action(
             "nested fixture: failed child start rejected under root B",
         );
-        let owner_keys_after_failed_start = nested_flash_owner_keys()?;
+        let owner_keys_after_failed_start = nested_browser_owner_keys()?;
         if owner_keys_after_failed_start != owner_keys_before_failed_start {
             return Err(format!(
                 "failed nested startup leaked host owners: before={owner_keys_before_failed_start:?}, after={owner_keys_after_failed_start:?}"
@@ -2741,8 +3523,8 @@ impl BrowserTestPlayer {
         ));
 
         let root_a_key = root_a.owner_identity();
-        unregister_browser_handle_flash_owner(&root_a_key);
-        queue_prepared_flash_action(&root_a_key)?;
+        unregister_browser_handle_owner(&root_a_key);
+        queue_prepared_owner_action(&root_a_key)?;
         let root_a_owner = root_a.owner().clone();
         crate::player::testing_shared::log_test_action("nested fixture: root A reset begin");
         root_a
@@ -2758,10 +3540,10 @@ impl BrowserTestPlayer {
         {
             return Err("retired root A capability accepted a readiness update".to_owned());
         }
-        if dispatch_flash_owner_action(&root_a_key, "onFlashResetAll")? {
+        if dispatch_browser_owner_action(&root_a_key, "onFlashResetAll")? {
             return Err("retired root A host route accepted a stale event".to_owned());
         }
-        if probe_prepared_flash_owner(&root_a_key)? {
+        if probe_prepared_browser_owner(&root_a_key)? {
             return Err("prepared Flash action crossed the retired root A owner".to_owned());
         }
         crate::player::testing_shared::log_test_action(&format!(
@@ -2779,7 +3561,7 @@ impl BrowserTestPlayer {
             "nested fixture: fresh root A registration begin",
         );
         let (_fresh_root_a_capability, _fresh_root_a_owner_guard) =
-            register_browser_handle_flash_owner(&root_a).await?;
+            register_browser_handle_owner(&root_a).await?;
         crate::player::testing_shared::log_test_action(
             "nested fixture: fresh root A registration complete",
         );
@@ -3083,10 +3865,9 @@ impl BrowserTestPlayer {
             .map_err(|error| format!("SpriteAsync owner A construction failed: {error:?}"))?;
         let mut second = crate::BrowserPlayerHandle::new()
             .map_err(|error| format!("SpriteAsync owner B construction failed: {error:?}"))?;
-        let (_first_capability, _first_owner_guard) =
-            register_browser_handle_flash_owner(&first).await?;
+        let (_first_capability, _first_owner_guard) = register_browser_handle_owner(&first).await?;
         let (_second_capability, _second_owner_guard) =
-            register_browser_handle_flash_owner(&second).await?;
+            register_browser_handle_owner(&second).await?;
         let harness_owner_key = crate::player::owner_key_string(self.harness_runtime().owner());
         let first_owner_key = first.owner_identity();
         let second_owner_key = second.owner_identity();
@@ -3517,9 +4298,8 @@ impl BrowserTestPlayer {
             .map_err(|error| format!("callback owner A construction failed: {error:?}"))?;
         let second = crate::BrowserPlayerHandle::new()
             .map_err(|error| format!("callback owner B construction failed: {error:?}"))?;
-        let (_first_capability, _first_guard) = register_browser_handle_flash_owner(&first).await?;
-        let (_second_capability, _second_guard) =
-            register_browser_handle_flash_owner(&second).await?;
+        let (_first_capability, _first_guard) = register_browser_handle_owner(&first).await?;
+        let (_second_capability, _second_guard) = register_browser_handle_owner(&second).await?;
         let first_container = create_public_play_test_container("callback-owner-a")?;
         let second_container = create_public_play_test_container("callback-owner-b")?;
         let callback_swf = include_bytes!("../../tests/fixtures/flash_lingo_callback_probe.swf");
@@ -3792,7 +4572,7 @@ impl BrowserTestPlayer {
             return Err("owner B did not survive owner A stale callback rejection".to_owned());
         }
 
-        unregister_browser_handle_flash_owner(&old_owner_key);
+        unregister_browser_handle_owner(&old_owner_key);
         first
             .reset()
             .map_err(|error| format!("callback owner A reset failed: {error:?}"))?;
@@ -3817,7 +4597,7 @@ impl BrowserTestPlayer {
             return Err("disposed callback owner A retained its stable route".to_owned());
         }
 
-        let (_fresh_capability, _fresh_guard) = register_browser_handle_flash_owner(&first).await?;
+        let (_fresh_capability, _fresh_guard) = register_browser_handle_owner(&first).await?;
         install_pointer_flash_fixture(&first, callback_swf)?;
         let fresh_probe = install_callback_script_fixture(&first)?;
         crate::player::eval_lingo_command_owned(
@@ -4217,7 +4997,7 @@ impl BrowserTestPlayer {
             context.player.movie.score.channels = vec![SpriteChannel::new(0), channel];
             context.player.movie.score.invalidate_render_channel_cache();
         });
-        // `dirplayer_registerFlashOwner` loads the production manager lazily.
+        // `dirplayer_registerBrowserOwner` loads the production manager lazily.
         // Prime that existing helper before replacing only the two transport
         // globals; this prevents a late bundle import from overwriting the
         // controlled callbacks below.
@@ -4235,7 +5015,7 @@ impl BrowserTestPlayer {
                 )
             })
             .ok_or_else(|| "Flash readiness state is unavailable".to_owned())?;
-        let capability = BrowserFlashCapability::new(
+        let capability = BrowserOwnerCapability::new(
             self.harness_runtime().session(),
             self.harness_runtime().player_id(),
             owner.clone(),
@@ -4244,11 +5024,11 @@ impl BrowserTestPlayer {
         );
         let helper = js_sys::Reflect::get(
             &window,
-            &JsValue::from_str("dirplayer_testFlashOwnerCapability"),
+            &JsValue::from_str("dirplayer_testBrowserOwnerCapability"),
         )
-        .map_err(|_| "production FlashOwnerHost helper is unavailable".to_owned())?
+        .map_err(|_| "production BrowserOwnerHost helper is unavailable".to_owned())?
         .dyn_into::<js_sys::Function>()
-        .map_err(|_| "production FlashOwnerHost helper is not callable".to_owned())?;
+        .map_err(|_| "production BrowserOwnerHost helper is not callable".to_owned())?;
         let helper_capability: JsValue = capability.into();
         let helper_result = helper
             .call3(
@@ -4257,12 +5037,12 @@ impl BrowserTestPlayer {
                 &helper_capability,
                 &JsValue::UNDEFINED,
             )
-            .map_err(|error| format!("FlashOwnerHost priming failed: {error:?}"))?
+            .map_err(|error| format!("BrowserOwnerHost priming failed: {error:?}"))?
             .dyn_into::<js_sys::Promise>()
-            .map_err(|_| "FlashOwnerHost priming did not return a Promise".to_owned())?;
+            .map_err(|_| "BrowserOwnerHost priming did not return a Promise".to_owned())?;
         JsFuture::from(helper_result)
             .await
-            .map_err(|error| format!("FlashOwnerHost priming rejected: {error:?}"))?;
+            .map_err(|error| format!("BrowserOwnerHost priming rejected: {error:?}"))?;
         Self::next_frame().await;
 
         let route_names = [
@@ -4282,14 +5062,14 @@ impl BrowserTestPlayer {
             entries: originals,
         };
 
-        let route_capability = BrowserFlashCapability::new(
+        let route_capability = BrowserOwnerCapability::new(
             self.harness_runtime().session(),
             self.harness_runtime().player_id(),
             owner.clone(),
             pending_cell.clone(),
             self.command_tx.clone(),
         );
-        let assertion_capability = BrowserFlashCapability::new(
+        let assertion_capability = BrowserOwnerCapability::new(
             self.harness_runtime().session(),
             self.harness_runtime().player_id(),
             owner.clone(),
@@ -5446,7 +6226,7 @@ impl BrowserTestPlayer {
         format!("{}:{}:{}", key.session, key.player, key.generation)
     }
 
-    fn register_flash_owner(&mut self) -> Option<js_sys::Promise> {
+    fn register_browser_owner(&mut self) -> Option<js_sys::Promise> {
         let flash_scripted_access_pending = self
             .runtime
             .session()
@@ -5455,7 +6235,7 @@ impl BrowserTestPlayer {
                 context.player.flash_scripted_access_pending.clone()
             })
             .expect("browser test player must expose Flash readiness state");
-        let capability = BrowserFlashCapability::new(
+        let capability = BrowserOwnerCapability::new(
             self.runtime.session(),
             self.runtime.player_id(),
             self.runtime.owner().clone(),
@@ -5465,9 +6245,9 @@ impl BrowserTestPlayer {
         // The JS callback registration owns its own wasm-bindgen wrapper. Keep
         // a second, capability-equivalent Rust value in the harness so the
         // callback's JS lifetime is independent of the Rust test field; both
-        // values share the same session/owner handles and BrowserFlashCapability
+        // values share the same session/owner handles and BrowserOwnerCapability
         // is non-owning, so dropping either wrapper cannot retire the player.
-        let js_capability = BrowserFlashCapability::new(
+        let js_capability = BrowserOwnerCapability::new(
             self.runtime.session(),
             self.runtime.player_id(),
             self.runtime.owner().clone(),
@@ -5477,9 +6257,10 @@ impl BrowserTestPlayer {
         let owner_key = capability.owner_identity();
         let mut registration_ready = None;
         if let Some(window) = web_sys::window() {
-            if let Ok(value) =
-                js_sys::Reflect::get(&window, &JsValue::from_str("dirplayer_registerFlashOwner"))
-            {
+            if let Ok(value) = js_sys::Reflect::get(
+                &window,
+                &JsValue::from_str("dirplayer_registerBrowserOwner"),
+            ) {
                 if let Ok(function) = value.dyn_into::<js_sys::Function>() {
                     let js_capability: JsValue = js_capability.into();
                     registration_ready = function
@@ -5489,22 +6270,22 @@ impl BrowserTestPlayer {
                 }
             }
         }
-        self.flash_capability = Some(capability);
+        self.browser_owner_capability = Some(capability);
         registration_ready
     }
 
-    fn unregister_flash_owner(&mut self, owner_key: &str) {
+    fn unregister_browser_owner(&mut self, owner_key: &str) {
         if let Some(window) = web_sys::window() {
             if let Ok(value) = js_sys::Reflect::get(
                 &window,
-                &JsValue::from_str("dirplayer_unregisterFlashOwner"),
+                &JsValue::from_str("dirplayer_unregisterBrowserOwner"),
             ) {
                 if let Ok(function) = value.dyn_into::<js_sys::Function>() {
                     let _ = function.call1(&window, &JsValue::from_str(owner_key));
                 }
             }
         }
-        self.flash_capability = None;
+        self.browser_owner_capability = None;
     }
 
     /// `preserve_external_params` — carry the current player's external params
@@ -5550,10 +6331,9 @@ impl BrowserTestPlayer {
         self.harness_runtime().with_context(|context| {
             context.player.stop();
             context.player.sound_manager.stop_all();
-            context.player.timeout_manager.clear();
+            context.player.clear_timeouts();
             context.player.bitmap_manager.clear_movie_bitmaps();
         });
-        crate::js_api::JsApi::dispatch_clear_timeouts();
         // Tear down every Ruffle/Flash instance from the previous movie so its
         // per-frame capture RAF loop, Ruffle player, and SWF audio don't leak
         // across the movie switch (the per-sprite unload path only fires for
@@ -5561,7 +6341,7 @@ impl BrowserTestPlayer {
         let key = self.runtime.owner().key();
         let owner_key = format!("{}:{}:{}", key.session, key.player, key.generation);
         crate::js_api::JsApi::dispatch_flash_reset_all(&owner_key);
-        self.unregister_flash_owner(&owner_key);
+        self.unregister_browser_owner(&owner_key);
         // Retire the owner before yielding so no in-flight handler can resume
         // against the replacement player. Keep the original RAF drain: these
         // yields let stale browser tasks observe retirement and exit without
@@ -5605,7 +6385,7 @@ impl BrowserTestPlayer {
             )
             .await;
         });
-        if let Some(registration_ready) = self.register_flash_owner() {
+        if let Some(registration_ready) = self.register_browser_owner() {
             let _ = JsFuture::from(registration_ready).await;
         }
 
@@ -6285,7 +7065,7 @@ impl Drop for BrowserTestPlayer {
     fn drop(&mut self) {
         crate::rendering::dispose_renderer_state(&self.renderer);
         let owner_key = self.owner_key();
-        self.unregister_flash_owner(&owner_key);
+        self.unregister_browser_owner(&owner_key);
         self.runtime.retire_current();
     }
 }

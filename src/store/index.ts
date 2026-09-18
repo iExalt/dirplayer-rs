@@ -15,8 +15,8 @@ const store = configureStore({
   middleware: (getDefaultMiddleware) =>
     getDefaultMiddleware({
       serializableCheck: {
-        ignoredPaths: ['vm.debugMessages', 'vm.timeoutHandles'],
-        ignoredActions: ['vm/debugContentAdded', 'vm/setTimeoutHandle'],
+        ignoredPaths: ['vm.debugMessages'],
+        ignoredActions: ['vm/debugContentAdded'],
       },
     }),
 });

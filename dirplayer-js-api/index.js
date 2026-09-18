@@ -196,18 +196,18 @@ export function registerVmCallbacks(callbacks, ownerKey, setAsDefault = true) {
 // Rust calls these through the package bridge. The app installs the concrete
 // per-host controller on window so browser fixtures and production share the
 // same exact parent/child validation path.
-export function registerNestedFlashOwner(parentOwnerKey, childOwnerKey, capability) {
-  const register = globalThis.window?.dirplayer_registerNestedFlashOwner;
+export function registerNestedBrowserOwner(parentOwnerKey, childOwnerKey, capability) {
+  const register = globalThis.window?.dirplayer_registerNestedBrowserOwner;
   if (typeof register !== 'function') {
-    throw new Error('nested Flash owner registration bridge is unavailable');
+    throw new Error('nested browser owner registration bridge is unavailable');
   }
   register(parentOwnerKey, childOwnerKey, capability);
 }
 
-export function retireNestedFlashOwner(parentOwnerKey, childOwnerKey) {
-  const retire = globalThis.window?.dirplayer_retireNestedFlashOwner;
+export function retireNestedBrowserOwner(parentOwnerKey, childOwnerKey) {
+  const retire = globalThis.window?.dirplayer_retireNestedBrowserOwner;
   if (typeof retire !== 'function') {
-    throw new Error('nested Flash owner retirement bridge is unavailable');
+    throw new Error('nested browser owner retirement bridge is unavailable');
   }
   retire(parentOwnerKey, childOwnerKey);
 }
@@ -375,16 +375,12 @@ export function onDebugContent(content) {
   vmCallbacks.onDebugContent(content)
 }
 
-export function onScheduleTimeout(name, period) {
-  vmCallbacks.onScheduleTimeout(name, period)
+export function onScheduleTimeoutOwned(ownerKey, name, period, incarnation) {
+  dispatchVmCallback(ownerKey, 'onScheduleTimeoutOwned', name, period, incarnation, ownerKey)
 }
 
-export function onClearTimeout(name) {
-  vmCallbacks.onClearTimeout(name)
-}
-
-export function onClearAllTimeouts() {
-  vmCallbacks.onClearAllTimeouts()
+export function onClearTimeoutOwned(ownerKey, name, incarnation) {
+  dispatchVmCallback(ownerKey, 'onClearTimeoutOwned', name, incarnation, ownerKey)
 }
 
 export function onDatumSnapshot(datumRef, snapshot) {

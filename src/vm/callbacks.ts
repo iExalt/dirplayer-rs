@@ -10,9 +10,9 @@ import {
   getXtraRegistry,
   dispatchVmCallback,
 } from "dirplayer-js-api";
-import { createFlashOwnerController, createOwnedFlashCallbacks, initFlashBridge } from "../services/flashPlayerManager";
+import { createBrowserOwnerController, createOwnedBrowserCallbacks, initFlashBridge } from "../services/flashPlayerManager";
 import store from "../store";
-import { breakpointListChanged, castLibNameChanged, castListChanged, castMemberChanged, castMemberListChanged, channelChanged, channelDisplayNameChanged, channelDisplayNamesChanged, datumSnapshot, debugContentAdded, debugMessageAdded, debugMessagesCleared, frameChanged, globalsChanged, movieLoaded, movieLoadFailed, onScriptError, removeTimeoutHandle, scopeListChanged, scoreChanged, scriptErrorCleared, scriptInstanceSnapshot, setTimeoutHandle } from "../store/vmSlice";
+import { breakpointListChanged, castLibNameChanged, castListChanged, castMemberChanged, castMemberListChanged, channelChanged, channelDisplayNameChanged, channelDisplayNamesChanged, datumSnapshot, debugContentAdded, debugMessageAdded, debugMessagesCleared, frameChanged, globalsChanged, movieLoaded, movieLoadFailed, onScriptError, scopeListChanged, scoreChanged, scriptErrorCleared, scriptInstanceSnapshot } from "../store/vmSlice";
 import type { BrowserPlayerHandle, OnMovieLoadedCallbackData } from 'vm-rust'
 import type { DebugContent } from "dirplayer-js-api";
 import { DatumRef, IVMScope, JsBridgeDatum, MemberSnapshot, ScoreSnapshot, ScoreSpriteSnapshot } from ".";
@@ -46,27 +46,19 @@ export type VmCallbackRegistration = (() => void) & {
   rebindOwner: (ownerKey: string) => void;
 };
 
-export function clearAllTimeouts() {
-  const handles = store.getState().vm.timeoutHandles;
-  Object.keys(handles).forEach((key) => {
-    clearInterval(handles[key] as Parameters<typeof clearInterval>[0]);
-    store.dispatch(removeTimeoutHandle(key));
-  });
-}
-
-const nestedController = createFlashOwnerController((callbacks, ownerKey, setAsDefault) =>
+const nestedController = createBrowserOwnerController((callbacks, ownerKey, setAsDefault) =>
   registerVmCallbacks(callbacks as any, ownerKey, setAsDefault),
 );
 
 function installNestedCallbackBridge(): void {
   const win = window as any;
-  if (win.dirplayer_registerNestedFlashOwner) return;
-  win.dirplayer_registerNestedFlashOwner = (
+  if (win.dirplayer_registerNestedBrowserOwner) return;
+  win.dirplayer_registerNestedBrowserOwner = (
     parentOwnerKey: string,
     childOwnerKey: string,
     capability: any,
   ) => nestedController.registerNested(parentOwnerKey, childOwnerKey, capability);
-  win.dirplayer_retireNestedFlashOwner = (
+  win.dirplayer_retireNestedBrowserOwner = (
     parentOwnerKey: string,
     childOwnerKey: string,
   ) => nestedController.retireNested(parentOwnerKey, childOwnerKey);
@@ -212,29 +204,6 @@ export function initVmCallbacks(browserHandle: BrowserPlayerHandle): VmCallbackR
     onDebugContent: (content: DebugContent) => {
       store.dispatch(debugContentAdded(content));
     },
-    onScheduleTimeout: (timeoutName: string, periodMs: number) => {
-      // Handles are keyed by name, so a re-schedule under a live name would
-      // orphan the previous interval — it keeps firing with no way to reach it.
-      const previous = store.getState().vm.timeoutHandles[timeoutName];
-      if (previous) {
-        clearInterval(previous as Parameters<typeof clearInterval>[0]);
-      }
-      const handle = setInterval(() => {
-        browserHandle.trigger_timeout(timeoutName)
-      }, periodMs);
-      store.dispatch(setTimeoutHandle({ name: timeoutName, handle }))
-    },
-    onClearTimeout: (timeoutName: string) => {
-      const handle = store.getState().vm.timeoutHandles[timeoutName];
-      if (handle) {
-        clearInterval(handle as Parameters<typeof clearInterval>[0]);
-        store.dispatch(removeTimeoutHandle(timeoutName))
-      }
-    },
-    onClearAllTimeouts: () => {
-      clearAllTimeouts();
-      console.log("Cleared all timeouts");
-    },
     onDatumSnapshot: (datumRef: DatumRef, datum: JsBridgeDatum) => {
       store.dispatch(datumSnapshot({ datumRef, datum }));
     },
@@ -250,7 +219,7 @@ export function initVmCallbacks(browserHandle: BrowserPlayerHandle): VmCallbackR
     onChannelDisplayNamesChanged: (names: Record<number, string>) => {
       store.dispatch(channelDisplayNamesChanged(names));
     },
-    ...createOwnedFlashCallbacks(flashHost),
+    ...createOwnedBrowserCallbacks(flashHost),
     onStageSizeChanged: (width: number, height: number, center: boolean) => {
       const inner = document.getElementById('stage_canvas_container');
       if (inner) {
@@ -283,7 +252,7 @@ export function initVmCallbacks(browserHandle: BrowserPlayerHandle): VmCallbackR
     flashHost = disposeFlashBridge.host;
     disposeExternalXtraHost.rebindOwner();
     disposeRegistered();
-    callbacks = { ...callbacks, ...createOwnedFlashCallbacks(flashHost) };
+    callbacks = { ...callbacks, ...createOwnedBrowserCallbacks(flashHost) };
     disposeRegistered = registerVmCallbacks(callbacks, ownerKey);
   };
   return disposeVmCallbacks;

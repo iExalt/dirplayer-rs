@@ -23,24 +23,24 @@ use super::cast_lib::{
 };
 use super::cast_manager::CastPreloadReason;
 use super::driver::{
-    checked_internal_datum, ActionCompletion, ActionKind, ActionRegistry, CompletionTicket,
-    ChildCompletion, DriverContinuation, DriverStart, DriverTurn, GlobalDispatch, PendingAction,
+    checked_internal_datum, ActionCompletion, ActionKind, ActionRegistry, ChildCompletion,
+    CompletionTicket, DriverContinuation, DriverStart, DriverTurn, GlobalDispatch, PendingAction,
     PendingCommand, ResumePhase,
 };
 use super::events::W3dClock;
-use super::ownership::{OwnerKey, OwnerToken};
-use super::{DirPlayer, PlayerVMExecutionItem, ScriptError, ScriptErrorCode};
-use super::{datum_ref::DatumRef, script_ref::ScriptInstanceRef};
 use super::handlers::datum_handlers::script_instance::ScriptInstanceUtils;
 use super::handlers::manager::BuiltInHandlerManager;
-use super::js_lingo_loader::JsRuntimeRegistry;
-use super::nested::{NestedChildRecord, NestedPlayerRegistry};
-use crate::director::lingo::datum::{Datum, VarRef};
-use super::symbols::{builtin::BuiltInSymbol, symbol::Symbol};
+use super::host_events::{BrowserHostSinkRef, BrowserHostSinkWeak, HostEventDelivery};
 use super::host_events::{
     NativeHostEventMailbox, NativeNotificationError, NativePlayerNotificationMailbox,
 };
-use super::host_events::{BrowserHostSinkRef, BrowserHostSinkWeak, HostEventDelivery};
+use super::js_lingo_loader::JsRuntimeRegistry;
+use super::nested::{NestedChildRecord, NestedPlayerRegistry};
+use super::ownership::{OwnerKey, OwnerToken};
+use super::symbols::{builtin::BuiltInSymbol, symbol::Symbol};
+use super::{datum_ref::DatumRef, script_ref::ScriptInstanceRef};
+use super::{DirPlayer, PlayerVMExecutionItem, ScriptError, ScriptErrorCode};
+use crate::director::lingo::datum::{Datum, VarRef};
 
 pub type PlayerId = u32;
 
@@ -210,7 +210,7 @@ pub struct PlayerGraph {
     players: HashMap<PlayerId, DirPlayer>,
 }
 
-pub(crate) struct NestedFlashRetirement {
+pub(crate) struct NestedBrowserOwnerRetirement {
     pub(crate) parent_owner: OwnerToken,
     pub(crate) child_owner: OwnerToken,
 }
@@ -321,9 +321,13 @@ pub struct RuntimeSession {
     /// Host resources retired while this session is mutably borrowed. The
     /// owner boundary drains this queue only after releasing the RefMut.
     pending_host_teardowns: Vec<crate::player::xtra::manager::XtraTeardownRequest>,
-    /// Exact owner keys whose nested Flash hosts must be retired after the
+    /// Exact owner keys whose nested browser hosts must be retired after the
     /// session borrow ends. Frontend cleanup may re-enter the session.
-    nested_flash_retirements: Vec<NestedFlashRetirement>,
+    nested_browser_owner_retirements: Vec<NestedBrowserOwnerRetirement>,
+    /// Timeout host actions detached during root or nested removal. They are
+    /// drained only after the session borrow ends, preserving exact owner,
+    /// name, and incarnation clears while allowing callbacks to re-enter.
+    pending_timeout_host_actions: Vec<(PlayerId, Vec<super::TimeoutHostAction>)>,
     /// Native host events are retained in an explicit bounded sink when the
     /// wasm callback surface is unavailable. They are drained by the native
     /// adapter, never silently discarded by notification pumping.
@@ -332,6 +336,7 @@ pub struct RuntimeSession {
     /// backpressure cannot consume another owner's bounded capacity.
     native_player_notifications: HashMap<PlayerId, NativePlayerNotificationMailbox>,
     native_notification_errors: HashMap<PlayerId, NativeNotificationError>,
+    native_timeout_host_unsupported: Vec<crate::js_api::TimeoutHostDispatch>,
     /// Session-owned weak bindings for the direct browser host sink. The
     /// strong capability remains on BrowserPlayerHandle.
     host_sinks: HashMap<PlayerId, (OwnerToken, BrowserHostSinkWeak)>,
@@ -591,10 +596,12 @@ impl RuntimeSession {
             js_lingo: JsRuntimeRegistry::default(),
             renderer_bindings: HashMap::new(),
             pending_host_teardowns: Vec::new(),
-            nested_flash_retirements: Vec::new(),
+            nested_browser_owner_retirements: Vec::new(),
+            pending_timeout_host_actions: Vec::new(),
             native_host_events: NativeHostEventMailbox::default(),
             native_player_notifications: HashMap::new(),
             native_notification_errors: HashMap::new(),
+            native_timeout_host_unsupported: Vec::new(),
             host_sinks: HashMap::new(),
             notification_drains: HashMap::new(),
             scheduled_notification_drains: HashMap::new(),
@@ -2643,7 +2650,7 @@ impl RuntimeSession {
             // Publication is recorded only after the frontend accepts the
             // exact parent/child registration. A failed registration has no
             // host to retire.
-            flash_owner_registered: false,
+            browser_owner_registered: false,
         };
         if let Err(error) = self.nested.insert(record) {
             let _ = self.remove_player(child_id);
@@ -2740,7 +2747,7 @@ impl RuntimeSession {
             .take_children_for_parent(parent_id, parent_owner)
     }
 
-    pub(crate) fn activate_nested_flash_route(
+    pub(crate) fn activate_nested_browser_owner_route(
         &mut self,
         parent_id: PlayerId,
         parent_owner: &OwnerToken,
@@ -2769,7 +2776,7 @@ impl RuntimeSession {
         Ok(())
     }
 
-    pub(crate) fn mark_nested_flash_owner_registered(
+    pub(crate) fn mark_nested_browser_owner_registered(
         &mut self,
         parent_id: PlayerId,
         parent_owner: &OwnerToken,
@@ -2785,21 +2792,24 @@ impl RuntimeSession {
         self.nested
             .child_mut(child_id, child_owner)
             .expect("nested child was checked above")
-            .flash_owner_registered = true;
-        self.activate_nested_flash_route(parent_id, parent_owner, child_id, child_owner)
+            .browser_owner_registered = true;
+        self.activate_nested_browser_owner_route(parent_id, parent_owner, child_id, child_owner)
     }
 
-    fn queue_nested_flash_retirement(&mut self, child: &NestedChildRecord) {
-        if child.flash_owner_registered {
-            self.nested_flash_retirements.push(NestedFlashRetirement {
-                parent_owner: child.parent_owner.clone(),
-                child_owner: child.child_owner.clone(),
-            });
+    fn queue_nested_browser_owner_retirement(&mut self, child: &NestedChildRecord) {
+        if child.browser_owner_registered {
+            self.nested_browser_owner_retirements
+                .push(NestedBrowserOwnerRetirement {
+                    parent_owner: child.parent_owner.clone(),
+                    child_owner: child.child_owner.clone(),
+                });
         }
     }
 
-    pub(crate) fn take_nested_flash_retirements(&mut self) -> Vec<NestedFlashRetirement> {
-        std::mem::take(&mut self.nested_flash_retirements)
+    pub(crate) fn take_nested_browser_owner_retirements(
+        &mut self,
+    ) -> Vec<NestedBrowserOwnerRetirement> {
+        std::mem::take(&mut self.nested_browser_owner_retirements)
     }
 
     pub(crate) fn retire_nested_child_if_owner(
@@ -3121,12 +3131,12 @@ impl RuntimeSession {
             child.command_tx.close();
             child.event_tx.close();
             let _ = self.remove_player(child.child_id);
-            self.queue_nested_flash_retirement(&child);
+            self.queue_nested_browser_owner_retirement(&child);
         }
         if let Some(child) = nested_child_reset {
-            self.queue_nested_flash_retirement(&child);
+            self.queue_nested_browser_owner_retirement(&child);
             if let Some(record) = self.nested.child_mut_identity(player_id, owner) {
-                record.flash_owner_registered = false;
+                record.browser_owner_registered = false;
             }
         }
         self.cancel_playback_loop(player_id, &current_owner, false);
@@ -3228,6 +3238,16 @@ impl RuntimeSession {
             .get(&id)
             .map(|player| player.owner.clone());
         if let Some(owner) = owner {
+            if let Some(player) = self.players.players.get_mut(&id) {
+                // Retire every active timer before removing the player. The
+                // exact incarnation on each Clear prevents a replacement
+                // owner from being affected by this detached batch.
+                player.clear_timeouts();
+                let actions = player.take_timeout_host_actions();
+                if !actions.is_empty() {
+                    self.pending_timeout_host_actions.push((id, actions));
+                }
+            }
             self.drain_eval_cancellations();
             self.record_player_owner_generation(id, owner.key().generation);
             let nested_children = self.take_nested_children_for(id, &owner);
@@ -3235,10 +3255,10 @@ impl RuntimeSession {
                 child.command_tx.close();
                 child.event_tx.close();
                 let _ = self.remove_player(child.child_id);
-                self.queue_nested_flash_retirement(&child);
+                self.queue_nested_browser_owner_retirement(&child);
             }
             if let Some(child) = self.nested.remove_child(id) {
-                self.queue_nested_flash_retirement(&child);
+                self.queue_nested_browser_owner_retirement(&child);
                 child.command_tx.close();
                 child.event_tx.close();
             }
@@ -3608,6 +3628,12 @@ impl RuntimeSession {
             .unwrap_or_default()
     }
 
+    pub(crate) fn take_timeout_host_actions(
+        &mut self,
+    ) -> Vec<(PlayerId, Vec<super::TimeoutHostAction>)> {
+        std::mem::take(&mut self.pending_timeout_host_actions)
+    }
+
     pub(crate) fn record_native_notification_error(&mut self, error: NativeNotificationError) {
         if self.player_owner_matches(error.player_id, &error.owner) {
             self.native_notification_errors
@@ -3620,6 +3646,19 @@ impl RuntimeSession {
         player_id: PlayerId,
     ) -> Option<NativeNotificationError> {
         self.native_notification_errors.remove(&player_id)
+    }
+
+    pub(crate) fn record_native_timeout_host_unsupported(
+        &mut self,
+        receipt: crate::js_api::TimeoutHostDispatch,
+    ) {
+        self.native_timeout_host_unsupported.push(receipt);
+    }
+
+    pub(crate) fn take_native_timeout_host_unsupported(
+        &mut self,
+    ) -> Vec<crate::js_api::TimeoutHostDispatch> {
+        std::mem::take(&mut self.native_timeout_host_unsupported)
     }
 
     pub(crate) fn bind_host_sink(
@@ -6261,12 +6300,12 @@ impl RuntimeSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_std::channel;
-    use binary_reader::Endian;
     use crate::director::chunks::{config::ConfigChunk, ChunkContainer};
     use crate::director::file::DirectorFile;
     use crate::player::cast_lib::CastLibState;
     use crate::player::cast_manager::CastPreloadState;
+    use async_std::channel;
+    use binary_reader::Endian;
     use url::Url;
 
     #[test]
@@ -7532,7 +7571,7 @@ mod tests {
                 context
                     .player
                     .queue_host_event(crate::player::host_events::HostEvent::FrameChanged {
-                        frame: 1,
+                        frame: 1
                     })
                     .is_ok()
             );
@@ -7549,7 +7588,7 @@ mod tests {
                 context
                     .player
                     .queue_host_event(crate::player::host_events::HostEvent::FrameChanged {
-                        frame: 2,
+                        frame: 2
                     })
                     .is_err()
             );

@@ -70,6 +70,16 @@ fn checked_flash_generation(value: f64) -> Result<u64, JsValue> {
     Ok(value as u64)
 }
 
+fn checked_timeout_incarnation(value: f64) -> Result<u64, JsValue> {
+    if !value.is_finite() || value.fract() != 0.0 || value < 1.0 || value > 9_007_199_254_740_991.0
+    {
+        return Err(JsValue::from_str(
+            "timeout incarnation is not a safe integer",
+        ));
+    }
+    Ok(value as u64)
+}
+
 fn dispatch_host_sink_event(
     sink: &BrowserHostSink,
     event: &player::host_events::HostEvent,
@@ -689,7 +699,7 @@ pub struct BrowserPlayerTestContext {
 /// the existing session/player/owner capability but never removes the player
 /// when dropped; the harness controls retirement explicitly.
 #[wasm_bindgen]
-pub struct BrowserFlashCapability {
+pub struct BrowserOwnerCapability {
     session: RuntimeSessionHandle,
     player_id: PlayerId,
     owner: OwnerToken,
@@ -699,7 +709,7 @@ pub struct BrowserFlashCapability {
     local_channels_only: bool,
 }
 
-impl BrowserFlashCapability {
+impl BrowserOwnerCapability {
     pub(crate) fn new(
         session: RuntimeSessionHandle,
         player_id: PlayerId,
@@ -776,10 +786,27 @@ impl BrowserFlashCapability {
 }
 
 #[wasm_bindgen]
-impl BrowserFlashCapability {
+impl BrowserOwnerCapability {
     pub fn owner_identity(&self) -> String {
         let key = self.owner.key();
         format!("{}:{}:{}", key.session, key.player, key.generation)
+    }
+
+    pub fn trigger_timeout(&self, name: String, incarnation: f64) -> Result<(), JsValue> {
+        let incarnation = checked_timeout_incarnation(incarnation)?;
+        if !self.owner.is_arena_live() {
+            return Err(JsValue::from_str("browser player capability is stale"));
+        }
+        self.command_tx
+            .try_send(PlayerVMExecutionItem {
+                command: PlayerVMCommand::TimeoutTriggered {
+                    owner: self.owner.clone(),
+                    name,
+                    incarnation,
+                },
+                completer: None,
+            })
+            .map_err(|_| JsValue::from_str("browser player command loop stopped"))
     }
 
     /// Publish Flash scripted-access readiness without borrowing the VM.
@@ -1815,6 +1842,15 @@ impl BrowserPlayerHandle {
         // generations while removing their stale bound/content notifications.
         session.clear_pending_host_event_deliveries(self.player_id);
 
+        // Carry pending timeout actions across the owner rotation. Reset adds
+        // exact Clear actions for every live timeout; the retired Schedule
+        // actions must also be drained so they cannot strand a browser handle.
+        let retired_timeout_actions = session
+            .with_player(self.player_id, |context| {
+                context.player.take_timeout_host_actions()
+            })
+            .unwrap_or_default();
+
         let (command_tx, command_rx) = unbounded();
         let owner = session
             .reset_player_owned(self.player_id, &self.owner)
@@ -1829,6 +1865,14 @@ impl BrowserPlayerHandle {
                 context.player.flash_binding_state.clone(),
             )
         });
+        if !retired_timeout_actions.is_empty() {
+            let _ = session.with_player(self.player_id, |context| {
+                context
+                    .player
+                    .timeout_host_actions
+                    .extend(retired_timeout_actions);
+            });
+        }
         if queue_result.is_none() {
             drop(session);
             drop(teardowns);
@@ -1836,6 +1880,7 @@ impl BrowserPlayerHandle {
         }
         drop(session);
         drop(teardowns);
+        crate::player::commands::drain_host_teardowns(&self.session);
         // Close the old sender only after reset has succeeded and the player
         // has received its replacement queue.
         self.command_tx.close();
@@ -1852,6 +1897,11 @@ impl BrowserPlayerHandle {
                 .bind_host_sink(self.player_id, &self.owner, sink)
                 .map_err(|error| JsValue::from_str(&error.message))?;
         }
+        crate::player::commands::drain_timeout_host_actions(
+            &self.session,
+            self.player_id,
+            &self.owner,
+        );
         rendering::rebind_renderer_owner(
             &self.renderer,
             self.session.clone(),
@@ -3020,13 +3070,18 @@ impl BrowserPlayerHandle {
         self.with_context(|context| context.player.step_into_line(skip_bytecode_indices))
     }
 
-    pub fn trigger_timeout(&self, name: String) -> Result<(), JsValue> {
+    pub fn trigger_timeout(&self, name: String, incarnation: f64) -> Result<(), JsValue> {
+        let incarnation = checked_timeout_incarnation(incarnation)?;
         if !self.owner.is_arena_live() {
             return Err(JsValue::from_str("browser player handle is stale"));
         }
         self.command_tx
             .try_send(PlayerVMExecutionItem {
-                command: PlayerVMCommand::TimeoutTriggered(name),
+                command: PlayerVMCommand::TimeoutTriggered {
+                    owner: self.owner.clone(),
+                    name,
+                    incarnation,
+                },
                 completer: None,
             })
             .map_err(|_| JsValue::from_str("browser player command loop stopped"))
@@ -3451,6 +3506,7 @@ impl Drop for BrowserPlayerHandle {
             drop(session);
             drop(teardowns);
         }
+        crate::player::commands::drain_host_teardowns(&self.session);
     }
 }
 
@@ -3750,11 +3806,6 @@ pub fn get_trace_log() -> JsValue {
 #[wasm_bindgen]
 pub fn set_stage_size(width: u32, height: u32) {
     player_dispatch(PlayerVMCommand::SetStageSize(width, height));
-}
-
-#[wasm_bindgen]
-pub fn trigger_timeout(name: &str) {
-    player_dispatch(PlayerVMCommand::TimeoutTriggered(name.to_string()));
 }
 
 // ── Interpreter instrumentation ─────────────────────────────────────────

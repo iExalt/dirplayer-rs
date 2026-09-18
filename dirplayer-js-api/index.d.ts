@@ -44,9 +44,8 @@ type TVmCallbacks = {
   onGlobalListChanged: (globals: Map<string, JsBridgeDatum>) => void,
   onDebugMessage: (message: string) => void,
   onDebugContent: (content: DebugContent) => void,
-  onScheduleTimeout: (timeoutName: string, periodMs: number) => void,
-  onClearTimeout: (timeoutName: string) => void,
-  onClearAllTimeouts: () => void,
+  onScheduleTimeoutOwned: (timeoutName: string, periodMs: number, incarnation: number, ownerKey: string) => void,
+  onClearTimeoutOwned: (timeoutName: string, incarnation: number, ownerKey: string) => void,
   onDatumSnapshot: (datumRef: DatumRef, datum: JsBridgeDatum) => void,
   onScriptInstanceSnapshot: (scriptInstanceRef: ScriptInstanceId, scriptInstance: JsBridgeDatum) => void,
   onChannelChanged: (channelNumber: number, channelData: ScoreSpriteSnapshot) => void,
@@ -71,12 +70,12 @@ type TVmCallbacks = {
 declare let vmCallbacks: TVmCallbacks | undefined;
 
 export function registerVmCallbacks(callbacks: TVmCallbacks, ownerKey?: string, setAsDefault?: boolean): () => void;
-export function registerNestedFlashOwner(
+export function registerNestedBrowserOwner(
   parentOwnerKey: string,
   childOwnerKey: string,
   capability: any,
 ): void;
-export function retireNestedFlashOwner(parentOwnerKey: string, childOwnerKey: string): void;
+export function retireNestedBrowserOwner(parentOwnerKey: string, childOwnerKey: string): void;
 export function dispatchVmCallback(ownerKey: string, name: string, ...args: any[]): any;
 export function onFlashMemberLoadedPrepared(
   spriteNum: number,
