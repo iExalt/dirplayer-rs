@@ -295,7 +295,7 @@
       ]
     },
     {
-      "check": "teardown and detached timeout host actions",
+      "check": "accepted Flash teardown drain path",
       "paths": [
         {
           "path": "vm-rust/src/player/commands.rs",
