@@ -132,9 +132,9 @@ def shape_member() -> bytes:
 
 
 def script_member() -> bytes:
-    # D5 Script cast member #2 points at Lscr script id 1 and is typed as a
-    # movie script. CastMemberInfo's minimal BasicList carries four empty
-    # source/name/path entries.
+    # The second CASt resource is listed first by CAS*, so it becomes movie
+    # cast member 1 and points at Lscr script id 1. CastMemberInfo's minimal
+    # BasicList carries four empty source/name/path entries.
     info = bytearray(46)
     struct.pack_into(">IIIII", info, 0, 20, 0, 0, 0, 1)
     struct.pack_into(">HIIII", info, 20, 4, 0, 1, 2, 3)
@@ -146,12 +146,14 @@ def score() -> bytes:
     frame = bytearray(96)
     sprite = bytearray(24)
     sprite[0] = 1  # sprite exists
+    sprite[10] = 255  # foreground palette index (black in SYSTEM_WIN_PALETTE)
+    sprite[11] = 0  # background palette index (white in SYSTEM_WIN_PALETTE)
     sprite[2:4] = u16(1)  # cast library
-    sprite[4:6] = u16(1)  # cast member
-    sprite[12:14] = u16(0)  # left
-    sprite[14:16] = u16(0)  # top
-    sprite[16:18] = u16(32)  # right
-    sprite[18:20] = u16(32)  # bottom
+    sprite[4:6] = u16(2)  # cast member (shape; member 1 is the movie script)
+    sprite[12:14] = u16(4)  # left
+    sprite[14:16] = u16(4)  # top
+    sprite[16:18] = u16(24)  # height; rendered rect is (4,4)-(28,28)
+    sprite[18:20] = u16(24)  # width; rendered rect is (4,4)-(28,28)
     frame[48:72] = sprite
 
     # This is the existing D5 one-frame stream shape consumed by ScoreChunk.
@@ -168,7 +170,9 @@ def container() -> bytes:
     chunks = [
         chunk("DRCF", config()),
         chunk("KEY*", key_table()),
-        chunk("CAS*", u32(3) + u32(4)),
+        # Member 1 is the movie script and member 2 is the QuickDraw shape;
+        # D5+ rendering reserves shape member 1 as a placeholder.
+        chunk("CAS*", u32(4) + u32(3)),
         chunk("CASt", shape_member()),
         chunk("CASt", script_member()),
         chunk("VWSC", score()),

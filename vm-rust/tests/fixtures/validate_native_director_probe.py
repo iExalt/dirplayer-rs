@@ -55,7 +55,7 @@ def main() -> None:
     assert u32(key, 4) == u32(key, 8) == 7
     assert [key[offset + 8:offset + 12] for offset in (12, 24, 36, 48, 60, 72, 84)] == [b"CAS*", b"CASt", b"CASt", b"VWSC", b"Lctx", b"Lnam", b"Lscr"]
 
-    assert chunks[b"CAS*"] == struct.pack(">II", 3, 4)
+    assert chunks[b"CAS*"] == struct.pack(">II", 4, 3)
     cast = chunks[b"CASt"][0]
     assert u32(cast, 0) == 8 and u32(cast, 4) == 0 and u32(cast, 8) == 17
     assert u16(cast, 12) == 1
@@ -64,6 +64,11 @@ def main() -> None:
     score = chunks[b"VWSC"]
     assert u32(score, 8) == 1
     assert len(score) >= 20 + 2 + 2 + 2 + 96 + 2
+    # The score places member 2 (the shape) in an inset 24x24 rect. Member 1
+    # is the movie script and is intentionally not rendered as a D5 placeholder.
+    assert u16(score, 78) == 2
+    assert score[84:86] == bytes((255, 0))
+    assert struct.unpack_from(">hhhh", score, 86) == (4, 4, 24, 24)
     lctx = chunks[b"Lctx"]
     assert u32(lctx, 8) == 1 and u16(lctx, 16) == 42 and u32(lctx, 32) == 7
     assert struct.unpack_from(">i", lctx, 46)[0] == 8
