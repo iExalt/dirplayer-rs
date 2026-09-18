@@ -1,6 +1,6 @@
 # Native DirPlayer cumulative readiness baseline
 
-This is the fresh cumulative baseline rebuilt from root `fa80cb175625ac0e72022ff399247623f66b00cd` and the latest sprite-variable acceptance overlay. Timer/BrowserOwner reapplication is intentionally pending this baseline review.
+This checkpoint starts from the cumulative baseline rebuilt from root `fa80cb175625ac0e72022ff399247623f66b00cd` and the latest sprite-variable acceptance overlay. It then reapplies the complete preserved BrowserOwner/timer candidate on an isolated branch.
 
 ## Exact source boundary
 
@@ -54,6 +54,39 @@ source-only checks in `semantic-retention-checks.json`:
 
 No earlier same-path hash is required to equal the later sprite version when the later overlay explicitly supersedes it.
 
+## BrowserOwner/timer source reconciliation
+
+- Corrected cumulative baseline receipt: `d4d03572`
+- Corrected cumulative source tree: `847ade6f`
+- Mechanical timer-owned formatting: `e374d357`
+- Complete BrowserOwner/timer source: `d79512f3`
+- Mechanical manifest: `timer-style-9.sha256`
+- Reconciled source manifest: `timer-source-21.sha256`
+- Scope and equivalence evidence: `timer-source-reconciliation.json`
+
+The mechanical commit contains exactly nine reviewed timer-owned Rust files.
+Each file is byte-identical to deterministic `rustfmt 1.9.0` output from
+`d4d03572` with edition 2024, `ruffle/rustfmt.toml`, `skip_children=true`, and
+import/module reordering disabled. Formatting was applied only in the isolated
+worktree and temporary proof copies; the preserved original source was not
+modified.
+
+The source commit contains exactly 21 paths. Eleven are byte-identical to the
+preserved original candidate. Six Rust paths are byte-identical after applying
+the same deterministic formatter to temporary copies of the original. The
+remaining four Rust paths report no syntactic changes in Difftastic after that
+normalization. This accounts for the complete preserved candidate, including
+the BrowserOwner rename, owner-qualified timer scheduling and clearing, timer
+incarnations, synchronous `TimeoutRef` assignment, timeout drains,
+`BrowserPlayerHandle` teardown, manager/frontend diagnostics, and the nested
+fixture.
+
+Eight formatter-only quarantine paths remain byte-identical to `d4d03572`.
+The nested Ruffle source remains at accepted commit `093de1f3`, and the
+standalone Ruffle checkout remains unchanged.
+
 ## Gate status
 
-The cumulative baseline is ready for parent review. No timer delta has been reapplied. No build, runtime test, network operation, or target formatter was run.
+The cumulative baseline and complete BrowserOwner/timer source are ready for
+parent review. No build, runtime test, or network operation was run. Focused
+native timer and browser lifecycle verification remains pending.
