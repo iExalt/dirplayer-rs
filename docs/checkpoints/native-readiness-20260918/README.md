@@ -15,6 +15,17 @@ This is the fresh cumulative baseline rebuilt from root `fa80cb175625ac0e72022ff
 
 `accepted-overlay-62.sha256` is the latest sprite acceptance manifest derived mechanically from the archive. Every extracted file hash matched its tar member hash (`62/62`); every nested overlay file matched commit `093de1f3` (`11/11`).
 
+## Rejected reconstruction history
+
+The earlier reconstruction is preserved only for audit on branch
+`codex/native-dirplayer-readiness-rejected-20260918` at `3ff6ef39`. Its
+baseline commit `1aae34c5`, timer source commit `d5bce000`, and reconciliation
+receipt `3ff6ef39` are rejected. The baseline replaced accepted mixed-file
+identities with older pre-timer variants: for example, it dropped the accepted
+shared session allocator and callback-origin fencing. The current baseline was
+rebuilt independently from the literal 62-file archive; no rejected source was
+carried forward.
+
 ## Preserved original snapshot
 
 - Original root: `/Users/clliaw/Projects/dirplayer-rs`
@@ -28,7 +39,12 @@ This is the fresh cumulative baseline rebuilt from root `fa80cb175625ac0e72022ff
 
 ## Cross-checkpoint provenance
 
-The latest sprite overlay supersedes same-path raw identities from earlier score/callback/evaluator checkpoints. `checkpoint-identity-reconciliation.json` records each prior identity and whether it remains byte-identical or is superseded. Superseded critical paths are retained by source-only checks in `semantic-retention-checks.json`:
+The latest sprite overlay supersedes same-path raw identities from earlier
+score and callback checkpoints. `checkpoint-identity-reconciliation.json`
+records the exact hashes from each checkpoint's `acceptance.json`, the current
+cumulative hash, and whether the later checkpoint is byte-identical or requires
+a semantic-retention check. Superseded critical paths are retained by
+source-only checks in `semantic-retention-checks.json`:
 
 - shared `allocate_session_id` and session allocator
 - callback-origin owner and generation fences
