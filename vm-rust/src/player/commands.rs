@@ -44,8 +44,8 @@ use super::{
     },
     font::player_load_system_font_owned,
     keyboard_events::{player_key_down, player_key_up},
-    player_alloc_datum, player_call_script_handler,
-    player_call_script_handler_turn_in_session_sync, player_dispatch_global_event,
+    player_call_script_handler,
+    player_call_script_handler_turn_in_session_sync,
     player_is_playing, reserve_player_mut, reserve_player_ref,
     score::{
         concrete_sprite_hit_test, get_concrete_sprite_rect, get_sprite_at, get_sprites_at,
@@ -4678,61 +4678,50 @@ async fn run_player_command_result(
             name: timeout_ref,
             incarnation,
         } => {
-            let (is_found, is_playing, is_script_paused, target_ref, handler_name, timeout_name) =
-                reserve_player_mut(|player| {
-                    if !trigger_owner.same_identity(&player.owner) || !trigger_owner.is_arena_live()
-                    {
-                        return (
-                            false,
-                            false,
-                            false,
-                            DatumRef::Void,
-                            Symbol::builtin(BuiltInSymbol::EmptyString),
-                            String::new(),
-                        );
-                    }
-                    if let Some(timeout) = player
-                        .timeout_manager
-                        .get_timeout_exact(&timeout_ref)
-                        .filter(|timeout| {
-                            timeout.incarnation == incarnation && timeout.is_scheduled
-                        })
-                    {
-                        let is_playing = player.is_playing;
-                        let is_script_paused = player.is_script_paused;
+            // Timeout commands run on a captured owner-bound queue. Keep the
+            // lookup, datum allocation, and handler dispatch on that owner;
+            // active-player helpers can select a root or sibling instead.
+            let timeout_state = with_owned_player(&session_handle, player_id, &owner, |player| {
+                if !trigger_owner.same_identity(&player.owner) || !trigger_owner.is_arena_live() {
+                    return None;
+                }
+                player
+                    .timeout_manager
+                    .get_timeout_exact(&timeout_ref)
+                    .filter(|timeout| timeout.incarnation == incarnation && timeout.is_scheduled)
+                    .map(|timeout| {
                         (
-                            true,
-                            is_playing,
-                            is_script_paused,
+                            player.is_playing,
+                            player.is_script_paused,
                             timeout.target_ref.clone(),
                             timeout.handler.to_owned(),
                             timeout.name.to_owned(),
                         )
-                    } else {
-                        (
-                            false,
-                            false,
-                            false,
-                            DatumRef::Void,
-                            Symbol::builtin(BuiltInSymbol::EmptyString),
-                            "".to_string(),
-                        )
-                    }
-                });
-            if !is_found {
+                    })
+            })
+            .ok()
+            .flatten();
+            let Some((is_playing, is_script_paused, target_ref, handler_name, timeout_name)) =
+                timeout_state
+            else {
                 warn!(
                     "Timeout trigger rejected as stale or missing: {}#{}",
                     timeout_ref, incarnation
                 );
                 return Ok(DatumRef::Void);
-            }
+            };
             if !is_playing || is_script_paused {
                 // TODO how to handle is_script_paused?
                 warn!("Timeout triggered but not playing");
                 return Ok(DatumRef::Void);
             }
             let timeout_name_for_args = timeout_name.clone();
-            let ref_datum = player_alloc_datum(Datum::TimeoutRef(timeout_name));
+            let ref_datum = match with_owned_player(&session_handle, player_id, &owner, |player| {
+                player.alloc_datum(Datum::TimeoutRef(timeout_name))
+            }) {
+                Ok(ref_datum) => ref_datum,
+                Err(_) => return Ok(DatumRef::Void),
+            };
             let args = vec![ref_datum];
             // Director 11.5 Scripting Dictionary, `new()` (Timeout): the
             // targetObject "indicates which CHILD OBJECT's handler should be
@@ -4748,17 +4737,50 @@ async fn run_player_command_result(
             //     on DelayEventTimeOut tEvent, tTimeOut
             // i.e. (target, timeoutObject). Dispatching the handler ON the
             // string raised "No handler DelayEventTimeOut for string datum".
-            let target_is_object = reserve_player_ref(|player| {
-                matches!(player.get_datum(&target_ref), Datum::ScriptInstanceRef(_))
-            });
+            let target_is_object =
+                match with_owned_player(&session_handle, player_id, &owner, |player| {
+                    matches!(player.get_datum(&target_ref), Datum::ScriptInstanceRef(_))
+                }) {
+                    Ok(target_is_object) => target_is_object,
+                    Err(_) => return Ok(DatumRef::Void),
+                };
             if target_is_object {
-                player_dispatch_callback_event(target_ref, handler_name, &args);
+                let _ = super::events::invoke_datum_owned(
+                    &session_handle,
+                    player_id,
+                    &owner,
+                    target_ref,
+                    handler_name,
+                    args,
+                )
+                .await;
             } else if target_ref != DatumRef::Void {
                 let mut args = vec![target_ref];
-                args.extend([player_alloc_datum(Datum::TimeoutRef(timeout_name_for_args))]);
-                player_dispatch_global_event(handler_name, &args);
+                let timeout_arg =
+                    match with_owned_player(&session_handle, player_id, &owner, |player| {
+                        player.alloc_datum(Datum::TimeoutRef(timeout_name_for_args))
+                    }) {
+                        Ok(timeout_arg) => timeout_arg,
+                        Err(_) => return Ok(DatumRef::Void),
+                    };
+                args.push(timeout_arg);
+                let _ = super::events::player_invoke_global_event_owned(
+                    session_handle.clone(),
+                    player_id,
+                    owner.clone(),
+                    handler_name,
+                    args,
+                )
+                .await;
             } else {
-                player_dispatch_global_event(handler_name, &args);
+                let _ = super::events::player_invoke_global_event_owned(
+                    session_handle.clone(),
+                    player_id,
+                    owner.clone(),
+                    handler_name,
+                    args,
+                )
+                .await;
             }
         }
         PlayerVMCommand::PrintMemberBitmapHex(member_ref) => {
@@ -6701,24 +6723,32 @@ mod owned_mouse_down_tests {
         session: Rc<RefCell<RuntimeSession>>,
         owner: OwnerToken,
     ) -> Result<crate::player::DatumRef, crate::player::ScriptError> {
-        let operation = run_player_command_result(
+        drive_command(
             PlayerVMCommand::MouseDown((10, 10)),
             session.clone(),
             1,
             owner.clone(),
-        )
-        .fuse();
+        ).await
+    }
+
+    async fn drive_command(
+        command: PlayerVMCommand,
+        session: Rc<RefCell<RuntimeSession>>,
+        player_id: u32,
+        owner: OwnerToken,
+    ) -> Result<crate::player::DatumRef, crate::player::ScriptError> {
+        let operation = run_player_command_result(command, session.clone(), player_id, owner.clone()).fuse();
         futures::pin_mut!(operation);
         let pump = async {
             loop {
-                let turns = pump_pending_commands(&session, 1);
+                let turns = pump_pending_commands(&session, player_id);
                 for turn in turns {
-                    finish_turn(&session, 1, &owner, turn).await;
+                    finish_turn(&session, player_id, &owner, turn).await;
                 }
-                let _ = pump_pending_eval_requests(&session, 1).await;
-                let (turns, _) = execute_pending_commands(&session, 1, &owner).await;
+                let _ = pump_pending_eval_requests(&session, player_id).await;
+                let (turns, _) = execute_pending_commands(&session, player_id, &owner).await;
                 for turn in turns {
-                    finish_turn(&session, 1, &owner, turn).await;
+                    finish_turn(&session, player_id, &owner, turn).await;
                 }
                 async_std::task::yield_now().await;
             }
@@ -6727,11 +6757,257 @@ mod owned_mouse_down_tests {
         match async_std::future::timeout(std::time::Duration::from_secs(2), select(operation, pump))
             .await
             .map_err(|_| {
-                crate::player::ScriptError::new("mouseDown fixture pump timed out".to_owned())
+                crate::player::ScriptError::new("owned command fixture pump timed out".to_owned())
             })? {
             Either::Left((result, _)) => result,
             Either::Right((never, _)) => match never {},
         }
+    }
+
+    fn install_timeout_observer(
+        session: &Rc<RefCell<RuntimeSession>>,
+        player_id: u32,
+    ) -> (
+        crate::player::symbols::symbol::Symbol,
+        crate::player::symbols::symbol::Symbol,
+        crate::player::symbols::symbol::Symbol,
+        crate::player::symbols::symbol::Symbol,
+    ) {
+        use crate::director::{
+            chunks::{handler::{Bytecode, HandlerDef}, script::ScriptChunk},
+            enums::ScriptType,
+            lingo::{datum::Datum, opcode::OpCode},
+        };
+        use crate::player::{
+            cast_lib::{CastLib, CastMemberRef},
+            script::Script,
+        };
+
+        let names = session
+            .borrow_mut()
+            .with_player(player_id, |context| {
+                (
+                    context.symbols.intern("browserTimeoutObserved"),
+                    context.symbols.intern("browserTimeoutCount"),
+                    context.symbols.intern("browserTimeoutArgument"),
+                    context.symbols.intern("browserTimeoutArgumentSlot1"),
+                )
+            })
+            .expect("observer player exists");
+        session
+            .borrow_mut()
+            .with_player(player_id, |context| {
+                let cast_number = context.player.movie.cast_manager.casts.len() as i32 + 1;
+                let count_value = context.player.alloc_datum(Datum::Int(0));
+                let argument_value = context.player.alloc_datum(Datum::Void);
+                let slot_one_value = context.player.alloc_datum(Datum::Void);
+                context.player.globals.insert(
+                    names.1.clone(),
+                    count_value,
+                );
+                context.player.globals.insert(
+                    names.2.clone(),
+                    argument_value,
+                );
+                context.player.globals.insert(
+                    names.3.clone(),
+                    slot_one_value,
+                );
+                let handler = Rc::new(HandlerDef {
+                    name_id: 0,
+                    bytecode_array: vec![
+                        Bytecode::new(OpCode::GetGlobal, 1, 0),
+                        Bytecode::new(OpCode::PushInt8, 1, 1),
+                        Bytecode::new(OpCode::Add, 0, 2),
+                        Bytecode::new(OpCode::SetGlobal, 1, 3),
+                        Bytecode::new(OpCode::GetParam, 0, 4),
+                        Bytecode::new(OpCode::SetGlobal, 2, 5),
+                        Bytecode::new(OpCode::GetParam, 6, 6),
+                        Bytecode::new(OpCode::SetGlobal, 3, 7),
+                        Bytecode::new(OpCode::Ret, 0, 8),
+                    ],
+                    bytecode_index_map: fxhash::FxHashMap::default(),
+                    argument_name_ids: vec![0],
+                    local_name_ids: vec![],
+                    global_name_ids: vec![1, 2, 3],
+                    compiled_ir: RefCell::new(None),
+                });
+                let member_ref = CastMemberRef {
+                    cast_lib: cast_number,
+                    cast_member: 1,
+                };
+                let script = Rc::new(Script {
+                    member_ref,
+                    name: "native-timeout-observer".to_owned(),
+                    chunk: ScriptChunk {
+                        script_number: 1,
+                        literals: vec![],
+                        handlers: vec![],
+                        property_name_ids: vec![],
+                        property_defaults: HashMap::new(),
+                    },
+                    script_type: ScriptType::Movie,
+                    handlers: fxhash::FxHashMap::from_iter([(names.0.clone(), handler)]),
+                    handler_names_raw: vec!["browserTimeoutObserved".to_owned()],
+                    handler_names: vec![names.0.clone()],
+                    properties: RefCell::new(fxhash::FxHashMap::default()),
+                });
+                let mut cast = CastLib::test_external(cast_number as u32, 0);
+                cast.name_symbols = Rc::from(vec![
+                    names.0.clone(),
+                    names.1.clone(),
+                    names.2.clone(),
+                    names.3.clone(),
+                ]);
+                cast.scripts.insert(1, script);
+                context.player.movie.cast_manager.casts.push(cast);
+                context.player.movie.cast_manager.clear_movie_script_cache();
+                context.player.is_playing = true;
+            })
+            .expect("observer fixture installed");
+        names
+    }
+
+    fn install_timeout(
+        session: &Rc<RefCell<RuntimeSession>>,
+        player_id: u32,
+        handler: crate::player::symbols::symbol::Symbol,
+    ) -> u64 {
+        let replacement = session
+            .borrow_mut()
+            .with_player(player_id, |context| {
+                context.player.timeout_manager.replace_timeout(
+                    crate::player::timeout::Timeout {
+                        name: "ChildTimer".to_owned(),
+                        period: 60_000,
+                        handler,
+                        target_ref: crate::player::DatumRef::Void,
+                        is_scheduled: true,
+                        incarnation: 0,
+                        next_fire_ms: 60_000.0,
+                    },
+                    0.0,
+                )
+            })
+            .expect("timeout player exists")
+            .expect("timeout replacement succeeds");
+        replacement.new.incarnation
+    }
+
+    fn read_timeout_observer(
+        session: &Rc<RefCell<RuntimeSession>>,
+        player_id: u32,
+        names: &(
+            crate::player::symbols::symbol::Symbol,
+            crate::player::symbols::symbol::Symbol,
+            crate::player::symbols::symbol::Symbol,
+            crate::player::symbols::symbol::Symbol,
+        ),
+    ) -> (i32, Option<String>, String) {
+        session
+            .borrow_mut()
+            .with_player(player_id, |context| {
+                let count = match context.player.get_datum(
+                    context.player.globals.get(&names.1).expect("count global"),
+                ) {
+                    crate::director::lingo::datum::Datum::Int(value) => *value,
+                    _ => 0,
+                };
+                let argument = match context.player.get_datum(
+                    context.player.globals.get(&names.2).expect("argument global"),
+                ) {
+                    crate::director::lingo::datum::Datum::TimeoutRef(name) => Some(name.clone()),
+                    _ => None,
+                };
+                let slot_one = context
+                    .player
+                    .get_datum(context.player.globals.get(&names.3).expect("slot one global"))
+                    .type_str()
+                    .to_owned();
+                (count, argument, slot_one)
+            })
+            .expect("observer player exists")
+    }
+
+    #[test]
+    fn timeout_triggered_preserves_observer_argument_in_nested_and_root_scopes() {
+        use crate::player::cast_lib::CastMemberRef;
+
+        let mut nested_runtime = RuntimeSession::new(SymbolOwner {
+            session: 9_210,
+            generation: 1,
+        });
+        assert!(nested_runtime.add_player(1, channel::unbounded().0));
+        let parent_owner = nested_runtime
+            .with_player(1, |context| context.player.owner.clone())
+            .expect("nested parent exists");
+        let (command_tx, _command_rx) = channel::unbounded();
+        let (event_tx, _event_rx) = channel::unbounded();
+        let (child_id, child_owner) = nested_runtime
+            .register_nested_player(
+                1,
+                &parent_owner,
+                CastMemberRef {
+                    cast_lib: 1,
+                    cast_member: 1,
+                },
+                command_tx,
+                event_tx,
+            )
+            .expect("nested child registration succeeds");
+        nested_runtime
+            .activate_nested_browser_owner_route(1, &parent_owner, child_id, &child_owner)
+            .expect("nested owner route activates");
+        let nested_session = Rc::new(RefCell::new(nested_runtime));
+        assert!(nested_session.borrow().nested_child_owned(child_id, &child_owner).is_some());
+        let nested_names = install_timeout_observer(&nested_session, child_id);
+        let nested_incarnation = install_timeout(&nested_session, child_id, nested_names.0.clone());
+        let nested_result = async_std::task::block_on(drive_command(
+            PlayerVMCommand::TimeoutTriggered {
+                owner: child_owner.clone(),
+                name: "ChildTimer".to_owned(),
+                incarnation: nested_incarnation,
+            },
+            nested_session.clone(),
+            child_id,
+            child_owner.clone(),
+        ));
+        assert!(nested_result.is_ok(), "nested timeout command failed: {nested_result:?}");
+        let nested_state = read_timeout_observer(&nested_session, child_id, &nested_names);
+        assert!(nested_session.borrow().nested_child_owned(child_id, &child_owner).is_some());
+
+        let mut root_runtime = RuntimeSession::new(SymbolOwner {
+            session: 9_211,
+            generation: 1,
+        });
+        assert!(root_runtime.add_player(1, channel::unbounded().0));
+        let root_owner = root_runtime
+            .with_player(1, |context| context.player.owner.clone())
+            .expect("root exists");
+        let root_session = Rc::new(RefCell::new(root_runtime));
+        let root_names = install_timeout_observer(&root_session, 1);
+        let root_incarnation = install_timeout(&root_session, 1, root_names.0.clone());
+        let root_result = async_std::task::block_on(drive_command(
+            PlayerVMCommand::TimeoutTriggered {
+                owner: root_owner.clone(),
+                name: "ChildTimer".to_owned(),
+                incarnation: root_incarnation,
+            },
+            root_session.clone(),
+            1,
+            root_owner,
+        ));
+        assert!(root_result.is_ok(), "root timeout command failed: {root_result:?}");
+        let root_state = read_timeout_observer(&root_session, 1, &root_names);
+        assert_eq!(
+            nested_state,
+            (1, Some("ChildTimer".to_owned()), "void".to_owned())
+        );
+
+        assert_eq!(
+            root_state,
+            (1, Some("ChildTimer".to_owned()), "void".to_owned())
+        );
     }
 
     #[test]

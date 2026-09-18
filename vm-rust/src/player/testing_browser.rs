@@ -618,14 +618,15 @@ fn install_timeout_observer(
             let handler = Rc::new(HandlerDef {
                 name_id: 0,
                 bytecode_array: vec![
-                    Bytecode::new(OpCode::GetGlobal, 1, 0),
-                    Bytecode::new(OpCode::PushInt8, 1, 1),
-                    Bytecode::new(OpCode::Add, 0, 2),
-                    Bytecode::new(OpCode::SetGlobal, 1, 3),
                     // A timeout with no target receives the exact
                     // TimeoutRef as its first handler argument.
-                    Bytecode::new(OpCode::GetParam, 6, 4),
-                    Bytecode::new(OpCode::SetGlobal, 2, 5),
+                    Bytecode::new(OpCode::GetParam, 0, 0),
+                    Bytecode::new(OpCode::SetGlobal, 2, 1),
+                    // Publish completion only after the argument slot is stored.
+                    Bytecode::new(OpCode::GetGlobal, 1, 2),
+                    Bytecode::new(OpCode::PushInt8, 1, 3),
+                    Bytecode::new(OpCode::Add, 0, 4),
+                    Bytecode::new(OpCode::SetGlobal, 1, 5),
                     Bytecode::new(OpCode::Ret, 0, 6),
                 ],
                 bytecode_index_map: FxHashMap::default(),
@@ -673,7 +674,11 @@ fn install_timeout_observer(
             cast.scripts.insert(1, script);
             context.player.movie.cast_manager.casts.push(cast);
             context.player.movie.cast_manager.clear_movie_script_cache();
-            Some((handler_name, count_name, argument_name))
+            Some((
+                handler_name,
+                count_name,
+                argument_name,
+            ))
         })
         .flatten()
         .ok_or_else(|| "timeout observer owner player disappeared".to_owned())
@@ -1779,10 +1784,13 @@ impl BrowserTestPlayer {
             0,
         )
         .await?;
+        let scheduled_reentry_incarnation = reentry_timer_b
+            .checked_add(1)
+            .ok_or_else(|| "reentry timeout incarnation overflow".to_owned())?;
         reset_browser_owner_timer_clear_record(
             &owner_key_b_after_reset,
             "Reentry",
-            reentry_timer_b,
+            scheduled_reentry_incarnation,
         )?;
         install_browser_owner_timer_reset_reentry(&owner_key_b_after_reset, root_b)?;
         mutate_owned_timeout(
@@ -1797,7 +1805,7 @@ impl BrowserTestPlayer {
             &owner_key_b_after_reset,
             "Reentry",
             5,
-            reentry_timer_b,
+            scheduled_reentry_incarnation,
             "current",
         )
         .await?
@@ -1807,9 +1815,17 @@ impl BrowserTestPlayer {
             );
         }
         let reentry_clear_count =
-            browser_owner_timer_clear_count(&owner_key_b_after_reset, "Reentry", reentry_timer_b)?;
+            browser_owner_timer_clear_count(
+                &owner_key_b_after_reset,
+                "Reentry",
+                scheduled_reentry_incarnation,
+            )?;
         let reentry_clear_phases =
-            browser_owner_timer_clear_phases(&owner_key_b_after_reset, "Reentry", reentry_timer_b)?;
+            browser_owner_timer_clear_phases(
+                &owner_key_b_after_reset,
+                "Reentry",
+                scheduled_reentry_incarnation,
+            )?;
         if reentry_clear_count < 2
             || reentry_clear_phases
                 .iter()
@@ -3108,11 +3124,12 @@ impl BrowserTestPlayer {
                 root_key_a.session, root_key_b.session, child_key_a, child_key_b,
             ));
         }
-
         let child_owner_key_a = format!(
             "{}:{}:{}",
             child_key_a.session, child_key_a.player, child_key_a.generation
         );
+
+        const NESTED_CHILD_TIMER_PERIOD_MS: u32 = 60_000;
         let (timeout_handler, timeout_count, timeout_argument) =
             install_timeout_observer(root_a.session().clone(), child_a, &child_owner_a)?;
         let child_timer = create_owned_timeout_with_handler(
@@ -3120,7 +3137,7 @@ impl BrowserTestPlayer {
             child_a,
             child_owner_a.clone(),
             "ChildTimer",
-            1,
+            NESTED_CHILD_TIMER_PERIOD_MS,
             "browserTimeoutObserved",
         )
         .await?;
@@ -3179,7 +3196,7 @@ impl BrowserTestPlayer {
             child_a,
             child_owner_a.clone(),
             "ChildTimer",
-            1,
+            NESTED_CHILD_TIMER_PERIOD_MS,
             "browserTimeoutObserved",
         )
         .await?;
@@ -3221,12 +3238,18 @@ impl BrowserTestPlayer {
                 observed_child_timeout
             ));
         }
-        if browser_owner_timer_probe(&child_owner_key_a, "ChildTimer", 1, child_timer, "current")
+        if browser_owner_timer_probe(
+            &child_owner_key_a,
+            "ChildTimer",
+            NESTED_CHILD_TIMER_PERIOD_MS,
+            child_timer,
+            "current",
+        )
             .await?
             || !browser_owner_timer_probe(
                 &child_owner_key_a,
                 "ChildTimer",
-                1,
+                NESTED_CHILD_TIMER_PERIOD_MS,
                 replacement_timer,
                 "current",
             )
@@ -3244,7 +3267,7 @@ impl BrowserTestPlayer {
         if browser_owner_timer_probe(
             &child_owner_key_a,
             "ChildTimer",
-            1,
+            NESTED_CHILD_TIMER_PERIOD_MS,
             replacement_timer,
             "current",
         )
