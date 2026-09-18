@@ -35,6 +35,34 @@ function registerTrackedVmCallbacks(callbacks, ownerKey, setAsDefault = true) {
   };
 }
 
+const _browserHandleTimers = new Map();
+function scheduleBrowserHandleTimer(ownerKey, handle, name, period, incarnation) {
+  if (!Number.isFinite(period) || period <= 0) return;
+  const timers = _browserHandleTimers.get(ownerKey) || new Map();
+  const previous = timers.get(name);
+  if (previous && previous.incarnation !== incarnation) clearInterval(previous.handle);
+  const reservation = { incarnation, handle: undefined };
+  timers.set(name, reservation);
+  _browserHandleTimers.set(ownerKey, timers);
+  const intervalHandle = setInterval(() => {
+    if (_browserHandleTimers.get(ownerKey)?.get(name) !== reservation) return;
+    try {
+      handle.trigger_timeout(name, incarnation);
+    } catch {
+      clearBrowserHandleTimer(ownerKey, name, incarnation);
+    }
+  }, period);
+  if (timers.get(name) === reservation) reservation.handle = intervalHandle;
+  else clearInterval(intervalHandle);
+}
+function clearBrowserHandleTimer(ownerKey, name, incarnation) {
+  const timers = _browserHandleTimers.get(ownerKey);
+  const current = timers?.get(name);
+  if (!current || current.incarnation !== incarnation) return;
+  clearInterval(current.handle);
+  timers.delete(name);
+}
+
 // Stubs for the dirplayer-js-api module.
 // In production, these are provided by the Electron host.
 export function onMovieLoaded() {}
@@ -71,6 +99,8 @@ export function __testRegisterBrowserHandleCallback(ownerKey, callback, rebindHa
     onScriptError: (data) => invokeBrowserHandleCallback(ownerKey, callback, 'scriptError', rebindHandle, rebindOnChannel, data),
     onDatumSnapshot: (datumRef, snapshot) => invokeBrowserHandleCallback(ownerKey, callback, 'datum', rebindHandle, rebindOnChannel, datumRef, snapshot),
     onScriptInstanceSnapshot: (instanceId, snapshot) => invokeBrowserHandleCallback(ownerKey, callback, 'scriptInstance', rebindHandle, rebindOnChannel, instanceId, snapshot),
+    onScheduleTimeoutOwned: (name, period, incarnation) => scheduleBrowserHandleTimer(ownerKey, rebindHandle, name, period, incarnation),
+    onClearTimeoutOwned: (name, incarnation) => clearBrowserHandleTimer(ownerKey, name, incarnation),
   }, ownerKey);
   _browserHandleRegistrations.set(ownerKey, registration);
 }
@@ -140,32 +170,11 @@ export function onDebugMessage() {}
 export function onDebugContent() {}
 export function onMovieLoadFailed() {}
 
-// Timeout handling — mirrors the real Electron host behavior.
-// Uses setInterval to call trigger_timeout, which dispatches
-// TimeoutTriggered commands through the player's command loop.
-const _timeoutHandles = {};
-export function onScheduleTimeout(name, periodMs) {
-  if (_timeoutHandles[name]) clearInterval(_timeoutHandles[name]);
-  _timeoutHandles[name] = setInterval(() => {
-    if (window.__wasm_trigger_timeout) window.__wasm_trigger_timeout(name);
-  }, periodMs);
+export function onScheduleTimeoutOwned(ownerKey, name, periodMs, incarnation) {
+  dispatchRealVmCallback(ownerKey, 'onScheduleTimeoutOwned', name, periodMs, incarnation, ownerKey);
 }
-export function onClearTimeout(name) {
-  if (_timeoutHandles[name]) {
-    clearInterval(_timeoutHandles[name]);
-    delete _timeoutHandles[name];
-  }
-}
-export function onClearTimeouts() {
-  for (const name of Object.keys(_timeoutHandles)) {
-    clearInterval(_timeoutHandles[name]);
-  }
-}
-export function onClearAllTimeouts() {
-  for (const name of Object.keys(_timeoutHandles)) {
-    clearInterval(_timeoutHandles[name]);
-    delete _timeoutHandles[name];
-  }
+export function onClearTimeoutOwned(ownerKey, name, incarnation) {
+  dispatchRealVmCallback(ownerKey, 'onClearTimeoutOwned', name, incarnation, ownerKey);
 }
 
 export function onDatumSnapshot() {}
@@ -177,17 +186,22 @@ export function onExternalEvent() {}
 // imports resolve to no-ops so tests without Flash still run.
 let _flashManager = null;
 let _flashManagerPromise = null;
-let _nestedFlashController = null;
-const _nestedFlashOwnerKeys = new Set();
+let _nestedBrowserOwnerController = null;
+const _nestedBrowserOwnerKeys = new Set();
 // Existing owner callback routing is the temporary browser-harness boundary.
-// The FlashOwnerHost itself remains captured by each registration closure.
-const _flashOwnerCallbacks = new Map();
-function installProductionNestedFlashController(manager) {
-  if (typeof window.dirplayer_registerNestedFlashOwner === 'function') return;
-  if (typeof manager.createFlashOwnerController !== 'function') {
-    throw new Error('production nested Flash controller factory is unavailable');
+// The BrowserOwnerHost itself remains captured by each registration closure.
+const _browserOwnerCallbacks = new Map();
+const _browserOwnerTimerResetReentry = new Map();
+const _browserOwnerTimerClearCounts = new Map();
+const _browserOwnerTimerClearPhases = new Map();
+const _browserOwnerTimerClearPhase = new Map();
+const browserOwnerTimerClearKey = (ownerKey, name, incarnation) => `${ownerKey}\u0000${name}\u0000${incarnation}`;
+function installProductionNestedBrowserController(manager) {
+  if (typeof window.dirplayer_registerNestedBrowserOwner === 'function') return;
+  if (typeof manager.createBrowserOwnerController !== 'function') {
+    throw new Error('production nested browser owner controller factory is unavailable');
   }
-  _nestedFlashController = manager.createFlashOwnerController((callbacks, ownerKey, setAsDefault) =>
+  _nestedBrowserOwnerController = manager.createBrowserOwnerController((callbacks, ownerKey, setAsDefault) =>
     (() => {
       if (_failNextNestedCallbackRegistration) {
         _failNextNestedCallbackRegistration = false;
@@ -213,25 +227,25 @@ function installProductionNestedFlashController(manager) {
       }
       return registerTrackedVmCallbacks(callbacks, ownerKey, setAsDefault);
     })());
-  window.dirplayer_registerNestedFlashOwner = (parentOwnerKey, childOwnerKey, capability) => {
-    const result = _nestedFlashController.registerNested(parentOwnerKey, childOwnerKey, capability);
-    _nestedFlashOwnerKeys.add(childOwnerKey);
+  window.dirplayer_registerNestedBrowserOwner = (parentOwnerKey, childOwnerKey, capability) => {
+    const result = _nestedBrowserOwnerController.registerNested(parentOwnerKey, childOwnerKey, capability);
+    _nestedBrowserOwnerKeys.add(childOwnerKey);
     return result;
   };
-  window.dirplayer_retireNestedFlashOwner = (parentOwnerKey, childOwnerKey) => {
+  window.dirplayer_retireNestedBrowserOwner = (parentOwnerKey, childOwnerKey) => {
     try {
-      return _nestedFlashController.retireNested(parentOwnerKey, childOwnerKey);
+      return _nestedBrowserOwnerController.retireNested(parentOwnerKey, childOwnerKey);
     } finally {
-      _nestedFlashOwnerKeys.delete(childOwnerKey);
+      _nestedBrowserOwnerKeys.delete(childOwnerKey);
     }
   };
 }
 
-export function dirplayer_testNestedFlashOwnerKeys() {
-  return Array.from(_nestedFlashOwnerKeys);
+export function dirplayer_testNestedBrowserOwnerKeys() {
+  return Array.from(_nestedBrowserOwnerKeys);
 }
 
-export function dirplayer_testDispatchFlashOwnerAction(ownerKey, method, ...args) {
+export function dirplayer_testDispatchBrowserOwnerAction(ownerKey, method, ...args) {
   if (!_realVmOwnerKeys.has(ownerKey)) return false;
   dispatchRealVmCallback(ownerKey, method, ...args);
   return true;
@@ -252,7 +266,7 @@ export function dirplayer_testQueuePreparedFlashAction(ownerKey) {
   );
 }
 
-export function dirplayer_testProbePreparedFlashOwner(ownerKey) {
+export function dirplayer_testProbePreparedBrowserOwner(ownerKey) {
   let adopted = false;
   const dispose = registerRealVmCallbacks({
     onFlashMemberLoaded: () => { adopted = true; },
@@ -295,28 +309,53 @@ export function dirplayer_testProbeFailedNestedHostAbsent(ownerKey) {
 
 // BrowserTestPlayer registers a non-owning, exact-generation capability here.
 // The capability is disposed before the harness retires its player.
-export function dirplayer_registerFlashOwner(ownerKey, capability) {
+export function dirplayer_registerBrowserOwner(ownerKey, capability) {
   if (typeof ownerKey !== 'string' || !ownerKey || !capability) return;
-  _flashOwnerCallbacks.get(ownerKey)?.dispose();
+  _browserOwnerCallbacks.get(ownerKey)?.dispose();
   let disposed = false;
   let registration;
   const registrationReady = flashManager().then(m => {
     if (disposed) return undefined;
-    installProductionNestedFlashController(m);
-    const ownerRegistration = m.registerFlashOwner?.(ownerKey, capability);
+    installProductionNestedBrowserController(m);
+    const ownerRegistration = m.registerBrowserOwner?.(ownerKey, capability);
     const bridgeDisposer = m.initFlashBridge?.(capability, ownerRegistration);
     if (!bridgeDisposer && !ownerRegistration) {
-      throw new Error(`Flash owner ${ownerKey} could not be registered`);
+      throw new Error(`browser owner ${ownerKey} could not be registered`);
     }
     const host = bridgeDisposer?.host ?? ownerRegistration?.host;
-    if (!host || typeof m.createOwnedFlashCallbacks !== 'function') {
+    if (!host || typeof m.createOwnedBrowserCallbacks !== 'function') {
       bridgeDisposer?.();
       if (!bridgeDisposer) ownerRegistration?.dispose?.();
-      throw new Error(`Flash owner ${ownerKey} lacks the production callback factory`);
+      throw new Error(`browser owner ${ownerKey} lacks the production callback factory`);
     }
-    const ownedCallbacks = m.createOwnedFlashCallbacks(host);
-    Object.assign(callbacks, ownedCallbacks);
-    const disposeCallbacks = registerTrackedVmCallbacks(ownedCallbacks, ownerKey, false);
+    const ownedCallbacks = m.createOwnedBrowserCallbacks(host);
+    const reentryCallbacks = {
+      ...ownedCallbacks,
+      onScheduleTimeoutOwned: (name, periodMs, incarnation, callbackOwnerKey) => {
+        const result = ownedCallbacks.onScheduleTimeoutOwned(name, periodMs, incarnation, callbackOwnerKey);
+        const handle = _browserOwnerTimerResetReentry.get(ownerKey);
+        if (handle) {
+          _browserOwnerTimerResetReentry.delete(ownerKey);
+          _browserOwnerTimerClearPhase.set(ownerKey, 'during-reset');
+          try {
+            handle.reset();
+          } finally {
+            _browserOwnerTimerClearPhase.set(ownerKey, 'post-reset');
+          }
+        }
+        return result;
+      },
+      onClearTimeoutOwned: (name, incarnation, callbackOwnerKey) => {
+        const key = browserOwnerTimerClearKey(callbackOwnerKey, name, incarnation);
+        _browserOwnerTimerClearCounts.set(key, (_browserOwnerTimerClearCounts.get(key) || 0) + 1);
+        const phases = _browserOwnerTimerClearPhases.get(key) || [];
+        phases.push(_browserOwnerTimerClearPhase.get(callbackOwnerKey) || 'outside-reentry');
+        _browserOwnerTimerClearPhases.set(key, phases);
+        return ownedCallbacks.onClearTimeoutOwned(name, incarnation, callbackOwnerKey);
+      },
+    };
+    Object.assign(callbacks, reentryCallbacks);
+    const disposeCallbacks = registerTrackedVmCallbacks(reentryCallbacks, ownerKey, false);
     registration = {
       host,
       dispose: () => {
@@ -334,10 +373,10 @@ export function dirplayer_registerFlashOwner(ownerKey, capability) {
       registration?.dispose?.();
     },
   };
-  _flashOwnerCallbacks.set(ownerKey, callbacks);
+  _browserOwnerCallbacks.set(ownerKey, callbacks);
   registrationReady.catch(error => {
     callbacks.dispose();
-    console.error(`Flash owner ${ownerKey} registration failed:`, error);
+    console.error(`browser owner ${ownerKey} registration failed:`, error);
   });
   // These routers are stable for the page lifetime and resolve the exact
   // owner closure, so registering a later player cannot replace an earlier
@@ -350,11 +389,56 @@ export function dirplayer_registerFlashOwner(ownerKey, capability) {
     dispatchRealVmCallback(requestedOwnerKey, 'onFlashLocalConnectionSendOwned', name, method, argsJson) ?? false;
   return registrationReady;
 }
-export function dirplayer_unregisterFlashOwner(ownerKey) {
+export function dirplayer_unregisterBrowserOwner(ownerKey) {
   if (typeof ownerKey !== 'string') return;
-  const callbacks = _flashOwnerCallbacks.get(ownerKey);
-  _flashOwnerCallbacks.delete(ownerKey);
+  const callbacks = _browserOwnerCallbacks.get(ownerKey);
+  _browserOwnerCallbacks.delete(ownerKey);
   callbacks?.dispose();
+}
+
+export function dirplayer_testInstallBrowserOwnerTimerResetReentry(ownerKey, handle) {
+  if (typeof ownerKey !== 'string' || !handle || typeof handle.reset !== 'function') return false;
+  _browserOwnerTimerResetReentry.set(ownerKey, handle);
+  return true;
+}
+
+export function dirplayer_testClearBrowserOwnerTimerResetReentry(ownerKey) {
+  _browserOwnerTimerResetReentry.delete(ownerKey);
+}
+
+export function dirplayer_testResetBrowserOwnerTimerClearRecord(ownerKey, name, incarnation) {
+  const key = browserOwnerTimerClearKey(ownerKey, name, incarnation);
+  _browserOwnerTimerClearCounts.delete(key);
+  _browserOwnerTimerClearPhases.delete(key);
+  _browserOwnerTimerClearPhase.delete(ownerKey);
+}
+
+export function dirplayer_testBrowserOwnerTimerClearCount(ownerKey, name, incarnation) {
+  return _browserOwnerTimerClearCounts.get(browserOwnerTimerClearKey(ownerKey, name, incarnation)) || 0;
+}
+
+export function dirplayer_testBrowserOwnerTimerClearPhases(ownerKey, name, incarnation) {
+  return _browserOwnerTimerClearPhases.get(browserOwnerTimerClearKey(ownerKey, name, incarnation)) || [];
+}
+
+export async function dirplayer_testBrowserOwnerTimerProbe(
+  ownerKey,
+  name,
+  period,
+  incarnation,
+  operation = 'schedule',
+) {
+  const callbacks = _browserOwnerCallbacks.get(ownerKey);
+  if (!callbacks || typeof name !== 'string' || !Number.isSafeInteger(incarnation) || incarnation <= 0) return false;
+  if (operation === 'schedule') {
+    dispatchRealVmCallback(ownerKey, 'onScheduleTimeoutOwned', name, period, incarnation, ownerKey);
+  } else if (operation === 'clear') {
+    dispatchRealVmCallback(ownerKey, 'onClearTimeoutOwned', name, incarnation, ownerKey);
+  }
+  const manager = await flashManager();
+  return operation === 'current'
+    ? manager.isBrowserOwnerTimerCurrent?.(ownerKey, name, incarnation) === true
+    : true;
 }
 
 // Owner-bound Lingo callback exports mirror the production browser module.
@@ -374,24 +458,24 @@ export function triggerLingoCallbackOnScriptRuffle(...args) {
 }
 
 // BrowserPlayerHandle capability regression helper. This instantiates the
-// production FlashOwnerHost with the actual wasm capability object supplied by
+// production BrowserOwnerHost with the actual wasm capability object supplied by
 // the Rust harness; it does not substitute a mock setter or expose host state.
-export async function dirplayer_testFlashOwnerCapability(ownerKey, capability, observe) {
+export async function dirplayer_testBrowserOwnerCapability(ownerKey, capability, observe) {
   const manager = await flashManager();
-  if (typeof manager.FlashOwnerHost !== 'function') {
-    throw new Error('FlashOwnerHost production class is unavailable');
+  if (typeof manager.BrowserOwnerHost !== 'function') {
+    throw new Error('BrowserOwnerHost production class is unavailable');
   }
-  const host = new manager.FlashOwnerHost(ownerKey, capability);
+  const host = new manager.BrowserOwnerHost(ownerKey, capability);
   const ticket = host.beginScriptedAccess(1);
-  if (ticket === undefined) throw new Error('FlashOwnerHost rejected live capability');
+  if (ticket === undefined) throw new Error('BrowserOwnerHost rejected live capability');
   observe?.('begin');
   host.completeScriptedAccess(1, ticket);
   observe?.('complete');
   if (host.scriptedAccessRequestCount() !== 0) {
-    throw new Error('FlashOwnerHost retained completed scripted access');
+    throw new Error('BrowserOwnerHost retained completed scripted access');
   }
   const secondTicket = host.beginScriptedAccess(1);
-  if (secondTicket === undefined) throw new Error('FlashOwnerHost rejected second live capability wait');
+  if (secondTicket === undefined) throw new Error('BrowserOwnerHost rejected second live capability wait');
   observe?.('begin-again');
   host.dispose();
   observe?.('dispose');
@@ -485,6 +569,6 @@ export {
 // directly. Forward them through the real production bridge so the browser
 // fixture exercises the same window controller without duplicating it here.
 export {
-  registerNestedFlashOwner,
-  retireNestedFlashOwner,
+  registerNestedBrowserOwner,
+  retireNestedBrowserOwner,
 } from './dirplayer-js-api-real.js';

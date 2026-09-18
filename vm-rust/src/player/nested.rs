@@ -16,8 +16,8 @@ use super::{
     commands::PlayerVMCommand,
     events::PlayerVMEvent,
     font::BitmapFont,
-    ownership::{OwnerKey, OwnerToken},
     owner_key_string,
+    ownership::{OwnerKey, OwnerToken},
     session::{ExecutionContext, PlayerId, RuntimeSessionHandle},
     PlayerVMExecutionItem, ScriptError,
 };
@@ -147,7 +147,7 @@ pub(crate) struct NestedChildRecord {
     pub(crate) child_owner: OwnerToken,
     pub(crate) command_tx: Sender<PlayerVMExecutionItem>,
     pub(crate) event_tx: Sender<PlayerVMEvent>,
-    pub(crate) flash_owner_registered: bool,
+    pub(crate) browser_owner_registered: bool,
 }
 
 #[derive(Default)]
@@ -294,7 +294,7 @@ impl NestedPlayerRegistry {
         record.child_owner = new_owner;
         record.command_tx = command_tx;
         record.event_tx = event_tx;
-        record.flash_owner_registered = false;
+        record.browser_owner_registered = false;
         Ok((parent_id, parent_owner))
     }
 
@@ -411,7 +411,7 @@ pub(crate) async fn start_nested_movie_owned(
             )
         })
         .ok_or_else(crate::player::cancelled_scope_error)?;
-    let flash_capability = crate::BrowserFlashCapability::new_child(
+    let browser_owner_capability = crate::BrowserOwnerCapability::new_child(
         session.clone(),
         child_id,
         child_owner.clone(),
@@ -422,14 +422,14 @@ pub(crate) async fn start_nested_movie_owned(
     let child_owner_key = owner_key_string(&child_owner);
     #[cfg(target_arch = "wasm32")]
     {
-        let flash_capability: wasm_bindgen::JsValue = flash_capability.into();
-        crate::js_api::JsApi::register_nested_flash_owner(
+        let browser_owner_capability: wasm_bindgen::JsValue = browser_owner_capability.into();
+        crate::js_api::JsApi::register_nested_browser_owner(
             &parent_owner_key,
             &child_owner_key,
-            &flash_capability,
+            &browser_owner_capability,
         )?;
         let mark_result = {
-            let result = session.borrow_mut().mark_nested_flash_owner_registered(
+            let result = session.borrow_mut().mark_nested_browser_owner_registered(
                 start.parent_id,
                 &start.parent_owner,
                 child_id,
@@ -441,9 +441,10 @@ pub(crate) async fn start_nested_movie_owned(
             // The callback may synchronously reset either side of the pair.
             // Retire the exact registration before startup guard cleanup so a
             // replacement child can never inherit this host.
-            if let Err(retire_error) =
-                crate::js_api::JsApi::retire_nested_flash_owner(&parent_owner_key, &child_owner_key)
-            {
+            if let Err(retire_error) = crate::js_api::JsApi::retire_nested_browser_owner(
+                &parent_owner_key,
+                &child_owner_key,
+            ) {
                 log::error!("nested Flash registration rollback failed: {retire_error}");
             }
             return Err(error);
@@ -451,8 +452,8 @@ pub(crate) async fn start_nested_movie_owned(
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let _ = flash_capability;
-        session.borrow_mut().activate_nested_flash_route(
+        let _ = browser_owner_capability;
+        session.borrow_mut().activate_nested_browser_owner_route(
             start.parent_id,
             &start.parent_owner,
             child_id,
@@ -578,7 +579,7 @@ pub(crate) fn reset_nested_player_owned(
             )
         })
         .ok_or_else(crate::player::cancelled_scope_error)?;
-    let flash_capability = crate::BrowserFlashCapability::new_child(
+    let browser_owner_capability = crate::BrowserOwnerCapability::new_child(
         session.clone(),
         child_id,
         new_owner.clone(),
@@ -589,11 +590,11 @@ pub(crate) fn reset_nested_player_owned(
     let child_owner_key = owner_key_string(&new_owner);
     #[cfg(target_arch = "wasm32")]
     {
-        let flash_capability: wasm_bindgen::JsValue = flash_capability.into();
-        if let Err(error) = crate::js_api::JsApi::register_nested_flash_owner(
+        let browser_owner_capability: wasm_bindgen::JsValue = browser_owner_capability.into();
+        if let Err(error) = crate::js_api::JsApi::register_nested_browser_owner(
             &parent_owner_key,
             &child_owner_key,
-            &flash_capability,
+            &browser_owner_capability,
         ) {
             session
                 .borrow_mut()
@@ -602,7 +603,7 @@ pub(crate) fn reset_nested_player_owned(
             return Err(error);
         }
         let mark_result = {
-            let result = session.borrow_mut().mark_nested_flash_owner_registered(
+            let result = session.borrow_mut().mark_nested_browser_owner_registered(
                 parent_id,
                 &parent_owner,
                 child_id,
@@ -611,9 +612,10 @@ pub(crate) fn reset_nested_player_owned(
             result
         };
         if let Err(error) = mark_result {
-            if let Err(retire_error) =
-                crate::js_api::JsApi::retire_nested_flash_owner(&parent_owner_key, &child_owner_key)
-            {
+            if let Err(retire_error) = crate::js_api::JsApi::retire_nested_browser_owner(
+                &parent_owner_key,
+                &child_owner_key,
+            ) {
                 log::error!("nested Flash reset rollback failed: {retire_error}");
             }
             session
@@ -625,9 +627,9 @@ pub(crate) fn reset_nested_player_owned(
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let _ = flash_capability;
+        let _ = browser_owner_capability;
         let activate_result = {
-            let result = session.borrow_mut().activate_nested_flash_route(
+            let result = session.borrow_mut().activate_nested_browser_owner_route(
                 parent_id,
                 &parent_owner,
                 child_id,
@@ -1120,7 +1122,7 @@ mod tests {
             child_owner,
             command_tx,
             event_tx,
-            flash_owner_registered: false,
+            browser_owner_registered: false,
         }
     }
 
@@ -1255,7 +1257,7 @@ mod tests {
                 command_tx,
                 event_tx,
             )?;
-            session.borrow_mut().activate_nested_flash_route(
+            session.borrow_mut().activate_nested_browser_owner_route(
                 start.parent_id,
                 &start.parent_owner,
                 child_id,
@@ -1392,7 +1394,7 @@ mod tests {
             .unwrap();
         session
             .borrow_mut()
-            .activate_nested_flash_route(1, &parent_owner, child_id, &old_owner)
+            .activate_nested_browser_owner_route(1, &parent_owner, child_id, &old_owner)
             .unwrap();
 
         let new_owner = async_std::task::block_on(async {
@@ -1482,7 +1484,7 @@ mod tests {
                 )
             })
             .unwrap();
-        let capability = crate::BrowserFlashCapability::new_child(
+        let capability = crate::BrowserOwnerCapability::new_child(
             session.clone(),
             child_id,
             new_owner,

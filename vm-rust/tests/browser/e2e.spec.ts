@@ -11,6 +11,7 @@ const UPDATE_SNAPSHOTS = process.env.SNAPSHOT_UPDATE === "1";
 let multiuserServer: ReturnType<typeof spawn> | undefined;
 const MULTIUSER_TEST_NAME = "test_multiuser_socket_lifecycle";
 const FILEIO_TEST_NAME = "test_fileio_open_remote";
+const OWNER_TIMER_TEST_NAME = "test_browser_owner_timer_lifecycle";
 const FIXTURE_TEST_NAMES = [MULTIUSER_TEST_NAME, FILEIO_TEST_NAME];
 const RUN_MULTIUSER_FIXTURE = (() => {
   const filter = process.env.E2E_FILTER;
@@ -428,6 +429,8 @@ test("browser e2e tests", async ({ page }) => {
         requestedFilters.some((filter) => test.name.toLowerCase().includes(filter))
       )
     ).toBe(true);
+  } else {
+    expect(testResults!.tests.map((test) => test.name)).toContain(OWNER_TIMER_TEST_NAME);
   }
   expect(testResults!.failed).toBe(0);
 });

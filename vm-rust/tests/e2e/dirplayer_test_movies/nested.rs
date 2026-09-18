@@ -31,6 +31,10 @@ browser_e2e_test!(test_nested_flash_owned_fixture, |player| async move {
     player.test_nested_flash_owned_fixture().await
 });
 
+browser_e2e_test!(test_browser_owner_timer_lifecycle, |player| async move {
+    player.test_browser_owner_timer_lifecycle().await
+});
+
 browser_e2e_test!(
     test_flash_lingo_callback_owned_fixture,
     |player| async move { player.test_flash_lingo_callback_owned_fixture().await }

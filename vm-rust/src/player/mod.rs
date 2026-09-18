@@ -19,10 +19,12 @@ pub mod compare;
 pub mod compiled;
 pub mod console;
 pub mod context_vars;
+pub(crate) mod datum_duplicate;
 pub mod datum_formatting;
 pub mod datum_operations;
 pub mod datum_ref;
 pub mod debug;
+pub mod driver;
 pub mod eval;
 pub mod events;
 pub mod font;
@@ -38,9 +40,9 @@ pub mod keyboard_events;
 pub mod keyboard_map;
 pub mod mcp;
 pub mod movie;
+pub mod nested;
 pub mod net_manager;
 pub mod net_task;
-pub mod nested;
 pub mod ownership;
 pub mod profiling;
 pub mod scope;
@@ -49,8 +51,6 @@ pub mod score_keyframes;
 pub mod script;
 pub mod script_ref;
 pub mod session;
-pub mod driver;
-pub(crate) mod datum_duplicate;
 pub mod sprite;
 pub mod stage;
 pub mod stream_status;
@@ -562,6 +562,186 @@ impl FlashActionFence {
     }
 }
 
+/// Owner fence for a detached browser timer effect. Clear actions intentionally
+/// remain valid after owner retirement; Schedule actions use the optional
+/// session binding to revalidate the exact current timer before and after the
+/// browser call.
+#[derive(Clone)]
+struct TimeoutActionFence {
+    owner: OwnerToken,
+    session: Option<RuntimeSessionHandle>,
+    player_id: Option<session::PlayerId>,
+}
+
+impl TimeoutActionFence {
+    fn legacy(owner: OwnerToken) -> Self {
+        Self {
+            owner,
+            session: None,
+            player_id: None,
+        }
+    }
+
+    fn bind_owned(&mut self, session: RuntimeSessionHandle, player_id: session::PlayerId) {
+        self.session = Some(session);
+        self.player_id = Some(player_id);
+    }
+
+    fn revalidate_schedule(&self, name: &str, incarnation: u64) -> Result<(), ScriptError> {
+        if !self.owner.is_arena_live() {
+            return Err(ScriptError::new_code(
+                ScriptErrorCode::InvalidReference,
+                "timeout schedule owner is stale".to_owned(),
+            ));
+        }
+        let (Some(session), Some(player_id)) = (&self.session, self.player_id) else {
+            return Ok(());
+        };
+        let valid = session
+            .borrow_mut()
+            .with_player(player_id, |context| {
+                self.owner.same_identity(&context.player.owner)
+                    && context
+                        .player
+                        .timeout_manager
+                        .get_timeout_exact(name)
+                        .is_some_and(|timeout| {
+                            timeout.incarnation == incarnation && timeout.is_scheduled
+                        })
+            })
+            .unwrap_or(false);
+        if valid {
+            Ok(())
+        } else {
+            Err(ScriptError::new_code(
+                ScriptErrorCode::InvalidReference,
+                "timeout schedule incarnation is stale".to_owned(),
+            ))
+        }
+    }
+}
+
+pub(crate) enum TimeoutHostAction {
+    Schedule {
+        fence: TimeoutActionFence,
+        name: String,
+        period: u32,
+        incarnation: u64,
+    },
+    Clear {
+        fence: TimeoutActionFence,
+        name: String,
+        incarnation: u64,
+    },
+}
+
+impl TimeoutHostAction {
+    fn owner(&self) -> OwnerToken {
+        match self {
+            Self::Schedule { fence, .. } | Self::Clear { fence, .. } => fence.owner.clone(),
+        }
+    }
+
+    fn bind_owned(&mut self, session: RuntimeSessionHandle, player_id: session::PlayerId) {
+        match self {
+            Self::Schedule { fence, .. } | Self::Clear { fence, .. } => {
+                fence.bind_owned(session, player_id)
+            }
+        }
+    }
+
+    fn emit(self) -> Result<crate::js_api::TimeoutHostDispatch, ScriptError> {
+        match self {
+            Self::Schedule {
+                fence,
+                name,
+                period,
+                incarnation,
+            } => {
+                fence.revalidate_schedule(&name, incarnation)?;
+                let result = crate::js_api::JsApi::dispatch_schedule_timeout(
+                    &owner_key_string(&fence.owner),
+                    &name,
+                    period,
+                    incarnation,
+                )?;
+                if let Err(error) = fence.revalidate_schedule(&name, incarnation) {
+                    // A synchronous host callback may have reset or replaced
+                    // the timer after Schedule published its interval. The
+                    // incarnation-qualified Clear cannot touch that newer
+                    // replacement.
+                    let _ = crate::js_api::JsApi::dispatch_clear_timeout(
+                        &owner_key_string(&fence.owner),
+                        &name,
+                        incarnation,
+                    );
+                    return Err(error);
+                }
+                Ok(result)
+            }
+            Self::Clear {
+                fence,
+                name,
+                incarnation,
+            } => crate::js_api::JsApi::dispatch_clear_timeout(
+                &owner_key_string(&fence.owner),
+                &name,
+                incarnation,
+            ),
+        }
+    }
+}
+
+pub(crate) fn bind_timeout_host_actions(
+    mut actions: Vec<TimeoutHostAction>,
+    session: RuntimeSessionHandle,
+    player_id: session::PlayerId,
+) -> Vec<TimeoutHostAction> {
+    for action in &mut actions {
+        action.bind_owned(session.clone(), player_id);
+    }
+    actions
+}
+
+pub(crate) fn emit_timeout_host_actions(
+    actions: Vec<TimeoutHostAction>,
+) -> Result<Vec<crate::js_api::TimeoutHostDispatch>, ScriptError> {
+    let mut unsupported = Vec::new();
+    for action in actions {
+        let owner = action.owner();
+        match action.emit() {
+            Ok(crate::js_api::TimeoutHostDispatch::Published) => {}
+            Ok(receipt @ crate::js_api::TimeoutHostDispatch::Unsupported { .. }) => {
+                if let crate::js_api::TimeoutHostDispatch::Unsupported {
+                    operation,
+                    owner_key,
+                    timeout_name,
+                    incarnation,
+                } = &receipt
+                {
+                    log::debug!(
+                        "native timeout host {:?} unsupported for {}:{}#{}; manual scheduler remains active",
+                        operation,
+                        owner_key,
+                        timeout_name,
+                        incarnation
+                    );
+                }
+                unsupported.push(receipt);
+            }
+            Err(error) if error.code == ScriptErrorCode::InvalidReference => {
+                // Stale Schedule actions are intentionally dropped. Clear
+                // actions are idempotent and may outlive their owner.
+                if owner.is_arena_live() {
+                    continue;
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(unsupported)
+}
+
 /// Flash host route for a player. `NestedPending` is used between the session
 /// child insertion and the frontend owner registration; it prevents a child
 /// from publishing actions before its exact owner callback set exists.
@@ -898,9 +1078,26 @@ pub(crate) fn emit_flash_host_actions(actions: Vec<FlashHostAction>) -> Result<(
 #[cfg(test)]
 mod flash_binding_state_tests {
     use super::FlashBindingState;
-    use crate::player::{session::RuntimeSession, symbols::symbol_table::SymbolOwner};
+    use crate::player::{
+        owner_key_string, session::RuntimeSession, symbols::symbol_table::SymbolOwner,
+        timeout::Timeout,
+    };
     use async_std::channel;
     use std::rc::Rc;
+
+    fn timeout(name: &str, period: u32) -> Timeout {
+        Timeout {
+            name: name.to_owned(),
+            period,
+            handler: crate::player::symbols::symbol::Symbol::builtin(
+                crate::player::symbols::builtin::BuiltInSymbol::Timeout,
+            ),
+            target_ref: crate::player::datum_ref::DatumRef::Void,
+            is_scheduled: period > 0,
+            incarnation: 0,
+            next_fire_ms: 0.0,
+        }
+    }
 
     #[test]
     fn generations_are_monotonic_and_old_invalidation_cannot_remove_replacement() {
@@ -912,6 +1109,184 @@ mod flash_binding_state_tests {
         assert!(state.is_current(7, replacement));
         assert!(state.invalidate(7, replacement));
         assert!(!state.is_current(7, replacement));
+    }
+
+    #[test]
+    fn stale_timeout_schedule_is_rejected_before_native_publication() {
+        let session = RuntimeSession::new(SymbolOwner {
+            session: 951,
+            generation: 1,
+        })
+        .into_handle();
+        assert!(session.borrow_mut().add_player(1, channel::unbounded().0));
+        let (owner, incarnation) = session
+            .borrow_mut()
+            .with_player(1, |context| {
+                context
+                    .player
+                    .replace_timeout(timeout("Timer", 10))
+                    .unwrap();
+                let incarnation = context
+                    .player
+                    .timeout_manager
+                    .get_timeout_exact("Timer")
+                    .expect("replacement timer must remain installed")
+                    .incarnation;
+                (context.player.owner.clone(), incarnation)
+            })
+            .unwrap();
+        let stale = super::TimeoutHostAction::Schedule {
+            fence: super::TimeoutActionFence {
+                owner: owner.clone(),
+                session: Some(session.clone()),
+                player_id: Some(1),
+            },
+            name: "Timer".to_owned(),
+            period: 10,
+            incarnation,
+        };
+        session.borrow_mut().with_player(1, |context| {
+            context
+                .player
+                .replace_timeout(timeout("Timer", 20))
+                .unwrap();
+        });
+        let receipts = super::emit_timeout_host_actions(vec![stale]).unwrap();
+        assert!(receipts.is_empty());
+    }
+
+    #[test]
+    fn owner_bound_eval_drains_timeout_actions_after_lingo_mutation() {
+        let session = RuntimeSession::new(SymbolOwner {
+            session: 952,
+            generation: 1,
+        })
+        .into_handle();
+        assert!(session.borrow_mut().add_player(1, channel::unbounded().0));
+        let owner = session
+            .borrow_mut()
+            .with_player(1, |context| {
+                context.player.is_playing = true;
+                context.player.owner.clone()
+            })
+            .expect("eval fixture player must exist");
+
+        let result = async_std::task::block_on(super::eval_lingo_command_owned(
+            session.clone(),
+            1,
+            owner.clone(),
+            "timeout().new(\"EvalTimer\", 5, #timeout)".to_owned(),
+        ));
+        assert!(result.is_ok(), "owner-bound timeout.new failed: {result:?}");
+
+        let receipts = session.borrow_mut().take_native_timeout_host_unsupported();
+        let schedule_count = receipts
+            .iter()
+            .filter(|receipt| {
+                matches!(
+                    receipt,
+                    crate::js_api::TimeoutHostDispatch::Unsupported {
+                        operation: crate::js_api::TimeoutHostOperation::Schedule,
+                        timeout_name,
+                        incarnation,
+                        ..
+                    } if timeout_name == "EvalTimer" && *incarnation > 0
+                )
+            })
+            .count();
+        assert_eq!(
+            schedule_count, 1,
+            "owner-bound eval must drain one Schedule"
+        );
+        assert!(
+            session
+                .borrow_mut()
+                .with_player(1, |context| context.player.take_timeout_host_actions())
+                .expect("eval fixture player must remain owned")
+                .is_empty()
+        );
+
+        let dormant_result = async_std::task::block_on(super::eval_lingo_command_owned(
+            session.clone(),
+            1,
+            owner.clone(),
+            "timeout().new(\"EvalPeriod\", 0, #timeout)".to_owned(),
+        ));
+        assert!(
+            dormant_result.is_ok(),
+            "owner-bound dormant timeout.new failed: {dormant_result:?}"
+        );
+        assert!(
+            session
+                .borrow_mut()
+                .take_native_timeout_host_unsupported()
+                .is_empty()
+        );
+
+        let period_result = async_std::task::block_on(super::eval_lingo_command_owned(
+            session.clone(),
+            1,
+            owner.clone(),
+            "timeout(\"EvalPeriod\").period = 5".to_owned(),
+        ));
+        assert!(
+            period_result.is_ok(),
+            "owner-bound timeout period mutation failed: {period_result:?}"
+        );
+        let period_receipts = session.borrow_mut().take_native_timeout_host_unsupported();
+        let period_schedule_count = period_receipts
+            .iter()
+            .filter(|receipt| {
+                matches!(
+                    receipt,
+                    crate::js_api::TimeoutHostDispatch::Unsupported {
+                        operation: crate::js_api::TimeoutHostOperation::Schedule,
+                        timeout_name,
+                        incarnation,
+                        ..
+                    } if timeout_name == "EvalPeriod" && *incarnation > 0
+                )
+            })
+            .count();
+        assert_eq!(
+            period_schedule_count, 1,
+            "owner-bound period mutation must drain one Schedule"
+        );
+        assert!(
+            session
+                .borrow_mut()
+                .with_player(1, |context| context.player.take_timeout_host_actions())
+                .expect("eval period fixture player must remain owned")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn retired_owner_clear_is_independent_of_replacement_liveness() {
+        let owner = crate::player::ownership::OwnerToken::transitional();
+        let clear = super::TimeoutHostAction::Clear {
+            fence: super::TimeoutActionFence::legacy(owner.clone()),
+            name: "Timer".to_owned(),
+            incarnation: 7,
+        };
+        owner.mark_arena_dead();
+        let receipts = super::emit_timeout_host_actions(vec![clear]).unwrap();
+        assert_eq!(receipts.len(), 1);
+        match &receipts[0] {
+            crate::js_api::TimeoutHostDispatch::Unsupported {
+                owner_key,
+                timeout_name,
+                incarnation,
+                ..
+            } => {
+                assert_eq!(owner_key, &owner_key_string(&owner));
+                assert_eq!(timeout_name, "Timer");
+                assert_eq!(*incarnation, 7);
+            }
+            crate::js_api::TimeoutHostDispatch::Published => {
+                panic!("native clear unexpectedly published")
+            }
+        }
     }
 
     #[test]
@@ -1325,7 +1700,6 @@ mod flash_binding_state_tests {
 
 use allocator::{DatumAllocator, DatumAllocatorTrait, ResetableAllocator, ScriptInstanceAllocatorTrait};
 use async_recursion::async_recursion;
-use futures::future::{select, Either, FutureExt};
 use async_std::{
     channel::{self, Receiver, Sender},
     future::{self, timeout},
@@ -1335,23 +1709,24 @@ use async_std::{
 use cast_manager::CastPreloadReason;
 use cast_member::CastMemberType;
 use datum_ref::DatumRef;
+use driver::{DriverStart, DriverTurn};
+use futures::future::{select, Either, FutureExt};
 use fxhash::FxHashMap;
 use handlers::datum_handlers::script_instance::ScriptInstanceUtils;
+use host_events::{HostEvent, HostEventMailbox, HostEventOverflow};
 use indexmap::IndexMap;
 use log::{debug, error, warn};
 use manual_future::{ManualFuture, ManualFutureCompleter};
 use net_manager::NetManager;
 use ownership::OwnerToken;
-use host_events::{HostEvent, HostEventMailbox, HostEventOverflow};
-use driver::{DriverStart, DriverTurn};
 use rand::SeedableRng;
 use scope::ScopeResult;
-use score::{ScoreRef, get_score_sprite_mut};
+use score::{get_score_sprite_mut, ScoreRef};
 use script::script_get_prop_opt;
 use script_ref::ScriptInstanceRef;
 use sprite::Sprite;
-use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::wasm_bindgen;
+use wasm_bindgen::JsCast;
 use xtra::leechprotection::EnvOverrides;
 use xtra::manager::XtraManagerState;
 use xtra::scene3d::Scene3dStore;
@@ -1361,16 +1736,16 @@ use crate::{
     director::{
         chunks::handler::{Bytecode, HandlerDef},
         enums::ScriptType,
-        file::{DirectorFile, read_director_file_bytes},
+        file::{read_director_file_bytes, DirectorFile},
         lingo::{
-            constants::{get_anim_prop_name, get_anim2_prop_name},
-            datum::{Datum, DatumType, VarRef, datum_bool},
+            constants::{get_anim2_prop_name, get_anim_prop_name},
+            datum::{datum_bool, Datum, DatumType, VarRef},
         },
     },
     js_api::JsApi,
     player::{
         bytecode::handler_manager::{
-            BytecodeHandlerContext, HandlerCode, try_execute_bytecode_sync, try_execute_opcode_sync,
+            try_execute_bytecode_sync, try_execute_opcode_sync, BytecodeHandlerContext, HandlerCode,
         },
         datum_formatting::format_datum,
         events::{
@@ -1379,7 +1754,7 @@ use crate::{
             player_invoke_frame_and_movie_scripts, player_invoke_targeted_event,
         },
         geometry::IntRect,
-        profiling::{ProfileScope, ProfileScopeOwned, get_profiler_report},
+        profiling::{get_profiler_report, ProfileScope, ProfileScopeOwned},
         scope::Scope,
         session::{RuntimeSession, RuntimeSessionHandle},
         symbols::{
@@ -1398,11 +1773,11 @@ use self::{
     bytecode::handler_manager::StaticBytecodeHandlerManager,
     cast_lib::{CastMemberRef, PlayerNotification, PlayerNotificationKind},
     cast_manager::CastManager,
-    commands::{PlayerVMCommand, run_command_loop},
+    commands::{run_command_loop, PlayerVMCommand},
     debug::{Breakpoint, BreakpointContext, BreakpointManager, StepMode},
     events::{
-        PlayerVMEvent, player_dispatch_global_event, player_invoke_global_event,
-        player_wait_available, run_event_loop,
+        player_dispatch_global_event, player_invoke_global_event, player_wait_available,
+        run_event_loop, PlayerVMEvent,
     },
     font::FontManager,
     handlers::manager::BuiltInHandlerManager,
@@ -1410,10 +1785,10 @@ use self::{
     movie::Movie,
     net_manager::NetManagerSharedState,
     scope::ScopeRef,
-    score::{Score, get_sprite_at},
+    score::{get_sprite_at, Score},
     script::{Script, ScriptHandlerRef},
     sprite::{ColorRef, CursorRef},
-    timeout::TimeoutManager,
+    timeout::{Timeout, TimeoutManager, TimeoutReplacement},
 };
 
 use crate::player::handlers::datum_handlers::date::DateObject;
@@ -1730,6 +2105,9 @@ pub struct DirPlayer {
     /// Flash host effects prepared under the player borrow and emitted only
     /// after the owning session borrow has ended.
     pub(crate) flash_host_actions: Vec<FlashHostAction>,
+    /// Browser timer effects prepared under the player borrow and emitted only
+    /// after the owning session borrow has ended.
+    pub(crate) timeout_host_actions: Vec<TimeoutHostAction>,
     /// Legacy nested players retain synthetic host keys. Session-owned nested
     /// children switch to `LocalOwned` after exact frontend registration.
     pub(crate) flash_host_is_nested: bool,
@@ -2306,6 +2684,88 @@ impl DirPlayer {
         std::mem::take(&mut self.flash_host_actions)
     }
 
+    pub(crate) fn take_timeout_host_actions(&mut self) -> Vec<TimeoutHostAction> {
+        std::mem::take(&mut self.timeout_host_actions)
+    }
+
+    fn timeout_action_fence(&self) -> TimeoutActionFence {
+        TimeoutActionFence::legacy(self.owner.clone())
+    }
+
+    pub(crate) fn queue_timeout_replacement(&mut self, replacement: TimeoutReplacement) {
+        let fence = self.timeout_action_fence();
+        if let Some(old) = replacement.old {
+            if old.is_scheduled {
+                self.timeout_host_actions.push(TimeoutHostAction::Clear {
+                    fence: fence.clone(),
+                    name: old.name,
+                    incarnation: old.incarnation,
+                });
+            }
+        }
+        if replacement.new.is_scheduled {
+            self.timeout_host_actions.push(TimeoutHostAction::Schedule {
+                fence,
+                name: replacement.new.name,
+                period: replacement.new.period,
+                incarnation: replacement.new.incarnation,
+            });
+        }
+    }
+
+    pub(crate) fn replace_timeout(&mut self, timeout: Timeout) -> Result<(), ScriptError> {
+        let replacement = self
+            .timeout_manager
+            .replace_timeout(timeout, crate::player::testing_shared::now_ms());
+        let replacement = replacement?;
+        self.queue_timeout_replacement(replacement);
+        Ok(())
+    }
+
+    pub(crate) fn set_timeout_period(
+        &mut self,
+        timeout_name: &str,
+        period: u32,
+    ) -> Result<bool, ScriptError> {
+        let replacement = self.timeout_manager.set_period(
+            timeout_name,
+            period,
+            crate::player::testing_shared::now_ms(),
+        )?;
+        let Some(replacement) = replacement else {
+            return Ok(false);
+        };
+        self.queue_timeout_replacement(replacement);
+        Ok(true)
+    }
+
+    pub(crate) fn forget_timeout(&mut self, timeout_name: &str) -> bool {
+        let Some(timeout) = self.timeout_manager.forget_timeout(timeout_name) else {
+            return false;
+        };
+        if timeout.is_scheduled {
+            self.timeout_host_actions.push(TimeoutHostAction::Clear {
+                fence: self.timeout_action_fence(),
+                name: timeout.name,
+                incarnation: timeout.incarnation,
+            });
+        }
+        true
+    }
+
+    pub(crate) fn clear_timeouts(&mut self) {
+        let fence = self.timeout_action_fence();
+        for timeout in self.timeout_manager.clear() {
+            if timeout.is_scheduled {
+                self.timeout_host_actions.push(TimeoutHostAction::Clear {
+                    fence: fence.clone(),
+                    name: timeout.name,
+                    incarnation: timeout.incarnation,
+                });
+            }
+        }
+    }
+
     fn flash_action_fence(&self) -> FlashActionFence {
         FlashActionFence::legacy(self.owner.clone(), self.flash_binding_state.clone())
     }
@@ -2615,6 +3075,7 @@ impl DirPlayer {
             flash_frame_buffers: HashMap::new(),
             flash_sprite_loaded: HashSet::new(),
             flash_host_actions: Vec::new(),
+            timeout_host_actions: Vec::new(),
             flash_host_is_nested: false,
             flash_host_route: FlashHostRoute::LocalOwned,
             flash_ready_sprites: HashSet::new(),
@@ -4095,7 +4556,7 @@ impl DirPlayer {
         debug!("Clearing globals");
         self.globals.clear();
         debug!("Clearing timeout manager");
-        self.timeout_manager.clear();
+        self.clear_timeouts();
         debug!("Clearing debug datum refs");
         self.debug_datum_refs.clear();
         // netManager.clear();
@@ -6205,7 +6666,7 @@ impl DirPlayer {
                 let existing: Vec<String> = self.timeout_manager.timeouts.keys().cloned().collect();
                 for name in existing {
                     if !keep.iter().any(|k| k.eq_ignore_ascii_case(&name)) {
-                        self.timeout_manager.forget_timeout(&name);
+                        self.forget_timeout(&name);
                     }
                 }
                 Ok(())
@@ -6796,6 +7257,12 @@ pub(crate) async fn drive_eval_owned(
     eval_id: crate::player::eval::EvalId,
     mut turn: crate::player::eval::EvalTurn,
 ) -> Result<DatumRef, ScriptError> {
+    // Evaluation can publish timeout actions before it yields to an external
+    // capability or child turn. Drain only after the preceding session borrow
+    // has ended, so a synchronous browser callback may re-enter this owner.
+    let drain_timeout_actions = || {
+        crate::player::commands::drain_timeout_host_actions(&session, player_id, &owner);
+    };
     let mut cancellation = if matches!(&turn, crate::player::eval::EvalTurn::Complete(_)) {
         None
     } else {
@@ -6807,6 +7274,7 @@ pub(crate) async fn drive_eval_owned(
         )?)
     };
     loop {
+        drain_timeout_actions();
         match turn {
             crate::player::eval::EvalTurn::Complete(result) => {
                 if let Some(cancellation) = cancellation.as_mut() {
@@ -6826,6 +7294,7 @@ pub(crate) async fn drive_eval_owned(
                 let next = session
                     .borrow_mut()
                     .execute_eval_request(eval_id.clone(), request);
+                drain_timeout_actions();
                 match next {
                     crate::player::session::EvalRequestTurn::ExternalXtra(request) => {
                         turn = match crate::player::commands::execute_eval_external_request(
@@ -6840,6 +7309,7 @@ pub(crate) async fn drive_eval_owned(
                         {
                             crate::player::session::EvalRequestTurn::Evaluator(turn) => turn,
                             _ => {
+                                drain_timeout_actions();
                                 return Err(crate::player::cancelled_scope_error());
                             }
                         };
@@ -6857,6 +7327,7 @@ pub(crate) async fn drive_eval_owned(
                         {
                             crate::player::session::EvalRequestTurn::Evaluator(turn) => turn,
                             _ => {
+                                drain_timeout_actions();
                                 return Err(crate::player::cancelled_scope_error());
                             }
                         };
@@ -6931,6 +7402,7 @@ pub(crate) async fn drive_eval_owned(
                             if let Some(cancellation) = cancellation.as_mut() {
                                 cancellation.disarm();
                             }
+                            drain_timeout_actions();
                             return result;
                         }
                         crate::player::eval::EvalTurn::Pending { request } => {
@@ -6961,9 +7433,12 @@ pub(crate) async fn drive_eval_owned(
                                 request,
                                 sender,
                             );
-                            return receiver.recv().await.map_err(|_| {
+                            drain_timeout_actions();
+                            let result = receiver.recv().await.map_err(|_| {
                                 ScriptError::new("evaluator completion channel closed".to_owned())
-                            })?;
+                            });
+                            drain_timeout_actions();
+                            return result.flatten();
                         }
                     },
                     crate::player::session::EvalRequestTurn::Child(child_turn) => {
@@ -6984,9 +7459,12 @@ pub(crate) async fn drive_eval_owned(
                                         eval_sender: Some(sender),
                                     },
                                 );
-                                return receiver.recv().await.map_err(|_| {
+                                drain_timeout_actions();
+                                let result = receiver.recv().await.map_err(|_| {
                                     ScriptError::new("evaluator child channel closed".to_owned())
-                                })?;
+                                });
+                                drain_timeout_actions();
+                                return result.flatten();
                             }
                             crate::player::driver::DriverTurn::Pending(action) => {
                                 let ticket = action.ticket().clone();
@@ -7005,9 +7483,12 @@ pub(crate) async fn drive_eval_owned(
                                         eval_sender: Some(sender),
                                     },
                                 );
-                                return receiver.recv().await.map_err(|_| {
+                                drain_timeout_actions();
+                                let result = receiver.recv().await.map_err(|_| {
                                     ScriptError::new("evaluator child channel closed".to_owned())
-                                })?;
+                                });
+                                drain_timeout_actions();
+                                return result.flatten();
                             }
                             crate::player::driver::DriverTurn::Complete(_)
                             | crate::player::driver::DriverTurn::Error(_) => {
@@ -7042,9 +7523,17 @@ pub(crate) async fn eval_lingo_command_owned(
     owner: OwnerToken,
     source: String,
 ) -> Result<DatumRef, ScriptError> {
-    let (eval_id, turn) =
-        start_eval_lingo_command_owned(session.clone(), player_id, owner.clone(), source)?;
-    drive_eval_owned(session, player_id, owner, eval_id, turn).await
+    let started = start_eval_lingo_command_owned(session.clone(), player_id, owner.clone(), source);
+    let (eval_id, turn) = match started {
+        Ok(started) => started,
+        Err(error) => {
+            crate::player::commands::drain_timeout_host_actions(&session, player_id, &owner);
+            return Err(error);
+        }
+    };
+    let result = drive_eval_owned(session.clone(), player_id, owner.clone(), eval_id, turn).await;
+    crate::player::commands::drain_timeout_host_actions(&session, player_id, &owner);
+    result
 }
 
 pub(crate) fn resume_eval_owned(
@@ -8463,7 +8952,7 @@ async fn stop_movie_sequence() {
     dispatch_system_event_to_timeouts(BuiltInSymbol::StopMovie, &vec![]).await;
 
     reserve_player_mut(|player| {
-        player.timeout_manager.clear();
+        player.clear_timeouts();
     });
 
     player_wait_available().await;
@@ -11014,7 +11503,7 @@ pub(crate) async fn stop_movie_sequence_owned(
             if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
                 return Err(cancelled_scope_error());
             }
-            context.player.timeout_manager.clear();
+            context.player.clear_timeouts();
             Ok::<(), ScriptError>(())
         })
         .ok_or_else(cancelled_scope_error)??;
@@ -11949,7 +12438,7 @@ pub(crate) async fn fire_pending_timeouts_owned_at(
             if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
                 return Err(cancelled_scope_error());
             }
-            let mut ready: Vec<(DatumRef, Symbol, String)> = Vec::new();
+            let mut ready: Vec<(DatumRef, Symbol, String, u64)> = Vec::new();
             for timeout in context.player.timeout_manager.timeouts.values_mut() {
                 if timeout.is_scheduled && timeout.next_fire_ms - now <= 0.0 {
                     timeout.next_fire_ms = now + timeout.period as f64;
@@ -11957,29 +12446,38 @@ pub(crate) async fn fire_pending_timeouts_owned_at(
                         timeout.target_ref.clone(),
                         timeout.handler.clone(),
                         timeout.name.clone(),
+                        timeout.incarnation,
                     ));
                 }
             }
-            let ready: Vec<(DatumRef, Symbol, String, DatumRef)> = ready
+            let ready: Vec<(DatumRef, Symbol, String, u64, DatumRef)> = ready
                 .into_iter()
-                .map(|(target_ref, handler, name)| {
+                .map(|(target_ref, handler, name, incarnation)| {
                     let timeout_ref = context.player.alloc_datum(Datum::TimeoutRef(name.clone()));
-                    (target_ref, handler, name, timeout_ref)
+                    (target_ref, handler, name, incarnation, timeout_ref)
                 })
                 .collect();
             Ok(ready)
         })
         .ok_or_else(cancelled_scope_error)??;
 
-    for (target_ref, handler_name, timeout_name, timeout_ref) in pending {
+    for (target_ref, handler_name, timeout_name, incarnation, timeout_ref) in pending {
         if !session
             .borrow_mut()
             .with_player(player_id, |context| {
-                owner.same_identity(&context.player.owner) && owner.is_arena_live()
+                owner.same_identity(&context.player.owner)
+                    && owner.is_arena_live()
+                    && context
+                        .player
+                        .timeout_manager
+                        .get_timeout_exact(&timeout_name)
+                        .is_some_and(|timeout| {
+                            timeout.incarnation == incarnation && timeout.is_scheduled
+                        })
             })
             .unwrap_or(false)
         {
-            return Err(cancelled_scope_error());
+            continue;
         }
         let args = vec![timeout_ref];
         if target_ref != DatumRef::Void {
@@ -13592,7 +14090,7 @@ fn bench_minimal_script() -> crate::player::script::Script {
 pub fn run_bytecode_benchmark() -> String {
     use crate::director::chunks::handler::{Bytecode, HandlerDef};
     use crate::director::lingo::opcode::OpCode;
-    use crate::player::bytecode::handler_manager::{BytecodeHandlerContext, try_execute_bytecode_sync};
+    use crate::player::bytecode::handler_manager::{try_execute_bytecode_sync, BytecodeHandlerContext};
     use crate::player::symbols::symbol::Symbol;
 
     fn run(bytecode: Vec<Bytecode>) -> (usize, f64) {
@@ -14140,7 +14638,7 @@ pub fn run_bytecode_benchmark() -> String {
 mod interp_bench {
     //! Native runner for the shared interpreter throughput benchmark. Run with:
     //!   cargo test --lib --manifest-path vm-rust/Cargo.toml interp_bench -- --nocapture
-    use crate::player::testing::{TestPlayer, run_test};
+    use crate::player::testing::{run_test, TestPlayer};
 
     #[test]
     fn bytecode_throughput() {
@@ -14158,9 +14656,9 @@ mod interp_bench {
 mod cursor_reset_tests {
     use super::*;
     use crate::player::cast_lib::{CastLib, CastMemberRef};
-    use crate::player::script::ScriptInstance;
     use crate::player::score::SpriteChannel;
-    use crate::player::testing::{TestHarness, TestPlayer, run_test};
+    use crate::player::script::ScriptInstance;
+    use crate::player::testing::{run_test, TestHarness, TestPlayer};
     use crate::player::timeout::Timeout;
 
     #[test]
@@ -14613,14 +15111,18 @@ mod cursor_reset_tests {
                     let timeout_target = context
                         .player
                         .alloc_datum(Datum::ScriptInstanceRef(timeout_instance_ref));
-                    context.player.timeout_manager.add_timeout(Timeout {
-                        name: "lifecycle-exit".to_owned(),
-                        period: 1,
-                        handler: exit_frame.clone(),
-                        target_ref: timeout_target,
-                        is_scheduled: true,
-                        next_fire_ms: 0.0,
-                    });
+                    context
+                        .player
+                        .replace_timeout(Timeout {
+                            name: "lifecycle-exit".to_owned(),
+                            period: 1,
+                            handler: exit_frame.clone(),
+                            target_ref: timeout_target,
+                            is_scheduled: true,
+                            incarnation: 0,
+                            next_fire_ms: 0.0,
+                        })
+                        .expect("lifecycle timeout replacement must succeed");
                     (
                         instance_id,
                         [
@@ -14682,7 +15184,7 @@ mod cursor_reset_tests {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod handler_gap_tests {
     use super::*;
-    use crate::player::testing::{TestHarness, TestPlayer, run_test};
+    use crate::player::testing::{run_test, TestHarness, TestPlayer};
 
     #[test]
     fn input_waits_until_the_frame_handler_returns() {
@@ -14829,8 +15331,8 @@ mod handler_code_lifetime_tests {
         handler::{Bytecode, HandlerDef},
         script::ScriptChunk,
     };
-    use crate::director::lingo::opcode::OpCode;
     use crate::director::enums::ScriptType;
+    use crate::director::lingo::opcode::OpCode;
     use crate::player::cast_lib::{CastLib, CastMemberRef};
     use crate::player::symbols::{builtin::BuiltInSymbol, symbol::Symbol};
     use std::{cell::RefCell, collections::HashMap};
@@ -14950,14 +15452,14 @@ mod scope_token_tests {
     use super::*;
     use crate::director::chunks::{
         handler::{Bytecode, HandlerDef},
-        script::ScriptChunk,
         score::{ScoreChunk, ScoreChunkHeader},
+        script::ScriptChunk,
     };
     use crate::director::enums::{FilmLoopInfo, ScriptType};
     use crate::director::lingo::opcode::OpCode;
+    use crate::player::bitmap::bitmap::{Bitmap, PaletteRef};
     use crate::player::cast_lib::{CastLib, CastMemberRef};
     use crate::player::cast_member::{CastMember, CastMemberType, FilmLoopMember, FlashMember};
-    use crate::player::bitmap::bitmap::{Bitmap, PaletteRef};
     use crate::player::geometry::IntRect;
     use crate::player::score::{Score, ScoreSpriteSpan, SpriteChannel};
     use crate::player::script::Script;

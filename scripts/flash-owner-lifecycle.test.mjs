@@ -5,7 +5,7 @@ import { readFile, unlink, writeFile } from 'node:fs/promises';
 // This harness imports the production FlashPlayerManager module.  The DOM and
 // Ruffle bridge below are deliberately only transport scaffolding: owner
 // registration, instance publication, and teardown all execute the real
-// FlashOwnerHost/create/destroy code.
+// BrowserOwnerHost/create/destroy code.
 
 const listeners = new Map();
 const players = new Map();
@@ -199,7 +199,7 @@ function makeCapability(ownerKey, state) {
     dispatch_flash_event: () => false,
     dispatch_flash_lingo: async () => false,
   };
-  const registration = manager.registerFlashOwner(ownerKey, capability);
+  const registration = manager.registerBrowserOwner(ownerKey, capability);
   host = registration.host;
   capabilities.set(ownerKey, capability);
   return { registration, host, state };
@@ -712,7 +712,7 @@ test('reserved route revalidates a reentrant authority invalidation before pendi
     dispatch_flash_event: () => false,
     dispatch_flash_lingo: async () => false,
   };
-  const registration = manager.registerFlashOwner(ownerKey, capability);
+  const registration = manager.registerBrowserOwner(ownerKey, capability);
   host = registration.host;
   const generation = host.reserveInstanceGeneration(7);
 
@@ -920,7 +920,7 @@ test('deferred seek cannot act on a replaced same-owner instance', async () => {
 test('duplicate active owner registration is rejected and original remains usable', () => {
   const original = makeCapability('duplicate-owner:g1', {});
   assert.throws(
-    () => manager.registerFlashOwner('duplicate-owner:g1', original.host.capability),
+    () => manager.registerBrowserOwner('duplicate-owner:g1', original.host.capability),
     /already registered/,
   );
   const ticket = original.host.beginScriptedAccess(7);
@@ -931,7 +931,7 @@ test('duplicate active owner registration is rejected and original remains usabl
 
 test('owner registration rejects a capability without binding authority', () => {
   assert.throws(
-    () => manager.registerFlashOwner('missing-binding-authority:g1', {
+    () => manager.registerBrowserOwner('missing-binding-authority:g1', {
       owner_identity: () => 'missing-binding-authority:g1',
     }),
     /binding-generation authority/,
@@ -951,11 +951,11 @@ test('capability failure unregisters the retired generation for reuse', () => {
     dispatch_flash_event: () => false,
     dispatch_flash_lingo: async () => false,
   };
-  const first = manager.registerFlashOwner(key, capability);
+  const first = manager.registerBrowserOwner(key, capability);
   fail = true;
   first.host.beginScriptedAccess(7);
   assert.equal(first.host.disposed, true);
-  const replacement = manager.registerFlashOwner(key, {
+  const replacement = manager.registerBrowserOwner(key, {
     ...capability,
     set_flash_scripted_access_pending: () => {},
   });
@@ -1133,7 +1133,7 @@ test('owned queued goto and gotoAndStop preserve their distinct frame intent', a
   stopped.registration.dispose();
 });
 
-test('production FlashOwnerHost isolates overlapping sprites and tears down reentrantly', async () => {
+test('production BrowserOwnerHost isolates overlapping sprites and tears down reentrantly', async () => {
   const removedBefore = removedPlayers.length;
   const a = makeCapability('owner-a:g1', {});
   const b = makeCapability('owner-b:g1', {});
@@ -1359,8 +1359,8 @@ test('browser bridge unregisters before a delayed manager import publishes an ow
       dispatch_flash_lingo: async () => false,
     };
 
-    bridge.dirplayer_registerFlashOwner(key, capability);
-    bridge.dirplayer_unregisterFlashOwner(key);
+    bridge.dirplayer_registerBrowserOwner(key, capability);
+    bridge.dirplayer_unregisterBrowserOwner(key);
     releaseBundle();
     // Await the exact module URL used by dirplayer-js-api.js before removing
     // the delayed fixture.  Under the full suite the template's cached
@@ -1368,11 +1368,11 @@ test('browser bridge unregisters before a delayed manager import publishes an ow
     // deleting the fixture then converts the real manager import into the
     // no-op fallback and poisons later owner-route tests.
     const importedManager = await import(bundlePath.href);
-    assert.equal(typeof importedManager.registerFlashOwner, 'function');
+    assert.equal(typeof importedManager.registerBrowserOwner, 'function');
     await new Promise((resolve) => realSetTimeout(resolve, 0));
     await new Promise((resolve) => realSetTimeout(resolve, 0));
 
-    assert.equal(identityCalls, 0, 'disposed import must not publish a FlashOwnerHost');
+    assert.equal(identityCalls, 0, 'disposed import must not publish a BrowserOwnerHost');
   } finally {
     releaseBundle?.();
     await unlink(bundlePath).catch(() => {});
@@ -1395,7 +1395,7 @@ test('browser bridge retires an in-flight production creation after owner dispos
     dispatch_flash_lingo: async () => false,
   };
 
-  bridge.dirplayer_registerFlashOwner(key, capability);
+  bridge.dirplayer_registerBrowserOwner(key, capability);
   for (let i = 0; i < 20 && typeof window.dirplayer_localConnectionSend !== 'function'; i += 1) {
     await new Promise((resolve) => realSetTimeout(resolve, 0));
   }
@@ -1411,7 +1411,7 @@ test('browser bridge retires an in-flight production creation after owner dispos
   }
   assert.equal(heldLoadResponses.length > 0, true, 'creation reached the controlled load wait');
 
-  bridge.dirplayer_unregisterFlashOwner(key);
+  bridge.dirplayer_unregisterBrowserOwner(key);
   holdLoadResponses = false;
   for (const release of heldLoadResponses.splice(0)) release();
   // The production create path retains its normal post-load ActionScript
@@ -1440,7 +1440,7 @@ test('same-owner replacement invalidates an unpublished Flash generation', async
     dispatch_flash_lingo: async () => false,
   };
 
-  await bridge.dirplayer_registerFlashOwner(key, capability);
+  await bridge.dirplayer_registerBrowserOwner(key, capability);
   // The production bridge does not expose its host; the owner registry and
   // instance map are the lifecycle boundary exercised by this fixture.
   assert.equal(typeof window.dirplayer_ruffleGetVariableOwned, 'function');
@@ -1468,7 +1468,7 @@ test('same-owner replacement invalidates an unpublished Flash generation', async
   assert.ok(replacement, 'replacement generation was published');
   assert.equal(replacement.instanceGeneration, 2);
   assert.equal(removedPlayers.length > removedBefore, true, 'stale first generation was disposed after its load completed');
-  bridge.dirplayer_unregisterFlashOwner(key);
+  bridge.dirplayer_unregisterBrowserOwner(key);
   await new Promise((resolve) => realSetTimeout(resolve, 0));
   assert.equal(window.dirplayer_flashInstances?.has(`${key}:9`) ?? false, false);
 });
@@ -1486,7 +1486,7 @@ test('unloading a pending Flash creation invalidates its reserved generation', a
     dispatch_flash_lingo: async () => false,
   };
 
-  await bridge.dirplayer_registerFlashOwner(key, capability);
+  await bridge.dirplayer_registerBrowserOwner(key, capability);
   ownerBeingCreated = key;
   holdLoadResponses = true;
   bridge.onFlashMemberLoaded(10, 2, 3, swfFixture(), 32, 24, false, -1, key);
@@ -1503,7 +1503,7 @@ test('unloading a pending Flash creation invalidates its reserved generation', a
     await new Promise((resolve) => realSetTimeout(resolve, 0));
   }
   assert.equal(window.dirplayer_flashInstances?.has(`${key}:10`) ?? false, false);
-  bridge.dirplayer_unregisterFlashOwner(key);
+  bridge.dirplayer_unregisterBrowserOwner(key);
 });
 
 test('owner-qualified bridge callbacks remain routed after a later owner registers', async () => {
@@ -1519,18 +1519,18 @@ test('owner-qualified bridge callbacks remain routed after a later owner registe
     dispatch_flash_lingo: async () => false,
   });
 
-  bridge.dirplayer_registerFlashOwner('owner-route-a:g1', makeCapability('owner-route-a:g1', 'a'));
-  bridge.dirplayer_registerFlashOwner('owner-route-b:g1', makeCapability('owner-route-b:g1', 'b'));
+  bridge.dirplayer_registerBrowserOwner('owner-route-a:g1', makeCapability('owner-route-a:g1', 'a'));
+  bridge.dirplayer_registerBrowserOwner('owner-route-b:g1', makeCapability('owner-route-b:g1', 'b'));
   await new Promise((resolve) => realSetTimeout(resolve, 50));
   assert.equal(window.dirplayer_localConnectionSendOwned('owner-route-a:g1', 'c', 'm', '[]'), true);
   assert.equal(window.dirplayer_localConnectionSendOwned('owner-route-b:g1', 'c', 'm', '[]'), true);
   assert.deepEqual(calls, { a: 1, b: 1 });
 
-  bridge.dirplayer_unregisterFlashOwner('owner-route-b:g1');
+  bridge.dirplayer_unregisterBrowserOwner('owner-route-b:g1');
   assert.equal(window.dirplayer_localConnectionSendOwned('owner-route-a:g1', 'c', 'm', '[]'), true);
   assert.equal(window.dirplayer_localConnectionSendOwned('owner-route-b:g1', 'c', 'm', '[]'), false);
   assert.deepEqual(calls, { a: 2, b: 1 });
-  bridge.dirplayer_unregisterFlashOwner('owner-route-a:g1');
+  bridge.dirplayer_unregisterBrowserOwner('owner-route-a:g1');
 });
 
 test('direct Ruffle players bind distinct owners before their first load', async () => {

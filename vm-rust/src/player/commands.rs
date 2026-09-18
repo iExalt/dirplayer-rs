@@ -25,8 +25,9 @@ use crate::{
     director::lingo::datum::{Datum, DatumType, FlashObjectRef, TimeoutRef},
     js_api::JsApi,
     player::{
-        call_datum_handler_active, active_player_id, retained_session_handle, PLAYER_OPT,
+        active_player_id, call_datum_handler_active, owner_key_string, retained_session_handle,
         symbols::{builtin::BuiltInSymbol, symbol::Symbol},
+        PLAYER_OPT,
     },
     utils::ToHexString,
 };
@@ -38,21 +39,21 @@ use super::{
     datum_ref::DatumRef,
     events::{
         player_dispatch_callback_event, player_dispatch_event_to_sprite,
-        player_dispatch_movie_callback, player_wait_available,
-        player_dispatch_event_to_sprite_targeted, player_invoke_frame_and_movie_scripts,
+        player_dispatch_event_to_sprite_targeted, player_dispatch_movie_callback,
+        player_invoke_frame_and_movie_scripts, player_wait_available,
     },
     font::player_load_system_font_owned,
     keyboard_events::{player_key_down, player_key_up},
     player_alloc_datum, player_call_script_handler,
     player_call_script_handler_turn_in_session_sync, player_dispatch_global_event,
-    player_is_playing, reserve_player_mut, reserve_player_ref, Score,
+    player_is_playing, reserve_player_mut, reserve_player_ref,
     score::{
         concrete_sprite_hit_test, get_concrete_sprite_rect, get_sprite_at, get_sprites_at,
         sprite_has_handler,
     },
     script_ref::ScriptInstanceRef,
-    PlayerVMExecutionItem, ScriptError, ScriptReceiver, ScriptHandlerTurn, PLAYER_TX,
     session::{DeferredInputFlagCleanup, InputFlagSnapshot, PendingEvalRequest, RuntimeSession},
+    PlayerVMExecutionItem, Score, ScriptError, ScriptHandlerTurn, ScriptReceiver, PLAYER_TX,
 };
 
 /// Result of driving one owner-bound pending action.  `Retain` is used for
@@ -95,7 +96,11 @@ pub enum PlayerVMCommand {
     SetMoviePathLabel(String),
     SetSystemFontPath(String),
     SetStageSize(u32, u32),
-    TimeoutTriggered(TimeoutRef),
+    TimeoutTriggered {
+        owner: super::ownership::OwnerToken,
+        name: TimeoutRef,
+        incarnation: u64,
+    },
     PrintMemberBitmapHex(CastMemberRef),
     /// Dev UI sound preview: play a sound member through channel 1 (the real
     /// puppetSound path) so it exercises the same decode/playback code a movie
@@ -221,8 +226,17 @@ pub fn _format_player_cmd(command: &PlayerVMCommand) -> String {
         PlayerVMCommand::SetStageSize(width, height) => {
             format!("SetStageSize({}, {})", width, height)
         }
-        PlayerVMCommand::TimeoutTriggered(timeout_ref) => {
-            format!("TimeoutTriggered({})", timeout_ref)
+        PlayerVMCommand::TimeoutTriggered {
+            owner,
+            name,
+            incarnation,
+        } => {
+            format!(
+                "TimeoutTriggered({}, {}, {})",
+                owner_key_string(owner),
+                name,
+                incarnation
+            )
         }
         PlayerVMCommand::PrintMemberBitmapHex(..) => "PrintMemberBitmapHex(..)".to_string(),
         PlayerVMCommand::PlayMemberSound(..) => "PlayMemberSound(..)".to_string(),
@@ -1063,27 +1077,83 @@ async fn finish_command_turn(
         }
     }
     let _ = JsApi::dispatch_player_notifications(session_handle.clone(), player_id);
+    drain_timeout_host_actions(session_handle, player_id, owner);
     drain_host_teardowns(session_handle);
+}
+
+/// Extract timeout host actions after the VM borrow ends. Host callbacks may
+/// synchronously re-enter the same owner, so publication never happens while
+/// `RuntimeSession` or `DirPlayer` is mutably borrowed.
+pub(crate) fn drain_timeout_host_actions(
+    session: &Rc<RefCell<RuntimeSession>>,
+    player_id: u32,
+    owner: &super::ownership::OwnerToken,
+) {
+    let actions = session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            if !owner.same_identity(&context.player.owner) {
+                return Vec::new();
+            }
+            context.player.take_timeout_host_actions()
+        })
+        .unwrap_or_default();
+    if actions.is_empty() {
+        return;
+    }
+    let actions = super::bind_timeout_host_actions(actions, session.clone(), player_id);
+    emit_timeout_host_actions_detached(session, player_id, actions);
+}
+
+fn emit_timeout_host_actions_detached(
+    session: &Rc<RefCell<RuntimeSession>>,
+    player_id: u32,
+    actions: Vec<super::TimeoutHostAction>,
+) {
+    match super::emit_timeout_host_actions(actions) {
+        Ok(receipts) => {
+            for receipt in receipts {
+                session
+                    .borrow_mut()
+                    .record_native_timeout_host_unsupported(receipt);
+            }
+        }
+        Err(error) => {
+            error!(
+                "timeout host action failed for player {}: {}",
+                player_id, error.message
+            );
+        }
+    }
+}
+
+pub(crate) fn drain_detached_timeout_host_actions(session: &Rc<RefCell<RuntimeSession>>) {
+    let batches = session.borrow_mut().take_timeout_host_actions();
+    for (player_id, actions) in batches {
+        let actions = super::bind_timeout_host_actions(actions, session.clone(), player_id);
+        emit_timeout_host_actions_detached(session, player_id, actions);
+    }
 }
 
 /// Drop retired host resources only after the session borrow used to extract
 /// them has ended. Host cleanup may synchronously re-enter the same session.
 pub(crate) fn drain_host_teardowns(session: &Rc<RefCell<RuntimeSession>>) {
-    let (teardowns, flash_retirements) = {
+    let (teardowns, browser_owner_retirements) = {
         let mut session = session.borrow_mut();
         (
             session.take_host_teardowns(),
-            session.take_nested_flash_retirements(),
+            session.take_nested_browser_owner_retirements(),
         )
     };
     drop(teardowns);
-    for retirement in flash_retirements {
+    drain_detached_timeout_host_actions(session);
+    for retirement in browser_owner_retirements {
         let parent_owner_key = super::owner_key_string(&retirement.parent_owner);
         let child_owner_key = super::owner_key_string(&retirement.child_owner);
         if let Err(error) =
-            crate::js_api::JsApi::retire_nested_flash_owner(&parent_owner_key, &child_owner_key)
+            crate::js_api::JsApi::retire_nested_browser_owner(&parent_owner_key, &child_owner_key)
         {
-            error!("nested Flash owner retirement failed: {error}");
+            error!("nested browser owner retirement failed: {error}");
         }
     }
 }
@@ -1114,6 +1184,7 @@ async fn finish_command_turn_no_wake(
         complete => finish_command_turn(complete, session_handle, player_id, owner).await,
     }
     let _ = JsApi::dispatch_player_notifications(session_handle.clone(), player_id);
+    drain_timeout_host_actions(session_handle, player_id, owner);
 }
 
 /// Execute one evaluator-owned external request after the session borrow has
@@ -2054,6 +2125,50 @@ pub(crate) async fn execute_eval_internal_request(
             name,
             value,
         } => {
+            let timeout_target = session
+                .borrow_mut()
+                .with_player(player_id, |context| {
+                    context
+                        .player
+                        .allocator
+                        .try_get_datum(&receiver)
+                        .map(|datum| {
+                            matches!(
+                                datum,
+                                super::Datum::TimeoutRef(_) | super::Datum::TimeoutInstance { .. }
+                            )
+                        })
+                })
+                .flatten()
+                .unwrap_or(false);
+            if timeout_target {
+                let mut outbox = super::cast_lib::CastNotificationOutbox::default();
+                let result = session.borrow_mut().with_player(player_id, |context| {
+                    super::script::set_obj_prop_sync(
+                        context.player,
+                        context.symbols,
+                        &receiver,
+                        name,
+                        &value,
+                        &mut outbox,
+                    )
+                });
+                session
+                    .borrow_mut()
+                    .append_notifications(player_id, &mut outbox);
+                let result = match result {
+                    Some(Ok(super::script::SetObjPropOutcome::Applied)) => {
+                        Ok(super::DatumRef::Void)
+                    }
+                    Some(Ok(_)) => Err(super::ScriptError::new(
+                        "timeout property assignment was not applied synchronously".to_owned(),
+                    )),
+                    Some(Err(error)) => Err(error),
+                    None => Err(super::cancelled_scope_error()),
+                };
+                let resumed = resume_eval_internal(&session, id, action, owner, result);
+                return Some(super::session::EvalRequestTurn::Evaluator(resumed));
+            }
             let target = session.borrow_mut().with_player(player_id, |context| {
                 let datum = context.player.allocator.try_get_datum(&receiver)?;
                 match datum {
@@ -3298,7 +3413,9 @@ async fn execute_internal_action(
                     ));
                 }
                 Err(error) => {
-                    return PendingActionExecution::Complete(ActionCompletion::InternalError(error));
+                    return PendingActionExecution::Complete(ActionCompletion::InternalError(
+                        error,
+                    ));
                 }
             };
             let result = session.borrow_mut().with_player(player_id, |context| {
@@ -4556,10 +4673,31 @@ async fn run_player_command_result(
                 crate::js_api::JsApi::dispatch_stage_size_changed(w, h, player.center_stage);
             });
         }
-        PlayerVMCommand::TimeoutTriggered(timeout_ref) => {
+        PlayerVMCommand::TimeoutTriggered {
+            owner: trigger_owner,
+            name: timeout_ref,
+            incarnation,
+        } => {
             let (is_found, is_playing, is_script_paused, target_ref, handler_name, timeout_name) =
                 reserve_player_mut(|player| {
-                    if let Some(timeout) = player.timeout_manager.get_timeout(&timeout_ref) {
+                    if !trigger_owner.same_identity(&player.owner) || !trigger_owner.is_arena_live()
+                    {
+                        return (
+                            false,
+                            false,
+                            false,
+                            DatumRef::Void,
+                            Symbol::builtin(BuiltInSymbol::EmptyString),
+                            String::new(),
+                        );
+                    }
+                    if let Some(timeout) = player
+                        .timeout_manager
+                        .get_timeout_exact(&timeout_ref)
+                        .filter(|timeout| {
+                            timeout.incarnation == incarnation && timeout.is_scheduled
+                        })
+                    {
                         let is_playing = player.is_playing;
                         let is_script_paused = player.is_script_paused;
                         (
@@ -4582,7 +4720,10 @@ async fn run_player_command_result(
                     }
                 });
             if !is_found {
-                warn!("Timeout triggered but not found: {}", timeout_ref);
+                warn!(
+                    "Timeout trigger rejected as stale or missing: {}#{}",
+                    timeout_ref, incarnation
+                );
                 return Ok(DatumRef::Void);
             }
             if !is_playing || is_script_paused {
@@ -5719,15 +5860,15 @@ async fn run_player_command_result(
 mod raw_flash_tests {
     use super::{
         raw_flash_args, raw_flash_args_from_values, raw_flash_values, ruffle_flash_values,
-        RawFlashBinding, run_callback_command, CommandTurn, Datum, FlashCallbackArgs,
-        PlayerVMCommand,
+        run_callback_command, CommandTurn, Datum, FlashCallbackArgs, PlayerVMCommand,
+        RawFlashBinding,
     };
-    use async_std::channel;
-    use std::{cell::RefCell, rc::Rc};
+    use crate::player::datum_ref::DatumRef;
     use crate::player::session::RuntimeSession;
     use crate::player::symbols::symbol_table::SymbolOwner;
     use crate::player::{owner_key_string, DirPlayer};
-    use crate::player::datum_ref::DatumRef;
+    use async_std::channel;
+    use std::{cell::RefCell, rc::Rc};
 
     fn assert_bound_markers(
         player: &DirPlayer,
@@ -6378,8 +6519,8 @@ mod owned_mouse_down_tests {
             allocator::ScriptInstanceAllocatorTrait,
             cast_lib::{CastLib, CastMemberRef},
             cast_member::{CastMember, CastMemberType, FieldMember},
-            script::{Script, ScriptInstance},
             score::{ScoreSpriteSpan, SpriteChannel},
+            script::{Script, ScriptInstance},
             symbols::{builtin::BuiltInSymbol, symbol::Symbol},
         };
 
