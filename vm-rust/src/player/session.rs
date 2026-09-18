@@ -155,16 +155,26 @@ pub(crate) struct EvalCancellationMailbox {
 
 impl EvalCancellationMailbox {
     fn new() -> Self {
-        Self { records: RefCell::new(Vec::new()), wake_queued: Cell::new(false) }
+        Self {
+            records: RefCell::new(Vec::new()),
+            wake_queued: Cell::new(false),
+        }
     }
 
-    pub(crate) fn defer(&self, record: EvalCancellationRecord, queue_tx: &Sender<PlayerVMExecutionItem>) {
+    pub(crate) fn defer(
+        &self,
+        record: EvalCancellationRecord,
+        queue_tx: &Sender<PlayerVMExecutionItem>,
+    ) {
         self.records.borrow_mut().push(record);
         if !self.wake_queued.replace(true) {
-            if queue_tx.try_send(PlayerVMExecutionItem {
-                command: super::commands::PlayerVMCommand::PumpPending,
-                completer: None,
-            }).is_err() {
+            if queue_tx
+                .try_send(PlayerVMExecutionItem {
+                    command: super::commands::PlayerVMCommand::PumpPending,
+                    completer: None,
+                })
+                .is_err()
+            {
                 // The logical EvalId/request tombstone remains authoritative
                 // when the owner loop has already closed.
                 self.wake_queued.set(false);
@@ -296,7 +306,11 @@ pub struct RuntimeSession {
     w3d_clocks: HashMap<PlayerId, W3dClock>,
     pending_commands: Vec<PendingCommand>,
     pending_completions: Vec<(PlayerId, CompletionTicket, ActionCompletion)>,
-    completed_score_defaults: Vec<(PlayerId, crate::player::score::BehaviorDefaultsContinuation, Result<DatumRef, ScriptError>)>,
+    completed_score_defaults: Vec<(
+        PlayerId,
+        crate::player::score::BehaviorDefaultsContinuation,
+        Result<DatumRef, ScriptError>,
+    )>,
     deferred_requests: Vec<DeferredRequest>,
     pending_eval_requests: Vec<PendingEvalRequest>,
     inflight_eval_routes: Vec<InflightEvalRoute>,
@@ -629,7 +643,8 @@ impl RuntimeSession {
     ) -> Result<crate::player::eval::EvalId, ScriptError> {
         let id = crate::player::eval::EvalId::new(self.next_eval_id);
         self.next_eval_id = self.next_eval_id.wrapping_add(1).max(1);
-        let continuation = crate::player::eval::EvalContinuation::new(self, player_id, id.clone(), expression)?;
+        let continuation =
+            crate::player::eval::EvalContinuation::new(self, player_id, id.clone(), expression)?;
         self.evals.insert(id.clone(), continuation);
         Ok(id)
     }
@@ -641,7 +656,8 @@ impl RuntimeSession {
     ) -> Result<crate::player::eval::EvalId, ScriptError> {
         let id = crate::player::eval::EvalId::new(self.next_eval_id);
         self.next_eval_id = self.next_eval_id.wrapping_add(1).max(1);
-        let continuation = crate::player::eval::EvalContinuation::new_command(self, player_id, id.clone(), lines)?;
+        let continuation =
+            crate::player::eval::EvalContinuation::new_command(self, player_id, id.clone(), lines)?;
         self.evals.insert(id.clone(), continuation);
         Ok(id)
     }
@@ -654,20 +670,28 @@ impl RuntimeSession {
         &mut self,
         player_id: PlayerId,
         request: super::driver::InternalVmRequest,
-    ) -> Result<(
-        crate::player::eval::EvalId,
-        crate::player::eval::EvalAction,
-        async_std::channel::Receiver<Result<DatumRef, ScriptError>>,
-    ), ScriptError> {
+    ) -> Result<
+        (
+            crate::player::eval::EvalId,
+            crate::player::eval::EvalAction,
+            async_std::channel::Receiver<Result<DatumRef, ScriptError>>,
+        ),
+        ScriptError,
+    > {
         let id = crate::player::eval::EvalId::new(self.next_eval_id);
         self.next_eval_id = self.next_eval_id.wrapping_add(1).max(1);
         let (continuation, pending) = crate::player::eval::EvalContinuation::new_request(
-            self, player_id, id.clone(), request,
+            self,
+            player_id,
+            id.clone(),
+            request,
         )?;
         let action = match &pending {
             crate::player::eval::EvalPending::Global { capability, .. }
             | crate::player::eval::EvalPending::Object { capability, .. }
-            | crate::player::eval::EvalPending::SetProperty { capability, .. } => capability.clone(),
+            | crate::player::eval::EvalPending::SetProperty { capability, .. } => {
+                capability.clone()
+            }
         };
         let owner = self
             .with_player(player_id, |context| context.player.owner.clone())
@@ -690,11 +714,14 @@ impl RuntimeSession {
         handler_ref: super::script::ScriptHandlerRef,
         args: Vec<DatumRef>,
         use_raw_arg_list: bool,
-    ) -> Result<(
-        crate::player::eval::EvalId,
-        EvalRequestTurn,
-        async_std::channel::Receiver<Result<super::scope::ScopeResult, ScriptError>>,
-    ), ScriptError> {
+    ) -> Result<
+        (
+            crate::player::eval::EvalId,
+            EvalRequestTurn,
+            async_std::channel::Receiver<Result<super::scope::ScopeResult, ScriptError>>,
+        ),
+        ScriptError,
+    > {
         let valid = self
             .with_player(player_id, |context| {
                 owner.same_identity(&context.player.owner) && owner.is_arena_live()
@@ -715,7 +742,10 @@ impl RuntimeSession {
             args: args.clone(),
         };
         let (mut continuation, pending) = crate::player::eval::EvalContinuation::new_request(
-            self, player_id, id.clone(), request,
+            self,
+            player_id,
+            id.clone(),
+            request,
         )?;
         let (sender, receiver_channel) = async_std::channel::bounded(1);
         continuation.set_callback_sender(sender);
@@ -725,8 +755,16 @@ impl RuntimeSession {
         };
         self.evals.insert(id.clone(), continuation);
         let turn = self.start_eval_child_prepared(
-            id.clone(), action, receiver, handler_ref, args, use_raw_arg_list,
-            None, None, Vec::new(), false,
+            id.clone(),
+            action,
+            receiver,
+            handler_ref,
+            args,
+            use_raw_arg_list,
+            None,
+            None,
+            Vec::new(),
+            false,
         );
         Ok((id, turn, receiver_channel))
     }
@@ -836,9 +874,9 @@ impl RuntimeSession {
             let _ = child.driver.cancel(self);
             self.send_owned_callback_result(&id, Err(super::cancelled_scope_error()));
             self.evals.remove(&id);
-            return EvalRequestTurn::Evaluator(crate::player::eval::EvalTurn::Complete(
-                Err(super::cancelled_scope_error()),
-            ));
+            return EvalRequestTurn::Evaluator(crate::player::eval::EvalTurn::Complete(Err(
+                super::cancelled_scope_error(),
+            )));
         }
         let player_id = child.driver.player_id;
         self.collect_player_host_teardowns(player_id);
@@ -962,7 +1000,10 @@ impl RuntimeSession {
                 }
                 if let Some(broadcast) = child.broadcast.take() {
                     if error.code != ScriptErrorCode::Abort && broadcast.continue_on_error {
-                        warn!("broadcast evaluator child failed; continuing: {}", error.message);
+                        warn!(
+                            "broadcast evaluator child failed; continuing: {}",
+                            error.message
+                        );
                         return self.continue_eval_broadcast(
                             id,
                             child.action,
@@ -998,15 +1039,18 @@ impl RuntimeSession {
         dispatch: GlobalDispatch,
     ) -> EvalRequestTurn {
         let Some((_, owner)) = self.eval_action_anchor(&id, &capability) else {
-            return EvalRequestTurn::Evaluator(crate::player::eval::EvalTurn::Complete(
-                Err(super::cancelled_scope_error()),
-            ));
+            return EvalRequestTurn::Evaluator(crate::player::eval::EvalTurn::Complete(Err(
+                super::cancelled_scope_error(),
+            )));
         };
         match dispatch {
             GlobalDispatch::SyncResult(result) => {
                 EvalRequestTurn::Evaluator(self.resume_eval(id, &capability, &owner, result))
             }
-            GlobalDispatch::Child { receiver, handler_ref } => self.execute_eval_request(
+            GlobalDispatch::Child {
+                receiver,
+                handler_ref,
+            } => self.execute_eval_request(
                 id,
                 crate::player::eval::EvalPending::Global {
                     capability,
@@ -1024,14 +1068,15 @@ impl RuntimeSession {
                     }),
                 },
             ),
-            GlobalDispatch::ChildPrepared { receiver, handler_ref, args: prepared_args } => self.execute_eval_request(
+            GlobalDispatch::ChildPrepared {
+                receiver,
+                handler_ref,
+                args: prepared_args,
+            } => self.execute_eval_request(
                 id,
                 crate::player::eval::EvalPending::Global {
                     capability,
-                    request: super::driver::InternalVmRequest::Global {
-                        name,
-                        args,
-                    },
+                    request: super::driver::InternalVmRequest::Global { name, args },
                     reason: None,
                     prepared_child: Some(crate::player::eval::PreparedGlobal::Child {
                         receiver,
@@ -1042,14 +1087,16 @@ impl RuntimeSession {
                     }),
                 },
             ),
-            GlobalDispatch::ChildWithCompletion { receiver, handler_ref, args: prepared_args, completion } => self.execute_eval_request(
+            GlobalDispatch::ChildWithCompletion {
+                receiver,
+                handler_ref,
+                args: prepared_args,
+                completion,
+            } => self.execute_eval_request(
                 id,
                 crate::player::eval::EvalPending::Global {
                     capability,
-                    request: super::driver::InternalVmRequest::Global {
-                        name,
-                        args,
-                    },
+                    request: super::driver::InternalVmRequest::Global { name, args },
                     reason: None,
                     prepared_child: Some(crate::player::eval::PreparedGlobal::Child {
                         receiver,
@@ -1107,16 +1154,16 @@ impl RuntimeSession {
                     })
                 }
             }
-            GlobalDispatch::Pending { reason } => EvalRequestTurn::Evaluator(
-                crate::player::eval::EvalTurn::Pending {
+            GlobalDispatch::Pending { reason } => {
+                EvalRequestTurn::Evaluator(crate::player::eval::EvalTurn::Pending {
                     request: crate::player::eval::EvalPending::Global {
                         capability,
                         request: super::driver::InternalVmRequest::Global { name, args },
                         reason: Some(reason),
                         prepared_child: None,
                     },
-                },
-            ),
+                })
+            }
         }
     }
 
@@ -1144,13 +1191,14 @@ impl RuntimeSession {
             crate::player::eval::EvalPending::Global {
                 capability,
                 request,
-                prepared_child: Some(crate::player::eval::PreparedGlobal::Child {
-                    receiver,
-                    handler_ref,
-                    args,
-                    use_raw_arg_list,
-                    completion,
-                }),
+                prepared_child:
+                    Some(crate::player::eval::PreparedGlobal::Child {
+                        receiver,
+                        handler_ref,
+                        args,
+                        use_raw_arg_list,
+                        completion,
+                    }),
                 ..
             } => self.start_eval_child_prepared(
                 id,
@@ -1231,7 +1279,9 @@ impl RuntimeSession {
             } => EvalRequestTurn::Flash(request),
             pending @ crate::player::eval::EvalPending::Global { .. }
             | pending @ crate::player::eval::EvalPending::SetProperty { .. } => {
-                EvalRequestTurn::Evaluator(crate::player::eval::EvalTurn::Pending { request: pending })
+                EvalRequestTurn::Evaluator(crate::player::eval::EvalTurn::Pending {
+                    request: pending,
+                })
             }
             crate::player::eval::EvalPending::Object {
                 capability,
@@ -1257,20 +1307,24 @@ impl RuntimeSession {
                 // to the host readiness request. A cast-member request stays
                 // pending for its import/physics executor and is never sent
                 // back through the synchronous dispatcher.
-                if let crate::player::driver::InternalVmRequest::SpriteAsync(sprite_request) = &request {
+                if let crate::player::driver::InternalVmRequest::SpriteAsync(sprite_request) =
+                    &request
+                {
                     let Some((player_id, owner)) = self.eval_action_anchor(&id, &capability) else {
-                        return EvalRequestTurn::Evaluator(crate::player::eval::EvalTurn::Complete(
-                            Err(ScriptError::new(
+                        return EvalRequestTurn::Evaluator(
+                            crate::player::eval::EvalTurn::Complete(Err(ScriptError::new(
                                 "stale, foreign, or duplicate evaluator action".to_owned(),
-                            )),
-                        ));
+                            ))),
+                        );
                     };
                     if sprite_request.player_id != player_id
                         || !sprite_request.owner.same_identity(&owner)
                     {
-                        return EvalRequestTurn::Evaluator(crate::player::eval::EvalTurn::Complete(
-                            Err(super::cancelled_scope_error()),
-                        ));
+                        return EvalRequestTurn::Evaluator(
+                            crate::player::eval::EvalTurn::Complete(Err(
+                                super::cancelled_scope_error(),
+                            )),
+                        );
                     }
                     let child = self.with_player(player_id, |context| {
                         let sprite = match checked_internal_datum(
@@ -1278,20 +1332,23 @@ impl RuntimeSession {
                             context.symbols,
                             &sprite_request.receiver,
                         )? {
-                            Datum::SpriteRef(number) => context.player.movie.score.get_sprite(*number),
+                            Datum::SpriteRef(number) => {
+                                context.player.movie.score.get_sprite(*number)
+                            }
                             _ => None,
                         };
-                        let Some(sprite) = sprite else { return Ok(None) };
+                        let Some(sprite) = sprite else {
+                            return Ok(None);
+                        };
                         for instance_ref in sprite.script_instance_list.iter().cloned() {
-                            if let Some(handler_ref) = ScriptInstanceUtils::get_script_instance_handler(
-                                sprite_request.handler.clone(),
-                                &instance_ref,
-                                context.player,
-                            )? {
-                                return Ok(Some((
-                                    Some(instance_ref),
-                                    handler_ref,
-                                )));
+                            if let Some(handler_ref) =
+                                ScriptInstanceUtils::get_script_instance_handler(
+                                    sprite_request.handler.clone(),
+                                    &instance_ref,
+                                    context.player,
+                                )?
+                            {
+                                return Ok(Some((Some(instance_ref), handler_ref)));
                             }
                         }
                         Ok(None)
@@ -1299,14 +1356,16 @@ impl RuntimeSession {
                     let child = match child {
                         Some(Ok(child)) => child,
                         Some(Err(error)) => {
-                            return EvalRequestTurn::Evaluator(crate::player::eval::EvalTurn::Complete(
-                                Err(error),
-                            ));
+                            return EvalRequestTurn::Evaluator(
+                                crate::player::eval::EvalTurn::Complete(Err(error)),
+                            );
                         }
                         None => {
-                            return EvalRequestTurn::Evaluator(crate::player::eval::EvalTurn::Complete(
-                                Err(super::cancelled_scope_error()),
-                            ));
+                            return EvalRequestTurn::Evaluator(
+                                crate::player::eval::EvalTurn::Complete(Err(
+                                    super::cancelled_scope_error(),
+                                )),
+                            );
                         }
                     };
                     if let Some((receiver, handler_ref)) = child {
@@ -1330,15 +1389,14 @@ impl RuntimeSession {
                     request => request,
                 };
                 if matches!(
-                        request,
-                        crate::player::driver::InternalVmRequest::CastMemberAsync(_)
-                            | crate::player::driver::InternalVmRequest::Flash(_)
-                            | crate::player::driver::InternalVmRequest::ObjectProperty { .. }
-                            | crate::player::driver::InternalVmRequest::EvaluateValue { .. }
-                    )
-                {
-                    let pending_reason = existing_reason
-                        .or_else(|| super::driver::async_request_reason(&request));
+                    request,
+                    crate::player::driver::InternalVmRequest::CastMemberAsync(_)
+                        | crate::player::driver::InternalVmRequest::Flash(_)
+                        | crate::player::driver::InternalVmRequest::ObjectProperty { .. }
+                        | crate::player::driver::InternalVmRequest::EvaluateValue { .. }
+                ) {
+                    let pending_reason =
+                        existing_reason.or_else(|| super::driver::async_request_reason(&request));
                     return EvalRequestTurn::Evaluator(crate::player::eval::EvalTurn::Pending {
                         request: crate::player::eval::EvalPending::Object {
                             capability,
@@ -1351,9 +1409,12 @@ impl RuntimeSession {
                     receiver,
                     name,
                     args,
-                } = request else {
+                } = request
+                else {
                     return EvalRequestTurn::Evaluator(crate::player::eval::EvalTurn::Complete(
-                        Err(ScriptError::new("invalid evaluator object request".to_owned())),
+                        Err(ScriptError::new(
+                            "invalid evaluator object request".to_owned(),
+                        )),
                     ));
                 };
                 let Some((player_id, owner)) = self.eval_action_anchor(&id, &capability) else {
@@ -1414,12 +1475,17 @@ impl RuntimeSession {
                     super::handlers::datum_handlers::DatumDispatch::Sync(result) => {
                         let result = match result {
                             Ok(result) => {
-                                let valid = self.with_player(player_id, |context| {
-                                    checked_internal_datum(context.player, context.symbols, &result)
+                                let valid = self
+                                    .with_player(player_id, |context| {
+                                        checked_internal_datum(
+                                            context.player,
+                                            context.symbols,
+                                            &result,
+                                        )
                                         .map(|_| ())
-                                })
-                                .and_then(Result::ok)
-                                .is_some();
+                                    })
+                                    .and_then(Result::ok)
+                                    .is_some();
                                 if !valid {
                                     Err(ScriptError::new_code(
                                         ScriptErrorCode::InvalidReference,
@@ -1431,7 +1497,12 @@ impl RuntimeSession {
                             }
                             Err(error) => Err(error),
                         };
-                        EvalRequestTurn::Evaluator(self.resume_eval(id, &capability, &owner, result))
+                        EvalRequestTurn::Evaluator(self.resume_eval(
+                            id,
+                            &capability,
+                            &owner,
+                            result,
+                        ))
                     }
                     super::handlers::datum_handlers::DatumDispatch::Pending { request, reason } => {
                         EvalRequestTurn::Evaluator(crate::player::eval::EvalTurn::Pending {
@@ -1478,11 +1549,14 @@ impl RuntimeSession {
         &mut self,
         player_id: PlayerId,
         call: &super::handlers::types::AncestorCall,
-    ) -> Result<Option<(
-        super::script_ref::ScriptInstanceRef,
-        super::script::ScriptHandlerRef,
-        Vec<super::datum_ref::DatumRef>,
-    )>, ScriptError> {
+    ) -> Result<
+        Option<(
+            super::script_ref::ScriptInstanceRef,
+            super::script::ScriptHandlerRef,
+            Vec<super::datum_ref::DatumRef>,
+        )>,
+        ScriptError,
+    > {
         self.with_player(player_id, |mut context| {
             super::handlers::types::resolve_ancestor_call(&mut context, call)
         })
@@ -1493,50 +1567,58 @@ impl RuntimeSession {
         &mut self,
         player_id: PlayerId,
         call: &super::driver::StaticEventCall,
-    ) -> Result<Option<(
-        Option<super::script_ref::ScriptInstanceRef>,
-        super::script::ScriptHandlerRef,
-        Vec<super::datum_ref::DatumRef>,
-        super::driver::StaticEventGuard,
-    )>, ScriptError> {
-        let resolved = self.with_player(player_id, |mut context| {
-            super::compare::validate_direct_symbol_fields(
-                &Datum::Symbol(call.handler_name.clone()),
-                context.symbols,
-            )?;
-            if let Some(receiver) = &call.receiver {
-                context
+    ) -> Result<
+        Option<(
+            Option<super::script_ref::ScriptInstanceRef>,
+            super::script::ScriptHandlerRef,
+            Vec<super::datum_ref::DatumRef>,
+            super::driver::StaticEventGuard,
+        )>,
+        ScriptError,
+    > {
+        let resolved = self
+            .with_player(player_id, |mut context| {
+                super::compare::validate_direct_symbol_fields(
+                    &Datum::Symbol(call.handler_name.clone()),
+                    context.symbols,
+                )?;
+                if let Some(receiver) = &call.receiver {
+                    context
+                        .player
+                        .allocator
+                        .get_script_instance_opt(receiver)
+                        .ok_or_else(|| {
+                            ScriptError::new_code(
+                                ScriptErrorCode::InvalidReference,
+                                "stale static event receiver".to_owned(),
+                            )
+                        })?;
+                }
+                let Some(script) = context
                     .player
-                    .allocator
-                    .get_script_instance_opt(receiver)
-                    .ok_or_else(|| {
-                        ScriptError::new_code(
-                            ScriptErrorCode::InvalidReference,
-                            "stale static event receiver".to_owned(),
-                        )
-                    })?;
-            }
-            let Some(script) = context
-                .player
-                .movie
-                .cast_manager
-                .get_script_by_ref(&call.member_ref)
-            else {
-                return Err(ScriptError::new_code(
-                    ScriptErrorCode::InvalidReference,
-                    format!("static event references missing script {:?}", call.member_ref),
-                ));
-            };
-            let Some(handler_ref) = script.get_own_handler_ref(call.handler_name.clone()) else {
-                return Ok(None);
-            };
-            Ok(Some((
-                call.receiver.clone(),
-                handler_ref,
-                call.args.clone(),
-            )))
-        })
-        .ok_or_else(super::cancelled_scope_error)??;
+                    .movie
+                    .cast_manager
+                    .get_script_by_ref(&call.member_ref)
+                else {
+                    return Err(ScriptError::new_code(
+                        ScriptErrorCode::InvalidReference,
+                        format!(
+                            "static event references missing script {:?}",
+                            call.member_ref
+                        ),
+                    ));
+                };
+                let Some(handler_ref) = script.get_own_handler_ref(call.handler_name.clone())
+                else {
+                    return Ok(None);
+                };
+                Ok(Some((
+                    call.receiver.clone(),
+                    handler_ref,
+                    call.args.clone(),
+                )))
+            })
+            .ok_or_else(super::cancelled_scope_error)??;
         let Some((receiver, handler_ref, args)) = resolved else {
             return Ok(None);
         };
@@ -1561,9 +1643,9 @@ impl RuntimeSession {
         let player_id = match self.evals.get(&id) {
             Some(continuation) if continuation.waiting_for(&action) => continuation.player_id,
             _ => {
-                return EvalRequestTurn::Evaluator(crate::player::eval::EvalTurn::Complete(
-                    Err(super::cancelled_scope_error()),
-                ));
+                return EvalRequestTurn::Evaluator(crate::player::eval::EvalTurn::Complete(Err(
+                    super::cancelled_scope_error(),
+                )));
             }
         };
         let static_event_was_active = broadcast.static_event_guard.is_some();
@@ -1638,12 +1720,7 @@ impl RuntimeSession {
         } else {
             broadcast.last_return_value
         };
-        EvalRequestTurn::Evaluator(self.resume_eval(
-            id,
-            &action,
-            &owner,
-            Ok(final_return),
-        ))
+        EvalRequestTurn::Evaluator(self.resume_eval(id, &action, &owner, Ok(final_return)))
     }
 
     fn start_eval_broadcast(
@@ -1653,9 +1730,9 @@ impl RuntimeSession {
         plan: super::driver::BroadcastPlan,
     ) -> EvalRequestTurn {
         let Some((player_id, owner)) = self.eval_action_anchor(&id, &action) else {
-            return EvalRequestTurn::Evaluator(crate::player::eval::EvalTurn::Complete(
-                Err(super::cancelled_scope_error()),
-            ));
+            return EvalRequestTurn::Evaluator(crate::player::eval::EvalTurn::Complete(Err(
+                super::cancelled_scope_error(),
+            )));
         };
         let mut broadcast = EvalBroadcastContinuation {
             remaining: plan.calls,
@@ -1695,14 +1772,7 @@ impl RuntimeSession {
                 }
             }
         }
-        self.continue_eval_broadcast(
-            id,
-            action,
-            owner,
-            broadcast,
-            DatumRef::Void,
-            true,
-        )
+        self.continue_eval_broadcast(id, action, owner, broadcast, DatumRef::Void, true)
     }
 
     fn start_eval_child(
@@ -1718,26 +1788,33 @@ impl RuntimeSession {
     ) -> EvalRequestTurn {
         let (args, use_raw_arg_list, request_owner) = match request {
             super::driver::InternalVmRequest::Global { args, .. }
-            | super::driver::InternalVmRequest::GlobalAfterExternalProbe { args, .. } => (args, true, None),
-            super::driver::InternalVmRequest::Object { args, .. } => (args, false, None),
-            super::driver::InternalVmRequest::SpriteAsync(request) => {
-                (request.args, false, Some((request.player_id, request.owner)))
+            | super::driver::InternalVmRequest::GlobalAfterExternalProbe { args, .. } => {
+                (args, true, None)
             }
+            super::driver::InternalVmRequest::Object { args, .. } => (args, false, None),
+            super::driver::InternalVmRequest::SpriteAsync(request) => (
+                request.args,
+                false,
+                Some((request.player_id, request.owner)),
+            ),
             _ => {
-                return EvalRequestTurn::Evaluator(crate::player::eval::EvalTurn::Complete(
-                    Err(ScriptError::new("invalid prepared evaluator child request".to_owned())),
-                ));
+                return EvalRequestTurn::Evaluator(crate::player::eval::EvalTurn::Complete(Err(
+                    ScriptError::new("invalid prepared evaluator child request".to_owned()),
+                )));
             }
         };
         if let Some((request_player, request_owner)) = request_owner {
-            let valid = self.eval_action_anchor(&id, &action).is_some_and(|(player_id, owner)| {
-                request_player == player_id && request_owner.same_identity(&owner)
-                    && request_owner.is_arena_live()
-            });
+            let valid = self
+                .eval_action_anchor(&id, &action)
+                .is_some_and(|(player_id, owner)| {
+                    request_player == player_id
+                        && request_owner.same_identity(&owner)
+                        && request_owner.is_arena_live()
+                });
             if !valid {
-                return EvalRequestTurn::Evaluator(crate::player::eval::EvalTurn::Complete(
-                    Err(super::cancelled_scope_error()),
-                ));
+                return EvalRequestTurn::Evaluator(crate::player::eval::EvalTurn::Complete(Err(
+                    super::cancelled_scope_error(),
+                )));
             }
         }
         self.start_eval_child_prepared(
@@ -1770,33 +1847,36 @@ impl RuntimeSession {
         if self.eval_drivers.contains_key(&id) {
             self.send_owned_callback_result(
                 &id,
-                Err(ScriptError::new("evaluator child action is already running".to_owned())),
+                Err(ScriptError::new(
+                    "evaluator child action is already running".to_owned(),
+                )),
             );
             self.evals.remove(&id);
-            return EvalRequestTurn::Evaluator(crate::player::eval::EvalTurn::Complete(
-                Err(ScriptError::new("evaluator child action is already running".to_owned())),
-            ));
+            return EvalRequestTurn::Evaluator(crate::player::eval::EvalTurn::Complete(Err(
+                ScriptError::new("evaluator child action is already running".to_owned()),
+            )));
         }
         let Some(continuation) = self.evals.get(&id) else {
-            return EvalRequestTurn::Evaluator(crate::player::eval::EvalTurn::Complete(
-                Err(super::cancelled_scope_error()),
-            ));
+            return EvalRequestTurn::Evaluator(crate::player::eval::EvalTurn::Complete(Err(
+                super::cancelled_scope_error(),
+            )));
         };
         if !continuation.waiting_for(&action) {
             self.send_owned_callback_result(
                 &id,
-                Err(ScriptError::new("evaluator child action is no longer pending".to_owned())),
+                Err(ScriptError::new(
+                    "evaluator child action is no longer pending".to_owned(),
+                )),
             );
             self.evals.remove(&id);
-            return EvalRequestTurn::Evaluator(crate::player::eval::EvalTurn::Complete(
-                Err(ScriptError::new("evaluator child action is no longer pending".to_owned())),
-            ));
+            return EvalRequestTurn::Evaluator(crate::player::eval::EvalTurn::Complete(Err(
+                ScriptError::new("evaluator child action is no longer pending".to_owned()),
+            )));
         }
         let (owner, parent_scope) = continuation.child_anchor();
         let player_id = continuation.player_id;
-        let Some((parent_scope_count, parent_handler_stack_depth)) = self.with_player(
-            player_id,
-            |context| {
+        let Some((parent_scope_count, parent_handler_stack_depth)) = self
+            .with_player(player_id, |context| {
                 if !owner.same_identity(&context.player.owner)
                     || !owner.is_arena_live()
                     || parent_scope
@@ -1805,14 +1885,18 @@ impl RuntimeSession {
                 {
                     return None;
                 }
-                Some((context.player.scope_count, context.player.handler_stack_depth))
-            },
-        ).flatten() else {
+                Some((
+                    context.player.scope_count,
+                    context.player.handler_stack_depth,
+                ))
+            })
+            .flatten()
+        else {
             self.send_owned_callback_result(&id, Err(super::cancelled_scope_error()));
             self.evals.remove(&id);
-            return EvalRequestTurn::Evaluator(crate::player::eval::EvalTurn::Complete(
-                Err(super::cancelled_scope_error()),
-            ));
+            return EvalRequestTurn::Evaluator(crate::player::eval::EvalTurn::Complete(Err(
+                super::cancelled_scope_error(),
+            )));
         };
         let driver = match DriverContinuation::start_subordinate(
             self,
@@ -1898,18 +1982,16 @@ impl RuntimeSession {
                     Err(error) => Err(error.clone()),
                 };
                 self.send_owned_callback_result(&id, callback_result);
-                return EvalRequestTurn::Evaluator(self.resume_eval(
-                    id,
-                    &action,
-                    &owner,
-                    result,
-                ));
+                return EvalRequestTurn::Evaluator(self.resume_eval(id, &action, &owner, result));
             }
             Ok(DriverStart::Running(driver)) => driver,
             Err(error) => {
                 if let Some(broadcast) = broadcast {
                     if error.code != ScriptErrorCode::Abort && broadcast.continue_on_error {
-                        warn!("broadcast evaluator child could not start; continuing: {}", error.message);
+                        warn!(
+                            "broadcast evaluator child could not start; continuing: {}",
+                            error.message
+                        );
                         return self.continue_eval_broadcast(
                             id,
                             action,
@@ -1942,7 +2024,10 @@ impl RuntimeSession {
             driver,
         };
         self.eval_drivers.insert(id.clone(), child);
-        let mut child = self.eval_drivers.remove(&id).expect("inserted evaluator child");
+        let mut child = self
+            .eval_drivers
+            .remove(&id)
+            .expect("inserted evaluator child");
         let child_turn = child.driver.turn(self);
         self.finish_eval_child(id, child, child_turn)
     }
@@ -2005,7 +2090,9 @@ impl RuntimeSession {
             self.evals.remove(&id);
             return false;
         }
-        let Some(mut continuation) = self.evals.remove(&id) else { return false };
+        let Some(mut continuation) = self.evals.remove(&id) else {
+            return false;
+        };
         let accepted = continuation.complete(self, action, owner, result);
         if !accepted || matches!(continuation.state, crate::player::eval::EvalState::Ready) {
             self.evals.insert(id, continuation);
@@ -2028,9 +2115,7 @@ impl RuntimeSession {
             super::driver::InternalVmRequest::CastMemberAsync(request) => {
                 (request.player_id, &request.owner)
             }
-            super::driver::InternalVmRequest::Flash(request) => {
-                (request.player_id, &request.owner)
-            }
+            super::driver::InternalVmRequest::Flash(request) => (request.player_id, &request.owner),
             _ => return None,
         };
         if anchored_player != player_id
@@ -2042,8 +2127,7 @@ impl RuntimeSession {
         }
         let current_owner = self
             .with_player(player_id, |context| {
-                (owner.same_identity(&context.player.owner)
-                    && context.player.owner.is_arena_live())
+                (owner.same_identity(&context.player.owner) && context.player.owner.is_arena_live())
                     .then(|| context.player.owner.clone())
             })
             .flatten()?;
@@ -2074,11 +2158,12 @@ impl RuntimeSession {
         owner: &OwnerToken,
         result: Result<DatumRef, ScriptError>,
     ) -> EvalRequestTurn {
-        let Some(current_owner) = self.validate_typed_async_eval(&id, action, request, owner) else {
+        let Some(current_owner) = self.validate_typed_async_eval(&id, action, request, owner)
+        else {
             self.cancel_eval_action(&id, action, owner);
-            return EvalRequestTurn::Evaluator(crate::player::eval::EvalTurn::Complete(
-                Err(super::cancelled_scope_error()),
-            ));
+            return EvalRequestTurn::Evaluator(crate::player::eval::EvalTurn::Complete(Err(
+                super::cancelled_scope_error(),
+            )));
         };
         EvalRequestTurn::Evaluator(self.resume_eval(id, action, &current_owner, result))
     }
@@ -2096,7 +2181,8 @@ impl RuntimeSession {
         owner: &OwnerToken,
         result: Result<DatumRef, ScriptError>,
     ) -> bool {
-        let Some(current_owner) = self.validate_typed_async_eval(&id, action, request, owner) else {
+        let Some(current_owner) = self.validate_typed_async_eval(&id, action, request, owner)
+        else {
             return false;
         };
         self.complete_eval(id, action, &current_owner, result)
@@ -2121,7 +2207,8 @@ impl RuntimeSession {
     pub(crate) async fn execute_cast_member_async_request(
         session: RuntimeSessionHandle,
         request: super::driver::CastMemberAsyncRequest,
-    ) -> Result<super::handlers::datum_handlers::cast_member_ref::CastAsyncExecution, ScriptError> {
+    ) -> Result<super::handlers::datum_handlers::cast_member_ref::CastAsyncExecution, ScriptError>
+    {
         super::handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers::execute_async_request(
             session, request,
         )
@@ -2147,10 +2234,15 @@ impl RuntimeSession {
                 {
                     return Err(super::cancelled_scope_error());
                 }
-                let instance_ref = match checked_internal_datum(context.player, context.symbols, receiver)? {
-                    Datum::ScriptInstanceRef(instance_ref) => instance_ref.clone(),
-                    _ => return Err(ScriptError::new("Havok callback receiver is not a script instance".to_owned())),
-                };
+                let instance_ref =
+                    match checked_internal_datum(context.player, context.symbols, receiver)? {
+                        Datum::ScriptInstanceRef(instance_ref) => instance_ref.clone(),
+                        _ => {
+                            return Err(ScriptError::new(
+                                "Havok callback receiver is not a script instance".to_owned(),
+                            ));
+                        }
+                    };
                 let handler_ref = ScriptInstanceUtils::get_script_instance_handler(
                     handler,
                     &instance_ref,
@@ -2263,7 +2355,8 @@ impl RuntimeSession {
         player_id: PlayerId,
         state: &std::rc::Rc<crate::rendering::RendererState>,
     ) {
-        self.renderer_bindings.insert(player_id, std::rc::Rc::downgrade(state));
+        self.renderer_bindings
+            .insert(player_id, std::rc::Rc::downgrade(state));
     }
 
     pub(crate) fn renderer_state(
@@ -2282,9 +2375,9 @@ impl RuntimeSession {
 
     fn next_player_owner_generation(&self, id: PlayerId) -> Result<u64, ScriptError> {
         match self.owner_generation_high_water.get(&id).copied() {
-            Some(generation) => generation.checked_add(1).ok_or_else(|| {
-                ScriptError::new("player owner generation exhausted".to_owned())
-            }),
+            Some(generation) => generation
+                .checked_add(1)
+                .ok_or_else(|| ScriptError::new("player owner generation exhausted".to_owned())),
             None => Ok(self.generation),
         }
     }
@@ -2351,13 +2444,9 @@ impl RuntimeSession {
         // A stopped loop still owes StopMovie/endSprite cleanup. Do not let
         // an immediate replay install a replacement until that old owner has
         // finished its cancellable cleanup boundary.
-        if self
-            .playback_cancellations
-            .get(&player_id)
-            .is_some_and(|(active_owner, _, stop_sequence)| {
-                *stop_sequence && active_owner.same_identity(owner)
-            })
-        {
+        if self.playback_cancellations.get(&player_id).is_some_and(
+            |(active_owner, _, stop_sequence)| *stop_sequence && active_owner.same_identity(owner),
+        ) {
             let epoch = self
                 .playback_cancellations
                 .get(&player_id)
@@ -2433,15 +2522,15 @@ impl RuntimeSession {
         owner: &OwnerToken,
         epoch: u64,
     ) -> bool {
-        let matches = self.playback_loops.get(&player_id).is_some_and(|active| {
-            active.epoch == epoch && active.owner.same_identity(owner)
-        });
+        let matches = self
+            .playback_loops
+            .get(&player_id)
+            .is_some_and(|active| active.epoch == epoch && active.owner.same_identity(owner));
         if matches {
             self.playback_loops.remove(&player_id);
         }
-        self.playback_cancellations.retain(|id, (_, active_epoch, _)| {
-            *id != player_id || *active_epoch != epoch
-        });
+        self.playback_cancellations
+            .retain(|id, (_, active_epoch, _)| *id != player_id || *active_epoch != epoch);
         matches
     }
 
@@ -2456,10 +2545,7 @@ impl RuntimeSession {
         else {
             return false;
         };
-        if request_epoch != epoch
-            || !request_owner.same_identity(owner)
-            || !owner.is_arena_live()
-        {
+        if request_epoch != epoch || !request_owner.same_identity(owner) || !owner.is_arena_live() {
             return false;
         }
         self.playback_replay_requests.remove(&player_id);
@@ -2472,8 +2558,7 @@ impl RuntimeSession {
         owner: &OwnerToken,
         epoch: u64,
     ) -> bool {
-        let Some((request_owner, request_epoch)) =
-            self.playback_replay_requests.get(&player_id)
+        let Some((request_owner, request_epoch)) = self.playback_replay_requests.get(&player_id)
         else {
             return false;
         };
@@ -2501,11 +2586,7 @@ impl RuntimeSession {
         stop_sequence
     }
 
-    pub(crate) fn playback_loop_active(
-        &self,
-        player_id: PlayerId,
-        owner: &OwnerToken,
-    ) -> bool {
+    pub(crate) fn playback_loop_active(&self, player_id: PlayerId, owner: &OwnerToken) -> bool {
         self.playback_loops
             .get(&player_id)
             .is_some_and(|active| active.owner.same_identity(owner))
@@ -2611,13 +2692,8 @@ impl RuntimeSession {
         command_tx: Sender<PlayerVMExecutionItem>,
         event_tx: Sender<super::events::PlayerVMEvent>,
     ) -> Result<(PlayerId, OwnerToken), ScriptError> {
-        self.nested.replace_child_runtime(
-            child_id,
-            old_owner,
-            new_owner,
-            command_tx,
-            event_tx,
-        )
+        self.nested
+            .replace_child_runtime(child_id, old_owner, new_owner, command_tx, event_tx)
     }
 
     pub(crate) fn nested_children_for(
@@ -2660,7 +2736,8 @@ impl RuntimeSession {
         parent_id: PlayerId,
         parent_owner: &OwnerToken,
     ) -> Vec<NestedChildRecord> {
-        self.nested.take_children_for_parent(parent_id, parent_owner)
+        self.nested
+            .take_children_for_parent(parent_id, parent_owner)
     }
 
     pub(crate) fn activate_nested_flash_route(
@@ -2702,9 +2779,7 @@ impl RuntimeSession {
         let Some(record) = self.nested.child(child_id, child_owner) else {
             return Err(super::cancelled_scope_error());
         };
-        if record.parent_id != parent_id
-            || !record.parent_owner.same_identity(parent_owner)
-        {
+        if record.parent_id != parent_id || !record.parent_owner.same_identity(parent_owner) {
             return Err(super::cancelled_scope_error());
         }
         self.nested
@@ -2789,7 +2864,8 @@ impl RuntimeSession {
             }
         }
         self.pending_commands = retained_commands;
-        self.pending_completions.retain(|(id, _, _)| *id != player_id);
+        self.pending_completions
+            .retain(|(id, _, _)| *id != player_id);
         self.pending_eval_requests.retain(|pending| {
             if pending.player_id == player_id && pending.owner.same_identity(owner) {
                 let _ = pending.sender.try_send(Err(super::cancelled_scope_error()));
@@ -2806,8 +2882,10 @@ impl RuntimeSession {
                 true
             }
         });
-        self.deferred_requests.retain(|request| request.player_id != player_id);
-        self.completed_score_defaults.retain(|(id, _, _)| *id != player_id);
+        self.deferred_requests
+            .retain(|request| request.player_id != player_id);
+        self.completed_score_defaults
+            .retain(|(id, _, _)| *id != player_id);
     }
 
     fn cancel_eval_continuations(&mut self, owner: &OwnerToken) {
@@ -2831,12 +2909,7 @@ impl RuntimeSession {
         let ids: Vec<_> = self
             .eval_drivers
             .iter()
-            .filter_map(|(id, child)| {
-                child
-                    .owner
-                    .same_identity(owner)
-                    .then_some(id.clone())
-            })
+            .filter_map(|(id, child)| child.owner.same_identity(owner).then_some(id.clone()))
             .collect();
         for id in ids {
             if let Some(mut child) = self.eval_drivers.remove(&id) {
@@ -2871,9 +2944,7 @@ impl RuntimeSession {
                 && pending.player_id == player_id
                 && pending.owner.same_identity(owner)
         }) || self.inflight_eval_routes.iter().any(|route| {
-            route.id == *id
-                && route.player_id == player_id
-                && route.owner.same_identity(owner)
+            route.id == *id && route.player_id == player_id && route.owner.same_identity(owner)
         }) || self.pending_commands.iter().any(|pending| {
             pending.eval_child.as_ref() == Some(id)
                 && pending.player_id == player_id
@@ -2947,12 +3018,13 @@ impl RuntimeSession {
             }
         }
         self.pending_commands = retained_commands;
-        self.pending_completions.retain(|(queued_player, queued_ticket, _)| {
-            *queued_player != player_id
-                || !canceled_tickets
-                    .iter()
-                    .any(|ticket| ticket.same_identity(queued_ticket))
-        });
+        self.pending_completions
+            .retain(|(queued_player, queued_ticket, _)| {
+                *queued_player != player_id
+                    || !canceled_tickets
+                        .iter()
+                        .any(|ticket| ticket.same_identity(queued_ticket))
+            });
         for ticket in canceled_tickets {
             self.actions.cancel_ticket(&ticket);
         }
@@ -2968,10 +3040,7 @@ impl RuntimeSession {
             }
         });
         self.inflight_eval_routes.retain(|route| {
-            if &route.id == id
-                && route.player_id == player_id
-                && route.owner.same_identity(owner)
-            {
+            if &route.id == id && route.player_id == player_id && route.owner.same_identity(owner) {
                 let _ = route.sender.try_send(Err(super::cancelled_scope_error()));
                 false
             } else {
@@ -3034,10 +3103,18 @@ impl RuntimeSession {
             .borrow_mut()
             .retain(|record| record.player_id != player_id);
         self.active_event_scopes.remove(&player_id);
-        self.event_cleanups.borrow_mut().retain(|record| match record {
-            DeferredEventCleanup::Stop { player_id: record_player, .. }
-            | DeferredEventCleanup::Static { player_id: record_player, .. } => *record_player != player_id,
-        });
+        self.event_cleanups
+            .borrow_mut()
+            .retain(|record| match record {
+                DeferredEventCleanup::Stop {
+                    player_id: record_player,
+                    ..
+                }
+                | DeferredEventCleanup::Static {
+                    player_id: record_player,
+                    ..
+                } => *record_player != player_id,
+            });
         self.drain_eval_cancellations();
         let nested_children = self.take_nested_children_for(player_id, &current_owner);
         for child in nested_children {
@@ -3075,10 +3152,18 @@ impl RuntimeSession {
         self.input_flag_cleanups
             .borrow_mut()
             .retain(|record| record.player_id != player_id);
-        self.event_cleanups.borrow_mut().retain(|record| match record {
-            DeferredEventCleanup::Stop { player_id: record_player, .. }
-            | DeferredEventCleanup::Static { player_id: record_player, .. } => *record_player != player_id,
-        });
+        self.event_cleanups
+            .borrow_mut()
+            .retain(|record| match record {
+                DeferredEventCleanup::Stop {
+                    player_id: record_player,
+                    ..
+                }
+                | DeferredEventCleanup::Static {
+                    player_id: record_player,
+                    ..
+                } => *record_player != player_id,
+            });
         // Finalize the replacement baseline only after every old-generation
         // cancellation and teardown guard has run.  A suspended old command
         // may restore one of these flags while it is being cancelled; that
@@ -3101,7 +3186,9 @@ impl RuntimeSession {
             player.owner.clone()
         };
         if new_owner.key() != expected_owner_key {
-            return Err(ScriptError::new("player owner generation advanced unexpectedly".to_owned()));
+            return Err(ScriptError::new(
+                "player owner generation advanced unexpectedly".to_owned(),
+            ));
         }
         self.record_player_owner_generation(player_id, new_owner.key().generation);
         // Retire the old NetManager shared state when the player generation
@@ -3125,15 +3212,21 @@ impl RuntimeSession {
             .borrow_mut()
             .retain(|record| record.player_id != id);
         self.active_event_scopes.remove(&id);
-        self.event_cleanups.borrow_mut().retain(|record| match record {
-            DeferredEventCleanup::Stop { player_id, .. }
-            | DeferredEventCleanup::Static { player_id, .. } => *player_id != id,
-        });
+        self.event_cleanups
+            .borrow_mut()
+            .retain(|record| match record {
+                DeferredEventCleanup::Stop { player_id, .. }
+                | DeferredEventCleanup::Static { player_id, .. } => *player_id != id,
+            });
         self.notification_drains.remove(&id);
         self.native_player_notifications.remove(&id);
         self.native_notification_errors.remove(&id);
         self.host_sinks.remove(&id);
-        let owner = self.players.players.get(&id).map(|player| player.owner.clone());
+        let owner = self
+            .players
+            .players
+            .get(&id)
+            .map(|player| player.owner.clone());
         if let Some(owner) = owner {
             self.drain_eval_cancellations();
             self.record_player_owner_generation(id, owner.key().generation);
@@ -3179,7 +3272,11 @@ impl RuntimeSession {
             if let Some(player) = self.players.players.get_mut(&id) {
                 for (request, property) in canceled {
                     if property {
-                        player.movie.cast_manager.get_cast_mut(request.cast_number()).cancel_load(&request);
+                        player
+                            .movie
+                            .cast_manager
+                            .get_cast_mut(request.cast_number())
+                            .cancel_load(&request);
                     } else {
                         player.movie.cast_manager.cancel_preload(&request);
                     }
@@ -3208,7 +3305,10 @@ impl RuntimeSession {
             .w3d_clocks
             .get_mut(&player_id)
             .ok_or_else(super::cancelled_scope_error)?;
-        Ok((clock.animation_dt(owner, now_ms)?, clock.particle_dt(owner, now_ms)?))
+        Ok((
+            clock.animation_dt(owner, now_ms)?,
+            clock.particle_dt(owner, now_ms)?,
+        ))
     }
 
     /// Cancel owned cast continuations before a caller performs a full player
@@ -3232,7 +3332,11 @@ impl RuntimeSession {
         });
         for (request, property) in canceled {
             if property {
-                player.movie.cast_manager.get_cast_mut(request.cast_number()).cancel_load(&request);
+                player
+                    .movie
+                    .cast_manager
+                    .get_cast_mut(request.cast_number())
+                    .cancel_load(&request);
             } else {
                 player.movie.cast_manager.cancel_preload(&request);
             }
@@ -3380,9 +3484,11 @@ impl RuntimeSession {
             .map(|player| {
                 let owner = player.owner.clone();
                 let mut batch = std::mem::take(&mut player.pending_player_notifications);
-                batch.extend(player.take_host_events().into_iter().map(|kind| PlayerNotification {
-                    owner: owner.clone(),
-                    kind: PlayerNotificationKind::Host(kind),
+                batch.extend(player.take_host_events().into_iter().map(|kind| {
+                    PlayerNotification {
+                        owner: owner.clone(),
+                        kind: PlayerNotificationKind::Host(kind),
+                    }
                 }));
                 if let Some(error) = player.host_event_backpressure {
                     batch.push(PlayerNotification {
@@ -3416,7 +3522,10 @@ impl RuntimeSession {
                 true
             }
             std::collections::hash_map::Entry::Occupied(entry)
-                if entry.get().same_identity(owner) => false,
+                if entry.get().same_identity(owner) =>
+            {
+                false
+            }
             std::collections::hash_map::Entry::Occupied(mut entry) => {
                 // A reset/replacement may occur before the old detached task
                 // starts. Replace the stale marker; the old task's exact-owner
@@ -3461,16 +3570,15 @@ impl RuntimeSession {
         owner: OwnerToken,
         event: super::host_events::HostEvent,
     ) -> Result<(), super::host_events::HostEventOverflow> {
-        self.native_host_events.push(super::host_events::NativeHostEvent {
-            player_id,
-            owner,
-            event,
-        })
+        self.native_host_events
+            .push(super::host_events::NativeHostEvent {
+                player_id,
+                owner,
+                event,
+            })
     }
 
-    pub(crate) fn take_native_host_events(
-        &mut self,
-    ) -> Vec<super::host_events::NativeHostEvent> {
+    pub(crate) fn take_native_host_events(&mut self) -> Vec<super::host_events::NativeHostEvent> {
         self.native_host_events.drain()
     }
 
@@ -3500,10 +3608,7 @@ impl RuntimeSession {
             .unwrap_or_default()
     }
 
-    pub(crate) fn record_native_notification_error(
-        &mut self,
-        error: NativeNotificationError,
-    ) {
+    pub(crate) fn record_native_notification_error(&mut self, error: NativeNotificationError) {
         if self.player_owner_matches(error.player_id, &error.owner) {
             self.native_notification_errors
                 .insert(error.player_id, error);
@@ -3568,12 +3673,17 @@ impl RuntimeSession {
             return Ok(());
         }
         let player_id = deliveries[0].player_id;
-        debug_assert!(deliveries.iter().all(|delivery| delivery.player_id == player_id));
-        let inflight = self.host_event_inflight.get(&player_id).copied().unwrap_or(0);
-        let queue = self
-            .host_event_deliveries
-            .entry(player_id)
-            .or_default();
+        debug_assert!(
+            deliveries
+                .iter()
+                .all(|delivery| delivery.player_id == player_id)
+        );
+        let inflight = self
+            .host_event_inflight
+            .get(&player_id)
+            .copied()
+            .unwrap_or(0);
+        let queue = self.host_event_deliveries.entry(player_id).or_default();
         let terminal_reserve = deliveries.len() == 1
             && matches!(
                 &deliveries[0].event,
@@ -3591,9 +3701,7 @@ impl RuntimeSession {
             .saturating_add(deliveries.len())
             > capacity
         {
-            return Err(super::host_events::HostEventOverflow {
-                capacity,
-            });
+            return Err(super::host_events::HostEventOverflow { capacity });
         }
         queue.extend(deliveries);
         Ok(())
@@ -3608,10 +3716,12 @@ impl RuntimeSession {
             .host_event_deliveries
             .get(&player_id)
             .map_or(0, VecDeque::len);
-        let inflight = self.host_event_inflight.get(&player_id).copied().unwrap_or(0);
-        if queued
-            .saturating_add(inflight)
-            .saturating_add(additional)
+        let inflight = self
+            .host_event_inflight
+            .get(&player_id)
+            .copied()
+            .unwrap_or(0);
+        if queued.saturating_add(inflight).saturating_add(additional)
             > super::host_events::MAX_HOST_EVENTS
         {
             return Err(super::host_events::HostEventOverflow {
@@ -3629,10 +3739,13 @@ impl RuntimeSession {
             .host_event_deliveries
             .get(&player_id)
             .map_or(0, VecDeque::len);
-        let inflight = self.host_event_inflight.get(&player_id).copied().unwrap_or(0);
+        let inflight = self
+            .host_event_inflight
+            .get(&player_id)
+            .copied()
+            .unwrap_or(0);
         if queued.saturating_add(inflight)
-            >= super::host_events::MAX_HOST_EVENTS
-                + super::host_events::HOST_EVENT_TERMINAL_RESERVE
+            >= super::host_events::MAX_HOST_EVENTS + super::host_events::HOST_EVENT_TERMINAL_RESERVE
         {
             return Err(super::host_events::HostEventOverflow {
                 capacity: super::host_events::MAX_HOST_EVENTS
@@ -3651,8 +3764,7 @@ impl RuntimeSession {
         }
         let deliveries = self.host_event_deliveries.remove(&player_id)?;
         self.host_event_drains.insert(player_id);
-        self.host_event_inflight
-            .insert(player_id, deliveries.len());
+        self.host_event_inflight.insert(player_id, deliveries.len());
         Some(deliveries.into_iter().collect())
     }
 
@@ -3670,11 +3782,7 @@ impl RuntimeSession {
         }
     }
 
-    pub(crate) fn release_host_event_reservation(
-        &mut self,
-        player_id: PlayerId,
-        count: usize,
-    ) {
+    pub(crate) fn release_host_event_reservation(&mut self, player_id: PlayerId, count: usize) {
         if let Some(inflight) = self.host_event_inflight.get_mut(&player_id) {
             *inflight = inflight.saturating_sub(count);
         }
@@ -3688,14 +3796,17 @@ impl RuntimeSession {
         if deliveries.is_empty() {
             return Ok(());
         }
-        let inflight = self.host_event_inflight.get(&player_id).copied().unwrap_or(0);
+        let inflight = self
+            .host_event_inflight
+            .get(&player_id)
+            .copied()
+            .unwrap_or(0);
         let queue = self.host_event_deliveries.entry(player_id).or_default();
         if queue
             .len()
             .saturating_add(inflight)
             .saturating_add(deliveries.len())
-            > super::host_events::MAX_HOST_EVENTS
-                + super::host_events::HOST_EVENT_TERMINAL_RESERVE
+            > super::host_events::MAX_HOST_EVENTS + super::host_events::HOST_EVENT_TERMINAL_RESERVE
         {
             return Err(super::host_events::HostEventOverflow {
                 capacity: super::host_events::MAX_HOST_EVENTS
@@ -3729,9 +3840,8 @@ impl RuntimeSession {
     }
 
     pub(crate) fn discard_completed_property_cast(&mut self, ticket: &CompletionTicket) {
-        self.completed_property_casts.retain(|(_, completed)| {
-            !completed.same_identity(ticket)
-        });
+        self.completed_property_casts
+            .retain(|(_, completed)| !completed.same_identity(ticket));
     }
     pub(crate) fn retain_pending_eval_request(
         &mut self,
@@ -3744,7 +3854,9 @@ impl RuntimeSession {
         let action = match &request {
             crate::player::eval::EvalPending::Global { capability, .. }
             | crate::player::eval::EvalPending::Object { capability, .. }
-            | crate::player::eval::EvalPending::SetProperty { capability, .. } => capability.clone(),
+            | crate::player::eval::EvalPending::SetProperty { capability, .. } => {
+                capability.clone()
+            }
         };
         self.pending_eval_requests.push(PendingEvalRequest {
             id,
@@ -3765,10 +3877,7 @@ impl RuntimeSession {
     /// Apply a host result to an evaluator request. Invalid owner/capability
     /// results leave the request queued; accepted pending turns are requeued
     /// with their newly-issued evaluator capability.
-    pub(crate) fn requeue_pending_eval_request(
-        &mut self,
-        pending: PendingEvalRequest,
-    ) {
+    pub(crate) fn requeue_pending_eval_request(&mut self, pending: PendingEvalRequest) {
         // One evaluator continuation owns one sender and one owner route at a
         // time.  A resumed continuation may issue a new capability, so the
         // action changes while the EvalId and owner remain stable.  Retire
@@ -3787,9 +3896,10 @@ impl RuntimeSession {
         id: &crate::player::eval::EvalId,
         action: &crate::player::eval::EvalAction,
     ) -> Option<(PlayerId, OwnerToken, Sender<Result<DatumRef, ScriptError>>)> {
-        let index = self.inflight_eval_routes.iter().position(|route| {
-            &route.id == id && &route.action == action
-        })?;
+        let index = self
+            .inflight_eval_routes
+            .iter()
+            .position(|route| &route.id == id && &route.action == action)?;
         let route = self.inflight_eval_routes.swap_remove(index);
         Some((route.player_id, route.owner, route.sender))
     }
@@ -3869,8 +3979,10 @@ impl RuntimeSession {
         let player_id = pending.player_id;
         let queue_tx = match self.players.players.get(&player_id) {
             Some(player)
-                if pending.owner.same_identity(&player.owner)
-                    && pending.owner.is_arena_live() => player.queue_tx.clone(),
+                if pending.owner.same_identity(&player.owner) && pending.owner.is_arena_live() =>
+            {
+                player.queue_tx.clone()
+            }
             _ => {
                 // Do not leave a caller future parked when its captured
                 // owner has been reset or removed.  The action itself is
@@ -3878,7 +3990,9 @@ impl RuntimeSession {
                 // cancellation result.
                 if let Some(completer) = pending.completer {
                     async_std::task::spawn_local(async move {
-                        completer.complete(Err(super::cancelled_scope_error())).await;
+                        completer
+                            .complete(Err(super::cancelled_scope_error()))
+                            .await;
                     });
                 }
                 if let Some(sender) = pending.event_sender {
@@ -3937,7 +4051,10 @@ impl RuntimeSession {
     /// Remove only newly runnable work for one owner. Actions marked started
     /// are external waits and remain parked until their exact ticket is
     /// submitted through `service_pending_commands`.
-    pub(crate) fn take_ready_pending_commands_for(&mut self, player_id: PlayerId) -> Vec<PendingCommand> {
+    pub(crate) fn take_ready_pending_commands_for(
+        &mut self,
+        player_id: PlayerId,
+    ) -> Vec<PendingCommand> {
         let mut selected = Vec::new();
         let mut retained = Vec::new();
         for command in self.take_pending_commands() {
@@ -3971,13 +4088,15 @@ impl RuntimeSession {
         if let Some(pending) = self.pending_commands.iter_mut().find(|pending| {
             pending.player_id == player_id
                 && pending.started
-                && pending.ticket.as_ref().is_some_and(|old| old.same_identity(ticket))
+                && pending
+                    .ticket
+                    .as_ref()
+                    .is_some_and(|old| old.same_identity(ticket))
         }) {
             pending.ticket = Some(action.ticket().clone());
             pending.action = Some(action);
         }
     }
-
 
     pub(crate) fn update_started_pending_command_with_completion(
         &mut self,
@@ -3989,7 +4108,10 @@ impl RuntimeSession {
         if let Some(pending) = self.pending_commands.iter_mut().find(|pending| {
             pending.player_id == player_id
                 && pending.started
-                && pending.ticket.as_ref().is_some_and(|old| old.same_identity(ticket))
+                && pending
+                    .ticket
+                    .as_ref()
+                    .is_some_and(|old| old.same_identity(ticket))
         }) {
             pending.ticket = Some(action.ticket().clone());
             pending.action = Some(action);
@@ -3998,14 +4120,15 @@ impl RuntimeSession {
     }
 
     pub(crate) fn has_pending_commands(&self, player_id: PlayerId) -> bool {
-        self.pending_commands.iter().any(|pending| pending.player_id == player_id)
+        self.pending_commands
+            .iter()
+            .any(|pending| pending.player_id == player_id)
     }
 
     pub(crate) fn has_ready_pending_commands(&self, player_id: PlayerId) -> bool {
-        self.pending_commands.iter().any(|pending| {
-            pending.player_id == player_id
-                && !pending.started
-        })
+        self.pending_commands
+            .iter()
+            .any(|pending| pending.player_id == player_id && !pending.started)
     }
 
     pub(crate) fn has_pending_eval_requests(&self, player_id: PlayerId) -> bool {
@@ -4017,7 +4140,12 @@ impl RuntimeSession {
     #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) fn test_scheduler_ticket(&mut self, owner: &OwnerToken) -> CompletionTicket {
         self.actions
-            .allocate(owner, None, ActionKind::InternalInvocation, ResumePhase::ApplyOpcode)
+            .allocate(
+                owner,
+                None,
+                ActionKind::InternalInvocation,
+                ResumePhase::ApplyOpcode,
+            )
             .expect("scheduler test action ticket should allocate")
     }
 
@@ -4061,7 +4189,8 @@ impl RuntimeSession {
         {
             return;
         }
-        self.pending_completions.push((player_id, ticket, completion));
+        self.pending_completions
+            .push((player_id, ticket, completion));
         if let Some(player) = self.players.players.get(&player_id) {
             let _ = player.queue_tx.try_send(PlayerVMExecutionItem {
                 command: super::commands::PlayerVMCommand::PumpPending,
@@ -4073,7 +4202,10 @@ impl RuntimeSession {
     /// Match host completions to retained actions and resume each matched
     /// continuation. Unmatched pending actions remain retained, so a host can
     /// deliver a result before the command loop has stored the action.
-    pub(crate) fn service_pending_commands(&mut self, player_id: PlayerId) -> Vec<super::commands::CommandTurn> {
+    pub(crate) fn service_pending_commands(
+        &mut self,
+        player_id: PlayerId,
+    ) -> Vec<super::commands::CommandTurn> {
         let mut turns = Vec::new();
         let mut retained = Vec::new();
         let mut pending = self.take_pending_commands();
@@ -4086,9 +4218,12 @@ impl RuntimeSession {
                 retained.push(command);
                 continue;
             };
-            let match_index = self.pending_completions.iter().position(|(player_id, ticket, _)| {
-                *player_id == command.player_id && action.ticket().same_identity(ticket)
-            });
+            let match_index = self
+                .pending_completions
+                .iter()
+                .position(|(player_id, ticket, _)| {
+                    *player_id == command.player_id && action.ticket().same_identity(ticket)
+                });
             let Some(index) = match_index else {
                 retained.push(command);
                 continue;
@@ -4108,7 +4243,12 @@ impl RuntimeSession {
         mut pending: PendingCommand,
         completion: Option<ActionCompletion>,
     ) -> super::commands::CommandTurn {
-        let Some(current_owner) = self.players.players.get(&pending.player_id).map(|p| p.owner.clone()) else {
+        let Some(current_owner) = self
+            .players
+            .players
+            .get(&pending.player_id)
+            .map(|p| p.owner.clone())
+        else {
             return super::commands::CommandTurn::Pending(pending);
         };
         if !pending.owner.same_identity(&current_owner) || !pending.owner.is_arena_live() {
@@ -4209,13 +4349,10 @@ impl RuntimeSession {
                         self.send_owned_callback_result(&child_id, Err(error.clone()));
                         self.evals.remove(&child_id);
                     }
-                    super::commands::CommandTurn::Complete(
-                        Err(error),
-                        pending.completer,
-                    )
+                    super::commands::CommandTurn::Complete(Err(error), pending.completer)
                 }
             };
-        } 
+        }
         if let (Some(completion), Some(ticket)) = (completion, pending.ticket.clone()) {
             if !self.complete_handler_action(ticket, completion) {
                 return super::commands::CommandTurn::Pending(pending);
@@ -4236,7 +4373,11 @@ impl RuntimeSession {
                         break super::commands::CommandTurn::Continue;
                     }
                     let returned = if let Some(child_completion) = pending.child_completion.take() {
-                        self.apply_child_completion(pending.player_id, child_completion, scope.return_value)
+                        self.apply_child_completion(
+                            pending.player_id,
+                            child_completion,
+                            scope.return_value,
+                        )
                     } else {
                         Ok(scope.return_value)
                     };
@@ -4247,10 +4388,7 @@ impl RuntimeSession {
                             returned.clone(),
                         ));
                     }
-                    break super::commands::CommandTurn::Complete(
-                        returned,
-                        pending.completer,
-                    )
+                    break super::commands::CommandTurn::Complete(returned, pending.completer);
                 }
                 Some(DriverTurn::Error(error)) => {
                     if let Some(sender) = pending.event_sender.take() {
@@ -4264,10 +4402,7 @@ impl RuntimeSession {
                             Err(error.clone()),
                         ));
                     }
-                    break super::commands::CommandTurn::Complete(
-                        Err(error),
-                        pending.completer,
-                    )
+                    break super::commands::CommandTurn::Complete(Err(error), pending.completer);
                 }
                 // A waiting command without an action is a cooperative turn
                 // (for example a jump or a driver that is waiting for its
@@ -4276,7 +4411,7 @@ impl RuntimeSession {
                 // the executor; the next pump will try the driver again.
                 Some(DriverTurn::Waiting) => {
                     pending.started = false;
-                    break super::commands::CommandTurn::Waiting(pending)
+                    break super::commands::CommandTurn::Waiting(pending);
                 }
                 Some(DriverTurn::Pending(action)) => {
                     pending.ticket = Some(action.ticket().clone());
@@ -4290,7 +4425,7 @@ impl RuntimeSession {
                             "command handler driver disappeared".to_owned(),
                         )),
                         pending.completer,
-                    )
+                    );
                 }
             }
         }
@@ -4340,8 +4475,6 @@ impl RuntimeSession {
         }
     }
 
-
-
     pub fn with_player<R>(
         &mut self,
         id: PlayerId,
@@ -4359,9 +4492,19 @@ impl RuntimeSession {
         &mut self,
         player_id: PlayerId,
         owner: &OwnerToken,
-    ) -> Result<(u64, InputFlagSnapshot, Rc<RefCell<VecDeque<DeferredInputFlagCleanup>>>, Sender<PlayerVMExecutionItem>), ScriptError> {
+    ) -> Result<
+        (
+            u64,
+            InputFlagSnapshot,
+            Rc<RefCell<VecDeque<DeferredInputFlagCleanup>>>,
+            Sender<PlayerVMExecutionItem>,
+        ),
+        ScriptError,
+    > {
         let Some(next_scope_id) = self.next_input_scope_id.checked_add(1) else {
-            return Err(ScriptError::new("input flag scope generation exhausted".to_owned()));
+            return Err(ScriptError::new(
+                "input flag scope generation exhausted".to_owned(),
+            ));
         };
         let (snapshot, queue_tx) = self
             .with_player(player_id, |context| {
@@ -4391,8 +4534,18 @@ impl RuntimeSession {
         self.active_input_scopes
             .entry(player_id)
             .or_default()
-            .push(ActiveInputFlagScope { scope_id, owner: owner.clone(), snapshot, restored: false });
-        Ok((scope_id, snapshot, self.input_flag_cleanups.clone(), queue_tx))
+            .push(ActiveInputFlagScope {
+                scope_id,
+                owner: owner.clone(),
+                snapshot,
+                restored: false,
+            });
+        Ok((
+            scope_id,
+            snapshot,
+            self.input_flag_cleanups.clone(),
+            queue_tx,
+        ))
     }
 
     pub(crate) fn restore_input_flag_scope(
@@ -4403,8 +4556,12 @@ impl RuntimeSession {
         snapshot: InputFlagSnapshot,
     ) -> bool {
         let (snapshots, remove_scope) = {
-            let Some(scopes) = self.active_input_scopes.get_mut(&player_id) else { return false };
-            let Some(index) = scopes.iter().position(|scope| scope.scope_id == scope_id) else { return false };
+            let Some(scopes) = self.active_input_scopes.get_mut(&player_id) else {
+                return false;
+            };
+            let Some(index) = scopes.iter().position(|scope| scope.scope_id == scope_id) else {
+                return false;
+            };
             if !scopes[index].owner.same_identity(owner) || !owner.is_arena_live() {
                 return false;
             }
@@ -4459,9 +4616,7 @@ impl RuntimeSession {
 
     #[cfg(test)]
     pub(crate) fn active_event_scope_count_for_test(&self, player_id: PlayerId) -> usize {
-        self.active_event_scopes
-            .get(&player_id)
-            .map_or(0, Vec::len)
+        self.active_event_scopes.get(&player_id).map_or(0, Vec::len)
     }
 
     #[cfg(test)]
@@ -4495,7 +4650,13 @@ impl RuntimeSession {
     pub(crate) fn event_cleanup_resources(
         &mut self,
         player_id: PlayerId,
-    ) -> Result<(Rc<RefCell<VecDeque<DeferredEventCleanup>>>, Sender<PlayerVMExecutionItem>), ScriptError> {
+    ) -> Result<
+        (
+            Rc<RefCell<VecDeque<DeferredEventCleanup>>>,
+            Sender<PlayerVMExecutionItem>,
+        ),
+        ScriptError,
+    > {
         let queue_tx = self
             .with_player(player_id, |context| context.player.queue_tx.clone())
             .ok_or_else(super::cancelled_scope_error)?;
@@ -4506,16 +4667,29 @@ impl RuntimeSession {
         &mut self,
         player_id: PlayerId,
         owner: &OwnerToken,
-    ) -> Result<(u64, bool, Rc<RefCell<VecDeque<DeferredEventCleanup>>>, Sender<PlayerVMExecutionItem>), ScriptError> {
+    ) -> Result<
+        (
+            u64,
+            bool,
+            Rc<RefCell<VecDeque<DeferredEventCleanup>>>,
+            Sender<PlayerVMExecutionItem>,
+        ),
+        ScriptError,
+    > {
         let Some(next_scope_id) = self.next_event_scope_id.checked_add(1) else {
-            return Err(ScriptError::new("event stop scope generation exhausted".to_owned()));
+            return Err(ScriptError::new(
+                "event stop scope generation exhausted".to_owned(),
+            ));
         };
         let (previous, queue_tx) = self
             .with_player(player_id, |context| {
                 if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
                     return Err(super::cancelled_scope_error());
                 }
-                Ok((std::mem::replace(&mut context.player.event_stopped, false), context.player.queue_tx.clone()))
+                Ok((
+                    std::mem::replace(&mut context.player.event_stopped, false),
+                    context.player.queue_tx.clone(),
+                ))
             })
             .ok_or_else(super::cancelled_scope_error)??;
         let scope_id = self.next_event_scope_id;
@@ -4523,7 +4697,12 @@ impl RuntimeSession {
         self.active_event_scopes
             .entry(player_id)
             .or_default()
-            .push(ActiveEventStopScope { scope_id, owner: owner.clone(), previous, restored: false });
+            .push(ActiveEventStopScope {
+                scope_id,
+                owner: owner.clone(),
+                previous,
+                restored: false,
+            });
         Ok((scope_id, previous, self.event_cleanups.clone(), queue_tx))
     }
 
@@ -4534,8 +4713,12 @@ impl RuntimeSession {
         scope_id: u64,
     ) -> bool {
         let snapshots = {
-            let Some(scopes) = self.active_event_scopes.get_mut(&player_id) else { return false };
-            let Some(index) = scopes.iter().position(|scope| scope.scope_id == scope_id) else { return false };
+            let Some(scopes) = self.active_event_scopes.get_mut(&player_id) else {
+                return false;
+            };
+            let Some(index) = scopes.iter().position(|scope| scope.scope_id == scope_id) else {
+                return false;
+            };
             if !scopes[index].owner.same_identity(owner) || !owner.is_arena_live() {
                 return false;
             }
@@ -4558,14 +4741,19 @@ impl RuntimeSession {
             }
             context.player.event_stopped = *snapshots.0.last().unwrap_or(&false);
             true
-        }).unwrap_or(false)
+        })
+        .unwrap_or(false)
     }
 
     pub(crate) fn drain_event_cleanups(&mut self) {
         let records: Vec<_> = self.event_cleanups.borrow_mut().drain(..).collect();
         for record in records {
             match record {
-                DeferredEventCleanup::Stop { player_id, owner, scope_id } => {
+                DeferredEventCleanup::Stop {
+                    player_id,
+                    owner,
+                    scope_id,
+                } => {
                     let _ = self.restore_event_stop_scope(player_id, &owner, scope_id);
                 }
                 DeferredEventCleanup::Static { player_id, guard } => {
@@ -4582,59 +4770,62 @@ impl RuntimeSession {
     ) -> Result<Option<super::driver::StaticEventGuard>, ScriptError> {
         self.drain_event_cleanups();
         let Some(next_registration_id) = self.next_static_event_guard_id.checked_add(1) else {
-            return Err(ScriptError::new("static event guard generation exhausted".to_owned()));
+            return Err(ScriptError::new(
+                "static event guard generation exhausted".to_owned(),
+            ));
         };
         let owner = self
             .with_player(player_id, |context| context.player.owner.clone())
             .ok_or_else(super::cancelled_scope_error)?;
         let registration_id = self.next_static_event_guard_id;
         self.next_static_event_guard_id = next_registration_id;
-        let already_active = self.with_player(player_id, |mut context| {
-            let handler_name = context
-                .symbols
-                .display(&call.handler_name)
-                .map_err(|_| {
-                    ScriptError::new_code(
-                        ScriptErrorCode::InvalidReference,
-                        "foreign or stale static event symbol".to_owned(),
-                    )
-                })?
-                .to_owned();
-            let mut already_active = false;
-            for (member_ref, active_name, active_args) in
-                &context.player.active_static_event_handlers
-            {
-                if *member_ref != call.member_ref
-                    || active_name != &handler_name
-                    || active_args.len() != call.args.len()
+        let already_active = self
+            .with_player(player_id, |mut context| {
+                let handler_name = context
+                    .symbols
+                    .display(&call.handler_name)
+                    .map_err(|_| {
+                        ScriptError::new_code(
+                            ScriptErrorCode::InvalidReference,
+                            "foreign or stale static event symbol".to_owned(),
+                        )
+                    })?
+                    .to_owned();
+                let mut already_active = false;
+                for (member_ref, active_name, active_args) in
+                    &context.player.active_static_event_handlers
                 {
-                    continue;
-                }
-                let mut same_args = true;
-                for (active, current) in active_args.iter().zip(call.args.iter()) {
-                    let active_text = crate::player::datum_formatting::format_datum(
-                        active,
-                        context.symbols,
-                        context.player,
-                    )?;
-                    let current_text = crate::player::datum_formatting::format_datum(
-                        current,
-                        context.symbols,
-                        context.player,
-                    )?;
-                    if active_text != current_text {
-                        same_args = false;
+                    if *member_ref != call.member_ref
+                        || active_name != &handler_name
+                        || active_args.len() != call.args.len()
+                    {
+                        continue;
+                    }
+                    let mut same_args = true;
+                    for (active, current) in active_args.iter().zip(call.args.iter()) {
+                        let active_text = crate::player::datum_formatting::format_datum(
+                            active,
+                            context.symbols,
+                            context.player,
+                        )?;
+                        let current_text = crate::player::datum_formatting::format_datum(
+                            current,
+                            context.symbols,
+                            context.player,
+                        )?;
+                        if active_text != current_text {
+                            same_args = false;
+                            break;
+                        }
+                    }
+                    if same_args {
+                        already_active = true;
                         break;
                     }
                 }
-                if same_args {
-                    already_active = true;
-                    break;
-                }
-            }
-            Ok::<(bool, String), ScriptError>((already_active, handler_name))
-        })
-        .ok_or_else(super::cancelled_scope_error)??;
+                Ok::<(bool, String), ScriptError>((already_active, handler_name))
+            })
+            .ok_or_else(super::cancelled_scope_error)??;
         if already_active.0 {
             return Ok(None);
         }
@@ -4665,7 +4856,9 @@ impl RuntimeSession {
         player_id: PlayerId,
         guard: &super::driver::StaticEventGuard,
     ) -> bool {
-        let Some(player_owner) = self.with_player(player_id, |context| context.player.owner.clone()) else {
+        let Some(player_owner) =
+            self.with_player(player_id, |context| context.player.owner.clone())
+        else {
             return false;
         };
         if !player_owner.same_identity(&guard.owner) || !guard.owner.is_arena_live() {
@@ -4685,13 +4878,16 @@ impl RuntimeSession {
             self.static_event_guards.remove(&player_id);
         }
         self.with_player(player_id, |context| {
-            let Some(index) = context.player.active_static_event_handlers.iter().rposition(
-                |(member_ref, handler_name, args)| {
+            let Some(index) = context
+                .player
+                .active_static_event_handlers
+                .iter()
+                .rposition(|(member_ref, handler_name, args)| {
                     *member_ref == record.member_ref
                         && handler_name == &record.handler_name
                         && args == &record.args
-                },
-            ) else {
+                })
+            else {
                 return false;
             };
             context.player.active_static_event_handlers.remove(index);
@@ -4839,7 +5035,9 @@ impl RuntimeSession {
         use_raw_arg_list: bool,
     ) -> Result<Option<super::scope::ScopeResult>, super::ScriptError> {
         if self.drivers.contains_key(&id) {
-            return Err(super::ScriptError::new("handler already running for player".to_owned()));
+            return Err(super::ScriptError::new(
+                "handler already running for player".to_owned(),
+            ));
         }
         match DriverContinuation::start(self, id, receiver, handler_ref, args, use_raw_arg_list)? {
             DriverStart::Early(result) => Ok(Some(result)),
@@ -4901,12 +5099,8 @@ impl RuntimeSession {
             Some(BuiltInSymbol::Nothing) => super::handlers::movie::MovieAsyncKind::Nothing,
             _ => return Ok(None),
         };
-        let request = super::handlers::movie::MovieHandlers::prepare_movie_async(
-            context,
-            id,
-            kind,
-            args,
-        )?;
+        let request =
+            super::handlers::movie::MovieHandlers::prepare_movie_async(context, id, kind, args)?;
         Ok(Some(super::driver::InternalVmRequest::MovieAsync(request)))
     }
 
@@ -5650,7 +5844,9 @@ impl RuntimeSession {
             Some(id) => id,
             None => return false,
         };
-        let Some(mut driver) = self.drivers.remove(&id) else { return false };
+        let Some(mut driver) = self.drivers.remove(&id) else {
+            return false;
+        };
         if !driver.complete(self, ticket, completion) {
             self.drivers.insert(id, driver);
             return false;
@@ -5706,11 +5902,7 @@ impl RuntimeSession {
         outbound
     }
 
-    fn drain_ready_casts(
-        &mut self,
-        id: PlayerId,
-        generated: &mut CastNotificationOutbox,
-    ) -> bool {
+    fn drain_ready_casts(&mut self, id: PlayerId, generated: &mut CastNotificationOutbox) -> bool {
         let mut applied_any = false;
         self.purge_invalid_pending();
         loop {
@@ -5751,41 +5943,54 @@ impl RuntimeSession {
                     if player.owner.same_identity(&stale.owner) {
                         match stale.purpose {
                             PendingCastPurpose::Property { .. } => {
-                                player.movie.cast_manager.get_cast_mut(stale.request.cast_number()).cancel_load(&stale.request);
+                                player
+                                    .movie
+                                    .cast_manager
+                                    .get_cast_mut(stale.request.cast_number())
+                                    .cancel_load(&stale.request);
                             }
                             PendingCastPurpose::Preload => {
-                                player.movie.cast_manager.retire_preload_requirement(&stale.request);
+                                player
+                                    .movie
+                                    .cast_manager
+                                    .retire_preload_requirement(&stale.request);
                             }
                         }
                     }
                 }
                 continue;
             }
-            if matches!(self.pending_casts[position].state, PendingCastState::Waiting) {
+            if matches!(
+                self.pending_casts[position].state,
+                PendingCastState::Waiting
+            ) {
                 break;
             }
             let cast_number = request.cast_number();
-            let cast_exists = self
-                .players
-                .players
-                .get(&id)
-                .is_some_and(|player| {
-                    player
-                        .movie
-                        .cast_manager
-                        .get_cast_or_null(cast_number)
-                        .is_some()
-                });
+            let cast_exists = self.players.players.get(&id).is_some_and(|player| {
+                player
+                    .movie
+                    .cast_manager
+                    .get_cast_or_null(cast_number)
+                    .is_some()
+            });
             if !cast_exists {
                 let stale = self.pending_casts.remove(position);
                 if let Some(player) = self.players.players.get_mut(&id) {
                     if player.owner.same_identity(&stale.owner) {
                         match stale.purpose {
                             PendingCastPurpose::Property { .. } => {
-                                player.movie.cast_manager.get_cast_mut(stale.request.cast_number()).cancel_load(&stale.request);
+                                player
+                                    .movie
+                                    .cast_manager
+                                    .get_cast_mut(stale.request.cast_number())
+                                    .cancel_load(&stale.request);
                             }
                             PendingCastPurpose::Preload => {
-                                player.movie.cast_manager.retire_preload_requirement(&stale.request);
+                                player
+                                    .movie
+                                    .cast_manager
+                                    .retire_preload_requirement(&stale.request);
                             }
                         }
                     }
@@ -5798,10 +6003,7 @@ impl RuntimeSession {
             };
             let request = pending.request;
             let owner = player.owner.key();
-            let property = matches!(
-                &pending.purpose,
-                PendingCastPurpose::Property { .. }
-            );
+            let property = matches!(&pending.purpose, PendingCastPurpose::Property { .. });
             let applied = match pending.state {
                 PendingCastState::Waiting => unreachable!("waiting cast at ready drain"),
                 PendingCastState::ReadyNetwork(result) => player
@@ -5865,7 +6067,11 @@ impl RuntimeSession {
             } else {
                 match pending.purpose {
                     PendingCastPurpose::Property { .. } => {
-                        player.movie.cast_manager.get_cast_mut(request.cast_number()).cancel_load(&request);
+                        player
+                            .movie
+                            .cast_manager
+                            .get_cast_mut(request.cast_number())
+                            .cancel_load(&request);
                     }
                     PendingCastPurpose::Preload => {
                         if !player.movie.cast_manager.cancel_preload(&request) {
@@ -5926,10 +6132,17 @@ impl RuntimeSession {
                     }
                     match stale.purpose {
                         PendingCastPurpose::Property { .. } => {
-                            player.movie.cast_manager.get_cast_mut(stale.request.cast_number()).cancel_load(&stale.request);
+                            player
+                                .movie
+                                .cast_manager
+                                .get_cast_mut(stale.request.cast_number())
+                                .cancel_load(&stale.request);
                         }
                         PendingCastPurpose::Preload => {
-                            player.movie.cast_manager.retire_preload_requirement(&stale.request);
+                            player
+                                .movie
+                                .cast_manager
+                                .retire_preload_requirement(&stale.request);
                         }
                     }
                 }
@@ -5940,12 +6153,16 @@ impl RuntimeSession {
         for id in finalize_ids {
             if let Some(player) = self.players.get_mut(id) {
                 let mut generated = CastNotificationOutbox::default();
-                player.movie.cast_manager.finalize_preloads_if_ready(
-                    &mut player.bitmap_manager,
-                    &mut generated,
-                );
+                player
+                    .movie
+                    .cast_manager
+                    .finalize_preloads_if_ready(&mut player.bitmap_manager, &mut generated);
                 for notification in generated.drain() {
-                    player.movie.cast_manager.pending_notifications.push(notification);
+                    player
+                        .movie
+                        .cast_manager
+                        .pending_notifications
+                        .push(notification);
                 }
             }
             let mut generated = CastNotificationOutbox::default();
@@ -5966,7 +6183,10 @@ impl RuntimeSession {
         let Some(position) = position else {
             return false;
         };
-        if !matches!(self.pending_casts[position].state, PendingCastState::Waiting) {
+        if !matches!(
+            self.pending_casts[position].state,
+            PendingCastState::Waiting
+        ) {
             return false;
         }
         let request = self.pending_casts[position].request.clone();
@@ -5984,37 +6204,47 @@ impl RuntimeSession {
             if let Some(player) = self.players.players.get_mut(&player_id) {
                 if player.owner.same_identity(&stale.owner) {
                     if property {
-                        player.movie.cast_manager.get_cast_mut(stale.request.cast_number()).cancel_load(&stale.request);
+                        player
+                            .movie
+                            .cast_manager
+                            .get_cast_mut(stale.request.cast_number())
+                            .cancel_load(&stale.request);
                     } else {
-                        player.movie.cast_manager.retire_preload_requirement(&stale.request);
+                        player
+                            .movie
+                            .cast_manager
+                            .retire_preload_requirement(&stale.request);
                     }
                 }
             }
             return false;
         }
-        let cast_valid = self
-            .players
-            .players
-            .get(&player_id)
-            .is_some_and(|player| {
-                if property {
-                    player
-                        .movie
-                        .cast_manager
-                        .get_cast_or_null(request.cast_number())
-                        .is_some_and(|cast| cast.is_load_current(&request))
-                } else {
-                    player.movie.cast_manager.is_preload_current(&request)
-                }
-            });
+        let cast_valid = self.players.players.get(&player_id).is_some_and(|player| {
+            if property {
+                player
+                    .movie
+                    .cast_manager
+                    .get_cast_or_null(request.cast_number())
+                    .is_some_and(|cast| cast.is_load_current(&request))
+            } else {
+                player.movie.cast_manager.is_preload_current(&request)
+            }
+        });
         if !cast_valid {
             let stale = self.pending_casts.remove(position);
             if let Some(player) = self.players.players.get_mut(&player_id) {
                 if player.owner.same_identity(&stale.owner) {
                     if property {
-                        player.movie.cast_manager.get_cast_mut(stale.request.cast_number()).cancel_load(&stale.request);
+                        player
+                            .movie
+                            .cast_manager
+                            .get_cast_mut(stale.request.cast_number())
+                            .cancel_load(&stale.request);
                     } else {
-                        player.movie.cast_manager.retire_preload_requirement(&stale.request);
+                        player
+                            .movie
+                            .cast_manager
+                            .retire_preload_requirement(&stale.request);
                     }
                 }
             }
@@ -6063,14 +6293,9 @@ mod tests {
             .with_player(1, |ctx| {
                 ctx.player.net_manager.base_path = Some(Url::parse("file:///tmp/").unwrap());
                 for (index, mode) in modes.iter().copied().enumerate() {
-                    ctx.player
-                        .movie
-                        .cast_manager
-                        .casts
-                        .push(super::super::cast_lib::CastLib::test_external(
-                            (index + 1) as u32,
-                            mode,
-                        ));
+                    ctx.player.movie.cast_manager.casts.push(
+                        super::super::cast_lib::CastLib::test_external((index + 1) as u32, mode),
+                    );
                 }
             })
             .unwrap();
@@ -6082,14 +6307,9 @@ mod tests {
             .with_player(id, |ctx| {
                 ctx.player.net_manager.base_path = Some(Url::parse("file:///tmp/").unwrap());
                 for (index, mode) in modes.iter().copied().enumerate() {
-                    ctx.player
-                        .movie
-                        .cast_manager
-                        .casts
-                        .push(super::super::cast_lib::CastLib::test_external(
-                            (index + 1) as u32,
-                            mode,
-                        ));
+                    ctx.player.movie.cast_manager.casts.push(
+                        super::super::cast_lib::CastLib::test_external((index + 1) as u32, mode),
+                    );
                 }
             })
             .unwrap();
@@ -6171,13 +6391,11 @@ mod tests {
             })
             .unwrap();
         let before = session
-            .with_player(1, |ctx| (ctx.player.scope_count, ctx.player.handler_stack_depth))
+            .with_player(1, |ctx| {
+                (ctx.player.scope_count, ctx.player.handler_stack_depth)
+            })
             .unwrap();
-        let result = session.dispatch_global(
-            1,
-            &Symbol::builtin(BuiltInSymbol::Voidp),
-            &[],
-        );
+        let result = session.dispatch_global(1, &Symbol::builtin(BuiltInSymbol::Voidp), &[]);
         assert!(matches!(
             result,
             Err(ScriptError {
@@ -6187,7 +6405,10 @@ mod tests {
         ));
         assert_eq!(
             session
-                .with_player(1, |ctx| (ctx.player.scope_count, ctx.player.handler_stack_depth))
+                .with_player(1, |ctx| (
+                    ctx.player.scope_count,
+                    ctx.player.handler_stack_depth
+                ))
                 .unwrap(),
             before
         );
@@ -6235,61 +6456,95 @@ mod tests {
 
     #[test]
     fn player_owner_generation_is_not_reused_after_remove_and_readd() {
-        let mut session = RuntimeSession::new(SymbolOwner { session: 43, generation: 1 });
+        let mut session = RuntimeSession::new(SymbolOwner {
+            session: 43,
+            generation: 1,
+        });
         let (tx, _rx) = channel::unbounded();
         assert!(session.add_player(7, tx.clone()));
-        let first_owner = session.with_player(7, |ctx| ctx.player.owner.clone()).unwrap();
+        let first_owner = session
+            .with_player(7, |ctx| ctx.player.owner.clone())
+            .unwrap();
         let removed = session.remove_player(7).expect("player should be removed");
         assert!(removed.owner.same_identity(&first_owner));
         assert!(first_owner.is_arena_live());
         assert!(session.add_player(7, tx));
-        let replacement_owner = session.with_player(7, |ctx| ctx.player.owner.clone()).unwrap();
+        let replacement_owner = session
+            .with_player(7, |ctx| ctx.player.owner.clone())
+            .unwrap();
         assert_ne!(first_owner.key(), replacement_owner.key());
         assert_eq!(replacement_owner.key().generation, 2);
     }
 
     #[test]
     fn player_owner_generation_high_water_survives_reset_remove_and_sibling_reuse() {
-        let mut session = RuntimeSession::new(SymbolOwner { session: 44, generation: 1 });
+        let mut session = RuntimeSession::new(SymbolOwner {
+            session: 44,
+            generation: 1,
+        });
         let (first_tx, _first_rx) = channel::unbounded();
         let (second_tx, _second_rx) = channel::unbounded();
         assert!(session.add_player(1, first_tx.clone()));
         assert!(session.add_player(2, second_tx));
-        let first_owner = session.with_player(1, |ctx| ctx.player.owner.clone()).unwrap();
-        let second_owner = session.with_player(2, |ctx| ctx.player.owner.clone()).unwrap();
+        let first_owner = session
+            .with_player(1, |ctx| ctx.player.owner.clone())
+            .unwrap();
+        let second_owner = session
+            .with_player(2, |ctx| ctx.player.owner.clone())
+            .unwrap();
         let reset_owner = session.reset_player_owned(1, &first_owner).unwrap();
         assert_eq!(reset_owner.key().generation, 2);
-        let removed = session.remove_player(1).expect("reset player should be removable");
+        let removed = session
+            .remove_player(1)
+            .expect("reset player should be removable");
         assert!(removed.owner.same_identity(&reset_owner));
         assert!(session.add_player(1, first_tx));
-        let replacement_owner = session.with_player(1, |ctx| ctx.player.owner.clone()).unwrap();
+        let replacement_owner = session
+            .with_player(1, |ctx| ctx.player.owner.clone())
+            .unwrap();
         assert_eq!(replacement_owner.key().generation, 3);
         assert_eq!(second_owner.key().generation, 1);
-        assert!(session
-            .with_player(2, |ctx| ctx.player.owner.same_identity(&second_owner))
-            .unwrap());
+        assert!(
+            session
+                .with_player(2, |ctx| ctx.player.owner.same_identity(&second_owner))
+                .unwrap()
+        );
     }
 
     #[test]
     fn removal_records_direct_player_reset_before_readd() {
-        let mut session = RuntimeSession::new(SymbolOwner { session: 47, generation: 1 });
+        let mut session = RuntimeSession::new(SymbolOwner {
+            session: 47,
+            generation: 1,
+        });
         let (tx, _rx) = channel::unbounded();
         assert!(session.add_player(1, tx.clone()));
-        let first_owner = session.with_player(1, |ctx| ctx.player.owner.clone()).unwrap();
+        let first_owner = session
+            .with_player(1, |ctx| ctx.player.owner.clone())
+            .unwrap();
         session.with_player(1, |ctx| ctx.player.reset_owned_core());
-        let direct_reset_owner = session.with_player(1, |ctx| ctx.player.owner.clone()).unwrap();
+        let direct_reset_owner = session
+            .with_player(1, |ctx| ctx.player.owner.clone())
+            .unwrap();
         assert_eq!(direct_reset_owner.key().generation, 2);
-        let removed = session.remove_player(1).expect("directly reset player should be removable");
+        let removed = session
+            .remove_player(1)
+            .expect("directly reset player should be removable");
         assert!(removed.owner.same_identity(&direct_reset_owner));
         assert!(!first_owner.is_arena_live());
         assert!(session.add_player(1, tx));
-        let replacement_owner = session.with_player(1, |ctx| ctx.player.owner.clone()).unwrap();
+        let replacement_owner = session
+            .with_player(1, |ctx| ctx.player.owner.clone())
+            .unwrap();
         assert_eq!(replacement_owner.key().generation, 3);
     }
 
     #[test]
     fn player_owner_generation_exhaustion_fails_before_add_or_reset_mutation() {
-        let mut session = RuntimeSession::new(SymbolOwner { session: 45, generation: 1 });
+        let mut session = RuntimeSession::new(SymbolOwner {
+            session: 45,
+            generation: 1,
+        });
         session.owner_generation_high_water.insert(7, u64::MAX);
         let (tx, _rx) = channel::unbounded();
         assert!(session.try_add_player(7, tx.clone()).is_err());
@@ -6298,15 +6553,24 @@ mod tests {
         assert!(!session.add_player(7, tx));
         assert!(session.with_player(7, |_| ()).is_none());
 
-        let mut maxed = RuntimeSession::new(SymbolOwner { session: 46, generation: u64::MAX });
+        let mut maxed = RuntimeSession::new(SymbolOwner {
+            session: 46,
+            generation: u64::MAX,
+        });
         let (max_tx, _max_rx) = channel::unbounded();
         assert!(maxed.add_player(1, max_tx));
-        let owner = maxed.with_player(1, |ctx| ctx.player.owner.clone()).unwrap();
+        let owner = maxed
+            .with_player(1, |ctx| ctx.player.owner.clone())
+            .unwrap();
         assert!(maxed.reset_player_owned(1, &owner).is_err());
-        assert!(maxed
-            .with_player(1, |ctx| ctx.player.owner.same_identity(&owner))
-            .unwrap());
-        let removed = maxed.remove_player(1).expect("maxed player should be removable");
+        assert!(
+            maxed
+                .with_player(1, |ctx| ctx.player.owner.same_identity(&owner))
+                .unwrap()
+        );
+        let removed = maxed
+            .remove_player(1)
+            .expect("maxed player should be removable");
         assert!(removed.owner.same_identity(&owner));
         let (readd_tx, _readd_rx) = channel::unbounded();
         assert!(!maxed.add_player(1, readd_tx));
@@ -6328,8 +6592,18 @@ mod tests {
             session
                 .with_player(1, |ctx| {
                     (
-                        ctx.player.movie.cast_manager.get_cast_or_null(1).unwrap().state,
-                        ctx.player.movie.cast_manager.get_cast_or_null(2).unwrap().state,
+                        ctx.player
+                            .movie
+                            .cast_manager
+                            .get_cast_or_null(1)
+                            .unwrap()
+                            .state,
+                        ctx.player
+                            .movie
+                            .cast_manager
+                            .get_cast_or_null(2)
+                            .unwrap()
+                            .state,
                     )
                 })
                 .unwrap(),
@@ -6344,13 +6618,27 @@ mod tests {
             session
                 .with_player(1, |ctx| {
                     (
-                        ctx.player.movie.cast_manager.get_cast_or_null(1).unwrap().state,
-                        ctx.player.movie.cast_manager.get_cast_or_null(2).unwrap().state,
+                        ctx.player
+                            .movie
+                            .cast_manager
+                            .get_cast_or_null(1)
+                            .unwrap()
+                            .state,
+                        ctx.player
+                            .movie
+                            .cast_manager
+                            .get_cast_or_null(2)
+                            .unwrap()
+                            .state,
                         ctx.player.movie.cast_manager.preload_state,
                     )
                 })
                 .unwrap(),
-            (CastLibState::None, CastLibState::None, CastPreloadState::Ready)
+            (
+                CastLibState::None,
+                CastLibState::None,
+                CastPreloadState::Ready
+            )
         );
     }
 
@@ -6377,9 +6665,11 @@ mod tests {
         let mut session = session_with_casts(&[2]);
         let requests = session.prepare_cast_loads(1, CastPreloadReason::MovieLoaded);
         assert_eq!(requests.len(), 1);
-        assert!(session
-            .prepare_cast_loads(1, CastPreloadReason::AfterFrameOne)
-            .is_empty());
+        assert!(
+            session
+                .prepare_cast_loads(1, CastPreloadReason::AfterFrameOne)
+                .is_empty()
+        );
         assert!(session.apply_cast_load(requests[0].complete(
             requests[0].requested_url().to_owned(),
             Err("failed".to_owned()),
@@ -6413,32 +6703,40 @@ mod tests {
             requests[0].requested_url().to_owned(),
             Err("stale".to_owned()),
         )));
-        assert!(session
-            .with_player(1, |ctx| !ctx
-                .player
-                .movie
-                .cast_manager
-                .retire_preload_requirement(&replacement[0]))
-            .unwrap());
+        assert!(
+            session
+                .with_player(1, |ctx| !ctx
+                    .player
+                    .movie
+                    .cast_manager
+                    .retire_preload_requirement(&replacement[0]))
+                .unwrap()
+        );
     }
 
     #[test]
     fn dropped_callback_rejects_late_driver_completion() {
-        let mut session = RuntimeSession::new(SymbolOwner { session: 42, generation: 1 });
+        let mut session = RuntimeSession::new(SymbolOwner {
+            session: 42,
+            generation: 1,
+        });
         let (tx, _rx) = channel::unbounded();
         assert!(session.add_player(1, tx));
-        let owner = session.with_player(1, |context| context.player.owner.clone()).unwrap();
+        let owner = session
+            .with_player(1, |context| context.player.owner.clone())
+            .unwrap();
         let ticket = session
             .actions
-            .allocate(&owner, None, ActionKind::InternalInvocation, ResumePhase::ApplyOpcode)
+            .allocate(
+                &owner,
+                None,
+                ActionKind::InternalInvocation,
+                ResumePhase::ApplyOpcode,
+            )
             .expect("test action must allocate");
         let eval_id = crate::player::eval::EvalId::new(1);
         // The host may answer before the owner pump has retained its command.
-        session.submit_pending_command_completion(
-            1,
-            ticket.clone(),
-            ActionCompletion::Resume,
-        );
+        session.submit_pending_command_completion(1, ticket.clone(), ActionCompletion::Resume);
         assert_eq!(session.pending_completions.len(), 1);
         session.pending_commands.push(PendingCommand {
             player_id: 1,
@@ -6492,8 +6790,18 @@ mod tests {
             session
                 .with_player(1, |ctx| {
                     (
-                        ctx.player.movie.cast_manager.get_cast_or_null(1).unwrap().state,
-                        ctx.player.movie.cast_manager.get_cast_or_null(2).unwrap().state,
+                        ctx.player
+                            .movie
+                            .cast_manager
+                            .get_cast_or_null(1)
+                            .unwrap()
+                            .state,
+                        ctx.player
+                            .movie
+                            .cast_manager
+                            .get_cast_or_null(2)
+                            .unwrap()
+                            .state,
                     )
                 })
                 .unwrap(),
@@ -6502,9 +6810,11 @@ mod tests {
         let (before_owner, before_batch) = session
             .begin_player_notification_drain(1)
             .expect("player owner must be live before cast completion");
-        assert!(before_batch
-            .iter()
-            .all(|event| event.owner.same_identity(&before_owner)));
+        assert!(
+            before_batch
+                .iter()
+                .all(|event| event.owner.same_identity(&before_owner))
+        );
         assert!(!before_batch.iter().any(|event| matches!(
             &event.kind,
             PlayerNotificationKind::Host(
@@ -6520,9 +6830,25 @@ mod tests {
         let (first_state, second_file_name, second_state) = session
             .with_player(1, |ctx| {
                 (
-                    ctx.player.movie.cast_manager.get_cast_or_null(1).unwrap().state,
-                    ctx.player.movie.cast_manager.get_cast_or_null(2).unwrap().file_name.clone(),
-                    ctx.player.movie.cast_manager.get_cast_or_null(2).unwrap().state,
+                    ctx.player
+                        .movie
+                        .cast_manager
+                        .get_cast_or_null(1)
+                        .unwrap()
+                        .state,
+                    ctx.player
+                        .movie
+                        .cast_manager
+                        .get_cast_or_null(2)
+                        .unwrap()
+                        .file_name
+                        .clone(),
+                    ctx.player
+                        .movie
+                        .cast_manager
+                        .get_cast_or_null(2)
+                        .unwrap()
+                        .state,
                 )
             })
             .unwrap();
@@ -6534,26 +6860,33 @@ mod tests {
             .begin_player_notification_drain(1)
             .expect("player owner must be live after cast completion");
         session.finish_player_notification_drain(1, &owner);
-        assert!(notifications
-            .iter()
-            .all(|event| event.owner.same_identity(&owner)));
+        assert!(
+            notifications
+                .iter()
+                .all(|event| event.owner.same_identity(&owner))
+        );
         assert_eq!(
             notifications
                 .iter()
-                .filter(|event| matches!(&event.kind, PlayerNotificationKind::Host(
-                    super::super::host_events::HostEvent::CastListChanged { .. }
-                )))
+                .filter(|event| matches!(
+                    &event.kind,
+                    PlayerNotificationKind::Host(
+                        super::super::host_events::HostEvent::CastListChanged { .. }
+                    )
+                ))
                 .count(),
             1
         );
-        assert!(!session
-            .with_player(1, |ctx| {
-                ctx.player.movie.cast_manager.finalize_preloads_if_ready(
-                    &mut ctx.player.bitmap_manager,
-                    &mut CastNotificationOutbox::default(),
-                )
-            })
-            .unwrap());
+        assert!(
+            !session
+                .with_player(1, |ctx| {
+                    ctx.player.movie.cast_manager.finalize_preloads_if_ready(
+                        &mut ctx.player.bitmap_manager,
+                        &mut CastNotificationOutbox::default(),
+                    )
+                })
+                .unwrap()
+        );
     }
 
     #[test]
@@ -6652,14 +6985,16 @@ mod tests {
                 .unwrap(),
             CastPreloadState::Loading
         );
-        assert!(session
-            .with_player(1, |ctx| {
-                ctx.player
-                    .movie
-                    .cast_manager
-                    .is_preload_current(&requests[0])
-            })
-            .unwrap());
+        assert!(
+            session
+                .with_player(1, |ctx| {
+                    ctx.player
+                        .movie
+                        .cast_manager
+                        .is_preload_current(&requests[0])
+                })
+                .unwrap()
+        );
     }
 
     #[test]
@@ -6684,14 +7019,13 @@ mod tests {
             old[0].requested_url().to_owned(),
             Err("stale cast replacement".to_owned()),
         )));
-        assert!(session
-            .with_player(1, |ctx| {
-                ctx.player
-                    .movie
-                    .cast_manager
-                    .is_preload_current(&fresh[0])
-            })
-            .unwrap());
+        assert!(
+            session
+                .with_player(1, |ctx| {
+                    ctx.player.movie.cast_manager.is_preload_current(&fresh[0])
+                })
+                .unwrap()
+        );
         assert!(session.apply_cast_load(fresh[0].complete(
             fresh[0].requested_url().to_owned(),
             Err("fresh cast failed".to_owned()),
@@ -6708,11 +7042,21 @@ mod tests {
         let (tx2, _rx2) = channel::unbounded();
         assert!(session.add_player(1, tx1));
         assert!(session.add_player(2, tx2));
-        let owner1 = session.with_player(1, |ctx| ctx.player.owner.clone()).unwrap();
-        let owner2 = session.with_player(2, |ctx| ctx.player.owner.clone()).unwrap();
+        let owner1 = session
+            .with_player(1, |ctx| ctx.player.owner.clone())
+            .unwrap();
+        let owner2 = session
+            .with_player(2, |ctx| ctx.player.owner.clone())
+            .unwrap();
 
-        assert_eq!(session.w3d_deltas(1, &owner1, 1_000.0).unwrap().0, 1.0 / 30.0);
-        assert_eq!(session.w3d_deltas(2, &owner2, 1_000.0).unwrap().0, 1.0 / 30.0);
+        assert_eq!(
+            session.w3d_deltas(1, &owner1, 1_000.0).unwrap().0,
+            1.0 / 30.0
+        );
+        assert_eq!(
+            session.w3d_deltas(2, &owner2, 1_000.0).unwrap().0,
+            1.0 / 30.0
+        );
         // Frame timestamps remain fractional all the way through the
         // owner-scoped clock; callers must not truncate browser RAF samples
         // before the phase executor receives them.
@@ -6725,7 +7069,10 @@ mod tests {
 
         let new_owner = session.reset_player_owned(1, &owner1).unwrap();
         assert!(session.w3d_deltas(1, &owner1, 2_000.0).is_err());
-        assert_eq!(session.w3d_deltas(1, &new_owner, 2_000.0).unwrap().0, 1.0 / 30.0);
+        assert_eq!(
+            session.w3d_deltas(1, &new_owner, 2_000.0).unwrap().0,
+            1.0 / 30.0
+        );
     }
 
     #[test]
@@ -6753,11 +7100,13 @@ mod tests {
                 event_tx,
             )
             .unwrap();
-        assert!(session
-            .with_player(child_id, |context| {
-                context.player.owner.same_identity(&child_owner)
-            })
-            .unwrap());
+        assert!(
+            session
+                .with_player(child_id, |context| {
+                    context.player.owner.same_identity(&child_owner)
+                })
+                .unwrap()
+        );
         let replacement = session.reset_player_owned(1, &parent_owner).unwrap();
         assert!(!child_owner.is_arena_live());
         assert!(session.with_player(child_id, |_| ()).is_none());
@@ -6768,11 +7117,13 @@ mod tests {
             .with_player(child_id, |context| context.player.owner.clone())
             .unwrap();
         assert!(!session.retire_nested_child_if_owner(child_id, &child_owner));
-        assert!(session
-            .with_player(child_id, |context| {
-                context.player.owner.same_identity(&replacement_owner)
-            })
-            .unwrap());
+        assert!(
+            session
+                .with_player(child_id, |context| {
+                    context.player.owner.same_identity(&replacement_owner)
+                })
+                .unwrap()
+        );
     }
 
     #[test]
@@ -6791,16 +7142,24 @@ mod tests {
                     .queue_player_notification(PlayerNotificationKind::ScoreChanged);
             });
             crate::js_api::JsApi::dispatch_player_notifications(handle.clone(), 1).unwrap();
-            assert!(handle
-                .borrow_mut()
-                .with_player(1, |context| context.player.pending_player_notifications.is_empty())
-                .unwrap());
+            assert!(
+                handle
+                    .borrow_mut()
+                    .with_player(1, |context| context
+                        .player
+                        .pending_player_notifications
+                        .is_empty())
+                    .unwrap()
+            );
         }
     }
 
     #[test]
     fn native_notification_drain_preserves_all_owned_kinds_for_two_players() {
-        let mut session = RuntimeSession::new(SymbolOwner { session: 804, generation: 1 });
+        let mut session = RuntimeSession::new(SymbolOwner {
+            session: 804,
+            generation: 1,
+        });
         let (first_tx, _first_rx) = channel::unbounded();
         let (second_tx, _second_rx) = channel::unbounded();
         assert!(session.add_player(1, first_tx));
@@ -6825,19 +7184,43 @@ mod tests {
                     ),
                 );
                 context.player.movie.cast_manager.casts.push(cast);
-                context.player.queue_player_notification(PlayerNotificationKind::ScoreChanged);
-                context.player.queue_player_notification(PlayerNotificationKind::ChannelChanged(3));
-                context.player.queue_player_notification(PlayerNotificationKind::ChannelNameChanged(4));
-                context.player.queue_player_notification(PlayerNotificationKind::ChannelNamesChanged);
-                context.player.queue_player_notification(PlayerNotificationKind::CastMemberNameChanged(6));
-                context.player.queue_player_notification(PlayerNotificationKind::CastMemberChanged(CastMemberRef { cast_lib: 1, cast_member: 2 }));
-                context.player.queue_player_notification(PlayerNotificationKind::DatumSnapshot(DatumRef::Void));
-                context.player.queue_player_notification(PlayerNotificationKind::ScriptInstanceSnapshot(None));
-                context.player.queue_player_notification(PlayerNotificationKind::Host(
-                    super::super::host_events::HostEvent::FrameChanged { frame: player_id },
-                ));
+                context
+                    .player
+                    .queue_player_notification(PlayerNotificationKind::ScoreChanged);
+                context
+                    .player
+                    .queue_player_notification(PlayerNotificationKind::ChannelChanged(3));
+                context
+                    .player
+                    .queue_player_notification(PlayerNotificationKind::ChannelNameChanged(4));
+                context
+                    .player
+                    .queue_player_notification(PlayerNotificationKind::ChannelNamesChanged);
+                context
+                    .player
+                    .queue_player_notification(PlayerNotificationKind::CastMemberNameChanged(6));
+                context.player.queue_player_notification(
+                    PlayerNotificationKind::CastMemberChanged(CastMemberRef {
+                        cast_lib: 1,
+                        cast_member: 2,
+                    }),
+                );
+                context
+                    .player
+                    .queue_player_notification(PlayerNotificationKind::DatumSnapshot(
+                        DatumRef::Void,
+                    ));
+                context.player.queue_player_notification(
+                    PlayerNotificationKind::ScriptInstanceSnapshot(None),
+                );
+                context
+                    .player
+                    .queue_player_notification(PlayerNotificationKind::Host(
+                        super::super::host_events::HostEvent::FrameChanged { frame: player_id },
+                    ));
             });
-            let dispatch = crate::js_api::JsApi::dispatch_player_notifications(handle.clone(), player_id);
+            let dispatch =
+                crate::js_api::JsApi::dispatch_player_notifications(handle.clone(), player_id);
             if dispatch.is_err() {
                 let diagnostic = handle
                     .borrow_mut()
@@ -6858,15 +7241,36 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(events.len(), 18);
         for player_id in [1, 2] {
-            let owner = handle.borrow_mut().with_player(player_id, |context| context.player.owner.clone()).unwrap();
-            let owned = events.iter().filter(|event| event.player_id == player_id).collect::<Vec<_>>();
+            let owner = handle
+                .borrow_mut()
+                .with_player(player_id, |context| context.player.owner.clone())
+                .unwrap();
+            let owned = events
+                .iter()
+                .filter(|event| event.player_id == player_id)
+                .collect::<Vec<_>>();
             assert_eq!(owned.len(), 9);
             assert!(owned.iter().all(|event| event.owner.same_identity(&owner)));
             assert!(owned.iter().any(|event| matches!(&event.kind, super::super::host_events::NativePlayerNotificationKind::ScoreChanged(snapshot) if snapshot.channel_count == 0)));
             assert!(owned.iter().any(|event| matches!(&event.kind, super::super::host_events::NativePlayerNotificationKind::ChannelChanged(snapshot) if snapshot.channel == 3)));
-            assert!(owned.iter().any(|event| matches!(&event.kind, super::super::host_events::NativePlayerNotificationKind::ChannelNameChanged { channel: 4, .. })));
-            assert!(owned.iter().any(|event| matches!(&event.kind, super::super::host_events::NativePlayerNotificationKind::ChannelNamesChanged(_))));
-            assert!(owned.iter().any(|event| matches!(&event.kind, super::super::host_events::NativePlayerNotificationKind::CastMemberNameChanged { slot: 6, .. })));
+            assert!(owned.iter().any(|event| matches!(
+                &event.kind,
+                super::super::host_events::NativePlayerNotificationKind::ChannelNameChanged {
+                    channel: 4,
+                    ..
+                }
+            )));
+            assert!(owned.iter().any(|event| matches!(
+                &event.kind,
+                super::super::host_events::NativePlayerNotificationKind::ChannelNamesChanged(_)
+            )));
+            assert!(owned.iter().any(|event| matches!(
+                &event.kind,
+                super::super::host_events::NativePlayerNotificationKind::CastMemberNameChanged {
+                    slot: 6,
+                    ..
+                }
+            )));
             assert!(owned.iter().any(|event| matches!(&event.kind, super::super::host_events::NativePlayerNotificationKind::CastMemberChanged(snapshot) if snapshot.member_ref == (1, 2))));
             assert!(owned.iter().any(|event| matches!(&event.kind, super::super::host_events::NativePlayerNotificationKind::DatumSnapshot(snapshot) if snapshot.type_name == "void")));
             assert!(owned.iter().any(|event| matches!(&event.kind, super::super::host_events::NativePlayerNotificationKind::ScriptInstanceSnapshot(snapshot) if snapshot.instance_id.is_none())));
@@ -6876,7 +7280,10 @@ mod tests {
 
     #[test]
     fn native_notification_capacity_is_partitioned_by_player() {
-        let mut session = RuntimeSession::new(SymbolOwner { session: 805, generation: 1 });
+        let mut session = RuntimeSession::new(SymbolOwner {
+            session: 805,
+            generation: 1,
+        });
         let (first_tx, _first_rx) = channel::unbounded();
         let (second_tx, _second_rx) = channel::unbounded();
         assert!(session.add_player(1, first_tx));
@@ -6897,31 +7304,43 @@ mod tests {
             .clone();
         for _ in 0..super::super::host_events::MAX_HOST_EVENTS {
             session
-                .push_native_player_notification(super::super::host_events::NativePlayerNotification {
-                    player_id: 1,
-                    owner: first_owner.clone(),
-                    kind: super::super::host_events::NativePlayerNotificationKind::Host(
-                        super::super::host_events::HostEvent::FrameChanged { frame: 1 },
-                    ),
-                })
+                .push_native_player_notification(
+                    super::super::host_events::NativePlayerNotification {
+                        player_id: 1,
+                        owner: first_owner.clone(),
+                        kind: super::super::host_events::NativePlayerNotificationKind::Host(
+                            super::super::host_events::HostEvent::FrameChanged { frame: 1 },
+                        ),
+                    },
+                )
                 .unwrap();
         }
-        assert!(session
-            .push_native_player_notification(super::super::host_events::NativePlayerNotification {
-                player_id: 2,
-                owner: second_owner,
-                kind: super::super::host_events::NativePlayerNotificationKind::Host(
-                    super::super::host_events::HostEvent::FrameChanged { frame: 2 },
-                ),
-            })
-            .is_ok());
+        assert!(
+            session
+                .push_native_player_notification(
+                    super::super::host_events::NativePlayerNotification {
+                        player_id: 2,
+                        owner: second_owner,
+                        kind: super::super::host_events::NativePlayerNotificationKind::Host(
+                            super::super::host_events::HostEvent::FrameChanged { frame: 2 },
+                        ),
+                    }
+                )
+                .is_ok()
+        );
         assert_eq!(session.take_native_player_notifications(2).len(), 1);
-        assert_eq!(session.take_native_player_notifications(1).len(), super::super::host_events::MAX_HOST_EVENTS);
+        assert_eq!(
+            session.take_native_player_notifications(1).len(),
+            super::super::host_events::MAX_HOST_EVENTS
+        );
     }
 
     #[test]
     fn native_foreign_datum_error_consumes_only_failure_and_retries_tail() {
-        let mut session = RuntimeSession::new(SymbolOwner { session: 806, generation: 1 });
+        let mut session = RuntimeSession::new(SymbolOwner {
+            session: 806,
+            generation: 1,
+        });
         let (first_tx, _first_rx) = channel::unbounded();
         let (second_tx, _second_rx) = channel::unbounded();
         assert!(session.add_player(1, first_tx));
@@ -6938,9 +7357,11 @@ mod tests {
             context
                 .player
                 .queue_player_notification(PlayerNotificationKind::DatumSnapshot(foreign));
-            context.player.queue_player_notification(PlayerNotificationKind::Host(
-                super::super::host_events::HostEvent::FrameChanged { frame: 7 },
-            ));
+            context
+                .player
+                .queue_player_notification(PlayerNotificationKind::Host(
+                    super::super::host_events::HostEvent::FrameChanged { frame: 7 },
+                ));
         });
 
         assert!(crate::js_api::JsApi::dispatch_player_notifications(handle.clone(), 1).is_err());
@@ -7002,18 +7423,22 @@ mod tests {
                 .unwrap(),
             CastPreloadState::Idle
         );
-        assert!(!session
-            .pending_casts
-            .iter()
-            .any(|pending| pending.request.owner_key().player == 2));
+        assert!(
+            !session
+                .pending_casts
+                .iter()
+                .any(|pending| pending.request.owner_key().player == 2)
+        );
 
         let (player_a_owner, player_a) = session
             .begin_player_notification_drain(1)
             .expect("player A owner must be live");
         session.finish_player_notification_drain(1, &player_a_owner);
-        assert!(player_a
-            .iter()
-            .all(|notification| notification.owner.same_identity(&player_a_owner)));
+        assert!(
+            player_a
+                .iter()
+                .all(|notification| notification.owner.same_identity(&player_a_owner))
+        );
         assert_eq!(
             player_a
                 .iter()
@@ -7030,9 +7455,11 @@ mod tests {
             .begin_player_notification_drain(2)
             .expect("player B owner must be live");
         session.finish_player_notification_drain(2, &player_b_owner);
-        assert!(player_b
-            .iter()
-            .all(|notification| notification.owner.same_identity(&player_b_owner)));
+        assert!(
+            player_b
+                .iter()
+                .all(|notification| notification.owner.same_identity(&player_b_owner))
+        );
         assert_eq!(
             player_b
                 .iter()
@@ -7054,18 +7481,20 @@ mod tests {
             .begin_player_notification_drain(1)
             .expect("player A owner must remain live");
         session.finish_player_notification_drain(1, &player_a_owner);
-        assert!(player_a
-            .iter()
-            .all(|notification| notification.owner.same_identity(&player_a_owner)));
+        assert!(
+            player_a
+                .iter()
+                .all(|notification| notification.owner.same_identity(&player_a_owner))
+        );
         assert_eq!(
             player_a
                 .iter()
                 .filter(|notification| matches!(
-            &notification.kind,
-            PlayerNotificationKind::Host(
-                super::super::host_events::HostEvent::CastListChanged { names }
-            ) if names.is_empty()
-        ))
+                    &notification.kind,
+                    PlayerNotificationKind::Host(
+                        super::super::host_events::HostEvent::CastListChanged { names }
+                    ) if names.is_empty()
+                ))
                 .count(),
             0
         );
@@ -7097,32 +7526,60 @@ mod tests {
             .with_player(2, |context| context.player.owner.clone())
             .unwrap();
         session.with_player(1, |context| {
-            context.player.host_event_mailbox = crate::player::host_events::HostEventMailbox::new(1);
-            assert!(context.player.queue_host_event(crate::player::host_events::HostEvent::FrameChanged {
-                frame: 1,
-            }).is_ok());
-            assert!(context.player.queue_host_event(crate::player::host_events::HostEvent::MovieLoaded {
-                version: 5,
-                cast_names: vec!["main".into()],
-            }).is_err());
-            assert!(context.player.queue_host_event(crate::player::host_events::HostEvent::FrameChanged {
-                frame: 2,
-            }).is_err());
+            context.player.host_event_mailbox =
+                crate::player::host_events::HostEventMailbox::new(1);
+            assert!(
+                context
+                    .player
+                    .queue_host_event(crate::player::host_events::HostEvent::FrameChanged {
+                        frame: 1,
+                    })
+                    .is_ok()
+            );
+            assert!(
+                context
+                    .player
+                    .queue_host_event(crate::player::host_events::HostEvent::MovieLoaded {
+                        version: 5,
+                        cast_names: vec!["main".into()],
+                    })
+                    .is_err()
+            );
+            assert!(
+                context
+                    .player
+                    .queue_host_event(crate::player::host_events::HostEvent::FrameChanged {
+                        frame: 2,
+                    })
+                    .is_err()
+            );
             assert!(context.player.pending_player_notifications.is_empty());
         });
         session.with_player(2, |context| {
-            assert!(context
-                .player
-                .queue_host_event(crate::player::host_events::HostEvent::FrameChanged { frame: 9 })
-                .is_ok());
+            assert!(
+                context
+                    .player
+                    .queue_host_event(crate::player::host_events::HostEvent::FrameChanged {
+                        frame: 9
+                    })
+                    .is_ok()
+            );
         });
         assert!(session.player_owner_matches(2, &other_owner));
         let (owner, batch) = session.begin_player_notification_drain(1).unwrap();
         assert!(matches!(
             batch.as_slice(),
             [
-                PlayerNotification { kind: PlayerNotificationKind::Host(crate::player::host_events::HostEvent::FrameChanged { frame: 1 }), .. },
-                PlayerNotification { kind: PlayerNotificationKind::HostBackpressure(1), .. },
+                PlayerNotification {
+                    kind: PlayerNotificationKind::Host(
+                        crate::player::host_events::HostEvent::FrameChanged { frame: 1 }
+                    ),
+                    ..
+                },
+                PlayerNotification {
+                    kind: PlayerNotificationKind::HostBackpressure(1),
+                    ..
+                },
             ]
         ));
         session.finish_player_notification_drain(1, &owner);
@@ -7205,14 +7662,18 @@ mod tests {
         // pump after a terminal host mailbox overflow. It must retire A's
         // action and pending command without touching sibling B.
         session.cancel_host_backpressured_owner(1, &first_owner);
-        assert!(!session
-            .pending_commands
-            .iter()
-            .any(|pending| pending.player_id == 1));
-        assert!(session
-            .pending_commands
-            .iter()
-            .any(|pending| pending.player_id == 2));
+        assert!(
+            !session
+                .pending_commands
+                .iter()
+                .any(|pending| pending.player_id == 1)
+        );
+        assert!(
+            session
+                .pending_commands
+                .iter()
+                .any(|pending| pending.player_id == 2)
+        );
         assert!(session.actions.details(&first_ticket).is_none());
         assert!(session.actions.details(&second_ticket).is_some());
 
@@ -7224,14 +7685,16 @@ mod tests {
             second_ticket.clone(),
             ActionCompletion::Resume,
         );
-        assert!(session
-            .pending_completions
-            .iter()
-            .any(|(player_id, ticket, completion)| {
-                *player_id == 2
-                    && ticket.same_identity(&second_ticket)
-                    && matches!(completion, ActionCompletion::Resume)
-            }));
+        assert!(
+            session
+                .pending_completions
+                .iter()
+                .any(|(player_id, ticket, completion)| {
+                    *player_id == 2
+                        && ticket.same_identity(&second_ticket)
+                        && matches!(completion, ActionCompletion::Resume)
+                })
+        );
     }
 
     #[test]
@@ -7242,7 +7705,9 @@ mod tests {
         });
         let (tx, _rx) = channel::unbounded();
         assert!(session.add_player(1, tx));
-        let old_owner = session.with_player(1, |context| context.player.owner.clone()).unwrap();
+        let old_owner = session
+            .with_player(1, |context| context.player.owner.clone())
+            .unwrap();
         session.with_player(1, |context| {
             context
                 .player
@@ -7266,7 +7731,9 @@ mod tests {
         });
         let (tx, _rx) = channel::unbounded();
         assert!(session.add_player(1, tx));
-        let old_owner = session.with_player(1, |context| context.player.owner.clone()).unwrap();
+        let old_owner = session
+            .with_player(1, |context| context.player.owner.clone())
+            .unwrap();
         assert!(session.begin_scheduled_player_notification(1, &old_owner));
 
         let new_owner = session.reset_player_owned(1, &old_owner).unwrap();
@@ -7286,7 +7753,9 @@ mod tests {
         });
         let (tx, _rx) = channel::unbounded();
         assert!(session.add_player(1, tx));
-        let owner = session.with_player(1, |context| context.player.owner.clone()).unwrap();
+        let owner = session
+            .with_player(1, |context| context.player.owner.clone())
+            .unwrap();
         let (epoch, _cancel_rx) = session.begin_playback_loop(1, &owner).unwrap().unwrap();
         assert_eq!(session.cancel_playback_loop(1, &owner, true), Some(epoch));
         assert!(session.begin_playback_loop(1, &owner).unwrap().is_none());
@@ -7303,7 +7772,9 @@ mod tests {
         let (tx, _rx) = channel::unbounded();
         assert!(session.add_player(1, tx));
         let retained = session
-            .with_player(1, |context| context.player.alloc_datum(Datum::String("old".into())))
+            .with_player(1, |context| {
+                context.player.alloc_datum(Datum::String("old".into()))
+            })
             .unwrap();
         let retained_id = retained.unwrap();
         let queued = retained.clone();
@@ -7319,8 +7790,8 @@ mod tests {
                     .player
                     .alloc_datum(Datum::String("replacement".into()))
                     .unwrap()
-        })
-        .unwrap();
+            })
+            .unwrap();
         assert_ne!(replacement_id, retained_id);
         let (_owner, batch) = session.begin_player_notification_drain(1).unwrap();
         assert!(matches!(
@@ -7329,17 +7800,19 @@ mod tests {
                 if reference.unwrap() == retained_id
         ));
         drop(batch);
-        let recycled = session.with_player(1, |context| {
-            let first = context
-                .player
-                .alloc_datum(Datum::String("recycled-one".into()))
-                .unwrap();
-            let second = context
-                .player
-                .alloc_datum(Datum::String("recycled-two".into()))
-                .unwrap();
-            (first, second)
-        }).unwrap();
+        let recycled = session
+            .with_player(1, |context| {
+                let first = context
+                    .player
+                    .alloc_datum(Datum::String("recycled-one".into()))
+                    .unwrap();
+                let second = context
+                    .player
+                    .alloc_datum(Datum::String("recycled-two".into()))
+                    .unwrap();
+                (first, second)
+            })
+            .unwrap();
         assert!(recycled.0 == retained_id || recycled.1 == retained_id);
     }
 
@@ -7348,41 +7821,79 @@ mod tests {
     fn reset_player_owned_retires_old_fileio_task_state() {
         use url::Url;
 
-        let mut session = RuntimeSession::new(SymbolOwner { session: 82, generation: 1 });
+        let mut session = RuntimeSession::new(SymbolOwner {
+            session: 82,
+            generation: 1,
+        });
         let (tx, _rx) = channel::unbounded();
         assert!(session.add_player(1, tx));
-        let old_owner = session.with_player(1, |context| {
-            context
-                .player
-                .net_manager
-                .set_base_path(Url::parse("https://old.example/").unwrap());
-            let prepared = context.player.net_manager.prepare_net_thing("same.txt".to_owned());
-            (context.player.owner.clone(), prepared)
-        }).unwrap();
+        let old_owner = session
+            .with_player(1, |context| {
+                context
+                    .player
+                    .net_manager
+                    .set_base_path(Url::parse("https://old.example/").unwrap());
+                let prepared = context
+                    .player
+                    .net_manager
+                    .prepare_net_thing("same.txt".to_owned());
+                (context.player.owner.clone(), prepared)
+            })
+            .unwrap();
         let old_shared = old_owner.1.shared_state.clone();
         let old_task_id = old_owner.1.task.id;
         let replacement_owner = session.reset_player_owned(1, &old_owner.0).unwrap();
-        let fresh = session.with_player(1, |context| {
-            context
-                .player
-                .net_manager
-                .set_base_path(Url::parse("https://new.example/").unwrap());
-            context.player.net_manager.prepare_net_thing("same.txt".to_owned())
-        }).unwrap();
+        let fresh = session
+            .with_player(1, |context| {
+                context
+                    .player
+                    .net_manager
+                    .set_base_path(Url::parse("https://new.example/").unwrap());
+                context
+                    .player
+                    .net_manager
+                    .prepare_net_thing("same.txt".to_owned())
+            })
+            .unwrap();
         assert!(replacement_owner.is_arena_live());
         assert_eq!(old_task_id, fresh.task.id, "replacement may reuse task ids");
         async_std::task::block_on(async {
-            old_shared.lock().await.fulfill_task(old_task_id, Ok(b"old".to_vec())).await;
+            old_shared
+                .lock()
+                .await
+                .fulfill_task(old_task_id, Ok(b"old".to_vec()))
+                .await;
         });
-        assert!(session.with_player(1, |context| {
-            context.player.net_manager.get_task_result(Some(fresh.task.id)).is_none()
-        }).unwrap());
+        assert!(
+            session
+                .with_player(1, |context| {
+                    context
+                        .player
+                        .net_manager
+                        .get_task_result(Some(fresh.task.id))
+                        .is_none()
+                })
+                .unwrap()
+        );
         async_std::task::block_on(async {
-            fresh.shared_state.lock().await.fulfill_task(fresh.task.id, Ok(b"fresh".to_vec())).await;
+            fresh
+                .shared_state
+                .lock()
+                .await
+                .fulfill_task(fresh.task.id, Ok(b"fresh".to_vec()))
+                .await;
         });
-        assert_eq!(session.with_player(1, |context| {
-            context.player.net_manager.get_task_result(Some(fresh.task.id))
-        }).unwrap(), Some(Ok(b"fresh".to_vec())));
+        assert_eq!(
+            session
+                .with_player(1, |context| {
+                    context
+                        .player
+                        .net_manager
+                        .get_task_result(Some(fresh.task.id))
+                })
+                .unwrap(),
+            Some(Ok(b"fresh".to_vec()))
+        );
     }
 }
 

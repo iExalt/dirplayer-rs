@@ -7,7 +7,10 @@ pub mod rendering;
 pub mod rendering_gpu;
 pub mod utils;
 
-use async_std::{channel::{unbounded, Receiver, Sender}, task::spawn_local};
+use async_std::{
+    channel::{unbounded, Receiver, Sender},
+    task::spawn_local,
+};
 use log::{debug, warn};
 use manual_future::ManualFuture;
 use std::cell::{Cell, RefCell};
@@ -34,10 +37,11 @@ use player::{
     ownership::OwnerToken,
     host_events::{BrowserHostSink, HostEvent, HostEventDelivery},
     owner_key_string,
-    session::{allocate_session_id, ExecutionContext, PlayerId, RuntimeSession, RuntimeSessionHandle},
+    session::{
+        allocate_session_id, ExecutionContext, PlayerId, RuntimeSession, RuntimeSessionHandle,
+    },
     symbols::symbol_table::SymbolOwner,
-    PlayerVMExecutionItem,
-    PLAYER_OPT,
+    PlayerVMExecutionItem, PLAYER_OPT,
 };
 
 use crate::{player::symbols::symbol::Symbol};
@@ -49,14 +53,19 @@ extern "C" {
 
 fn checked_flash_sprite_number(value: f64) -> Result<i16, JsValue> {
     if !value.is_finite() || value.fract() != 0.0 || value < 1.0 || value > i16::MAX as f64 {
-        return Err(JsValue::from_str("Flash sprite number is outside the supported range"));
+        return Err(JsValue::from_str(
+            "Flash sprite number is outside the supported range",
+        ));
     }
     Ok(value as i16)
 }
 
 fn checked_flash_generation(value: f64) -> Result<u64, JsValue> {
-    if !value.is_finite() || value.fract() != 0.0 || value < 1.0 || value > 9_007_199_254_740_991.0 {
-        return Err(JsValue::from_str("Flash instance generation is not a safe integer"));
+    if !value.is_finite() || value.fract() != 0.0 || value < 1.0 || value > 9_007_199_254_740_991.0
+    {
+        return Err(JsValue::from_str(
+            "Flash instance generation is not a safe integer",
+        ));
     }
     Ok(value as u64)
 }
@@ -189,7 +198,9 @@ impl Drop for HostEventDrainGuard {
                         runtime.consume_host_event_delivery(player_id);
                     }
                     runtime.release_host_event_reservation(player_id, tail.len());
-                    let schedule_again = match runtime.prepend_host_event_deliveries(player_id, tail) {
+                    let schedule_again = match runtime
+                        .prepend_host_event_deliveries(player_id, tail)
+                    {
                         Ok(()) => runtime.finish_host_event_drain(player_id),
                         Err(error) => {
                             if let Some(owner) = owner.as_ref() {
@@ -200,7 +211,10 @@ impl Drop for HostEventDrainGuard {
                                 });
                                 runtime.cancel_host_backpressured_owner(player_id, owner);
                             }
-                            log::error!("host lifecycle queue overflow while restoring cancelled drain: {:?}", error);
+                            log::error!(
+                                "host lifecycle queue overflow while restoring cancelled drain: {:?}",
+                                error
+                            );
                             runtime.finish_host_event_drain(player_id);
                             false
                         }
@@ -240,10 +254,9 @@ fn finish_host_event_boundary(
     // reset/rebind may have replaced the first delivery's generation while the
     // detached batch was running; notification/PumpPending must target only
     // the replacement generation and must happen after this borrow is dropped.
-    let owner = session
-        .try_borrow_mut()
-        .ok()
-        .and_then(|mut runtime| runtime.with_player(player_id, |context| context.player.owner.clone()));
+    let owner = session.try_borrow_mut().ok().and_then(|mut runtime| {
+        runtime.with_player(player_id, |context| context.player.owner.clone())
+    });
     let Some(owner) = owner else {
         return;
     };
@@ -325,7 +338,10 @@ fn schedule_host_event_drain(session: RuntimeSessionHandle, player_id: PlayerId)
         // final owner-validated notification drain and wake.
         finish_host_event_boundary(session.clone(), player_id, schedule_again);
         if let Some(error) = first_error {
-            log::error!("detached browser host lifecycle delivery failed: {:?}", error);
+            log::error!(
+                "detached browser host lifecycle delivery failed: {:?}",
+                error
+            );
         }
     });
 }
@@ -350,9 +366,7 @@ pub(crate) fn schedule_player_notification_drain(
         return;
     }
     spawn_local(async move {
-        let still_current = session
-            .borrow()
-            .player_owner_matches(player_id, &owner);
+        let still_current = session.borrow().player_owner_matches(player_id, &owner);
         if !still_current {
             session
                 .borrow_mut()
@@ -469,8 +483,7 @@ pub async fn test_browser_host_event_guard_drops_attempted_callback() -> Result<
     // Keep this guard test independent from the public handle's command loop.
     // The loop is intentionally absent so the held RuntimeSession borrow can
     // isolate deferred Drop cleanup from unrelated PumpPending work.
-    let session_key = allocate_session_id()
-        .map_err(|error| JsValue::from_str(&error.message))?;
+    let session_key = allocate_session_id().map_err(|error| JsValue::from_str(&error.message))?;
     let session = RuntimeSession::new(SymbolOwner {
         session: session_key,
         generation: 1,
@@ -478,10 +491,7 @@ pub async fn test_browser_host_event_guard_drops_attempted_callback() -> Result<
     .into_handle();
     let (command_tx, _command_rx) = unbounded();
     let player_id = 1;
-    if !session
-        .borrow_mut()
-        .add_player(player_id, command_tx)
-    {
+    if !session.borrow_mut().add_player(player_id, command_tx) {
         return Err(JsValue::from_str("failed to install guard-test player"));
     }
     let events = js_sys::Array::new();
@@ -502,15 +512,13 @@ pub async fn test_browser_host_event_guard_drops_attempted_callback() -> Result<
         .borrow_mut()
         .bind_host_sink(player_id, &owner, &sink)
         .map_err(|error| JsValue::from_str(&error.message))?;
-    session
-        .borrow_mut()
-        .with_player(player_id, |context| {
-            context.player.queue_player_notification(
-                crate::player::cast_lib::PlayerNotificationKind::Host(
-                    HostEvent::FrameChanged { frame: 99 },
-                ),
-            );
-        });
+    session.borrow_mut().with_player(player_id, |context| {
+        context.player.queue_player_notification(
+            crate::player::cast_lib::PlayerNotificationKind::Host(HostEvent::FrameChanged {
+                frame: 99,
+            }),
+        );
+    });
     let first = HostEventDelivery {
         player_id,
         owner: owner.clone(),
@@ -701,7 +709,9 @@ impl BrowserFlashCapability {
     ) -> Self {
         let flash_binding_state = session
             .borrow_mut()
-            .with_player(player_id, |context| context.player.flash_binding_state.clone())
+            .with_player(player_id, |context| {
+                context.player.flash_binding_state.clone()
+            })
             .expect("browser flash capability player must expose binding state");
         Self {
             session,
@@ -756,7 +766,10 @@ impl BrowserFlashCapability {
             return Err(JsValue::from_str("browser flash capability is stale"));
         }
         self.command_tx
-            .try_send(PlayerVMExecutionItem { command, completer: None })
+            .try_send(PlayerVMExecutionItem {
+                command,
+                completer: None,
+            })
             .map_err(|_| JsValue::from_str("browser player command loop stopped"))?;
         Ok(true)
     }
@@ -788,7 +801,10 @@ impl BrowserFlashCapability {
         if !self.owner.is_arena_live() {
             return Err(JsValue::from_str("browser flash capability is stale"));
         }
-        let generation = self.flash_binding_state.borrow_mut().reserve(sprite_num)
+        let generation = self
+            .flash_binding_state
+            .borrow_mut()
+            .reserve(sprite_num)
             .map_err(|error| JsValue::from_str(&error.message))?;
         Ok(generation as f64)
     }
@@ -803,7 +819,10 @@ impl BrowserFlashCapability {
         if !self.owner.is_arena_live() {
             return Err(JsValue::from_str("browser flash capability is stale"));
         }
-        Ok(self.flash_binding_state.borrow_mut().invalidate(sprite_num, generation))
+        Ok(self
+            .flash_binding_state
+            .borrow_mut()
+            .invalidate(sprite_num, generation))
     }
 
     pub fn is_flash_instance_generation_current(
@@ -816,7 +835,10 @@ impl BrowserFlashCapability {
         if !self.owner.is_arena_live() {
             return Err(JsValue::from_str("browser flash capability is stale"));
         }
-        Ok(self.flash_binding_state.borrow().is_current(sprite_num, generation))
+        Ok(self
+            .flash_binding_state
+            .borrow()
+            .is_current(sprite_num, generation))
     }
 
     pub fn update_flash_frame(
@@ -827,10 +849,19 @@ impl BrowserFlashCapability {
         rgba_data: &[u8],
     ) -> Result<(), JsValue> {
         if self.local_channels_only && !(1..=i16::MAX as i32).contains(&sprite_num) {
-            return Err(JsValue::from_str("nested Flash channel must be a local i16"));
+            return Err(JsValue::from_str(
+                "nested Flash channel must be a local i16",
+            ));
         }
         self.with_context(|context| {
-            update_flash_frame_for_player(context.player, context.symbols, sprite_num, width, height, rgba_data)
+            update_flash_frame_for_player(
+                context.player,
+                context.symbols,
+                sprite_num,
+                width,
+                height,
+                rgba_data,
+            )
         })
     }
 
@@ -852,7 +883,10 @@ impl BrowserFlashCapability {
             return Err(JsValue::from_str("Flash callback owner key is stale"));
         }
         if !self.owner.is_arena_live()
-            || !self.flash_binding_state.borrow().is_current(origin_sprite_num, origin_generation)
+            || !self
+                .flash_binding_state
+                .borrow()
+                .is_current(origin_sprite_num, origin_generation)
         {
             return Err(JsValue::from_str("Flash callback binding is stale"));
         }
@@ -889,7 +923,10 @@ impl BrowserFlashCapability {
             return Err(JsValue::from_str("Flash callback owner key is stale"));
         }
         if !self.owner.is_arena_live()
-            || !self.flash_binding_state.borrow().is_current(origin_sprite_num, origin_generation)
+            || !self
+                .flash_binding_state
+                .borrow()
+                .is_current(origin_sprite_num, origin_generation)
         {
             return Err(JsValue::from_str("Flash callback binding is stale"));
         }
@@ -925,7 +962,11 @@ impl BrowserFlashCapability {
         cast_member: i32,
         body: String,
     ) -> Result<bool, JsValue> {
-        self.enqueue_raw(PlayerVMCommand::DispatchFlashEventRaw { cast_lib, cast_member, body })
+        self.enqueue_raw(PlayerVMCommand::DispatchFlashEventRaw {
+            cast_lib,
+            cast_member,
+            body,
+        })
     }
 
     pub async fn dispatch_flash_lingo(&self, body: String) -> Result<bool, JsValue> {
@@ -966,9 +1007,10 @@ impl BrowserPlayerHandle {
         &self,
         callback: impl FnOnce(&mut ExecutionContext<'_>) -> R,
     ) -> Result<R, JsValue> {
-        let mut session = self.session.try_borrow_mut().map_err(|_| {
-            JsValue::from_str("browser player session is already borrowed")
-        })?;
+        let mut session = self
+            .session
+            .try_borrow_mut()
+            .map_err(|_| JsValue::from_str("browser player session is already borrowed"))?;
         let current_owner = session
             .with_player(self.player_id, |context| context.player.owner.clone())
             .ok_or_else(|| JsValue::from_str("browser player is not installed"))?;
@@ -1002,12 +1044,9 @@ impl BrowserPlayerHandle {
     ) -> Result<(), JsValue> {
         self.with_context(|context| {
             for event in events {
-                context
-                    .player
-                    .queue_host_event(event)
-                    .map_err(|error| {
-                        JsValue::from_str(&format!("host event mailbox overflow: {error:?}"))
-                    })?;
+                context.player.queue_host_event(event).map_err(|error| {
+                    JsValue::from_str(&format!("host event mailbox overflow: {error:?}"))
+                })?;
             }
             Ok::<(), JsValue>(())
         })??;
@@ -1041,8 +1080,8 @@ impl BrowserPlayerHandle {
     /// it reuses the same numeric id.
     #[wasm_bindgen(constructor)]
     pub fn new() -> Result<BrowserPlayerHandle, JsValue> {
-        let session_key = allocate_session_id()
-            .map_err(|error| JsValue::from_str(&error.message))?;
+        let session_key =
+            allocate_session_id().map_err(|error| JsValue::from_str(&error.message))?;
         let session = RuntimeSession::new(SymbolOwner {
             session: session_key,
             generation: 1,
@@ -1062,14 +1101,20 @@ impl BrowserPlayerHandle {
             .ok_or_else(|| JsValue::from_str("failed to capture browser player owner"))?;
         let flash_scripted_access_pending = session
             .borrow_mut()
-            .with_player(player_id, |context| context.player.flash_scripted_access_pending.clone())
+            .with_player(player_id, |context| {
+                context.player.flash_scripted_access_pending.clone()
+            })
             .ok_or_else(|| JsValue::from_str("failed to capture Flash readiness state"))?;
         let flash_binding_state = session
             .borrow_mut()
-            .with_player(player_id, |context| context.player.flash_binding_state.clone())
+            .with_player(player_id, |context| {
+                context.player.flash_binding_state.clone()
+            })
             .ok_or_else(|| JsValue::from_str("failed to capture Flash binding state"))?;
         let renderer = rendering::new_renderer_state();
-        session.borrow_mut().bind_renderer_state(player_id, &renderer);
+        session
+            .borrow_mut()
+            .bind_renderer_state(player_id, &renderer);
         let mut handle = Self {
             session,
             player_id,
@@ -1112,7 +1157,10 @@ impl BrowserPlayerHandle {
         if !self.owner.is_arena_live() {
             return Err(JsValue::from_str("browser player handle is stale"));
         }
-        let generation = self.flash_binding_state.borrow_mut().reserve(sprite_num)
+        let generation = self
+            .flash_binding_state
+            .borrow_mut()
+            .reserve(sprite_num)
             .map_err(|error| JsValue::from_str(&error.message))?;
         Ok(generation as f64)
     }
@@ -1127,7 +1175,10 @@ impl BrowserPlayerHandle {
         if !self.owner.is_arena_live() {
             return Err(JsValue::from_str("browser player handle is stale"));
         }
-        Ok(self.flash_binding_state.borrow_mut().invalidate(sprite_num, generation))
+        Ok(self
+            .flash_binding_state
+            .borrow_mut()
+            .invalidate(sprite_num, generation))
     }
 
     pub fn is_flash_instance_generation_current(
@@ -1140,7 +1191,10 @@ impl BrowserPlayerHandle {
         if !self.owner.is_arena_live() {
             return Err(JsValue::from_str("browser player handle is stale"));
         }
-        Ok(self.flash_binding_state.borrow().is_current(sprite_num, generation))
+        Ok(self
+            .flash_binding_state
+            .borrow()
+            .is_current(sprite_num, generation))
     }
 
     /// Bind a callback directly to this handle's current owner generation.
@@ -1156,7 +1210,9 @@ impl BrowserPlayerHandle {
                 .map_err(|_| JsValue::from_str("browser player session is already borrowed"))?;
             session
                 .ensure_host_event_capacity(self.player_id, if previous.is_some() { 2 } else { 1 })
-                .map_err(|error| JsValue::from_str(&format!("host lifecycle queue overflow: {error:?}")))?;
+                .map_err(|error| {
+                    JsValue::from_str(&format!("host lifecycle queue overflow: {error:?}"))
+                })?;
             if previous.is_some() {
                 session.unbind_host_sink(self.player_id, &self.owner);
             }
@@ -1183,7 +1239,11 @@ impl BrowserPlayerHandle {
         lifecycle.push(HostEventDelivery {
             player_id: self.player_id,
             owner: self.owner.clone(),
-            sink: self.host_event_sink.as_ref().expect("sink installed").clone(),
+            sink: self
+                .host_event_sink
+                .as_ref()
+                .expect("sink installed")
+                .clone(),
             event: HostEvent::OwnerBound {
                 owner_key: owner_key_string(&self.owner),
             },
@@ -1215,10 +1275,17 @@ impl BrowserPlayerHandle {
         let Some(sink) = self.host_event_sink.take() else {
             return Ok(());
         };
-        let capacity = self.session.try_borrow()
+        let capacity = self
+            .session
+            .try_borrow()
             .map_err(|_| JsValue::from_str("browser player session is already borrowed"))
-            .and_then(|session| session.ensure_host_event_terminal_capacity(self.player_id)
-                .map_err(|error| JsValue::from_str(&format!("host lifecycle queue overflow: {error:?}"))));
+            .and_then(|session| {
+                session
+                    .ensure_host_event_terminal_capacity(self.player_id)
+                    .map_err(|error| {
+                        JsValue::from_str(&format!("host lifecycle queue overflow: {error:?}"))
+                    })
+            });
         if let Err(error) = capacity {
             self.host_event_sink = Some(sink);
             return Err(error);
@@ -1261,8 +1328,12 @@ impl BrowserPlayerHandle {
     }
 
     pub fn play(&self) -> Result<(), JsValue> {
-        crate::player::start_playback_owned(self.session.clone(), self.player_id, self.owner.clone())
-            .map_err(|error| JsValue::from_str(&error.message))
+        crate::player::start_playback_owned(
+            self.session.clone(),
+            self.player_id,
+            self.owner.clone(),
+        )
+        .map_err(|error| JsValue::from_str(&error.message))
     }
 
     pub fn stop(&self) -> Result<(), JsValue> {
@@ -1308,13 +1379,8 @@ impl BrowserPlayerHandle {
     }
 
     pub fn draw_frame(&self) -> Result<bool, JsValue> {
-        rendering::draw_frame_owned(
-            &self.renderer,
-            &self.session,
-            self.player_id,
-            &self.owner,
-        )
-        .map_err(|error| JsValue::from_str(&error.message))
+        rendering::draw_frame_owned(&self.renderer, &self.session, self.player_id, &self.owner)
+            .map_err(|error| JsValue::from_str(&error.message))
     }
 
     pub fn draw_frame_at_end(&self) -> Result<bool, JsValue> {
@@ -1327,10 +1393,7 @@ impl BrowserPlayerHandle {
         .map_err(|error| JsValue::from_str(&error.message))
     }
 
-    pub fn set_preview_parent(
-        &self,
-        parent: Option<web_sys::HtmlElement>,
-    ) -> Result<(), JsValue> {
+    pub fn set_preview_parent(&self, parent: Option<web_sys::HtmlElement>) -> Result<(), JsValue> {
         rendering::set_preview_parent_for_handle(
             &self.renderer,
             &self.session,
@@ -1346,7 +1409,10 @@ impl BrowserPlayerHandle {
             &self.session,
             self.player_id,
             &self.owner,
-            CastMemberRef { cast_lib, cast_member },
+            CastMemberRef {
+                cast_lib,
+                cast_member,
+            },
         )
     }
 
@@ -1369,9 +1435,9 @@ impl BrowserPlayerHandle {
             channel,
         )?;
         self.with_context(|context| {
-            context
-                .player
-                .queue_player_notification(crate::player::cast_lib::PlayerNotificationKind::ChannelChanged(channel));
+            context.player.queue_player_notification(
+                crate::player::cast_lib::PlayerNotificationKind::ChannelChanged(channel),
+            );
         })?;
         schedule_player_notification_drain(
             self.session.clone(),
@@ -1396,7 +1462,9 @@ impl BrowserPlayerHandle {
         js_sys::Reflect::set(
             &state,
             &JsValue::from_str("fontSize"),
-            &font_size.map(|value| JsValue::from_f64(value as f64)).unwrap_or(JsValue::UNDEFINED),
+            &font_size
+                .map(|value| JsValue::from_f64(value as f64))
+                .unwrap_or(JsValue::UNDEFINED),
         )?;
         js_sys::Reflect::set(
             &state,
@@ -1431,7 +1499,10 @@ impl BrowserPlayerHandle {
                 player_id,
                 command_tx,
                 owner,
-                PlayerVMCommand::PrintMemberBitmapHex(CastMemberRef { cast_lib, cast_member }),
+                PlayerVMCommand::PrintMemberBitmapHex(CastMemberRef {
+                    cast_lib,
+                    cast_member,
+                }),
             )
             .await
             .map(|_| JsValue::UNDEFINED)
@@ -1455,7 +1526,10 @@ impl BrowserPlayerHandle {
                 player_id,
                 command_tx,
                 owner,
-                PlayerVMCommand::PlayMemberSound(CastMemberRef { cast_lib, cast_member }),
+                PlayerVMCommand::PlayMemberSound(CastMemberRef {
+                    cast_lib,
+                    cast_member,
+                }),
             )
             .await
             .map(|_| JsValue::UNDEFINED)
@@ -1470,7 +1544,14 @@ impl BrowserPlayerHandle {
         rgba_data: &[u8],
     ) -> Result<(), JsValue> {
         self.with_context(|context| {
-            update_flash_frame_for_player(context.player, context.symbols, sprite_num, width, height, rgba_data)
+            update_flash_frame_for_player(
+                context.player,
+                context.symbols,
+                sprite_num,
+                width,
+                height,
+                rgba_data,
+            )
         })?
     }
 
@@ -1492,7 +1573,10 @@ impl BrowserPlayerHandle {
             return Err(JsValue::from_str("Flash callback owner key is stale"));
         }
         if !self.owner.is_arena_live()
-            || !self.flash_binding_state.borrow().is_current(origin_sprite_num, origin_generation)
+            || !self
+                .flash_binding_state
+                .borrow()
+                .is_current(origin_sprite_num, origin_generation)
         {
             return Err(JsValue::from_str("Flash callback binding is stale"));
         }
@@ -1533,7 +1617,10 @@ impl BrowserPlayerHandle {
             return Err(JsValue::from_str("Flash callback owner key is stale"));
         }
         if !self.owner.is_arena_live()
-            || !self.flash_binding_state.borrow().is_current(origin_sprite_num, origin_generation)
+            || !self
+                .flash_binding_state
+                .borrow()
+                .is_current(origin_sprite_num, origin_generation)
         {
             return Err(JsValue::from_str("Flash callback binding is stale"));
         }
@@ -1565,7 +1652,12 @@ impl BrowserPlayerHandle {
         let args_value = js_sys::JSON::parse(&args_json)
             .map_err(|_| JsValue::from_str("invalid LocalConnection JSON"))?;
         self.with_context(|context| -> Result<bool, JsValue> {
-            let Some(lc_path) = context.player.flash_lc_connections.get(&connection_name).cloned() else {
+            let Some(lc_path) = context
+                .player
+                .flash_lc_connections
+                .get(&connection_name)
+                .cloned()
+            else {
                 return Ok(false);
             };
             let Some((handler_name, target)) = context
@@ -1577,10 +1669,16 @@ impl BrowserPlayerHandle {
                 return Ok(false);
             };
             if !js_sys::Array::is_array(&args_value) {
-                return Err(JsValue::from_str("LocalConnection arguments are not an array"));
+                return Err(JsValue::from_str(
+                    "LocalConnection arguments are not an array",
+                ));
             }
             let array = js_sys::Array::from(&args_value);
-            let mut args = vec![context.player.alloc_datum(director::lingo::datum::Datum::Void)];
+            let mut args = vec![
+                context
+                    .player
+                    .alloc_datum(director::lingo::datum::Datum::Void),
+            ];
             for item in array.iter() {
                 args.push(js_value_to_datum_ref_for_context(
                     &item,
@@ -1603,7 +1701,8 @@ impl BrowserPlayerHandle {
                 })
                 .map_err(|_| JsValue::from_str("browser player command loop stopped"))?;
             Ok(true)
-        }).and_then(|result| result)
+        })
+        .and_then(|result| result)
     }
 
     pub fn dispatch_flash_event(
@@ -1620,17 +1719,18 @@ impl BrowserPlayerHandle {
             let args = raw_args
                 .into_iter()
                 .map(|token| {
-                    let datum = if token.len() >= 2 && token.starts_with('"') && token.ends_with('"') {
-                        Datum::String(token[1..token.len() - 1].to_owned())
-                    } else if let Some(symbol) = token.strip_prefix('#') {
-                        Datum::Symbol(context.symbols.intern(symbol))
-                    } else if let Ok(number) = token.parse::<i32>() {
-                        Datum::Int(number)
-                    } else if let Ok(number) = token.parse::<f64>() {
-                        Datum::Float(number)
-                    } else {
-                        Datum::String(token)
-                    };
+                    let datum =
+                        if token.len() >= 2 && token.starts_with('"') && token.ends_with('"') {
+                            Datum::String(token[1..token.len() - 1].to_owned())
+                        } else if let Some(symbol) = token.strip_prefix('#') {
+                            Datum::Symbol(context.symbols.intern(symbol))
+                        } else if let Ok(number) = token.parse::<i32>() {
+                            Datum::Int(number)
+                        } else if let Ok(number) = token.parse::<f64>() {
+                            Datum::Float(number)
+                        } else {
+                            Datum::String(token)
+                        };
                     context.player.alloc_datum(datum)
                 })
                 .collect();
@@ -1648,7 +1748,8 @@ impl BrowserPlayerHandle {
                 })
                 .map_err(|_| JsValue::from_str("browser player command loop stopped"))?;
             Ok(true)
-        }).and_then(|result| result)
+        })
+        .and_then(|result| result)
     }
 
     pub fn dispatch_flash_lingo(&self, body: String) -> js_sys::Promise {
@@ -1719,16 +1820,15 @@ impl BrowserPlayerHandle {
             .reset_player_owned(self.player_id, &self.owner)
             .map_err(|error| JsValue::from_str(&error.message))?;
         let teardowns = session.take_host_teardowns();
-        let queue_result = session
-            .with_player(self.player_id, |context| {
-                // Install the replacement queue only after the session reset
-                // has validated and retired the captured owner.
-                context.player.queue_tx = command_tx.clone();
-                (
-                    context.player.flash_scripted_access_pending.clone(),
-                    context.player.flash_binding_state.clone(),
-                )
-            });
+        let queue_result = session.with_player(self.player_id, |context| {
+            // Install the replacement queue only after the session reset
+            // has validated and retired the captured owner.
+            context.player.queue_tx = command_tx.clone();
+            (
+                context.player.flash_scripted_access_pending.clone(),
+                context.player.flash_binding_state.clone(),
+            )
+        });
         if queue_result.is_none() {
             drop(session);
             drop(teardowns);
@@ -1740,8 +1840,8 @@ impl BrowserPlayerHandle {
         // has received its replacement queue.
         self.command_tx.close();
         self.owner = owner;
-        let (flash_scripted_access_pending, flash_binding_state) = queue_result
-            .expect("replacement player was validated above");
+        let (flash_scripted_access_pending, flash_binding_state) =
+            queue_result.expect("replacement player was validated above");
         self.flash_scripted_access_pending = flash_scripted_access_pending;
         self.flash_binding_state = flash_binding_state;
         self.command_tx = command_tx;
@@ -1769,7 +1869,9 @@ impl BrowserPlayerHandle {
                         player_id: self.player_id,
                         owner: old_owner.clone(),
                         sink: sink.clone(),
-                        event: HostEvent::OwnerRetired { owner_key: old_key.clone() },
+                        event: HostEvent::OwnerRetired {
+                            owner_key: old_key.clone(),
+                        },
                     },
                     HostEventDelivery {
                         player_id: self.player_id,
@@ -1824,14 +1926,17 @@ impl BrowserPlayerHandle {
                     height,
                     center: context.player.center_stage,
                 })
-                .map_err(|error| JsValue::from_str(&format!("host event mailbox overflow: {error:?}")))
+                .map_err(|error| {
+                    JsValue::from_str(&format!("host event mailbox overflow: {error:?}"))
+                })
         })??;
         Ok(())
     }
 
     pub fn set_base_path(&self, path: String) -> Result<(), JsValue> {
-        let url = url::Url::parse(&path)
-            .map_err(|error| JsValue::from_str(&format!("invalid base path URL '{}': {}", path, error)))?;
+        let url = url::Url::parse(&path).map_err(|error| {
+            JsValue::from_str(&format!("invalid base path URL '{}': {}", path, error))
+        })?;
         self.with_context(|context| context.player.net_manager.set_base_path(url))
     }
 
@@ -1879,7 +1984,9 @@ impl BrowserPlayerHandle {
                     height,
                     center: context.player.center_stage,
                 })
-                .map_err(|error| JsValue::from_str(&format!("host event mailbox overflow: {error:?}")))
+                .map_err(|error| {
+                    JsValue::from_str(&format!("host event mailbox overflow: {error:?}"))
+                })
         })??;
         Ok(())
     }
@@ -1956,10 +2063,14 @@ impl BrowserPlayerHandle {
         self.with_context(|context| {
             context.player.mouse_loc = loc;
             context.player.movie.mouse_down = true;
-            context.player.queue_tx.try_send(PlayerVMExecutionItem {
-                command: PlayerVMCommand::MouseDown(loc),
-                completer: None,
-            }).map_err(|_| JsValue::from_str("browser player command loop stopped"))
+            context
+                .player
+                .queue_tx
+                .try_send(PlayerVMExecutionItem {
+                    command: PlayerVMCommand::MouseDown(loc),
+                    completer: None,
+                })
+                .map_err(|_| JsValue::from_str("browser player command loop stopped"))
         })?;
         self.route_nested_pointer(loc, PlayerVMCommand::MouseDown(loc))?;
         Ok(())
@@ -1970,10 +2081,14 @@ impl BrowserPlayerHandle {
         self.with_context(|context| {
             context.player.mouse_loc = loc;
             context.player.movie.mouse_down = false;
-            context.player.queue_tx.try_send(PlayerVMExecutionItem {
-                command: PlayerVMCommand::MouseUp(loc),
-                completer: None,
-            }).map_err(|_| JsValue::from_str("browser player command loop stopped"))
+            context
+                .player
+                .queue_tx
+                .try_send(PlayerVMExecutionItem {
+                    command: PlayerVMCommand::MouseUp(loc),
+                    completer: None,
+                })
+                .map_err(|_| JsValue::from_str("browser player command loop stopped"))
         })?;
         self.route_nested_pointer(loc, PlayerVMCommand::MouseUp(loc))?;
         Ok(())
@@ -1984,10 +2099,14 @@ impl BrowserPlayerHandle {
         self.with_context(|context| {
             context.player.mouse_loc = loc;
             context.player.movie.right_mouse_down = true;
-            context.player.queue_tx.try_send(PlayerVMExecutionItem {
-                command: PlayerVMCommand::RightMouseDown(loc),
-                completer: None,
-            }).map_err(|_| JsValue::from_str("browser player command loop stopped"))
+            context
+                .player
+                .queue_tx
+                .try_send(PlayerVMExecutionItem {
+                    command: PlayerVMCommand::RightMouseDown(loc),
+                    completer: None,
+                })
+                .map_err(|_| JsValue::from_str("browser player command loop stopped"))
         })?;
         Ok(())
     }
@@ -1997,10 +2116,14 @@ impl BrowserPlayerHandle {
         self.with_context(|context| {
             context.player.mouse_loc = loc;
             context.player.movie.right_mouse_down = false;
-            context.player.queue_tx.try_send(PlayerVMExecutionItem {
-                command: PlayerVMCommand::RightMouseUp(loc),
-                completer: None,
-            }).map_err(|_| JsValue::from_str("browser player command loop stopped"))
+            context
+                .player
+                .queue_tx
+                .try_send(PlayerVMExecutionItem {
+                    command: PlayerVMCommand::RightMouseUp(loc),
+                    completer: None,
+                })
+                .map_err(|_| JsValue::from_str("browser player command loop stopped"))
         })?;
         Ok(())
     }
@@ -2009,10 +2132,14 @@ impl BrowserPlayerHandle {
         let loc = self.input_movie_loc(x, y)?;
         self.with_context(|context| {
             context.player.mouse_loc = loc;
-            context.player.queue_tx.try_send(PlayerVMExecutionItem {
-                command: PlayerVMCommand::MouseMove(loc),
-                completer: None,
-            }).map_err(|_| JsValue::from_str("browser player command loop stopped"))
+            context
+                .player
+                .queue_tx
+                .try_send(PlayerVMExecutionItem {
+                    command: PlayerVMCommand::MouseMove(loc),
+                    completer: None,
+                })
+                .map_err(|_| JsValue::from_str("browser player command loop stopped"))
         })?;
         self.route_nested_pointer(loc, PlayerVMCommand::MouseMove(loc))?;
         Ok(())
@@ -2025,10 +2152,14 @@ impl BrowserPlayerHandle {
             context.player.mouse_loc.0 += dx;
             context.player.mouse_loc.1 += dy;
             let loc = context.player.mouse_loc;
-            context.player.queue_tx.try_send(PlayerVMExecutionItem {
-                command: PlayerVMCommand::MouseMove(loc),
-                completer: None,
-            }).map_err(|_| JsValue::from_str("browser player command loop stopped"))
+            context
+                .player
+                .queue_tx
+                .try_send(PlayerVMExecutionItem {
+                    command: PlayerVMCommand::MouseMove(loc),
+                    completer: None,
+                })
+                .map_err(|_| JsValue::from_str("browser player command loop stopped"))
         })?;
         let loc = self.with_context(|context| context.player.mouse_loc)?;
         self.route_nested_pointer(loc, PlayerVMCommand::MouseMove(loc))?;
@@ -2038,10 +2169,14 @@ impl BrowserPlayerHandle {
     pub fn key_down(&self, key: String, code: u16) -> Result<(), JsValue> {
         self.with_context(|context| {
             context.player.keyboard_manager.key_down(key.clone(), code);
-            context.player.queue_tx.try_send(PlayerVMExecutionItem {
-                command: PlayerVMCommand::KeyDown(key.clone(), code),
-                completer: None,
-            }).map_err(|_| JsValue::from_str("browser player command loop stopped"))
+            context
+                .player
+                .queue_tx
+                .try_send(PlayerVMExecutionItem {
+                    command: PlayerVMCommand::KeyDown(key.clone(), code),
+                    completer: None,
+                })
+                .map_err(|_| JsValue::from_str("browser player command loop stopped"))
         })?;
         self.route_nested_key(&key, code, true)?;
         Ok(())
@@ -2050,10 +2185,14 @@ impl BrowserPlayerHandle {
     pub fn key_up(&self, key: String, code: u16) -> Result<(), JsValue> {
         self.with_context(|context| {
             context.player.keyboard_manager.key_up(&key, code);
-            context.player.queue_tx.try_send(PlayerVMExecutionItem {
-                command: PlayerVMCommand::KeyUp(key.clone(), code),
-                completer: None,
-            }).map_err(|_| JsValue::from_str("browser player command loop stopped"))
+            context
+                .player
+                .queue_tx
+                .try_send(PlayerVMExecutionItem {
+                    command: PlayerVMCommand::KeyUp(key.clone(), code),
+                    completer: None,
+                })
+                .map_err(|_| JsValue::from_str("browser player command loop stopped"))
         })?;
         self.route_nested_key(&key, code, false)?;
         Ok(())
@@ -2096,10 +2235,22 @@ impl BrowserPlayerHandle {
 
     fn focused_member_editable(context: &ExecutionContext<'_>) -> Option<i16> {
         let sprite_id = context.player.keyboard_focus_sprite;
-        if sprite_id < 0 { return None; }
+        if sprite_id < 0 {
+            return None;
+        }
         let sprite_id = sprite_id as i16;
-        let member_ref = context.player.movie.score.get_sprite(sprite_id)?.member.as_ref()?;
-        let member = context.player.movie.cast_manager.find_member_by_ref(member_ref)?;
+        let member_ref = context
+            .player
+            .movie
+            .score
+            .get_sprite(sprite_id)?
+            .member
+            .as_ref()?;
+        let member = context
+            .player
+            .movie
+            .cast_manager
+            .find_member_by_ref(member_ref)?;
         let editable = matches!(&member.member_type, CastMemberType::Field(field) if field.editable)
             || matches!(&member.member_type, CastMemberType::Text(text) if text.info.as_ref().is_some_and(|info| info.editable));
         editable.then_some(sprite_id)
@@ -2111,12 +2262,35 @@ impl BrowserPlayerHandle {
 
     pub fn get_focused_field_selected_text(&self) -> Result<String, JsValue> {
         self.with_context(|context| {
-            let Some(sprite_id) = Self::focused_member_editable(context) else { return String::new(); };
-            let Some(member_ref) = context.player.movie.score.get_sprite(sprite_id).and_then(|s| s.member.as_ref()) else { return String::new(); };
-            let Some(member) = context.player.movie.cast_manager.find_member_by_ref(member_ref) else { return String::new(); };
+            let Some(sprite_id) = Self::focused_member_editable(context) else {
+                return String::new();
+            };
+            let Some(member_ref) = context
+                .player
+                .movie
+                .score
+                .get_sprite(sprite_id)
+                .and_then(|s| s.member.as_ref())
+            else {
+                return String::new();
+            };
+            let Some(member) = context
+                .player
+                .movie
+                .cast_manager
+                .find_member_by_ref(member_ref)
+            else {
+                return String::new();
+            };
             let (text, start, end) = match &member.member_type {
-                CastMemberType::Field(field) if field.editable => (&field.text, field.sel_start, field.sel_end),
-                CastMemberType::Text(text) if text.info.as_ref().is_some_and(|info| info.editable) => (&text.text, text.sel_start, text.sel_end),
+                CastMemberType::Field(field) if field.editable => {
+                    (&field.text, field.sel_start, field.sel_end)
+                }
+                CastMemberType::Text(text)
+                    if text.info.as_ref().is_some_and(|info| info.editable) =>
+                {
+                    (&text.text, text.sel_start, text.sel_end)
+                }
                 _ => return String::new(),
             };
             let len = text.len() as i32;
@@ -2126,56 +2300,142 @@ impl BrowserPlayerHandle {
             let second = end.clamp(0, len);
             let mut lo_b = first.min(second) as usize;
             let mut hi_b = first.max(second) as usize;
-            while lo_b < text.len() && !text.is_char_boundary(lo_b) { lo_b += 1; }
-            while hi_b < text.len() && !text.is_char_boundary(hi_b) { hi_b += 1; }
+            while lo_b < text.len() && !text.is_char_boundary(lo_b) {
+                lo_b += 1;
+            }
+            while hi_b < text.len() && !text.is_char_boundary(hi_b) {
+                hi_b += 1;
+            }
             text[lo_b..hi_b].to_owned()
         })
     }
 
-    pub fn field_set_caret_at(&self, sprite_id: i32, canvas_x: f64, canvas_y: f64, extend: bool) -> Result<bool, JsValue> {
+    pub fn field_set_caret_at(
+        &self,
+        sprite_id: i32,
+        canvas_x: f64,
+        canvas_y: f64,
+        extend: bool,
+    ) -> Result<bool, JsValue> {
         let mode = if extend {
             crate::player::keyboard_events::CaretAtMode::ExtendToAnchor
         } else {
             crate::player::keyboard_events::CaretAtMode::SetAndAnchor
         };
         self.with_context(|context| {
-            let (x, y) = crate::player::stage::canvas_to_movie_coords(context.player, canvas_x, canvas_y);
-            crate::player::keyboard_events::set_caret_at_screen_for_player(context.player, sprite_id as i16, x as i32, y as i32, mode)
+            let (x, y) =
+                crate::player::stage::canvas_to_movie_coords(context.player, canvas_x, canvas_y);
+            crate::player::keyboard_events::set_caret_at_screen_for_player(
+                context.player,
+                sprite_id as i16,
+                x as i32,
+                y as i32,
+                mode,
+            )
         })
     }
 
-    pub fn field_drag_extend_to(&self, sprite_id: i32, canvas_x: f64, canvas_y: f64) -> Result<bool, JsValue> {
+    pub fn field_drag_extend_to(
+        &self,
+        sprite_id: i32,
+        canvas_x: f64,
+        canvas_y: f64,
+    ) -> Result<bool, JsValue> {
         self.with_context(|context| {
-            let (x, y) = crate::player::stage::canvas_to_movie_coords(context.player, canvas_x, canvas_y);
-            crate::player::keyboard_events::set_caret_at_screen_for_player(context.player, sprite_id as i16, x as i32, y as i32, crate::player::keyboard_events::CaretAtMode::DragExtend)
+            let (x, y) =
+                crate::player::stage::canvas_to_movie_coords(context.player, canvas_x, canvas_y);
+            crate::player::keyboard_events::set_caret_at_screen_for_player(
+                context.player,
+                sprite_id as i16,
+                x as i32,
+                y as i32,
+                crate::player::keyboard_events::CaretAtMode::DragExtend,
+            )
         })
     }
 
-    pub fn field_select_word_at(&self, sprite_id: i32, canvas_x: f64, canvas_y: f64) -> Result<bool, JsValue> {
+    pub fn field_select_word_at(
+        &self,
+        sprite_id: i32,
+        canvas_x: f64,
+        canvas_y: f64,
+    ) -> Result<bool, JsValue> {
         self.with_context(|context| {
-            let (x, y) = crate::player::stage::canvas_to_movie_coords(context.player, canvas_x, canvas_y);
-            crate::player::keyboard_events::set_caret_at_screen_for_player(context.player, sprite_id as i16, x as i32, y as i32, crate::player::keyboard_events::CaretAtMode::SelectWord)
+            let (x, y) =
+                crate::player::stage::canvas_to_movie_coords(context.player, canvas_x, canvas_y);
+            crate::player::keyboard_events::set_caret_at_screen_for_player(
+                context.player,
+                sprite_id as i16,
+                x as i32,
+                y as i32,
+                crate::player::keyboard_events::CaretAtMode::SelectWord,
+            )
         })
     }
 
-    pub fn field_select_line_at(&self, sprite_id: i32, canvas_x: f64, canvas_y: f64) -> Result<bool, JsValue> {
+    pub fn field_select_line_at(
+        &self,
+        sprite_id: i32,
+        canvas_x: f64,
+        canvas_y: f64,
+    ) -> Result<bool, JsValue> {
         self.with_context(|context| {
-            let (x, y) = crate::player::stage::canvas_to_movie_coords(context.player, canvas_x, canvas_y);
-            crate::player::keyboard_events::set_caret_at_screen_for_player(context.player, sprite_id as i16, x as i32, y as i32, crate::player::keyboard_events::CaretAtMode::SelectLine)
+            let (x, y) =
+                crate::player::stage::canvas_to_movie_coords(context.player, canvas_x, canvas_y);
+            crate::player::keyboard_events::set_caret_at_screen_for_player(
+                context.player,
+                sprite_id as i16,
+                x as i32,
+                y as i32,
+                crate::player::keyboard_events::CaretAtMode::SelectLine,
+            )
         })
     }
 
     pub fn field_select_all(&self) -> Result<(), JsValue> {
         self.with_context(|context| {
-            let Some(sprite_id) = Self::focused_member_editable(context) else { return; };
-            let Some(member_ref) = context.player.movie.score.get_sprite(sprite_id).and_then(|s| s.member.clone()) else { return; };
-            let Some(member) = context.player.movie.cast_manager.find_mut_member_by_ref(&member_ref) else { return; };
+            let Some(sprite_id) = Self::focused_member_editable(context) else {
+                return;
+            };
+            let Some(member_ref) = context
+                .player
+                .movie
+                .score
+                .get_sprite(sprite_id)
+                .and_then(|s| s.member.clone())
+            else {
+                return;
+            };
+            let Some(member) = context
+                .player
+                .movie
+                .cast_manager
+                .find_mut_member_by_ref(&member_ref)
+            else {
+                return;
+            };
             let (len, start, end, anchor) = match &mut member.member_type {
-                CastMemberType::Field(field) if field.editable => (field.text.len() as i32, &mut field.sel_start, &mut field.sel_end, &mut field.sel_anchor),
-                CastMemberType::Text(text) if text.info.as_ref().is_some_and(|info| info.editable) => (text.text.len() as i32, &mut text.sel_start, &mut text.sel_end, &mut text.sel_anchor),
+                CastMemberType::Field(field) if field.editable => (
+                    field.text.len() as i32,
+                    &mut field.sel_start,
+                    &mut field.sel_end,
+                    &mut field.sel_anchor,
+                ),
+                CastMemberType::Text(text)
+                    if text.info.as_ref().is_some_and(|info| info.editable) =>
+                {
+                    (
+                        text.text.len() as i32,
+                        &mut text.sel_start,
+                        &mut text.sel_end,
+                        &mut text.sel_anchor,
+                    )
+                }
                 _ => return,
             };
-            *start = 0; *end = len; *anchor = 0;
+            *start = 0;
+            *end = len;
+            *anchor = 0;
             context.player.text_selection_start = 0;
             context.player.text_selection_end = len.max(0) as u16;
         })
@@ -2183,12 +2443,43 @@ impl BrowserPlayerHandle {
 
     pub fn delete_focused_field_selection(&self) -> Result<(), JsValue> {
         self.with_context(|context| {
-            let Some(sprite_id) = Self::focused_member_editable(context) else { return; };
-            let Some(member_ref) = context.player.movie.score.get_sprite(sprite_id).and_then(|s| s.member.clone()) else { return; };
-            let Some(member) = context.player.movie.cast_manager.find_mut_member_by_ref(&member_ref) else { return; };
+            let Some(sprite_id) = Self::focused_member_editable(context) else {
+                return;
+            };
+            let Some(member_ref) = context
+                .player
+                .movie
+                .score
+                .get_sprite(sprite_id)
+                .and_then(|s| s.member.clone())
+            else {
+                return;
+            };
+            let Some(member) = context
+                .player
+                .movie
+                .cast_manager
+                .find_mut_member_by_ref(&member_ref)
+            else {
+                return;
+            };
             let (text, start, end, anchor) = match &mut member.member_type {
-                CastMemberType::Field(field) if field.editable => (&mut field.text, &mut field.sel_start, &mut field.sel_end, &mut field.sel_anchor),
-                CastMemberType::Text(text) if text.info.as_ref().is_some_and(|info| info.editable) => (&mut text.text, &mut text.sel_start, &mut text.sel_end, &mut text.sel_anchor),
+                CastMemberType::Field(field) if field.editable => (
+                    &mut field.text,
+                    &mut field.sel_start,
+                    &mut field.sel_end,
+                    &mut field.sel_anchor,
+                ),
+                CastMemberType::Text(text)
+                    if text.info.as_ref().is_some_and(|info| info.editable) =>
+                {
+                    (
+                        &mut text.text,
+                        &mut text.sel_start,
+                        &mut text.sel_end,
+                        &mut text.sel_anchor,
+                    )
+                }
                 _ => return,
             };
             crate::player::keyboard_events::apply_text_insertion(text, start, end, anchor, "");
@@ -2203,12 +2494,43 @@ impl BrowserPlayerHandle {
 
     pub fn paste_text_into_focused_field(&self, text: String) -> Result<(), JsValue> {
         self.with_context(|context| {
-            let Some(sprite_id) = Self::focused_member_editable(context) else { return; };
-            let Some(member_ref) = context.player.movie.score.get_sprite(sprite_id).and_then(|s| s.member.clone()) else { return; };
-            let Some(member) = context.player.movie.cast_manager.find_mut_member_by_ref(&member_ref) else { return; };
+            let Some(sprite_id) = Self::focused_member_editable(context) else {
+                return;
+            };
+            let Some(member_ref) = context
+                .player
+                .movie
+                .score
+                .get_sprite(sprite_id)
+                .and_then(|s| s.member.clone())
+            else {
+                return;
+            };
+            let Some(member) = context
+                .player
+                .movie
+                .cast_manager
+                .find_mut_member_by_ref(&member_ref)
+            else {
+                return;
+            };
             let (target, start, end, anchor) = match &mut member.member_type {
-                CastMemberType::Field(field) if field.editable => (&mut field.text, &mut field.sel_start, &mut field.sel_end, &mut field.sel_anchor),
-                CastMemberType::Text(text_member) if text_member.info.as_ref().is_some_and(|info| info.editable) => (&mut text_member.text, &mut text_member.sel_start, &mut text_member.sel_end, &mut text_member.sel_anchor),
+                CastMemberType::Field(field) if field.editable => (
+                    &mut field.text,
+                    &mut field.sel_start,
+                    &mut field.sel_end,
+                    &mut field.sel_anchor,
+                ),
+                CastMemberType::Text(text_member)
+                    if text_member.info.as_ref().is_some_and(|info| info.editable) =>
+                {
+                    (
+                        &mut text_member.text,
+                        &mut text_member.sel_start,
+                        &mut text_member.sel_end,
+                        &mut text_member.sel_anchor,
+                    )
+                }
                 _ => return,
             };
             crate::player::keyboard_events::apply_text_insertion(target, start, end, anchor, &text);
@@ -2219,15 +2541,50 @@ impl BrowserPlayerHandle {
 
     pub fn ime_composition_start(&self) -> Result<(), JsValue> {
         self.with_context(|context| {
-            let Some(sprite_id) = Self::focused_member_editable(context) else { return; };
-            let Some(member_ref) = context.player.movie.score.get_sprite(sprite_id).and_then(|s| s.member.clone()) else { return; };
-            let Some(member) = context.player.movie.cast_manager.find_mut_member_by_ref(&member_ref) else { return; };
+            let Some(sprite_id) = Self::focused_member_editable(context) else {
+                return;
+            };
+            let Some(member_ref) = context
+                .player
+                .movie
+                .score
+                .get_sprite(sprite_id)
+                .and_then(|s| s.member.clone())
+            else {
+                return;
+            };
+            let Some(member) = context
+                .player
+                .movie
+                .cast_manager
+                .find_mut_member_by_ref(&member_ref)
+            else {
+                return;
+            };
             let (target, start, end, anchor) = match &mut member.member_type {
-                CastMemberType::Field(field) if field.editable => (&mut field.text, &mut field.sel_start, &mut field.sel_end, &mut field.sel_anchor),
-                CastMemberType::Text(text) if text.info.as_ref().is_some_and(|info| info.editable) => (&mut text.text, &mut text.sel_start, &mut text.sel_end, &mut text.sel_anchor),
+                CastMemberType::Field(field) if field.editable => (
+                    &mut field.text,
+                    &mut field.sel_start,
+                    &mut field.sel_end,
+                    &mut field.sel_anchor,
+                ),
+                CastMemberType::Text(text)
+                    if text.info.as_ref().is_some_and(|info| info.editable) =>
+                {
+                    (
+                        &mut text.text,
+                        &mut text.sel_start,
+                        &mut text.sel_end,
+                        &mut text.sel_anchor,
+                    )
+                }
                 _ => return,
             };
-            if *start != *end { crate::player::keyboard_events::apply_text_insertion(target, start, end, anchor, ""); }
+            if *start != *end {
+                crate::player::keyboard_events::apply_text_insertion(
+                    target, start, end, anchor, "",
+                );
+            }
             let pos = (*start).max(0);
             context.player.ime_composition = Some((pos, pos));
             context.player.text_selection_start = pos as u16;
@@ -2237,22 +2594,59 @@ impl BrowserPlayerHandle {
 
     pub fn ime_composition_update(&self, text: String) -> Result<(), JsValue> {
         self.with_context(|context| {
-            let Some((start, end)) = context.player.ime_composition else { return; };
-            let Some(sprite_id) = Self::focused_member_editable(context) else { return; };
-            let Some(member_ref) = context.player.movie.score.get_sprite(sprite_id).and_then(|s| s.member.clone()) else { return; };
-            let Some(member) = context.player.movie.cast_manager.find_mut_member_by_ref(&member_ref) else { return; };
+            let Some((start, end)) = context.player.ime_composition else {
+                return;
+            };
+            let Some(sprite_id) = Self::focused_member_editable(context) else {
+                return;
+            };
+            let Some(member_ref) = context
+                .player
+                .movie
+                .score
+                .get_sprite(sprite_id)
+                .and_then(|s| s.member.clone())
+            else {
+                return;
+            };
+            let Some(member) = context
+                .player
+                .movie
+                .cast_manager
+                .find_mut_member_by_ref(&member_ref)
+            else {
+                return;
+            };
             let (target, sel_start, sel_end, sel_anchor) = match &mut member.member_type {
-                CastMemberType::Field(field) if field.editable => (&mut field.text, &mut field.sel_start, &mut field.sel_end, &mut field.sel_anchor),
-                CastMemberType::Text(text_member) if text_member.info.as_ref().is_some_and(|info| info.editable) => (&mut text_member.text, &mut text_member.sel_start, &mut text_member.sel_end, &mut text_member.sel_anchor),
+                CastMemberType::Field(field) if field.editable => (
+                    &mut field.text,
+                    &mut field.sel_start,
+                    &mut field.sel_end,
+                    &mut field.sel_anchor,
+                ),
+                CastMemberType::Text(text_member)
+                    if text_member.info.as_ref().is_some_and(|info| info.editable) =>
+                {
+                    (
+                        &mut text_member.text,
+                        &mut text_member.sel_start,
+                        &mut text_member.sel_end,
+                        &mut text_member.sel_anchor,
+                    )
+                }
                 _ => return,
             };
             let len = target.len() as i32;
             let lo = start.clamp(0, len) as usize;
             let hi = end.clamp(0, len).max(lo as i32) as usize;
-            if !target.is_char_boundary(lo) || !target.is_char_boundary(hi) { return; }
+            if !target.is_char_boundary(lo) || !target.is_char_boundary(hi) {
+                return;
+            }
             target.replace_range(lo..hi, &text);
             let new_end = lo as i32 + text.len() as i32;
-            *sel_start = new_end; *sel_end = new_end; *sel_anchor = new_end;
+            *sel_start = new_end;
+            *sel_end = new_end;
+            *sel_anchor = new_end;
             context.player.ime_composition = Some((start, new_end));
             context.player.text_selection_start = new_end.max(0) as u16;
             context.player.text_selection_end = new_end.max(0) as u16;
@@ -2299,8 +2693,8 @@ impl BrowserPlayerHandle {
                 owner,
                 PlayerVMCommand::SetSystemFontPath(path),
             )
-                .await
-                .map(|_| JsValue::UNDEFINED)
+            .await
+            .map(|_| JsValue::UNDEFINED)
         })
     }
 
@@ -2350,7 +2744,12 @@ impl BrowserPlayerHandle {
         })
     }
 
-    pub fn mcp_list_scripts(&self, cast_lib: i32, limit: i32, offset: i32) -> Result<String, JsValue> {
+    pub fn mcp_list_scripts(
+        &self,
+        cast_lib: i32,
+        limit: i32,
+        offset: i32,
+    ) -> Result<String, JsValue> {
         self.with_context(|context| {
             player::mcp::mcp_list_scripts(
                 context.player,
@@ -2433,7 +2832,11 @@ impl BrowserPlayerHandle {
         })
     }
 
-    pub fn mcp_inspect_cast_member(&self, cast_lib: i32, cast_member: i32) -> Result<String, JsValue> {
+    pub fn mcp_inspect_cast_member(
+        &self,
+        cast_lib: i32,
+        cast_member: i32,
+    ) -> Result<String, JsValue> {
         self.with_context(|context| {
             player::mcp::mcp_inspect_cast_member(
                 context.player,
@@ -2462,10 +2865,7 @@ impl BrowserPlayerHandle {
 
     pub fn mcp_list_cast_members(&self, cast_lib: i32) -> Result<String, JsValue> {
         self.with_context(|context| {
-            player::mcp::mcp_list_cast_members(
-                context.player,
-                (cast_lib >= 0).then_some(cast_lib),
-            )
+            player::mcp::mcp_list_cast_members(context.player, (cast_lib >= 0).then_some(cast_lib))
         })
     }
 
@@ -2480,13 +2880,9 @@ impl BrowserPlayerHandle {
         let player_id = self.player_id;
         let owner = self.owner.clone();
         future_to_promise(async move {
-            let result = player::eval_lingo_command_owned(
-                session.clone(),
-                player_id,
-                owner.clone(),
-                code,
-            )
-            .await;
+            let result =
+                player::eval_lingo_command_owned(session.clone(), player_id, owner.clone(), code)
+                    .await;
             let formatted = session
                 .borrow_mut()
                 .with_player(player_id, |context| {
@@ -2544,7 +2940,10 @@ impl BrowserPlayerHandle {
                     if let Err(callback_error) =
                         JsApi::dispatch_script_error_data_owned(&owner_key, data)
                     {
-                        log::error!("detached script-error callback failed: {:?}", callback_error);
+                        log::error!(
+                            "detached script-error callback failed: {:?}",
+                            callback_error
+                        );
                     }
                 }
             }
@@ -2552,13 +2951,27 @@ impl BrowserPlayerHandle {
         })
     }
 
-    pub fn add_breakpoint(&self, script_name: String, handler_name: String, bytecode_index: usize) -> Result<(), JsValue> {
+    pub fn add_breakpoint(
+        &self,
+        script_name: String,
+        handler_name: String,
+        bytecode_index: usize,
+    ) -> Result<(), JsValue> {
         self.with_context(|context| {
-            context.player.breakpoint_manager.add_breakpoint(script_name, handler_name, bytecode_index);
+            context.player.breakpoint_manager.add_breakpoint(
+                script_name,
+                handler_name,
+                bytecode_index,
+            );
         })
     }
 
-    pub fn toggle_breakpoint(&self, script_name: String, handler_name: String, bytecode_index: usize) -> Result<(), JsValue> {
+    pub fn toggle_breakpoint(
+        &self,
+        script_name: String,
+        handler_name: String,
+        bytecode_index: usize,
+    ) -> Result<(), JsValue> {
         self.with_context(|context| {
             context.player.breakpoint_manager.toggle_breakpoint(
                 script_name,
@@ -2568,9 +2981,18 @@ impl BrowserPlayerHandle {
         })
     }
 
-    pub fn remove_breakpoint(&self, script_name: String, handler_name: String, bytecode_index: usize) -> Result<(), JsValue> {
+    pub fn remove_breakpoint(
+        &self,
+        script_name: String,
+        handler_name: String,
+        bytecode_index: usize,
+    ) -> Result<(), JsValue> {
         self.with_context(|context| {
-            context.player.breakpoint_manager.remove_breakpoint(script_name, handler_name, bytecode_index);
+            context.player.breakpoint_manager.remove_breakpoint(
+                script_name,
+                handler_name,
+                bytecode_index,
+            );
         })
     }
 
@@ -2611,19 +3033,19 @@ impl BrowserPlayerHandle {
     }
 
     pub fn get_breakpoints(&self) -> Result<js_sys::Array, JsValue> {
-        self.with_context(|context| JsApi::get_breakpoint_list(context.player).into_iter().collect())
+        self.with_context(|context| {
+            JsApi::get_breakpoint_list(context.player)
+                .into_iter()
+                .collect()
+        })
     }
 
     pub fn request_datum(&self, datum_id: u32) -> Result<(), JsValue> {
         self.with_context(|context| {
             if let Some(datum_ref) = context.player.allocator.get_datum_ref(datum_id as DatumId) {
-                context
-                    .player
-                    .queue_player_notification(
-                        crate::player::cast_lib::PlayerNotificationKind::DatumSnapshot(
-                            datum_ref,
-                        ),
-                    );
+                context.player.queue_player_notification(
+                    crate::player::cast_lib::PlayerNotificationKind::DatumSnapshot(datum_ref),
+                );
             }
         })?;
         schedule_player_notification_drain(
@@ -2639,16 +3061,19 @@ impl BrowserPlayerHandle {
             let instance_ref = if script_instance_id == 0 {
                 None
             } else {
-                Some(context.player.allocator.get_script_instance_ref(script_instance_id)
-                    .ok_or_else(|| JsValue::from_str("script instance is not live"))?)
+                Some(
+                    context
+                        .player
+                        .allocator
+                        .get_script_instance_ref(script_instance_id)
+                        .ok_or_else(|| JsValue::from_str("script instance is not live"))?,
+                )
             };
-            context
-                .player
-                .queue_player_notification(
-                    crate::player::cast_lib::PlayerNotificationKind::ScriptInstanceSnapshot(
-                        instance_ref,
-                    ),
-                );
+            context.player.queue_player_notification(
+                crate::player::cast_lib::PlayerNotificationKind::ScriptInstanceSnapshot(
+                    instance_ref,
+                ),
+            );
             Ok(())
         })??;
         schedule_player_notification_drain(
@@ -2682,32 +3107,41 @@ impl BrowserPlayerHandle {
     }
 
     pub fn get_cast_chunk_list(&self, cast_number: u32) -> Result<JsValue, JsValue> {
-        self.with_context(|context| JsApi::get_cast_chunk_list_for(context.player, cast_number).into())
+        self.with_context(|context| {
+            JsApi::get_cast_chunk_list_for(context.player, cast_number).into()
+        })
     }
 
     pub fn get_movie_top_level_chunks(&self) -> Result<JsValue, JsValue> {
         self.with_context(|context| JsApi::get_movie_top_level_chunks(context.player).into())
     }
 
-    pub fn get_chunk_bytes(&self, cast_number: u32, chunk_id: u32) -> Result<Option<Vec<u8>>, JsValue> {
+    pub fn get_chunk_bytes(
+        &self,
+        cast_number: u32,
+        chunk_id: u32,
+    ) -> Result<Option<Vec<u8>>, JsValue> {
         self.with_context(|context| JsApi::get_chunk_bytes(context.player, cast_number, chunk_id))
     }
 
     pub fn get_parsed_chunk(&self, cast_number: u32, chunk_id: u32) -> Result<JsValue, JsValue> {
-        self.with_context(|context| JsApi::get_parsed_chunk(context.player, context.symbols, cast_number, chunk_id).into())
+        self.with_context(|context| {
+            JsApi::get_parsed_chunk(context.player, context.symbols, cast_number, chunk_id).into()
+        })
     }
 
     pub fn subscribe_to_member(&self, cast_lib: i32, cast_member: i32) -> Result<(), JsValue> {
         let member_ref = cast_member_ref(cast_lib, cast_member);
         self.with_context(|context| {
             if !context.player.subscribed_member_refs.contains(&member_ref) {
-                context.player.subscribed_member_refs.push(member_ref.clone());
+                context
+                    .player
+                    .subscribed_member_refs
+                    .push(member_ref.clone());
             }
-            context
-                .player
-                .queue_player_notification(
-                    crate::player::cast_lib::PlayerNotificationKind::CastMemberChanged(member_ref),
-                );
+            context.player.queue_player_notification(
+                crate::player::cast_lib::PlayerNotificationKind::CastMemberChanged(member_ref),
+            );
         })?;
         schedule_player_notification_drain(
             self.session.clone(),
@@ -2720,18 +3154,19 @@ impl BrowserPlayerHandle {
     pub fn unsubscribe_from_member(&self, cast_lib: i32, cast_member: i32) -> Result<(), JsValue> {
         self.with_context(|context| {
             let member_ref = cast_member_ref(cast_lib, cast_member);
-            context.player.subscribed_member_refs.retain(|item| item != &member_ref);
+            context
+                .player
+                .subscribed_member_refs
+                .retain(|item| item != &member_ref);
         })
     }
 
     pub fn subscribe_to_channel_names(&self) -> Result<(), JsValue> {
         self.with_context(|context| {
             context.player.is_subscribed_to_channel_names = true;
-            context
-                .player
-                .queue_player_notification(
-                    crate::player::cast_lib::PlayerNotificationKind::ChannelNamesChanged,
-                );
+            context.player.queue_player_notification(
+                crate::player::cast_lib::PlayerNotificationKind::ChannelNamesChanged,
+            );
         })?;
         schedule_player_notification_drain(
             self.session.clone(),
@@ -2748,9 +3183,9 @@ impl BrowserPlayerHandle {
     pub fn subscribe_to_score(&self) -> Result<(), JsValue> {
         self.with_context(|context| {
             context.player.is_subscribed_to_score = true;
-            context
-                .player
-                .queue_player_notification(crate::player::cast_lib::PlayerNotificationKind::ScoreChanged);
+            context.player.queue_player_notification(
+                crate::player::cast_lib::PlayerNotificationKind::ScoreChanged,
+            );
         })?;
         schedule_player_notification_drain(
             self.session.clone(),
@@ -2785,14 +3220,13 @@ impl BrowserPlayerHandle {
 
     pub fn subscribe_to_cast_member_list(&self, cast_number: u32) -> Result<(), JsValue> {
         self.with_context(|context| {
-            context.player.subscribed_cast_member_lists.insert(cast_number);
             context
                 .player
-                .queue_player_notification(
-                    crate::player::cast_lib::PlayerNotificationKind::CastMemberListChanged(
-                        cast_number,
-                    ),
-                );
+                .subscribed_cast_member_lists
+                .insert(cast_number);
+            context.player.queue_player_notification(
+                crate::player::cast_lib::PlayerNotificationKind::CastMemberListChanged(cast_number),
+            );
         })?;
         schedule_player_notification_drain(
             self.session.clone(),
@@ -2804,7 +3238,10 @@ impl BrowserPlayerHandle {
 
     pub fn unsubscribe_from_cast_member_list(&self, cast_number: u32) -> Result<(), JsValue> {
         self.with_context(|context| {
-            context.player.subscribed_cast_member_lists.remove(&cast_number);
+            context
+                .player
+                .subscribed_cast_member_lists
+                .remove(&cast_number);
         })
     }
 
@@ -2834,17 +3271,25 @@ impl BrowserPlayerHandle {
 
     pub fn export_w3d_raw(&self, cast_lib: i32, cast_member: i32) -> Result<(), JsValue> {
         self.with_context(|context| {
-            let member_ref = CastMemberRef { cast_lib, cast_member };
-            let Some(member) = context.player.movie.cast_manager.find_member_by_ref(&member_ref) else {
+            let member_ref = CastMemberRef {
+                cast_lib,
+                cast_member,
+            };
+            let Some(member) = context
+                .player
+                .movie
+                .cast_manager
+                .find_member_by_ref(&member_ref)
+            else {
                 return Err(JsValue::from_str("W3D member not found"));
             };
             let Some(w3d) = member.member_type.as_shockwave3d() else {
                 return Err(JsValue::from_str("member is not Shockwave3D"));
             };
             let magic = [0x49u8, 0x46, 0x58, 0x00];
-            let Some(offset) = (0..w3d.w3d_data.len().min(256))
-                .find(|&index| index + 4 <= w3d.w3d_data.len() && w3d.w3d_data[index..index + 4] == magic)
-            else {
+            let Some(offset) = (0..w3d.w3d_data.len().min(256)).find(|&index| {
+                index + 4 <= w3d.w3d_data.len() && w3d.w3d_data[index..index + 4] == magic
+            }) else {
                 return Err(JsValue::from_str("W3D member has no IFX payload"));
             };
             trigger_browser_download(
@@ -2857,7 +3302,9 @@ impl BrowserPlayerHandle {
     }
 
     pub fn export_w3d_obj(&self, cast_lib: i32, cast_member: i32) -> Result<(), JsValue> {
-        self.with_context(|context| export_w3d_obj_for_player(context.player, context.symbols, cast_lib, cast_member))?
+        self.with_context(|context| {
+            export_w3d_obj_for_player(context.player, context.symbols, cast_lib, cast_member)
+        })?
     }
 
     /// Drop host-side external-Xtra slots for this exact owner generation.
@@ -2865,24 +3312,24 @@ impl BrowserPlayerHandle {
         crate::player::xtra::external::dispose_external_host(&self.owner_identity());
     }
 
-    pub fn external_xtra_host_dispatch(
-        &self,
-        op_id: u32,
-        args: &[u8],
-    ) -> Result<Vec<u8>, JsValue> {
+    pub fn external_xtra_host_dispatch(&self, op_id: u32, args: &[u8]) -> Result<Vec<u8>, JsValue> {
         if matches!(op_id, 5 | 6 | 7) {
             let decoded = xtra_sdk::wire::decode_args(args)
                 .map_err(|error| JsValue::from_str(&format!("bad args: {}", error)))?;
-            let request = self.with_context(|context| {
-                crate::player::xtra::external::prepare_nested_host_request(
-                    context.player,
-                    op_id,
-                    &decoded,
-                )
-            })?.map_err(|error| JsValue::from_str(&error))?;
+            let request = self
+                .with_context(|context| {
+                    crate::player::xtra::external::prepare_nested_host_request(
+                        context.player,
+                        op_id,
+                        &decoded,
+                    )
+                })?
+                .map_err(|error| JsValue::from_str(&error))?;
             let response = crate::player::xtra::external::execute_request(&request)
                 .map_err(|error| JsValue::from_str(&error.message))?
-                .ok_or_else(|| JsValue::from_str("external Xtra host dispatch returned no response"))?;
+                .ok_or_else(|| {
+                    JsValue::from_str("external Xtra host dispatch returned no response")
+                })?;
             let still_current = self
                 .with_context(|context| {
                     request.owner.same_identity(&context.player.owner)
@@ -2891,7 +3338,9 @@ impl BrowserPlayerHandle {
                 })
                 .unwrap_or(false);
             if !still_current {
-                return Err(JsValue::from_str("external Xtra host dispatch owner was retired"));
+                return Err(JsValue::from_str(
+                    "external Xtra host dispatch owner was retired",
+                ));
             }
             return Ok(response.bytes);
         }
@@ -2980,7 +3429,10 @@ impl Drop for BrowserPlayerHandle {
                         owner_key: owner_key_string(&self.owner),
                     },
                 ) {
-                    log::error!("browser host sink retirement during drop failed: {:?}", error);
+                    log::error!(
+                        "browser host sink retirement during drop failed: {:?}",
+                        error
+                    );
                 }
                 schedule_host_event_drain(self.session.clone(), self.player_id);
             }
@@ -3124,11 +3576,9 @@ pub fn datum_stats() -> String {
 #[wasm_bindgen]
 pub fn add_breakpoint(script_name: String, handler_name: String, bytecode_index: usize) {
     reserve_player_mut(|player| {
-        player.breakpoint_manager.add_breakpoint(
-            script_name,
-            handler_name,
-            bytecode_index,
-        );
+        player
+            .breakpoint_manager
+            .add_breakpoint(script_name, handler_name, bytecode_index);
     });
 }
 
@@ -3140,30 +3590,24 @@ pub fn add_breakpoint(script_name: String, handler_name: String, bytecode_index:
 /// way to ask.
 #[wasm_bindgen]
 pub fn get_breakpoints() -> js_sys::Array {
-    reserve_player_ref(|player| {
-        JsApi::get_breakpoint_list(player).into_iter().collect()
-    })
+    reserve_player_ref(|player| JsApi::get_breakpoint_list(player).into_iter().collect())
 }
 
 #[wasm_bindgen]
 pub fn remove_breakpoint(script_name: String, handler_name: String, bytecode_index: usize) {
     reserve_player_mut(|player| {
-        player.breakpoint_manager.remove_breakpoint(
-            script_name,
-            handler_name,
-            bytecode_index,
-        );
+        player
+            .breakpoint_manager
+            .remove_breakpoint(script_name, handler_name, bytecode_index);
     });
 }
 
 #[wasm_bindgen]
 pub fn toggle_breakpoint(script_name: String, handler_name: String, bytecode_index: usize) {
     reserve_player_mut(|player| {
-        player.breakpoint_manager.toggle_breakpoint(
-            script_name,
-            handler_name,
-            bytecode_index,
-        );
+        player
+            .breakpoint_manager
+            .toggle_breakpoint(script_name, handler_name, bytecode_index);
     });
 }
 
@@ -3369,11 +3813,7 @@ pub fn movie_required_xtras() -> js_sys::Array {
                         let _ = js_sys::Reflect::set(
                             &obj,
                             &"displayName".into(),
-                            &decl
-                                .display_name
-                                .as_deref()
-                                .unwrap_or("")
-                                .into(),
+                            &decl.display_name.as_deref().unwrap_or("").into(),
                         );
                         result.push(&obj);
                     }
@@ -3431,39 +3871,46 @@ fn print_member_sound_hex_for_player(
     cast_member: i32,
 ) {
     use crate::player::cast_member::CastMemberType;
-        let member_ref = CastMemberRef { cast_lib, cast_member };
-        let Some(member) = player.movie.cast_manager.find_member_by_ref(&member_ref) else {
-            web_sys::console::warn_1(
-                &format!("[sound-preview] member {}:{} not found", cast_lib, cast_member).into(),
-            );
-            return;
-        };
-        let CastMemberType::Sound(snd) = &member.member_type else {
-            web_sys::console::warn_1(
-                &format!(
-                    "[sound-preview] member {}:{} '{}' is not a sound member",
-                    cast_lib, cast_member, member.name
-                )
-                .into(),
-            );
-            return;
-        };
-        let data = snd.sound.data();
-        let info = &snd.info;
-        let codec = snd.sound.codec();
-        let big_endian = snd.sound.big_endian_data();
-        let magic = if data.len() >= 4 && &data[0..4] == b"RIFF" {
-            "RIFF/WAV"
-        } else if data.len() >= 4 && &data[0..4] == b"FORM" {
-            "AIFF (FORM)"
-        } else if data.len() >= 3 && &data[0..3] == b"ID3" {
-            "MP3 (ID3 tag)"
-        } else if data.len() >= 2 && data[0] == 0xFF && (data[1] & 0xE0) == 0xE0 {
-            "MP3 frame (FF Ex)"
-        } else {
-            "raw / PCM?"
-        };
-        web_sys::console::log_1(
+    let member_ref = CastMemberRef {
+        cast_lib,
+        cast_member,
+    };
+    let Some(member) = player.movie.cast_manager.find_member_by_ref(&member_ref) else {
+        web_sys::console::warn_1(
+            &format!(
+                "[sound-preview] member {}:{} not found",
+                cast_lib, cast_member
+            )
+            .into(),
+        );
+        return;
+    };
+    let CastMemberType::Sound(snd) = &member.member_type else {
+        web_sys::console::warn_1(
+            &format!(
+                "[sound-preview] member {}:{} '{}' is not a sound member",
+                cast_lib, cast_member, member.name
+            )
+            .into(),
+        );
+        return;
+    };
+    let data = snd.sound.data();
+    let info = &snd.info;
+    let codec = snd.sound.codec();
+    let big_endian = snd.sound.big_endian_data();
+    let magic = if data.len() >= 4 && &data[0..4] == b"RIFF" {
+        "RIFF/WAV"
+    } else if data.len() >= 4 && &data[0..4] == b"FORM" {
+        "AIFF (FORM)"
+    } else if data.len() >= 3 && &data[0..3] == b"ID3" {
+        "MP3 (ID3 tag)"
+    } else if data.len() >= 2 && data[0] == 0xFF && (data[1] & 0xE0) == 0xE0 {
+        "MP3 frame (FF Ex)"
+    } else {
+        "raw / PCM?"
+    };
+    web_sys::console::log_1(
             &format!(
                 "🎧 SOUND {}:{} '{}' — {} Hz, {} ch, {}-bit, samples={}, dur={}ms, loop={}, codec='{}', big_endian={} — data={} bytes — magic={}",
                 cast_lib, cast_member, member.name,
@@ -3473,19 +3920,23 @@ fn print_member_sound_hex_for_player(
             )
             .into(),
         );
-        let n = data.len().min(256);
-        let mut hex = String::with_capacity(n * 3 + n / 16);
-        let mut ascii = String::with_capacity(n + n / 16);
-        for (i, &b) in data[..n].iter().enumerate() {
-            hex.push_str(&format!("{:02X} ", b));
-            ascii.push(if (0x20..0x7F).contains(&b) { b as char } else { '.' });
-            if (i + 1) % 16 == 0 {
-                hex.push('\n');
-                ascii.push('\n');
-            }
+    let n = data.len().min(256);
+    let mut hex = String::with_capacity(n * 3 + n / 16);
+    let mut ascii = String::with_capacity(n + n / 16);
+    for (i, &b) in data[..n].iter().enumerate() {
+        hex.push_str(&format!("{:02X} ", b));
+        ascii.push(if (0x20..0x7F).contains(&b) {
+            b as char
+        } else {
+            '.'
+        });
+        if (i + 1) % 16 == 0 {
+            hex.push('\n');
+            ascii.push('\n');
         }
-        web_sys::console::log_1(&format!("🎧 first {} bytes (hex):\n{}", n, hex).into());
-        web_sys::console::log_1(&format!("🎧 first {} bytes (ascii):\n{}", n, ascii).into());
+    }
+    web_sys::console::log_1(&format!("🎧 first {} bytes (hex):\n{}", n, hex).into());
+    web_sys::console::log_1(&format!("🎧 first {} bytes (ascii):\n{}", n, ascii).into());
 }
 
 /// Dev UI sound preview: play a sound member on channel 1 via the real
@@ -3511,18 +3962,28 @@ pub fn player_print_filmloop_sprites(cast_lib: i32, cast_member: i32) {
     use crate::player::{cast_member::CastMemberType, reserve_player_ref};
     use crate::player::score::get_channel_number_from_index;
     reserve_player_ref(|player| {
-        let member_ref = CastMemberRef { cast_lib, cast_member };
+        let member_ref = CastMemberRef {
+            cast_lib,
+            cast_member,
+        };
         let Some(member) = player.movie.cast_manager.find_member_by_ref(&member_ref) else {
-            web_sys::console::warn_1(&format!(
-                "[filmloop-dump] member {}:{} not found", cast_lib, cast_member
-            ).into());
+            web_sys::console::warn_1(
+                &format!(
+                    "[filmloop-dump] member {}:{} not found",
+                    cast_lib, cast_member
+                )
+                .into(),
+            );
             return;
         };
         let CastMemberType::FilmLoop(film) = &member.member_type else {
-            web_sys::console::warn_1(&format!(
-                "[filmloop-dump] member {}:{} ('{}') is not a filmloop",
-                cast_lib, cast_member, member.name
-            ).into());
+            web_sys::console::warn_1(
+                &format!(
+                    "[filmloop-dump] member {}:{} ('{}') is not a filmloop",
+                    cast_lib, cast_member, member.name
+                )
+                .into(),
+            );
             return;
         };
 
@@ -3531,15 +3992,28 @@ pub fn player_print_filmloop_sprites(cast_lib: i32, cast_member: i32) {
         let init_data = &film.score.channel_initialization_data;
 
         // Resolve active sprite per channel: most-recent frame_idx <= target
-        let mut latest: std::collections::HashMap<u16, (u32, &crate::director::chunks::score::ScoreFrameChannelData)> =
-            std::collections::HashMap::new();
+        let mut latest: std::collections::HashMap<
+            u16,
+            (u32, &crate::director::chunks::score::ScoreFrameChannelData),
+        > = std::collections::HashMap::new();
         for (frame_idx, channel_idx, data) in init_data.iter() {
-            if *channel_idx < 6 { continue; }
-            if data.cast_member == 0 { continue; }
-            if *frame_idx > frame_idx_target { continue; }
+            if *channel_idx < 6 {
+                continue;
+            }
+            if data.cast_member == 0 {
+                continue;
+            }
+            if *frame_idx > frame_idx_target {
+                continue;
+            }
             latest
                 .entry(*channel_idx)
-                .and_modify(|(f, d)| if *frame_idx > *f { *f = *frame_idx; *d = data; })
+                .and_modify(|(f, d)| {
+                    if *frame_idx > *f {
+                        *f = *frame_idx;
+                        *d = data;
+                    }
+                })
                 .or_insert((*frame_idx, data));
         }
         let mut entries: Vec<_> = latest.into_iter().collect();
@@ -3556,36 +4030,68 @@ pub fn player_print_filmloop_sprites(cast_lib: i32, cast_member: i32) {
         let mut all_raw: Vec<_> = init_data.iter().collect();
         all_raw.sort_by_key(|(f, c, _)| (*c, *f));
         for (f, c, d) in all_raw.iter().take(80) {
-            let ilib = if d.cast_lib == 65535 { cast_lib } else { d.cast_lib as i32 };
-            let nm = player.movie.cast_manager
-                .find_filmloop_inner_member(&CastMemberRef { cast_lib: ilib, cast_member: d.cast_member as i32 })
+            let ilib = if d.cast_lib == 65535 {
+                cast_lib
+            } else {
+                d.cast_lib as i32
+            };
+            let nm = player
+                .movie
+                .cast_manager
+                .find_filmloop_inner_member(&CastMemberRef {
+                    cast_lib: ilib,
+                    cast_member: d.cast_member as i32,
+                })
                 .map(|m| m.name.clone())
                 .unwrap_or_else(|| "<no_member>".into());
-            web_sys::console::warn_1(&format!(
-                "[filmloop-raw]   f={} ch={} ink={} blend={} member=({},{}) '{}' size={}x{}",
-                f, c, d.ink, d.blend, ilib, d.cast_member, nm, d.width, d.height
-            ).into());
+            web_sys::console::warn_1(
+                &format!(
+                    "[filmloop-raw]   f={} ch={} ink={} blend={} member=({},{}) '{}' size={}x{}",
+                    f, c, d.ink, d.blend, ilib, d.cast_member, nm, d.width, d.height
+                )
+                .into(),
+            );
         }
 
         for (channel_idx, (frame_idx, data)) in entries {
             let channel_num = get_channel_number_from_index(channel_idx as u32);
-            let resolved_lib = if data.cast_lib == 65535 { cast_lib } else { data.cast_lib as i32 };
-            let sprite_ref = CastMemberRef { cast_lib: resolved_lib, cast_member: data.cast_member as i32 };
-            let inner = player.movie.cast_manager.find_filmloop_inner_member(&sprite_ref);
+            let resolved_lib = if data.cast_lib == 65535 {
+                cast_lib
+            } else {
+                data.cast_lib as i32
+            };
+            let sprite_ref = CastMemberRef {
+                cast_lib: resolved_lib,
+                cast_member: data.cast_member as i32,
+            };
+            let inner = player
+                .movie
+                .cast_manager
+                .find_filmloop_inner_member(&sprite_ref);
             let (mname, mtype, bm_info) = match inner {
                 Some(m) => {
                     let info = if let CastMemberType::Bitmap(bm) = &m.member_type {
                         let bmp = player.bitmap_manager.get_bitmap(bm.image_ref);
                         match bmp {
-                            Some(b) => format!(" bm={}x{} bd={} obd={} use_alpha={} pal={:?}",
-                                b.width, b.height, b.bit_depth, b.original_bit_depth,
-                                b.use_alpha, b.palette_ref),
+                            Some(b) => format!(
+                                " bm={}x{} bd={} obd={} use_alpha={} pal={:?}",
+                                b.width,
+                                b.height,
+                                b.bit_depth,
+                                b.original_bit_depth,
+                                b.use_alpha,
+                                b.palette_ref
+                            ),
                             None => " bm=<no_data>".into(),
                         }
                     } else {
                         String::new()
                     };
-                    (m.name.clone(), format!("{:?}", m.member_type.member_type_id()), info)
+                    (
+                        m.name.clone(),
+                        format!("{:?}", m.member_type.member_type_id()),
+                        info,
+                    )
                 }
                 None => ("<not found>".into(), "<none>".into(), String::new()),
             };
@@ -3609,23 +4115,46 @@ pub fn player_print_filmloop_sprites(cast_lib: i32, cast_member: i32) {
             if let Some(m) = inner {
                 if let CastMemberType::FilmLoop(inner_film) = &m.member_type {
                     let inner_target = inner_film.current_frame.saturating_sub(1);
-                    let mut inner_latest: std::collections::HashMap<u16, (u32, &crate::director::chunks::score::ScoreFrameChannelData)> =
-                        std::collections::HashMap::new();
+                    let mut inner_latest: std::collections::HashMap<
+                        u16,
+                        (u32, &crate::director::chunks::score::ScoreFrameChannelData),
+                    > = std::collections::HashMap::new();
                     for (f, c, d) in inner_film.score.channel_initialization_data.iter() {
-                        if *c < 6 || d.cast_member == 0 || *f > inner_target { continue; }
+                        if *c < 6 || d.cast_member == 0 || *f > inner_target {
+                            continue;
+                        }
                         inner_latest
                             .entry(*c)
-                            .and_modify(|(ef, ed)| if *f > *ef { *ef = *f; *ed = d; })
+                            .and_modify(|(ef, ed)| {
+                                if *f > *ef {
+                                    *ef = *f;
+                                    *ed = d;
+                                }
+                            })
                             .or_insert((*f, d));
                     }
                     let mut inner_entries: Vec<_> = inner_latest.into_iter().collect();
                     inner_entries.sort_by_key(|(c, _)| *c);
                     for (ic, (ifr, id)) in inner_entries {
                         let icn = get_channel_number_from_index(ic as u32);
-                        let ilib = if id.cast_lib == 65535 { resolved_lib } else { id.cast_lib as i32 };
-                        let inested_ref = CastMemberRef { cast_lib: ilib, cast_member: id.cast_member as i32 };
-                        let (inn_name, inn_type) = match player.movie.cast_manager.find_filmloop_inner_member(&inested_ref) {
-                            Some(im) => (im.name.clone(), format!("{:?}", im.member_type.member_type_id())),
+                        let ilib = if id.cast_lib == 65535 {
+                            resolved_lib
+                        } else {
+                            id.cast_lib as i32
+                        };
+                        let inested_ref = CastMemberRef {
+                            cast_lib: ilib,
+                            cast_member: id.cast_member as i32,
+                        };
+                        let (inn_name, inn_type) = match player
+                            .movie
+                            .cast_manager
+                            .find_filmloop_inner_member(&inested_ref)
+                        {
+                            Some(im) => (
+                                im.name.clone(),
+                                format!("{:?}", im.member_type.member_type_id()),
+                            ),
                             None => ("<not found>".into(), "<none>".into()),
                         };
                         web_sys::console::warn_1(&format!(
@@ -3945,7 +4474,10 @@ pub fn field_set_caret_at(sprite_id: i32, canvas_x: f64, canvas_y: f64, extend: 
         crate::player::stage::canvas_to_movie_coords(player, canvas_x, canvas_y)
     });
     crate::player::keyboard_events::set_caret_at_screen(
-        sprite_id as i16, mx as i32, my as i32, mode,
+        sprite_id as i16,
+        mx as i32,
+        my as i32,
+        mode,
     );
 }
 
@@ -3957,7 +4489,9 @@ pub fn field_drag_extend_to(sprite_id: i32, canvas_x: f64, canvas_y: f64) {
         crate::player::stage::canvas_to_movie_coords(player, canvas_x, canvas_y)
     });
     crate::player::keyboard_events::set_caret_at_screen(
-        sprite_id as i16, mx as i32, my as i32,
+        sprite_id as i16,
+        mx as i32,
+        my as i32,
         crate::player::keyboard_events::CaretAtMode::DragExtend,
     );
 }
@@ -3969,7 +4503,9 @@ pub fn field_select_word_at(sprite_id: i32, canvas_x: f64, canvas_y: f64) {
         crate::player::stage::canvas_to_movie_coords(player, canvas_x, canvas_y)
     });
     crate::player::keyboard_events::set_caret_at_screen(
-        sprite_id as i16, mx as i32, my as i32,
+        sprite_id as i16,
+        mx as i32,
+        my as i32,
         crate::player::keyboard_events::CaretAtMode::SelectWord,
     );
 }
@@ -3981,7 +4517,9 @@ pub fn field_select_line_at(sprite_id: i32, canvas_x: f64, canvas_y: f64) {
         crate::player::stage::canvas_to_movie_coords(player, canvas_x, canvas_y)
     });
     crate::player::keyboard_events::set_caret_at_screen(
-        sprite_id as i16, mx as i32, my as i32,
+        sprite_id as i16,
+        mx as i32,
+        my as i32,
         crate::player::keyboard_events::CaretAtMode::SelectLine,
     );
 }
@@ -3991,17 +4529,21 @@ pub fn field_select_line_at(sprite_id: i32, canvas_x: f64, canvas_y: f64) {
 #[wasm_bindgen]
 pub fn is_field_focused() -> bool {
     reserve_player_ref(|player| {
-        if player.keyboard_focus_sprite < 0 { return false; }
+        if player.keyboard_focus_sprite < 0 {
+            return false;
+        }
         let sprite_id = player.keyboard_focus_sprite as i16;
         let sprite = player.movie.score.get_sprite(sprite_id);
         let member = sprite
             .and_then(|s| s.member.as_ref())
             .and_then(|m| player.movie.cast_manager.find_member_by_ref(m));
-        member.map_or(false, |m| matches!(&m.member_type,
-            CastMemberType::Field(f) if f.editable
-        ) || matches!(&m.member_type,
-            CastMemberType::Text(t) if t.info.as_ref().map_or(false, |i| i.editable)
-        ))
+        member.map_or(false, |m| {
+            matches!(&m.member_type,
+                CastMemberType::Field(f) if f.editable
+            ) || matches!(&m.member_type,
+                CastMemberType::Text(t) if t.info.as_ref().map_or(false, |i| i.editable)
+            )
+        })
     })
 }
 
@@ -4011,17 +4553,19 @@ pub fn is_field_focused() -> bool {
 #[wasm_bindgen]
 pub fn get_focused_field_selected_text() -> String {
     reserve_player_ref(|player| {
-        if player.keyboard_focus_sprite < 0 { return String::new(); }
+        if player.keyboard_focus_sprite < 0 {
+            return String::new();
+        }
         let sprite_id = player.keyboard_focus_sprite as i16;
         let sprite = player.movie.score.get_sprite(sprite_id);
         let member = sprite
             .and_then(|s| s.member.as_ref())
             .and_then(|m| player.movie.cast_manager.find_member_by_ref(m));
-        let Some(member) = member else { return String::new() };
+        let Some(member) = member else {
+            return String::new();
+        };
         let (text, lo, hi) = match &member.member_type {
-            CastMemberType::Field(f) if f.editable => {
-                (&f.text, f.sel_start, f.sel_end)
-            }
+            CastMemberType::Field(f) if f.editable => (&f.text, f.sel_start, f.sel_end),
             CastMemberType::Text(t) if t.info.as_ref().map_or(false, |i| i.editable) => {
                 (&t.text, t.sel_start, t.sel_end)
             }
@@ -4036,8 +4580,12 @@ pub fn get_focused_field_selected_text() -> String {
         // would panic.
         let mut lo_b = lo as usize;
         let mut hi_b = hi as usize;
-        while lo_b < text.len() && !text.is_char_boundary(lo_b) { lo_b += 1; }
-        while hi_b < text.len() && !text.is_char_boundary(hi_b) { hi_b += 1; }
+        while lo_b < text.len() && !text.is_char_boundary(lo_b) {
+            lo_b += 1;
+        }
+        while hi_b < text.len() && !text.is_char_boundary(hi_b) {
+            hi_b += 1;
+        }
         text[lo_b..hi_b].to_string()
     })
 }
@@ -4046,20 +4594,34 @@ pub fn get_focused_field_selected_text() -> String {
 #[wasm_bindgen]
 pub fn field_select_all() {
     reserve_player_mut(|player| {
-        if player.keyboard_focus_sprite < 0 { return; }
+        if player.keyboard_focus_sprite < 0 {
+            return;
+        }
         let sprite_id = player.keyboard_focus_sprite as i16;
         let sprite = player.movie.score.get_sprite(sprite_id);
-        let Some(member_ref) = sprite.and_then(|s| s.member.clone()) else { return };
-        let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) else {
+        let Some(member_ref) = sprite.and_then(|s| s.member.clone()) else {
+            return;
+        };
+        let Some(member) = player
+            .movie
+            .cast_manager
+            .find_mut_member_by_ref(&member_ref)
+        else {
             return;
         };
         let (len, sel_start, sel_end, sel_anchor) = match &mut member.member_type {
-            CastMemberType::Field(f) if f.editable => {
-                (f.text.len() as i32, &mut f.sel_start, &mut f.sel_end, &mut f.sel_anchor)
-            }
-            CastMemberType::Text(t) if t.info.as_ref().map_or(false, |i| i.editable) => {
-                (t.text.len() as i32, &mut t.sel_start, &mut t.sel_end, &mut t.sel_anchor)
-            }
+            CastMemberType::Field(f) if f.editable => (
+                f.text.len() as i32,
+                &mut f.sel_start,
+                &mut f.sel_end,
+                &mut f.sel_anchor,
+            ),
+            CastMemberType::Text(t) if t.info.as_ref().map_or(false, |i| i.editable) => (
+                t.text.len() as i32,
+                &mut t.sel_start,
+                &mut t.sel_end,
+                &mut t.sel_anchor,
+            ),
             _ => return,
         };
         *sel_start = 0;
@@ -4074,23 +4636,39 @@ pub fn field_select_all() {
 #[wasm_bindgen]
 pub fn delete_focused_field_selection() {
     reserve_player_mut(|player| {
-        if player.keyboard_focus_sprite < 0 { return; }
+        if player.keyboard_focus_sprite < 0 {
+            return;
+        }
         let sprite_id = player.keyboard_focus_sprite as i16;
         let sprite = player.movie.score.get_sprite(sprite_id);
-        let Some(member_ref) = sprite.and_then(|s| s.member.clone()) else { return };
-        let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) else {
+        let Some(member_ref) = sprite.and_then(|s| s.member.clone()) else {
+            return;
+        };
+        let Some(member) = player
+            .movie
+            .cast_manager
+            .find_mut_member_by_ref(&member_ref)
+        else {
             return;
         };
         let (text, sel_start, sel_end, sel_anchor) = match &mut member.member_type {
             CastMemberType::Field(f) if f.editable => (
-                &mut f.text, &mut f.sel_start, &mut f.sel_end, &mut f.sel_anchor,
+                &mut f.text,
+                &mut f.sel_start,
+                &mut f.sel_end,
+                &mut f.sel_anchor,
             ),
             CastMemberType::Text(t) if t.info.as_ref().map_or(false, |i| i.editable) => (
-                &mut t.text, &mut t.sel_start, &mut t.sel_end, &mut t.sel_anchor,
+                &mut t.text,
+                &mut t.sel_start,
+                &mut t.sel_end,
+                &mut t.sel_anchor,
             ),
             _ => return,
         };
-        crate::player::keyboard_events::apply_text_insertion(text, sel_start, sel_end, sel_anchor, "");
+        crate::player::keyboard_events::apply_text_insertion(
+            text, sel_start, sel_end, sel_anchor, "",
+        );
         let s = *sel_start;
         let e = *sel_end;
         player.text_selection_start = s.max(0) as u16;
@@ -4115,25 +4693,41 @@ pub fn set_clipboard_mirror(text: String) {
 #[wasm_bindgen]
 pub fn ime_composition_start() {
     reserve_player_mut(|player| {
-        if player.keyboard_focus_sprite < 0 { return; }
+        if player.keyboard_focus_sprite < 0 {
+            return;
+        }
         let sprite_id = player.keyboard_focus_sprite as i16;
         let sprite = player.movie.score.get_sprite(sprite_id);
-        let Some(member_ref) = sprite.and_then(|s| s.member.clone()) else { return };
-        let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) else {
+        let Some(member_ref) = sprite.and_then(|s| s.member.clone()) else {
+            return;
+        };
+        let Some(member) = player
+            .movie
+            .cast_manager
+            .find_mut_member_by_ref(&member_ref)
+        else {
             return;
         };
         let (text, sel_start, sel_end, sel_anchor) = match &mut member.member_type {
             CastMemberType::Field(f) if f.editable => (
-                &mut f.text, &mut f.sel_start, &mut f.sel_end, &mut f.sel_anchor,
+                &mut f.text,
+                &mut f.sel_start,
+                &mut f.sel_end,
+                &mut f.sel_anchor,
             ),
             CastMemberType::Text(t) if t.info.as_ref().map_or(false, |i| i.editable) => (
-                &mut t.text, &mut t.sel_start, &mut t.sel_end, &mut t.sel_anchor,
+                &mut t.text,
+                &mut t.sel_start,
+                &mut t.sel_end,
+                &mut t.sel_anchor,
             ),
             _ => return,
         };
         // Collapse any existing selection so the composition replaces it cleanly.
         if *sel_start != *sel_end {
-            crate::player::keyboard_events::apply_text_insertion(text, sel_start, sel_end, sel_anchor, "");
+            crate::player::keyboard_events::apply_text_insertion(
+                text, sel_start, sel_end, sel_anchor, "",
+            );
         }
         let pos = (*sel_start).max(0);
         player.ime_composition = Some((pos, pos));
@@ -4148,20 +4742,36 @@ pub fn ime_composition_start() {
 #[wasm_bindgen]
 pub fn ime_composition_update(text: String) {
     reserve_player_mut(|player| {
-        let Some((start, end)) = player.ime_composition else { return };
-        if player.keyboard_focus_sprite < 0 { return; }
+        let Some((start, end)) = player.ime_composition else {
+            return;
+        };
+        if player.keyboard_focus_sprite < 0 {
+            return;
+        }
         let sprite_id = player.keyboard_focus_sprite as i16;
         let sprite = player.movie.score.get_sprite(sprite_id);
-        let Some(member_ref) = sprite.and_then(|s| s.member.clone()) else { return };
-        let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) else {
+        let Some(member_ref) = sprite.and_then(|s| s.member.clone()) else {
+            return;
+        };
+        let Some(member) = player
+            .movie
+            .cast_manager
+            .find_mut_member_by_ref(&member_ref)
+        else {
             return;
         };
         let (text_buf, sel_start, sel_end, sel_anchor) = match &mut member.member_type {
             CastMemberType::Field(f) if f.editable => (
-                &mut f.text, &mut f.sel_start, &mut f.sel_end, &mut f.sel_anchor,
+                &mut f.text,
+                &mut f.sel_start,
+                &mut f.sel_end,
+                &mut f.sel_anchor,
             ),
             CastMemberType::Text(t) if t.info.as_ref().map_or(false, |i| i.editable) => (
-                &mut t.text, &mut t.sel_start, &mut t.sel_end, &mut t.sel_anchor,
+                &mut t.text,
+                &mut t.sel_start,
+                &mut t.sel_end,
+                &mut t.sel_anchor,
             ),
             _ => return,
         };
@@ -4195,23 +4805,39 @@ pub fn ime_composition_end(text: String) {
 #[wasm_bindgen]
 pub fn paste_text_into_focused_field(text: String) {
     reserve_player_mut(|player| {
-        if player.keyboard_focus_sprite < 0 { return; }
+        if player.keyboard_focus_sprite < 0 {
+            return;
+        }
         let sprite_id = player.keyboard_focus_sprite as i16;
         let sprite = player.movie.score.get_sprite(sprite_id);
-        let Some(member_ref) = sprite.and_then(|s| s.member.clone()) else { return };
-        let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) else {
+        let Some(member_ref) = sprite.and_then(|s| s.member.clone()) else {
+            return;
+        };
+        let Some(member) = player
+            .movie
+            .cast_manager
+            .find_mut_member_by_ref(&member_ref)
+        else {
             return;
         };
         let (target, sel_start, sel_end, sel_anchor) = match &mut member.member_type {
             CastMemberType::Field(f) if f.editable => (
-                &mut f.text, &mut f.sel_start, &mut f.sel_end, &mut f.sel_anchor,
+                &mut f.text,
+                &mut f.sel_start,
+                &mut f.sel_end,
+                &mut f.sel_anchor,
             ),
             CastMemberType::Text(t) if t.info.as_ref().map_or(false, |i| i.editable) => (
-                &mut t.text, &mut t.sel_start, &mut t.sel_end, &mut t.sel_anchor,
+                &mut t.text,
+                &mut t.sel_start,
+                &mut t.sel_end,
+                &mut t.sel_anchor,
             ),
             _ => return,
         };
-        crate::player::keyboard_events::apply_text_insertion(target, sel_start, sel_end, sel_anchor, &text);
+        crate::player::keyboard_events::apply_text_insertion(
+            target, sel_start, sel_end, sel_anchor, &text,
+        );
         let s = *sel_start;
         let e = *sel_end;
         player.text_selection_start = s.max(0) as u16;
@@ -4224,23 +4850,17 @@ pub fn paste_text_into_focused_field(text: String) {
 
 #[wasm_bindgen]
 pub fn get_cast_chunk_list(cast_number: u32) -> JsValue {
-    reserve_player_ref(|player| {
-        JsApi::get_cast_chunk_list_for(player, cast_number).into()
-    })
+    reserve_player_ref(|player| JsApi::get_cast_chunk_list_for(player, cast_number).into())
 }
 
 #[wasm_bindgen]
 pub fn get_movie_top_level_chunks() -> JsValue {
-    reserve_player_ref(|player| {
-        JsApi::get_movie_top_level_chunks(player).into()
-    })
+    reserve_player_ref(|player| JsApi::get_movie_top_level_chunks(player).into())
 }
 
 #[wasm_bindgen]
 pub fn get_chunk_bytes(cast_number: u32, chunk_id: u32) -> Option<Vec<u8>> {
-    reserve_player_ref(|player| {
-        JsApi::get_chunk_bytes(player, cast_number, chunk_id)
-    })
+    reserve_player_ref(|player| JsApi::get_chunk_bytes(player, cast_number, chunk_id))
 }
 
 #[wasm_bindgen]
@@ -4401,7 +5021,9 @@ fn update_flash_frame_for_player(
 
     let expected_len = (width * height * 4) as usize;
     if rgba_data.len() != expected_len {
-        return Err(JsValue::from_str("Flash frame pixel length does not match dimensions"));
+        return Err(JsValue::from_str(
+            "Flash frame pixel length does not match dimensions",
+        ));
     }
     let mut bitmap = Bitmap::new(
         width as u16,
@@ -4424,7 +5046,11 @@ fn update_flash_frame_for_player(
         texture_data.extend_from_slice(&width.to_le_bytes());
         texture_data.extend_from_slice(&height.to_le_bytes());
         texture_data.extend_from_slice(rgba_data);
-        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+        if let Some(member) = player
+            .movie
+            .cast_manager
+            .find_mut_member_by_ref(&member_ref)
+        {
             if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                 if let Some(scene) = w3d.scene_mut() {
                     let changed = scene
@@ -4466,7 +5092,8 @@ fn js_value_to_datum_ref_for_context(
         return player.alloc_datum(Datum::String(value));
     }
     if let Some(value) = item.as_f64() {
-        let datum = if value.fract() == 0.0 && value >= i32::MIN as f64 && value <= i32::MAX as f64 {
+        let datum = if value.fract() == 0.0 && value >= i32::MIN as f64 && value <= i32::MAX as f64
+        {
             Datum::Int(value as i32)
         } else {
             Datum::Float(value)
@@ -4492,7 +5119,9 @@ fn js_value_to_datum_ref_for_context(
     }
     if item.is_object() {
         let object = js_sys::Object::from(item.clone());
-        if let Ok(stored_path) = js_sys::Reflect::get(&object, &JsValue::from_str("__dirplayer_stored_path")) {
+        if let Ok(stored_path) =
+            js_sys::Reflect::get(&object, &JsValue::from_str("__dirplayer_stored_path"))
+        {
             if let Some(path) = stored_path.as_string() {
                 return player.alloc_datum(Datum::FlashObjectRef(
                     FlashObjectRef::from_path_with_member(&path, flash_cast_lib, flash_cast_member),
@@ -4573,7 +5202,10 @@ pub fn clear_font_cache() {
         player.font_manager.fonts.clear();
         player.font_manager.font_by_id.clear();
         player.font_manager.font_counter = 0;
-        debug!("[clear_font_cache] Cleared {} cached fonts. Reload movie to re-rasterize.", count);
+        debug!(
+            "[clear_font_cache] Cleared {} cached fonts. Reload movie to re-rasterize.",
+            count
+        );
     });
 }
 
@@ -4597,12 +5229,17 @@ fn export_w3d_obj_for_player(
     cast_lib: i32,
     cast_member: i32,
 ) -> Result<(), JsValue> {
-    let member_ref = CastMemberRef { cast_lib, cast_member };
+    let member_ref = CastMemberRef {
+        cast_lib,
+        cast_member,
+    };
     let member = player
         .movie
         .cast_manager
         .find_member_by_ref(&member_ref)
-        .ok_or_else(|| JsValue::from_str(&format!("Member {}:{} not found", cast_lib, cast_member)))?;
+        .ok_or_else(|| {
+            JsValue::from_str(&format!("Member {}:{} not found", cast_lib, cast_member))
+        })?;
     let w3d = member
         .member_type
         .as_shockwave3d()
@@ -4643,9 +5280,12 @@ fn export_w3d_obj_for_player(
 
 /// Build a minimal uncompressed ZIP file containing OBJ + MTL + textures
 fn build_zip_with_glb(
-    obj_name: &str, obj_data: &[u8],
-    mtl_name: &str, mtl_data: &[u8],
-    glb_name: &str, glb_data: &[u8],
+    obj_name: &str,
+    obj_data: &[u8],
+    mtl_name: &str,
+    mtl_data: &[u8],
+    glb_name: &str,
+    glb_data: &[u8],
     textures: &std::collections::HashMap<crate::player::symbols::symbol::Symbol, Vec<u8>>,
     symbols: &player::symbols::symbol_table::SymbolTable,
 ) -> Vec<u8> {
@@ -4684,15 +5324,15 @@ fn build_zip_files(files: &[(String, &[u8])]) -> Vec<u8> {
         // Local file header (0x04034b50)
         zip.extend_from_slice(&[0x50, 0x4B, 0x03, 0x04]); // signature
         zip.extend_from_slice(&20u16.to_le_bytes()); // version needed
-        zip.extend_from_slice(&0u16.to_le_bytes());  // flags
-        zip.extend_from_slice(&0u16.to_le_bytes());  // compression (0=stored)
-        zip.extend_from_slice(&0u16.to_le_bytes());  // mod time
-        zip.extend_from_slice(&0u16.to_le_bytes());  // mod date
-        zip.extend_from_slice(&crc.to_le_bytes());   // crc32
+        zip.extend_from_slice(&0u16.to_le_bytes()); // flags
+        zip.extend_from_slice(&0u16.to_le_bytes()); // compression (0=stored)
+        zip.extend_from_slice(&0u16.to_le_bytes()); // mod time
+        zip.extend_from_slice(&0u16.to_le_bytes()); // mod date
+        zip.extend_from_slice(&crc.to_le_bytes()); // crc32
         zip.extend_from_slice(&(data.len() as u32).to_le_bytes()); // compressed size
         zip.extend_from_slice(&(data.len() as u32).to_le_bytes()); // uncompressed size
         zip.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes()); // name length
-        zip.extend_from_slice(&0u16.to_le_bytes());  // extra length
+        zip.extend_from_slice(&0u16.to_le_bytes()); // extra length
         zip.extend_from_slice(name_bytes);
         zip.extend_from_slice(data);
     }
@@ -4706,19 +5346,19 @@ fn build_zip_files(files: &[(String, &[u8])]) -> Vec<u8> {
         central_dir.extend_from_slice(&[0x50, 0x4B, 0x01, 0x02]); // signature
         central_dir.extend_from_slice(&20u16.to_le_bytes()); // version made by
         central_dir.extend_from_slice(&20u16.to_le_bytes()); // version needed
-        central_dir.extend_from_slice(&0u16.to_le_bytes());  // flags
-        central_dir.extend_from_slice(&0u16.to_le_bytes());  // compression
-        central_dir.extend_from_slice(&0u16.to_le_bytes());  // mod time
-        central_dir.extend_from_slice(&0u16.to_le_bytes());  // mod date
-        central_dir.extend_from_slice(&crc.to_le_bytes());   // crc32
+        central_dir.extend_from_slice(&0u16.to_le_bytes()); // flags
+        central_dir.extend_from_slice(&0u16.to_le_bytes()); // compression
+        central_dir.extend_from_slice(&0u16.to_le_bytes()); // mod time
+        central_dir.extend_from_slice(&0u16.to_le_bytes()); // mod date
+        central_dir.extend_from_slice(&crc.to_le_bytes()); // crc32
         central_dir.extend_from_slice(&(data.len() as u32).to_le_bytes()); // compressed size
         central_dir.extend_from_slice(&(data.len() as u32).to_le_bytes()); // uncompressed size
         central_dir.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes()); // name length
-        central_dir.extend_from_slice(&0u16.to_le_bytes());  // extra length
-        central_dir.extend_from_slice(&0u16.to_le_bytes());  // comment length
-        central_dir.extend_from_slice(&0u16.to_le_bytes());  // disk number
-        central_dir.extend_from_slice(&0u16.to_le_bytes());  // internal attrs
-        central_dir.extend_from_slice(&0u32.to_le_bytes());  // external attrs
+        central_dir.extend_from_slice(&0u16.to_le_bytes()); // extra length
+        central_dir.extend_from_slice(&0u16.to_le_bytes()); // comment length
+        central_dir.extend_from_slice(&0u16.to_le_bytes()); // disk number
+        central_dir.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
+        central_dir.extend_from_slice(&0u32.to_le_bytes()); // external attrs
         central_dir.extend_from_slice(&offsets[i].to_le_bytes()); // local header offset
         central_dir.extend_from_slice(name_bytes);
     }
@@ -4727,13 +5367,13 @@ fn build_zip_files(files: &[(String, &[u8])]) -> Vec<u8> {
 
     // End of central directory
     zip.extend_from_slice(&[0x50, 0x4B, 0x05, 0x06]); // signature
-    zip.extend_from_slice(&0u16.to_le_bytes());  // disk number
-    zip.extend_from_slice(&0u16.to_le_bytes());  // cd disk number
+    zip.extend_from_slice(&0u16.to_le_bytes()); // disk number
+    zip.extend_from_slice(&0u16.to_le_bytes()); // cd disk number
     zip.extend_from_slice(&(files.len() as u16).to_le_bytes()); // entries on disk
     zip.extend_from_slice(&(files.len() as u16).to_le_bytes()); // total entries
     zip.extend_from_slice(&(central_dir.len() as u32).to_le_bytes()); // cd size
     zip.extend_from_slice(&cd_offset.to_le_bytes()); // cd offset
-    zip.extend_from_slice(&0u16.to_le_bytes());  // comment length
+    zip.extend_from_slice(&0u16.to_le_bytes()); // comment length
 
     zip
 }

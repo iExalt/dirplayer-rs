@@ -123,26 +123,38 @@ impl FlashBindingState {
     ) {
         let key = (sprite_num, cast_lib, cast_member);
         if teardown {
-            self.teardown_generations.entry(key).or_default().push(generation);
+            self.teardown_generations
+                .entry(key)
+                .or_default()
+                .push(generation);
         }
     }
 
     pub(crate) fn reserve(&mut self, sprite_num: i16) -> Result<u64, ScriptError> {
         if sprite_num <= 0 {
-            return Err(ScriptError::new("Flash sprite number must be positive".to_owned()));
+            return Err(ScriptError::new(
+                "Flash sprite number must be positive".to_owned(),
+            ));
         }
-        let generation = self.next_generation.checked_add(1).ok_or_else(|| {
-            ScriptError::new("Flash instance generation exhausted".to_owned())
-        })?;
+        let generation = self
+            .next_generation
+            .checked_add(1)
+            .ok_or_else(|| ScriptError::new("Flash instance generation exhausted".to_owned()))?;
         if generation > 9_007_199_254_740_991 {
-            return Err(ScriptError::new("Flash instance generation exceeds JavaScript safe integer range".to_owned()));
+            return Err(ScriptError::new(
+                "Flash instance generation exceeds JavaScript safe integer range".to_owned(),
+            ));
         }
         if let Some(current) = self.generations.remove(&sprite_num) {
             let retired_pair = match self.origin(sprite_num) {
-                FlashBindingOrigin::Exact { cast_lib, cast_member }
-                | FlashBindingOrigin::FirstPublished { cast_lib, cast_member } => {
-                    (cast_lib, cast_member)
+                FlashBindingOrigin::Exact {
+                    cast_lib,
+                    cast_member,
                 }
+                | FlashBindingOrigin::FirstPublished {
+                    cast_lib,
+                    cast_member,
+                } => (cast_lib, cast_member),
                 FlashBindingOrigin::Absent => (0, 0),
             };
             self.record_retirement(
@@ -150,7 +162,10 @@ impl FlashBindingState {
                 retired_pair.0,
                 retired_pair.1,
                 current,
-                matches!(self.origin(sprite_num), FlashBindingOrigin::FirstPublished { .. }),
+                matches!(
+                    self.origin(sprite_num),
+                    FlashBindingOrigin::FirstPublished { .. }
+                ),
             );
             self.pending_absent.remove(&sprite_num);
             self.origins.insert(sprite_num, FlashBindingOrigin::Absent);
@@ -193,7 +208,10 @@ impl FlashBindingState {
         let generation = self.reserve(sprite_num)?;
         self.origins.insert(
             sprite_num,
-            FlashBindingOrigin::Exact { cast_lib, cast_member },
+            FlashBindingOrigin::Exact {
+                cast_lib,
+                cast_member,
+            },
         );
         Ok(generation)
     }
@@ -216,10 +234,14 @@ impl FlashBindingState {
             self.generations.remove(&sprite_num);
             self.pending_absent.remove(&sprite_num);
             let retired_pair = match self.origin(sprite_num) {
-                FlashBindingOrigin::Exact { cast_lib, cast_member }
-                | FlashBindingOrigin::FirstPublished { cast_lib, cast_member } => {
-                    (cast_lib, cast_member)
+                FlashBindingOrigin::Exact {
+                    cast_lib,
+                    cast_member,
                 }
+                | FlashBindingOrigin::FirstPublished {
+                    cast_lib,
+                    cast_member,
+                } => (cast_lib, cast_member),
                 FlashBindingOrigin::Absent => (0, 0),
             };
             self.record_retirement(
@@ -227,7 +249,10 @@ impl FlashBindingState {
                 retired_pair.0,
                 retired_pair.1,
                 expected,
-                matches!(self.origin(sprite_num), FlashBindingOrigin::FirstPublished { .. }),
+                matches!(
+                    self.origin(sprite_num),
+                    FlashBindingOrigin::FirstPublished { .. }
+                ),
             );
             self.origins.insert(sprite_num, FlashBindingOrigin::Absent);
             true
@@ -246,7 +271,10 @@ impl FlashBindingState {
         if self.generations.get(&sprite_num).copied() == Some(expected) {
             self.generations.remove(&sprite_num);
             self.pending_absent.remove(&sprite_num);
-            let published = matches!(self.origin(sprite_num), FlashBindingOrigin::FirstPublished { .. });
+            let published = matches!(
+                self.origin(sprite_num),
+                FlashBindingOrigin::FirstPublished { .. }
+            );
             self.record_retirement(sprite_num, cast_lib, cast_member, expected, published);
             // Retirement removes the owner-visible binding as one atomic
             // state transition. Callers that establish a replacement origin
@@ -265,12 +293,7 @@ impl FlashBindingState {
         cast_member: i32,
         expected: u64,
     ) -> bool {
-        let retired = self.retire_current_for_pair(
-            sprite_num,
-            cast_lib,
-            cast_member,
-            expected,
-        );
+        let retired = self.retire_current_for_pair(sprite_num, cast_lib, cast_member, expected);
         if retired {
             self.pending_absent.remove(&sprite_num);
             self.origins.insert(sprite_num, FlashBindingOrigin::Absent);
@@ -356,11 +379,17 @@ impl FlashBindingState {
             return false;
         }
         if self.origin(sprite_num)
-            == (FlashBindingOrigin::Exact { cast_lib, cast_member })
+            == (FlashBindingOrigin::Exact {
+                cast_lib,
+                cast_member,
+            })
         {
             self.origins.insert(
                 sprite_num,
-                FlashBindingOrigin::FirstPublished { cast_lib, cast_member },
+                FlashBindingOrigin::FirstPublished {
+                    cast_lib,
+                    cast_member,
+                },
             );
             true
         } else {
@@ -418,9 +447,10 @@ impl FlashBindingState {
                 None,
                 Some((cast_lib, cast_member)),
                 FlashMemberClassification::UnresolvedExact | FlashMemberClassification::ValidFlash,
-            ) => {
-                FlashBindingOrigin::Exact { cast_lib, cast_member }
-            }
+            ) => FlashBindingOrigin::Exact {
+                cast_lib,
+                cast_member,
+            },
             _ => FlashBindingOrigin::Absent,
         };
         self.origins.insert(sprite_num, origin);
@@ -429,7 +459,6 @@ impl FlashBindingState {
     pub(crate) fn is_current(&self, sprite_num: i16, expected: u64) -> bool {
         self.generations.get(&sprite_num).copied() == Some(expected)
     }
-
 }
 
 /// The owner fence attached to a detached host effect. Owned scheduler paths
@@ -446,7 +475,12 @@ struct FlashActionFence {
 
 impl FlashActionFence {
     fn legacy(owner: OwnerToken, binding: Rc<RefCell<FlashBindingState>>) -> Self {
-        Self { owner, binding, session: None, player_id: None }
+        Self {
+            owner,
+            binding,
+            session: None,
+            player_id: None,
+        }
     }
 
     fn owned(
@@ -455,7 +489,12 @@ impl FlashActionFence {
         session: RuntimeSessionHandle,
         player_id: session::PlayerId,
     ) -> Self {
-        Self { owner, binding, session: Some(session), player_id: Some(player_id) }
+        Self {
+            owner,
+            binding,
+            session: Some(session),
+            player_id: Some(player_id),
+        }
     }
 
     fn revalidated(
@@ -490,10 +529,9 @@ impl FlashActionFence {
                     self.owner.is_arena_live()
                         && self.owner.same_identity(&context.player.owner)
                         && generation.map_or(true, |generation| {
-                            context.player.is_flash_instance_generation_current(
-                                local_sprite,
-                                generation,
-                            )
+                            context
+                                .player
+                                .is_flash_instance_generation_current(local_sprite, generation)
                         })
                         && cast_pair.map_or(true, |(cast_lib, cast_member)| {
                             context
@@ -575,14 +613,18 @@ pub(crate) enum FlashHostAction {
 impl FlashHostAction {
     fn owner(&self) -> OwnerToken {
         let fence = match self {
-            Self::Load { fence, .. } | Self::Unload { fence, .. } | Self::Resize { fence, .. } => fence,
+            Self::Load { fence, .. } | Self::Unload { fence, .. } | Self::Resize { fence, .. } => {
+                fence
+            }
         };
         fence.owner.clone()
     }
 
     fn bind_owned(&mut self, session: RuntimeSessionHandle, player_id: session::PlayerId) {
         let fence = match self {
-            Self::Load { fence, .. } | Self::Unload { fence, .. } | Self::Resize { fence, .. } => fence,
+            Self::Load { fence, .. } | Self::Unload { fence, .. } | Self::Resize { fence, .. } => {
+                fence
+            }
         };
         fence.bind_owned(session, player_id);
     }
@@ -596,7 +638,12 @@ impl FlashHostAction {
                 cast_lib,
                 cast_member,
                 ..
-            } => (fence, *local_sprite, Some(*generation), Some((*cast_lib, *cast_member))),
+            } => (
+                fence,
+                *local_sprite,
+                Some(*generation),
+                Some((*cast_lib, *cast_member)),
+            ),
             _ => return,
         };
         if let Some(generation) = generation {
@@ -629,12 +676,17 @@ impl FlashHostAction {
             if let (Some(session), Some(player_id)) = (&fence.session, fence.player_id) {
                 if let Ok(mut session) = session.try_borrow_mut() {
                     let _ = session.with_player(player_id, |context| {
-                        if context.player.flash_instance_generation(local_sprite).is_none() {
+                        if context
+                            .player
+                            .flash_instance_generation(local_sprite)
+                            .is_none()
+                        {
                             if let Some(cast_pair) = cast_pair {
-                                context
-                                    .player
-                                    .flash_sprite_loaded
-                                    .remove(&(local_sprite, cast_pair.0, cast_pair.1));
+                                context.player.flash_sprite_loaded.remove(&(
+                                    local_sprite,
+                                    cast_pair.0,
+                                    cast_pair.1,
+                                ));
                             }
                         }
                     });
@@ -658,11 +710,26 @@ impl FlashHostAction {
                 asserted_frame,
                 generation,
             } => {
-                fence.revalidated(*local_sprite, Some(*generation), Some((*cast_lib, *cast_member)))?;
+                fence.revalidated(
+                    *local_sprite,
+                    Some(*generation),
+                    Some((*cast_lib, *cast_member)),
+                )?;
                 #[cfg(not(target_arch = "wasm32"))]
                 {
-                    let _ = (host_sprite, cast_lib, cast_member, data, width, height, paused_at_start, asserted_frame);
-                    return Err(ScriptError::new("Flash host is unavailable on native".to_owned()));
+                    let _ = (
+                        host_sprite,
+                        cast_lib,
+                        cast_member,
+                        data,
+                        width,
+                        height,
+                        paused_at_start,
+                        asserted_frame,
+                    );
+                    return Err(ScriptError::new(
+                        "Flash host is unavailable on native".to_owned(),
+                    ));
                 }
                 #[cfg(target_arch = "wasm32")]
                 {
@@ -729,7 +796,9 @@ impl FlashHostAction {
                         *cast_member,
                         *generation,
                     );
-                    return Err(ScriptError::new("Flash host is unavailable on native".to_owned()));
+                    return Err(ScriptError::new(
+                        "Flash host is unavailable on native".to_owned(),
+                    ));
                 }
                 #[cfg(target_arch = "wasm32")]
                 crate::js_api::JsApi::dispatch_flash_member_unloaded_at_generation(
@@ -759,11 +828,17 @@ impl FlashHostAction {
                 height,
             } => {
                 let _ = (cast_lib, cast_member);
-                fence.revalidated(*local_sprite, Some(*generation), Some((*cast_lib, *cast_member)))?;
+                fence.revalidated(
+                    *local_sprite,
+                    Some(*generation),
+                    Some((*cast_lib, *cast_member)),
+                )?;
                 #[cfg(not(target_arch = "wasm32"))]
                 {
                     let _ = (host_sprite, width, height);
-                    return Err(ScriptError::new("Flash host is unavailable on native".to_owned()));
+                    return Err(ScriptError::new(
+                        "Flash host is unavailable on native".to_owned(),
+                    ));
                 }
                 #[cfg(target_arch = "wasm32")]
                 crate::js_api::JsApi::dispatch_flash_member_resized(
@@ -773,7 +848,11 @@ impl FlashHostAction {
                     *height,
                     &owner_key_string(&fence.owner),
                 );
-                fence.revalidated(*local_sprite, Some(*generation), Some((*cast_lib, *cast_member)))
+                fence.revalidated(
+                    *local_sprite,
+                    Some(*generation),
+                    Some((*cast_lib, *cast_member)),
+                )
             }
         }
     }
@@ -794,7 +873,7 @@ pub(crate) fn emit_flash_host_actions(actions: Vec<FlashHostAction>) -> Result<(
     for action in actions {
         let owner = action.owner();
         match action.emit() {
-            Ok(()) => {},
+            Ok(()) => {}
             Err(error) if error.code == ScriptErrorCode::InvalidReference => {
                 action.rollback_after_emit_failure();
                 // A callback may synchronously replace the sprite or retire the
@@ -819,10 +898,7 @@ pub(crate) fn emit_flash_host_actions(actions: Vec<FlashHostAction>) -> Result<(
 #[cfg(test)]
 mod flash_binding_state_tests {
     use super::FlashBindingState;
-    use crate::player::{
-        session::RuntimeSession,
-        symbols::symbol_table::SymbolOwner,
-    };
+    use crate::player::{session::RuntimeSession, symbols::symbol_table::SymbolOwner};
     use async_std::channel;
     use std::rc::Rc;
 
@@ -917,29 +993,45 @@ mod flash_binding_state_tests {
     fn absent_and_exact_reservations_reuse_only_their_pending_binding() {
         let mut state = FlashBindingState::new();
         let absent = state.reserve_absent(1).expect("absent reservation");
-        assert_eq!(state.reserve_absent(1).expect("repeat absent reservation"), absent);
+        assert_eq!(
+            state.reserve_absent(1).expect("repeat absent reservation"),
+            absent
+        );
         let exact = state
             .reserve_for_pair(1, 2, 3)
             .expect("exact reservation should rotate the unrelated absent binding");
         assert_ne!(exact, absent);
-        assert_eq!(state.reserve_for_pair(1, 2, 3).expect("repeat exact reservation"), exact);
+        assert_eq!(
+            state
+                .reserve_for_pair(1, 2, 3)
+                .expect("repeat exact reservation"),
+            exact
+        );
         state.next_generation = 9_007_199_254_740_991;
         assert!(state.reserve_absent(2).is_err());
 
         let mut transitioned = FlashBindingState::new();
-        let early = transitioned.reserve_absent(1).expect("early absent reservation");
+        let early = transitioned
+            .reserve_absent(1)
+            .expect("early absent reservation");
         transitioned.transition_member(
             1,
             None,
             Some((4, 5)),
             super::FlashMemberClassification::UnresolvedExact,
         );
-        assert_eq!(transitioned.reserve_for_pair(1, 4, 5).expect("exact reuse"), early);
+        assert_eq!(
+            transitioned.reserve_for_pair(1, 4, 5).expect("exact reuse"),
+            early
+        );
     }
 
     #[test]
     fn player_reset_replaces_flash_authority_and_retires_old_capability() {
-        let mut session = RuntimeSession::new(SymbolOwner { session: 91, generation: 1 });
+        let mut session = RuntimeSession::new(SymbolOwner {
+            session: 91,
+            generation: 1,
+        });
         assert!(session.add_player(1, channel::unbounded().0));
         let (old_owner, old_state, old_generation) = session
             .with_player(1, |context| {
@@ -977,7 +1069,10 @@ mod flash_binding_state_tests {
 
     #[test]
     fn root_player_ids_stay_local_and_legacy_children_use_synthetic_flash_keys() {
-        let mut session = RuntimeSession::new(SymbolOwner { session: 92, generation: 1 });
+        let mut session = RuntimeSession::new(SymbolOwner {
+            session: 92,
+            generation: 1,
+        });
         let (parent_tx, _parent_rx) = channel::unbounded();
         assert!(session.add_player(17, parent_tx));
         let parent_owner = session
@@ -993,7 +1088,10 @@ mod flash_binding_state_tests {
             .register_nested_player(
                 17,
                 &parent_owner,
-                super::cast_lib::CastMemberRef { cast_lib: 1, cast_member: 1 },
+                super::cast_lib::CastMemberRef {
+                    cast_lib: 1,
+                    cast_member: 1,
+                },
                 child_tx,
                 child_event_tx,
             )
@@ -1006,14 +1104,24 @@ mod flash_binding_state_tests {
 
         let synthetic = super::nested_flash_key(child_id as usize, 7);
         assert_eq!(super::flash_host_sprite_key(false, 17, 7), 7);
-        assert_eq!(super::flash_host_sprite_key(true, child_id as usize, 7), synthetic);
+        assert_eq!(
+            super::flash_host_sprite_key(true, child_id as usize, 7),
+            synthetic
+        );
         assert_ne!(synthetic, 7);
-        assert_eq!(super::decode_nested_flash_key(synthetic), Some((child_id as usize, 7)));
+        assert_eq!(
+            super::decode_nested_flash_key(synthetic),
+            Some((child_id as usize, 7))
+        );
     }
 
     #[test]
     fn captured_flash_cast_pair_replacement_is_rejected_before_native_transport() {
-        let session = RuntimeSession::new(SymbolOwner { session: 93, generation: 1 }).into_handle();
+        let session = RuntimeSession::new(SymbolOwner {
+            session: 93,
+            generation: 1,
+        })
+        .into_handle();
         assert!(session.borrow_mut().add_player(1, channel::unbounded().0));
         let (owner, binding, generation) = session
             .borrow_mut()
@@ -1023,7 +1131,10 @@ mod flash_binding_state_tests {
                     super::score::SpriteChannel::new(1),
                 ];
                 context.player.movie.score.channels[1].sprite.member =
-                    Some(super::cast_lib::CastMemberRef { cast_lib: 1, cast_member: 1 });
+                    Some(super::cast_lib::CastMemberRef {
+                        cast_lib: 1,
+                        cast_member: 1,
+                    });
                 let generation = context
                     .player
                     .reserve_flash_instance_generation(1)
@@ -1037,7 +1148,10 @@ mod flash_binding_state_tests {
             .expect("fixture player must exist");
         session.borrow_mut().with_player(1, |context| {
             context.player.movie.score.channels[1].sprite.member =
-                Some(super::cast_lib::CastMemberRef { cast_lib: 1, cast_member: 2 });
+                Some(super::cast_lib::CastMemberRef {
+                    cast_lib: 1,
+                    cast_member: 2,
+                });
         });
         let action = super::FlashHostAction::Load {
             fence: super::FlashActionFence::owned(owner, binding, session.clone(), 1),
@@ -1058,7 +1172,11 @@ mod flash_binding_state_tests {
 
     #[test]
     fn stale_flash_generation_is_rejected_before_native_transport() {
-        let session = RuntimeSession::new(SymbolOwner { session: 94, generation: 1 }).into_handle();
+        let session = RuntimeSession::new(SymbolOwner {
+            session: 94,
+            generation: 1,
+        })
+        .into_handle();
         assert!(session.borrow_mut().add_player(1, channel::unbounded().0));
         let (owner, binding, generation) = session
             .borrow_mut()
@@ -1068,7 +1186,10 @@ mod flash_binding_state_tests {
                     super::score::SpriteChannel::new(1),
                 ];
                 context.player.movie.score.channels[1].sprite.member =
-                    Some(super::cast_lib::CastMemberRef { cast_lib: 1, cast_member: 1 });
+                    Some(super::cast_lib::CastMemberRef {
+                        cast_lib: 1,
+                        cast_member: 1,
+                    });
                 let generation = context
                     .player
                     .reserve_flash_instance_generation(1)
@@ -1097,12 +1218,19 @@ mod flash_binding_state_tests {
 
     #[test]
     fn forged_unload_is_rejected_before_native_transport() {
-        let session = RuntimeSession::new(SymbolOwner { session: 97, generation: 1 }).into_handle();
+        let session = RuntimeSession::new(SymbolOwner {
+            session: 97,
+            generation: 1,
+        })
+        .into_handle();
         assert!(session.borrow_mut().add_player(1, channel::unbounded().0));
         let (owner, binding) = session
             .borrow_mut()
             .with_player(1, |context| {
-                (context.player.owner.clone(), context.player.flash_binding_state.clone())
+                (
+                    context.player.owner.clone(),
+                    context.player.flash_binding_state.clone(),
+                )
             })
             .expect("fixture player must exist");
         let action = super::FlashHostAction::Unload {
@@ -1119,7 +1247,11 @@ mod flash_binding_state_tests {
 
     #[test]
     fn stale_flash_action_does_not_drop_a_live_tail_action() {
-        let session = RuntimeSession::new(SymbolOwner { session: 95, generation: 1 }).into_handle();
+        let session = RuntimeSession::new(SymbolOwner {
+            session: 95,
+            generation: 1,
+        })
+        .into_handle();
         assert!(session.borrow_mut().add_player(1, channel::unbounded().0));
         let (owner, binding, stale_generation, live_generation) = session
             .borrow_mut()
@@ -1130,9 +1262,15 @@ mod flash_binding_state_tests {
                     super::score::SpriteChannel::new(2),
                 ];
                 context.player.movie.score.channels[1].sprite.member =
-                    Some(super::cast_lib::CastMemberRef { cast_lib: 1, cast_member: 1 });
+                    Some(super::cast_lib::CastMemberRef {
+                        cast_lib: 1,
+                        cast_member: 1,
+                    });
                 context.player.movie.score.channels[2].sprite.member =
-                    Some(super::cast_lib::CastMemberRef { cast_lib: 1, cast_member: 2 });
+                    Some(super::cast_lib::CastMemberRef {
+                        cast_lib: 1,
+                        cast_member: 2,
+                    });
                 let stale_generation = context
                     .player
                     .reserve_flash_instance_generation(1)
@@ -1177,13 +1315,15 @@ mod flash_binding_state_tests {
         };
         let error = super::emit_flash_host_actions(vec![stale, tail])
             .expect_err("live tail must reach the explicit native unsupported boundary");
-        assert!(error.message.contains("Flash host is unavailable on native"));
+        assert!(
+            error
+                .message
+                .contains("Flash host is unavailable on native")
+        );
     }
 }
 
-use allocator::{
-    DatumAllocator, DatumAllocatorTrait, ResetableAllocator, ScriptInstanceAllocatorTrait,
-};
+use allocator::{DatumAllocator, DatumAllocatorTrait, ResetableAllocator, ScriptInstanceAllocatorTrait};
 use async_recursion::async_recursion;
 use futures::future::{select, Either, FutureExt};
 use async_std::{
@@ -1230,8 +1370,7 @@ use crate::{
     js_api::JsApi,
     player::{
         bytecode::handler_manager::{
-            BytecodeHandlerContext, HandlerCode, try_execute_bytecode_sync,
-            try_execute_opcode_sync,
+            BytecodeHandlerContext, HandlerCode, try_execute_bytecode_sync, try_execute_opcode_sync,
         },
         datum_formatting::format_datum,
         events::{
@@ -1923,7 +2062,10 @@ pub enum MovieFrameTarget {
 
 impl DirPlayer {
     pub(crate) fn set_nested_flash_host_route(&mut self, route: FlashHostRoute) {
-        debug_assert!(matches!(route, FlashHostRoute::LocalOwned | FlashHostRoute::NestedPending));
+        debug_assert!(matches!(
+            route,
+            FlashHostRoute::LocalOwned | FlashHostRoute::NestedPending
+        ));
         self.flash_host_is_nested = true;
         self.flash_host_route = route;
     }
@@ -1955,7 +2097,9 @@ impl DirPlayer {
         sprite_num: i16,
         expected: u64,
     ) -> bool {
-        self.flash_binding_state.borrow().is_current(sprite_num, expected)
+        self.flash_binding_state
+            .borrow()
+            .is_current(sprite_num, expected)
     }
 
     pub(crate) fn flash_instance_generation(&self, sprite_num: i16) -> Option<u64> {
@@ -1997,12 +2141,9 @@ impl DirPlayer {
                 } if (current_lib, current_member) == (cast_lib, cast_member)
             );
             if let Some(current) = current.filter(|_| current_is_pair) {
-                self.flash_binding_state.borrow_mut().retire_current_for_pair(
-                    sprite_num,
-                    cast_lib,
-                    cast_member,
-                    current,
-                );
+                self.flash_binding_state
+                    .borrow_mut()
+                    .retire_current_for_pair(sprite_num, cast_lib, cast_member, current);
             }
             return self
                 .flash_binding_state
@@ -2022,12 +2163,11 @@ impl DirPlayer {
             } if (current_lib, current_member) == (cast_lib, cast_member)
         );
         if let Some(current) = current.filter(|_| current_is_pair) {
-            if self.flash_binding_state.borrow_mut().retire_current_for_pair(
-                sprite_num,
-                cast_lib,
-                cast_member,
-                current,
-            ) {
+            if self
+                .flash_binding_state
+                .borrow_mut()
+                .retire_current_for_pair(sprite_num, cast_lib, cast_member, current)
+            {
                 return self
                     .flash_binding_state
                     .borrow()
@@ -2068,10 +2208,20 @@ impl DirPlayer {
                 .generations
                 .iter()
                 .filter_map(|(sprite_num, generation)| match state.origin(*sprite_num) {
-                    FlashBindingOrigin::Exact { cast_lib, cast_member }
-                    | FlashBindingOrigin::FirstPublished { cast_lib, cast_member } => {
-                        Some((*sprite_num, cast_lib, cast_member, *generation, state.origin(*sprite_num)))
+                    FlashBindingOrigin::Exact {
+                        cast_lib,
+                        cast_member,
                     }
+                    | FlashBindingOrigin::FirstPublished {
+                        cast_lib,
+                        cast_member,
+                    } => Some((
+                        *sprite_num,
+                        cast_lib,
+                        cast_member,
+                        *generation,
+                        state.origin(*sprite_num),
+                    )),
                     FlashBindingOrigin::Absent => None,
                 })
                 .collect()
@@ -2084,10 +2234,17 @@ impl DirPlayer {
                 .and_then(|sprite| sprite.member.as_ref())
                 .map(|member| (member.cast_lib, member.cast_member));
             let classification = match current_pair {
-                Some((current_lib, current_member)) if (current_lib, current_member) == (cast_lib, cast_member) => {
-                    match self.movie.cast_manager.find_member_by_ref(&CastMemberRef { cast_lib, cast_member }) {
+                Some((current_lib, current_member))
+                    if (current_lib, current_member) == (cast_lib, cast_member) =>
+                {
+                    match self.movie.cast_manager.find_member_by_ref(&CastMemberRef {
+                        cast_lib,
+                        cast_member,
+                    }) {
                         None => FlashMemberClassification::UnresolvedExact,
-                        Some(member) if matches!(&member.member_type, CastMemberType::Flash(flash) if crate::rendering::has_swf_signature(&flash.data)) => FlashMemberClassification::ValidFlash,
+                        Some(member) if matches!(&member.member_type, CastMemberType::Flash(flash) if crate::rendering::has_swf_signature(&flash.data)) => {
+                            FlashMemberClassification::ValidFlash
+                        }
                         Some(_) => FlashMemberClassification::InvalidTarget,
                     }
                 }
@@ -2095,8 +2252,9 @@ impl DirPlayer {
                 Some(_) => FlashMemberClassification::InvalidTarget,
             };
             let must_retire = match origin {
-                FlashBindingOrigin::FirstPublished { .. } =>
-                    !matches!(classification, FlashMemberClassification::ValidFlash),
+                FlashBindingOrigin::FirstPublished { .. } => {
+                    !matches!(classification, FlashMemberClassification::ValidFlash)
+                }
                 FlashBindingOrigin::Exact { .. } => matches!(
                     classification,
                     FlashMemberClassification::InvalidTarget | FlashMemberClassification::Absent
@@ -2120,19 +2278,21 @@ impl DirPlayer {
     ) {
         let classification = match next {
             None => FlashMemberClassification::Absent,
-            Some((cast_lib, cast_member)) => match self
-                .movie
-                .cast_manager
-                .find_member_by_ref(&cast_lib::CastMemberRef {
-                    cast_lib,
-                    cast_member,
-                }) {
-                None => FlashMemberClassification::UnresolvedExact,
-                Some(member) if matches!(&member.member_type, CastMemberType::Flash(flash) if crate::rendering::has_swf_signature(&flash.data)) => {
-                    FlashMemberClassification::ValidFlash
+            Some((cast_lib, cast_member)) => {
+                match self
+                    .movie
+                    .cast_manager
+                    .find_member_by_ref(&cast_lib::CastMemberRef {
+                        cast_lib,
+                        cast_member,
+                    }) {
+                    None => FlashMemberClassification::UnresolvedExact,
+                    Some(member) if matches!(&member.member_type, CastMemberType::Flash(flash) if crate::rendering::has_swf_signature(&flash.data)) => {
+                        FlashMemberClassification::ValidFlash
+                    }
+                    Some(_) => FlashMemberClassification::InvalidTarget,
                 }
-                Some(_) => FlashMemberClassification::InvalidTarget,
-            },
+            }
         };
         self.flash_binding_state.borrow_mut().transition_member(
             sprite_num,
@@ -2166,13 +2326,18 @@ impl DirPlayer {
         paused_at_start: bool,
         asserted_frame: i32,
     ) -> Result<bool, ScriptError> {
-        if local_sprite <= 0 || self.flash_sprite_loaded.contains(&(local_sprite, cast_lib, cast_member)) {
+        if local_sprite <= 0
+            || self
+                .flash_sprite_loaded
+                .contains(&(local_sprite, cast_lib, cast_member))
+        {
             return Ok(false);
         }
-        let generation = self
-            .flash_binding_state
-            .borrow_mut()
-            .reserve_for_pair(local_sprite, cast_lib, cast_member)?;
+        let generation = self.flash_binding_state.borrow_mut().reserve_for_pair(
+            local_sprite,
+            cast_lib,
+            cast_member,
+        )?;
         self.queue_flash_host_action(FlashHostAction::Load {
             fence: self.flash_action_fence(),
             host_sprite,
@@ -2186,7 +2351,8 @@ impl DirPlayer {
             asserted_frame,
             generation,
         });
-        self.flash_sprite_loaded.insert((local_sprite, cast_lib, cast_member));
+        self.flash_sprite_loaded
+            .insert((local_sprite, cast_lib, cast_member));
         Ok(true)
     }
 
@@ -2223,8 +2389,8 @@ impl DirPlayer {
     }
 
     pub(crate) fn queue_player_notification(&mut self, kind: PlayerNotificationKind) {
-        let wake_owner_loop = self.pending_player_notifications.is_empty()
-            && self.host_event_mailbox.is_empty();
+        let wake_owner_loop =
+            self.pending_player_notifications.is_empty() && self.host_event_mailbox.is_empty();
         self.pending_player_notifications.push(PlayerNotification {
             owner: self.owner.clone(),
             kind,
@@ -2244,8 +2410,8 @@ impl DirPlayer {
         if events.is_empty() {
             return;
         }
-        let wake_owner_loop = self.pending_player_notifications.is_empty()
-            && self.host_event_mailbox.is_empty();
+        let wake_owner_loop =
+            self.pending_player_notifications.is_empty() && self.host_event_mailbox.is_empty();
         let mut retained = std::mem::take(&mut self.pending_player_notifications);
         self.pending_player_notifications = events;
         self.pending_player_notifications.append(&mut retained);
@@ -2261,18 +2427,15 @@ impl DirPlayer {
     /// Callers that cannot propagate the error must surface it through their
     /// existing script error path; this method never evicts an older ordered
     /// transition to make room for a new one.
-    pub(crate) fn queue_host_event(
-        &mut self,
-        event: HostEvent,
-    ) -> Result<(), HostEventOverflow> {
+    pub(crate) fn queue_host_event(&mut self, event: HostEvent) -> Result<(), HostEventOverflow> {
         // Mailbox overflow is terminal for this owner generation. Do not
         // accept later events behind the marker: callers must reset or
         // rebind the owner before host delivery can resume.
         if let Some(error) = self.host_event_backpressure {
             return Err(error);
         }
-        let wake_owner_loop = self.host_event_mailbox.is_empty()
-            && self.pending_player_notifications.is_empty();
+        let wake_owner_loop =
+            self.host_event_mailbox.is_empty() && self.pending_player_notifications.is_empty();
         if let Err(error) = self.host_event_mailbox.push(event) {
             // Do not spill into pending_player_notifications: that queue is
             // intentionally unbounded for evaluator continuations. Record a
@@ -2324,13 +2487,9 @@ impl DirPlayer {
         f: impl FnOnce(&mut XtraManagerState, &mut DirPlayer) -> T,
     ) -> T {
         let owner = self.owner.clone();
-        let mut state = std::mem::replace(
-            &mut self.xtra_manager_state,
-            XtraManagerState::new(owner),
-        );
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            f(&mut state, self)
-        }));
+        let mut state =
+            std::mem::replace(&mut self.xtra_manager_state, XtraManagerState::new(owner));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut state, self)));
         self.xtra_manager_state = state;
         match result {
             Ok(result) => result,
@@ -2567,9 +2726,8 @@ impl DirPlayer {
             ));
         }
         self.reconcile_flash_binding_origins();
-        let js_flash_key = |ch: i16| {
-            flash_host_sprite_key(route == FlashHostRoute::LegacySynthetic, active, ch)
-        };
+        let js_flash_key =
+            |ch: i16| flash_host_sprite_key(route == FlashHostRoute::LegacySynthetic, active, ch);
         // UNLOAD pass FIRST: tear down any Ruffle instance whose channel no
         // longer holds that exact Flash member — BEFORE the load pass below, so
         // a member swap is deterministically unload(old) → load(new). If the
@@ -2879,7 +3037,10 @@ impl DirPlayer {
             // RAF so it can't re-insert a frame buffer after we drop it).
             if self.flash_host_route == FlashHostRoute::LegacySynthetic {
                 if loaded.contains(&(sn, cl, cm)) {
-                    JsApi::dispatch_flash_member_unloaded(sn as i32, &owner_key_string(&self.owner));
+                    JsApi::dispatch_flash_member_unloaded(
+                        sn as i32,
+                        &owner_key_string(&self.owner),
+                    );
                 }
             } else {
                 for generation in self.retire_or_get_flash_unload_generations(sn, cl, cm) {
@@ -2986,7 +3147,11 @@ impl DirPlayer {
             let id = NESTED_PLAYERS.len() + 1;
             // Legacy callers reach this path through the retained session;
             // PLAYER_OPT no longer has a standalone production writer.
-            assert!(session_handle.borrow_mut().add_player(id as u32, tx.clone()));
+            assert!(
+                session_handle
+                    .borrow_mut()
+                    .add_player(id as u32, tx.clone())
+            );
             session_handle
                 .borrow_mut()
                 .with_player(id as u32, |context| {
@@ -3012,14 +3177,17 @@ impl DirPlayer {
             ACTIVE_PLAYER_ID = id;
         }
         crate::player::spawn_player_local(async move {
-            reserve_player_mut_async(|p| Box::pin(async move {
-                // This legacy nested-player path predates RuntimeSession's
-                // explicit context API. The load body is synchronous; keep
-                // the compatibility call local until the nested frontend is
-                // fully owner-bound.
-                let mut symbols = SymbolTable::new();
-                p.load_movie_from_dir(dir, &mut symbols).await;
-            })).await;
+            reserve_player_mut_async(|p| {
+                Box::pin(async move {
+                    // This legacy nested-player path predates RuntimeSession's
+                    // explicit context API. The load body is synchronous; keep
+                    // the compatibility call local until the nested frontend is
+                    // fully owner-bound.
+                    let mut symbols = SymbolTable::new();
+                    p.load_movie_from_dir(dir, &mut symbols).await;
+                })
+            })
+            .await;
             if host_system_font.is_some() {
                 reserve_player_mut(|p| {
                     if p.font_manager.system_font.is_none() {
@@ -3035,10 +3203,16 @@ impl DirPlayer {
             let event_session = session_handle.clone();
             let event_owner = owner.clone();
             crate::player::spawn_player_local(crate::player::commands::run_command_loop(
-                rx, session_handle, id as u32, owner,
+                rx,
+                session_handle,
+                id as u32,
+                owner,
             ));
             crate::player::spawn_player_local(crate::player::events::run_event_loop(
-                event_rx, event_session, id as u32, event_owner,
+                event_rx,
+                event_session,
+                id as u32,
+                event_owner,
             ));
             let (rw, rh, ver) = reserve_player_ref(|p| {
                 (
@@ -3114,7 +3288,9 @@ impl DirPlayer {
             let prev = unsafe { ACTIVE_PLAYER_ID };
             let rendered = unsafe {
                 ACTIVE_PLAYER_ID = id;
-                let out = if let Some(handle) = PLAYER_SESSION_HANDLE.with(|slot| slot.borrow().clone()) {
+                let out = if let Some(handle) =
+                    PLAYER_SESSION_HANDLE.with(|slot| slot.borrow().clone())
+                {
                     handle
                         .borrow_mut()
                         .with_player(id as u32, |mut context| {
@@ -3287,18 +3463,26 @@ impl DirPlayer {
         }
 
         let (stage_w, stage_h) = crate::player::stage::stage_canvas_dims(self);
-        if let Err(error) = self.queue_host_event(crate::player::host_events::HostEvent::StageSizeChanged {
-            width: stage_w,
-            height: stage_h,
-            center: self.center_stage,
-        }) {
+        if let Err(error) =
+            self.queue_host_event(crate::player::host_events::HostEvent::StageSizeChanged {
+                width: stage_w,
+                height: stage_h,
+                center: self.center_stage,
+            })
+        {
             log::error!("host event mailbox overflow: {:?}", error);
         }
         let movie = self.movie.file.as_ref().unwrap();
-        if let Err(error) = self.queue_host_event(crate::player::host_events::HostEvent::MovieLoaded {
-            version: movie.version,
-            cast_names: movie.cast_entries.iter().map(|cast| cast.name.clone()).collect(),
-        }) {
+        if let Err(error) =
+            self.queue_host_event(crate::player::host_events::HostEvent::MovieLoaded {
+                version: movie.version,
+                cast_names: movie
+                    .cast_entries
+                    .iter()
+                    .map(|cast| cast.name.clone())
+                    .collect(),
+            })
+        {
             log::error!("host event mailbox overflow: {:?}", error);
         }
 
@@ -3308,9 +3492,11 @@ impl DirPlayer {
         if begin_sprites {
             self.begin_all_sprites(symbols);
         }
-        if let Err(error) = self.queue_host_event(crate::player::host_events::HostEvent::FrameChanged {
-            frame: self.movie.current_frame,
-        }) {
+        if let Err(error) =
+            self.queue_host_event(crate::player::host_events::HostEvent::FrameChanged {
+                frame: self.movie.current_frame,
+            })
+        {
             log::error!("host event mailbox overflow: {:?}", error);
         }
     }
@@ -3363,7 +3549,9 @@ impl DirPlayer {
         let _ = crate::js_api::JsApi::dispatch_player_notifications(session.clone(), player_id);
         let cast_count = session
             .borrow_mut()
-            .with_player(player_id, |context| context.player.movie.cast_manager.casts.len())
+            .with_player(player_id, |context| {
+                context.player.movie.cast_manager.casts.len()
+            })
             .ok_or_else(cancelled_scope_error)?;
         for cast_lib in 1..=cast_count as u32 {
             cast_lib::CastLib::install_pending_js_registrations(
@@ -3480,7 +3668,11 @@ impl DirPlayer {
                 None => continue,
             };
             // Use filmloop's own current_frame instead of movie's current_frame
-            self.begin_score_sprites(ScoreRef::FilmLoop(member_ref.clone()), current_frame, symbols);
+            self.begin_score_sprites(
+                ScoreRef::FilmLoop(member_ref.clone()),
+                current_frame,
+                symbols,
+            );
             if let Some(film_loop) = self
                 .movie
                 .cast_manager
@@ -3788,9 +3980,11 @@ impl DirPlayer {
 
         // Only dispatch and render if updateLock is off
         if !self.movie.update_lock && prev_frame != self.movie.current_frame {
-            if let Err(error) = self.queue_host_event(crate::player::host_events::HostEvent::FrameChanged {
-                frame: self.movie.current_frame,
-            }) {
+            if let Err(error) =
+                self.queue_host_event(crate::player::host_events::HostEvent::FrameChanged {
+                    frame: self.movie.current_frame,
+                })
+            {
                 log::error!("host event mailbox overflow: {:?}", error);
             }
             self.has_player_frame_changed = true;
@@ -3949,9 +4143,11 @@ impl DirPlayer {
             self.scopes.push(Scope::default(i));
         }
 
-        if let Err(error) = self.queue_host_event(crate::player::host_events::HostEvent::FrameChanged {
-            frame: self.movie.current_frame,
-        }) {
+        if let Err(error) =
+            self.queue_host_event(crate::player::host_events::HostEvent::FrameChanged {
+                frame: self.movie.current_frame,
+            })
+        {
             log::error!("host event mailbox overflow: {:?}", error);
         }
         JsApi::dispatch_scope_list(self);
@@ -4644,8 +4840,11 @@ impl DirPlayer {
         }
         for i in 0..self.scopes.len() {
             let stack_refs = {
-                let (scopes, allocator, bitmap_manager) =
-                    (&mut self.scopes, &mut self.allocator, &mut self.bitmap_manager);
+                let (scopes, allocator, bitmap_manager) = (
+                    &mut self.scopes,
+                    &mut self.allocator,
+                    &mut self.bitmap_manager,
+                );
                 scopes[i]
                     .stack
                     .snapshot_refs_with(allocator, bitmap_manager)
@@ -5027,10 +5226,12 @@ impl DirPlayer {
         if let Datum::ScriptInstanceRef(instance_ref) = datum {
             self.allocator
                 .get_script_instance_opt(instance_ref)
-                .ok_or_else(|| ScriptError::new_code(
-                    ScriptErrorCode::InvalidReference,
-                    "foreign or stale ScriptInstanceRef".to_owned(),
-                ))?;
+                .ok_or_else(|| {
+                    ScriptError::new_code(
+                        ScriptErrorCode::InvalidReference,
+                        "foreign or stale ScriptInstanceRef".to_owned(),
+                    )
+                })?;
         }
         Ok(())
     }
@@ -5058,9 +5259,7 @@ impl DirPlayer {
         symbols: &mut SymbolTable,
         prop: Symbol,
     ) -> Result<DatumRef, ScriptError> {
-        symbols
-            .lower(&prop)
-            .map_err(|_| SymbolError::Foreign)?;
+        symbols.lower(&prop).map_err(|_| SymbolError::Foreign)?;
         let builtin_prop = prop.into_builtin_or_error(symbols)?;
         match builtin_prop {
             BuiltInSymbol::DatumStats => {
@@ -5116,13 +5315,14 @@ impl DirPlayer {
                 ];
                 let mut entries = Vec::new();
                 for (name, value_ref) in &self.globals {
-                    let lower = symbols
-                        .lower(name)
-                        .map_err(|_| SymbolError::Foreign)?;
+                    let lower = symbols.lower(name).map_err(|_| SymbolError::Foreign)?;
                     // Constant-name filtering happens before value resolution:
                     // Director does not expose language constants as globals,
                     // even if a stale or foreign value ref is attached to one.
-                    if CONST_GLOBALS.iter().any(|constant| lower.eq_ignore_ascii_case(constant)) {
+                    if CONST_GLOBALS
+                        .iter()
+                        .any(|constant| lower.eq_ignore_ascii_case(constant))
+                    {
                         continue;
                     }
                     let value = self.checked_movie_datum_ref(symbols, value_ref)?;
@@ -5135,7 +5335,8 @@ impl DirPlayer {
                     .into_iter()
                     .map(|(name, value_ref)| (self.alloc_datum(Datum::Symbol(name)), value_ref))
                     .collect();
-                let version_key = self.alloc_datum(Datum::Symbol(symbols.intern_authoritative("version")));
+                let version_key =
+                    self.alloc_datum(Datum::Symbol(symbols.intern_authoritative("version")));
                 let version_val = self.alloc_datum(Datum::String("11.0".to_string()));
                 props.push_back((version_key, version_val));
                 Ok(self.alloc_datum(Datum::PropList(props, false)))
@@ -5617,9 +5818,7 @@ impl DirPlayer {
             // Read against the movie those two are unrelated to the animation
             // and never coincide, so the sprite is never cleared.
             BuiltInSymbol::Frame | BuiltInSymbol::LastFrame => {
-                let prop_text = symbols
-                    .lower(&prop)
-                    .map_err(|_| SymbolError::Foreign)?;
+                let prop_text = symbols.lower(&prop).map_err(|_| SymbolError::Foreign)?;
                 let value = self.tell_film_loop().and_then(|member_ref| {
                     self.movie
                         .cast_manager
@@ -5710,9 +5909,7 @@ impl DirPlayer {
             // `_player.<name>` form reaches the same getter instead of erroring
             // — the Scripting Dictionary gives `_player.frontWindow` as the
             // primary syntax for exactly these.
-            _ => {
-                self.alloc_movie_prop(symbols, prop)
-            }
+            _ => self.alloc_movie_prop(symbols, prop),
         }
     }
 
@@ -5797,7 +5994,10 @@ impl DirPlayer {
                     )),
                 }
             }
-            _ => Err(ScriptError::new(format!("Cannot set _mouse prop {:?}", prop))),
+            _ => Err(ScriptError::new(format!(
+                "Cannot set _mouse prop {:?}",
+                prop
+            ))),
         }
     }
 
@@ -5834,12 +6034,16 @@ impl DirPlayer {
                 // payload untouched until Movie::set_prop dispatches it.
                 let value = match value {
                     DatumRef::Void => Datum::Void,
-                    _ => self.allocator.try_get_datum(value).ok_or_else(|| {
-                        ScriptError::new_code(
-                            ScriptErrorCode::InvalidReference,
-                            format!("invalid datum reference {value}"),
-                        )
-                    })?.clone(),
+                    _ => self
+                        .allocator
+                        .try_get_datum(value)
+                        .ok_or_else(|| {
+                            ScriptError::new_code(
+                                ScriptErrorCode::InvalidReference,
+                                format!("invalid datum reference {value}"),
+                            )
+                        })?
+                        .clone(),
                 };
                 self.movie.set_prop(symbols, prop, value, &self.allocator)
             }
@@ -6386,7 +6590,12 @@ impl DirPlayer {
             session_handle
                 .borrow_mut()
                 .with_player(player_id, |mut context| {
-                    let is_film_loop = if let Some(member) = context.player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                    let is_film_loop = if let Some(member) = context
+                        .player
+                        .movie
+                        .cast_manager
+                        .find_mut_member_by_ref(&member_ref)
+                    {
                         if let CastMemberType::FilmLoop(film_loop) = &mut member.member_type {
                             for sprite_num in &ended_sprites {
                                 film_loop.score.get_sprite_mut(*sprite_num as i16).exited = true;
@@ -6400,8 +6609,17 @@ impl DirPlayer {
                         false
                     };
                     if is_film_loop {
-                        context.player.begin_score_sprites(score_ref.clone(), new_frame, context.symbols);
-                        if let Some(member) = context.player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                        context.player.begin_score_sprites(
+                            score_ref.clone(),
+                            new_frame,
+                            context.symbols,
+                        );
+                        if let Some(member) = context
+                            .player
+                            .movie
+                            .cast_manager
+                            .find_mut_member_by_ref(&member_ref)
+                        {
                             if let CastMemberType::FilmLoop(film_loop) = &mut member.member_type {
                                 film_loop.score.apply_tween_modifiers(new_frame);
                             }
@@ -6512,8 +6730,10 @@ pub(crate) async fn load_movie_from_file_owned(
         })
         .ok_or_else(cancelled_scope_error)??;
 
-    let movie_file = read_director_file_bytes(&data_bytes, &file_name, &base_url)
-        .map_err(|error| ScriptError::new(format!("Failed to parse movie file '{}': {}", path, error)))?;
+    let movie_file =
+        read_director_file_bytes(&data_bytes, &file_name, &base_url).map_err(|error| {
+            ScriptError::new(format!("Failed to parse movie file '{}': {}", path, error))
+        })?;
     session
         .borrow_mut()
         .with_player(player_id, |context| {
@@ -6599,9 +6819,13 @@ pub(crate) async fn drive_eval_owned(
                 let action = match &request {
                     crate::player::eval::EvalPending::Global { capability, .. }
                     | crate::player::eval::EvalPending::Object { capability, .. }
-                    | crate::player::eval::EvalPending::SetProperty { capability, .. } => capability.clone(),
+                    | crate::player::eval::EvalPending::SetProperty { capability, .. } => {
+                        capability.clone()
+                    }
                 };
-                let next = session.borrow_mut().execute_eval_request(eval_id.clone(), request);
+                let next = session
+                    .borrow_mut()
+                    .execute_eval_request(eval_id.clone(), request);
                 match next {
                     crate::player::session::EvalRequestTurn::ExternalXtra(request) => {
                         turn = match crate::player::commands::execute_eval_external_request(
@@ -6639,10 +6863,9 @@ pub(crate) async fn drive_eval_owned(
                     }
                     crate::player::session::EvalRequestTurn::XtraPending(request) => {
                         let result = crate::player::commands::execute_xtra_pending_request(
-                            &session,
-                            player_id,
-                            request,
-                        ).await;
+                            &session, player_id, request,
+                        )
+                        .await;
                         turn = session.borrow_mut().resume_eval(
                             eval_id.clone(),
                             &action,
@@ -6651,22 +6874,20 @@ pub(crate) async fn drive_eval_owned(
                         );
                     }
                     crate::player::session::EvalRequestTurn::SpriteAsync(request) => {
-                        if request.player_id != player_id
-                            || !request.owner.same_identity(&owner)
-                        {
+                        if request.player_id != player_id || !request.owner.same_identity(&owner) {
                             turn = crate::player::eval::EvalTurn::Complete(Err(
                                 crate::player::cancelled_scope_error(),
                             ));
                             continue;
                         }
-                        let typed_request = crate::player::driver::InternalVmRequest::SpriteAsync(
-                            request.clone(),
-                        );
-                        let result = crate::player::session::RuntimeSession::execute_sprite_async_request(
-                            session.clone(),
-                            request,
-                        )
-                        .await;
+                        let typed_request =
+                            crate::player::driver::InternalVmRequest::SpriteAsync(request.clone());
+                        let result =
+                            crate::player::session::RuntimeSession::execute_sprite_async_request(
+                                session.clone(),
+                                request,
+                            )
+                            .await;
                         turn = match session.borrow_mut().resume_typed_async_eval(
                             eval_id.clone(),
                             &action,
@@ -6684,7 +6905,8 @@ pub(crate) async fn drive_eval_owned(
                         let result = Box::pin(crate::player::handlers::movie::execute_movie_async(
                             session.clone(),
                             request,
-                        )).await;
+                        ))
+                        .await;
                         turn = session.borrow_mut().resume_eval(
                             eval_id.clone(),
                             &action,
@@ -6694,10 +6916,7 @@ pub(crate) async fn drive_eval_owned(
                     }
                     crate::player::session::EvalRequestTurn::Flash(request) => {
                         let result = crate::player::commands::execute_owned_flash_request(
-                            &session,
-                            player_id,
-                            &owner,
-                            request,
+                            &session, player_id, &owner, request,
                         )
                         .await;
                         turn = session.borrow_mut().resume_eval(
@@ -6718,15 +6937,18 @@ pub(crate) async fn drive_eval_owned(
                             if let Some((action, internal_request)) =
                                 crate::player::commands::eval_pending_internal_request(&request)
                             {
-                                if let Some(crate::player::session::EvalRequestTurn::Evaluator(next)) =
-                                    Box::pin(crate::player::commands::execute_eval_internal_request(
+                                if let Some(crate::player::session::EvalRequestTurn::Evaluator(
+                                    next,
+                                )) = Box::pin(
+                                    crate::player::commands::execute_eval_internal_request(
                                         &session,
                                         eval_id.clone(),
                                         action,
                                         owner.clone(),
                                         internal_request,
-                                    ))
-                                    .await
+                                    ),
+                                )
+                                .await
                                 {
                                     turn = next;
                                     continue;
@@ -6739,55 +6961,57 @@ pub(crate) async fn drive_eval_owned(
                                 request,
                                 sender,
                             );
-                            return receiver
-                                .recv()
-                                .await
-                                .map_err(|_| ScriptError::new("evaluator completion channel closed".to_owned()))?;
+                            return receiver.recv().await.map_err(|_| {
+                                ScriptError::new("evaluator completion channel closed".to_owned())
+                            })?;
                         }
                     },
-                    crate::player::session::EvalRequestTurn::Child(child_turn) => match child_turn {
-                        crate::player::driver::DriverTurn::Waiting => {
-                            session.borrow_mut().retain_pending_command(crate::player::driver::PendingCommand {
-                                player_id,
-                                owner: owner.clone(),
-                                started: false,
-                                action: None,
-                                ticket: None,
-                                completer: None,
-                                event_sender: None,
-                                score_continuation: None,
-                                child_completion: None,
-                                eval_child: Some(eval_id.clone()),
-                                eval_sender: Some(sender),
-                            });
-                            return receiver
-                                .recv()
-                                .await
-                                .map_err(|_| ScriptError::new("evaluator child channel closed".to_owned()))?;
-                        }
-                        crate::player::driver::DriverTurn::Pending(action) => {
-                            let ticket = action.ticket().clone();
-                            session.borrow_mut().retain_pending_command(crate::player::driver::PendingCommand {
-                                player_id,
-                                owner: owner.clone(),
-                                started: false,
-                                action: Some(action),
-                                ticket: Some(ticket),
-                                completer: None,
-                                event_sender: None,
-                                score_continuation: None,
-                                child_completion: None,
-                                eval_child: Some(eval_id.clone()),
-                                eval_sender: Some(sender),
-                            });
-                            return receiver
-                                .recv()
-                                .await
-                                .map_err(|_| ScriptError::new("evaluator child channel closed".to_owned()))?;
-                        }
-                        crate::player::driver::DriverTurn::Complete(_)
-                        | crate::player::driver::DriverTurn::Error(_) => {
-                            turn = session
+                    crate::player::session::EvalRequestTurn::Child(child_turn) => {
+                        match child_turn {
+                            crate::player::driver::DriverTurn::Waiting => {
+                                session.borrow_mut().retain_pending_command(
+                                    crate::player::driver::PendingCommand {
+                                        player_id,
+                                        owner: owner.clone(),
+                                        started: false,
+                                        action: None,
+                                        ticket: None,
+                                        completer: None,
+                                        event_sender: None,
+                                        score_continuation: None,
+                                        child_completion: None,
+                                        eval_child: Some(eval_id.clone()),
+                                        eval_sender: Some(sender),
+                                    },
+                                );
+                                return receiver.recv().await.map_err(|_| {
+                                    ScriptError::new("evaluator child channel closed".to_owned())
+                                })?;
+                            }
+                            crate::player::driver::DriverTurn::Pending(action) => {
+                                let ticket = action.ticket().clone();
+                                session.borrow_mut().retain_pending_command(
+                                    crate::player::driver::PendingCommand {
+                                        player_id,
+                                        owner: owner.clone(),
+                                        started: false,
+                                        action: Some(action),
+                                        ticket: Some(ticket),
+                                        completer: None,
+                                        event_sender: None,
+                                        score_continuation: None,
+                                        child_completion: None,
+                                        eval_child: Some(eval_id.clone()),
+                                        eval_sender: Some(sender),
+                                    },
+                                );
+                                return receiver.recv().await.map_err(|_| {
+                                    ScriptError::new("evaluator child channel closed".to_owned())
+                                })?;
+                            }
+                            crate::player::driver::DriverTurn::Complete(_)
+                            | crate::player::driver::DriverTurn::Error(_) => {
+                                turn = session
                                 .borrow_mut()
                                 .turn_eval_child(eval_id.clone())
                                 .and_then(|child| match child {
@@ -6801,8 +7025,9 @@ pub(crate) async fn drive_eval_owned(
                                     | crate::player::session::EvalRequestTurn::XtraPending(_) => None,
                                 })
                                 .unwrap_or_else(|| crate::player::eval::EvalTurn::Complete(Err(cancelled_scope_error())));
+                            }
                         }
-                    },
+                    }
                 }
             }
         }
@@ -6817,12 +7042,8 @@ pub(crate) async fn eval_lingo_command_owned(
     owner: OwnerToken,
     source: String,
 ) -> Result<DatumRef, ScriptError> {
-    let (eval_id, turn) = start_eval_lingo_command_owned(
-        session.clone(),
-        player_id,
-        owner.clone(),
-        source,
-    )?;
+    let (eval_id, turn) =
+        start_eval_lingo_command_owned(session.clone(), player_id, owner.clone(), source)?;
     drive_eval_owned(session, player_id, owner, eval_id, turn).await
 }
 
@@ -6907,10 +7128,9 @@ impl ScriptError {
 impl From<SymbolError> for ScriptError {
     fn from(error: SymbolError) -> Self {
         match error {
-            SymbolError::Foreign => Self::new_code(
-                ScriptErrorCode::InvalidReference,
-                error.to_string(),
-            ),
+            SymbolError::Foreign => {
+                Self::new_code(ScriptErrorCode::InvalidReference, error.to_string())
+            }
             SymbolError::NotBuiltin { .. } => Self::new(error.to_string()),
         }
     }
@@ -6962,12 +7182,15 @@ pub(crate) fn player_call_global_handler_turn_in_session(
         Err(error) => return GlobalHandlerTurn::Complete(Err(error)),
     };
     let (receiver, handler_ref, child_args, completion, use_raw_arg_list) = match dispatch {
-        driver::GlobalDispatch::Child { receiver, handler_ref } => {
-            (receiver, handler_ref, args.clone(), None, true)
-        }
-        driver::GlobalDispatch::ChildPrepared { receiver, handler_ref, args } => {
-            (receiver, handler_ref, args, None, false)
-        }
+        driver::GlobalDispatch::Child {
+            receiver,
+            handler_ref,
+        } => (receiver, handler_ref, args.clone(), None, true),
+        driver::GlobalDispatch::ChildPrepared {
+            receiver,
+            handler_ref,
+            args,
+        } => (receiver, handler_ref, args, None, false),
         driver::GlobalDispatch::ChildWithCompletion {
             receiver,
             handler_ref,
@@ -6980,7 +7203,8 @@ pub(crate) fn player_call_global_handler_turn_in_session(
                     name: handler_name,
                     args: args.clone(),
                 },
-                reason: "ancestor handler dispatch requires the global continuation executor".to_owned(),
+                reason: "ancestor handler dispatch requires the global continuation executor"
+                    .to_owned(),
             };
         }
         driver::GlobalDispatch::SyncResult(result) => return GlobalHandlerTurn::Complete(result),
@@ -6990,7 +7214,8 @@ pub(crate) fn player_call_global_handler_turn_in_session(
                     name: handler_name,
                     args: args.clone(),
                 },
-                reason: "ordered global child sequence requires the global continuation executor".to_owned(),
+                reason: "ordered global child sequence requires the global continuation executor"
+                    .to_owned(),
             };
         }
         driver::GlobalDispatch::PendingRequest { request, reason } => {
@@ -7006,10 +7231,11 @@ pub(crate) fn player_call_global_handler_turn_in_session(
             };
         }
     };
-    let started = match session.start_handler(id, receiver, handler_ref, &child_args, use_raw_arg_list) {
-        Ok(started) => started,
-        Err(error) => return GlobalHandlerTurn::Complete(Err(error)),
-    };
+    let started =
+        match session.start_handler(id, receiver, handler_ref, &child_args, use_raw_arg_list) {
+            Ok(started) => started,
+            Err(error) => return GlobalHandlerTurn::Complete(Err(error)),
+        };
     match started {
         Some(result) => {
             let result = if let Some(completion) = completion {
@@ -7038,9 +7264,11 @@ pub(crate) fn player_call_global_handler_turn_in_session(
                 Some(DriverTurn::Pending(request)) => {
                     break GlobalHandlerTurn::PendingAction(request);
                 }
-                None => break GlobalHandlerTurn::Complete(Err(ScriptError::new(
-                    "global handler driver disappeared".to_owned(),
-                ))),
+                None => {
+                    break GlobalHandlerTurn::Complete(Err(ScriptError::new(
+                        "global handler driver disappeared".to_owned(),
+                    )));
+                }
             }
         },
     }
@@ -7085,7 +7313,10 @@ pub(crate) fn player_call_datum_handler_in_session(
 ) -> crate::player::handlers::datum_handlers::DatumDispatch {
     let Some(dispatch) = session.with_player(id, |mut context| {
         crate::player::handlers::datum_handlers::player_call_datum_handler(
-            &mut context, receiver, name, args,
+            &mut context,
+            receiver,
+            name,
+            args,
         )
     }) else {
         return crate::player::handlers::datum_handlers::DatumDispatch::Sync(Err(
@@ -7127,13 +7358,12 @@ pub(crate) async fn call_datum_handler_active(
     player_call_datum_handler_active(receiver, name, args)
 }
 
-pub(crate) fn retain_datum_pending(
-    request: driver::InternalVmRequest,
-    reason: String,
-) {
+pub(crate) fn retain_datum_pending(request: driver::InternalVmRequest, reason: String) {
     let id = active_player_id() as u32;
     if let Some(handle) = retained_session_handle() {
-        handle.borrow_mut().retain_deferred_request(id, request, reason);
+        handle
+            .borrow_mut()
+            .retain_deferred_request(id, request, reason);
     }
 }
 
@@ -7186,16 +7416,20 @@ pub(crate) fn player_call_script_handler_turn_in_session_sync(
         Some(result) => ScriptHandlerTurn::Complete(Ok(result)),
         None => loop {
             match session.turn_handler(id) {
-                Some(DriverTurn::Complete(result)) => break ScriptHandlerTurn::Complete(Ok(result)),
+                Some(DriverTurn::Complete(result)) => {
+                    break ScriptHandlerTurn::Complete(Ok(result));
+                }
                 Some(DriverTurn::Error(error)) => break ScriptHandlerTurn::Complete(Err(error)),
                 // DriverTurn::Waiting is its cooperative one-op increment.
                 // Continue the same owner-bound driver rather than exposing
                 // an action-less pending command that no host ticket can wake.
                 Some(DriverTurn::Waiting) => continue,
                 Some(DriverTurn::Pending(action)) => break ScriptHandlerTurn::Pending(action),
-                None => break ScriptHandlerTurn::Complete(Err(ScriptError::new(
-                    "script handler driver disappeared".to_owned(),
-                ))),
+                None => {
+                    break ScriptHandlerTurn::Complete(Err(ScriptError::new(
+                        "script handler driver disappeared".to_owned(),
+                    )));
+                }
             }
         },
     }
@@ -7345,9 +7579,9 @@ pub(crate) fn render_nested_player_bitmap(
     let h = rh.max(1) as u16;
     let webgl_bmp = symbols.as_deref_mut().and_then(|symbols| {
         crate::rendering::with_renderer_mut(|r| match r {
-            Some(crate::rendering_gpu::DynamicRenderer::WebGL2(webgl)) => {
-                webgl.render_player_to_bitmap(sub, symbols, id, w as u32, h as u32).ok()
-            }
+            Some(crate::rendering_gpu::DynamicRenderer::WebGL2(webgl)) => webgl
+                .render_player_to_bitmap(sub, symbols, id, w as u32, h as u32)
+                .ok(),
             _ => None,
         })
     });
@@ -7398,7 +7632,9 @@ where
     if let Some(handle) = PLAYER_SESSION_HANDLE.with(|slot| slot.borrow().clone()) {
         let mut session = handle.borrow_mut();
         return session
-            .with_player(active_player_id() as u32, |context| callback(context.player))
+            .with_player(active_player_id() as u32, |context| {
+                callback(context.player)
+            })
             .expect("active production player is missing");
     }
     unsafe {
@@ -7454,18 +7690,15 @@ pub async fn wait_for_handler_gap_owned(
         if !owner.is_arena_live() {
             return Err(cancelled_scope_error());
         }
-        let Some((owner_matches, busy)) = session
-            .borrow_mut()
-            .with_player(player_id, |context| {
-                (
-                    owner.same_identity(&context.player.owner),
-                    context.player.is_playing
-                        && !context.player.is_yield_safe()
-                        && !context.player.in_mouse_command
-                        && !context.player.command_handler_yielding,
-                )
-            })
-        else {
+        let Some((owner_matches, busy)) = session.borrow_mut().with_player(player_id, |context| {
+            (
+                owner.same_identity(&context.player.owner),
+                context.player.is_playing
+                    && !context.player.is_yield_safe()
+                    && !context.player.in_mouse_command
+                    && !context.player.command_handler_yielding,
+            )
+        }) else {
             return Err(cancelled_scope_error());
         };
         if !owner_matches {
@@ -7485,7 +7718,9 @@ where
     if let Some(handle) = PLAYER_SESSION_HANDLE.with(|slot| slot.borrow().clone()) {
         let mut session = handle.borrow_mut();
         return session
-            .with_player(active_player_id() as u32, |context| callback(context.player))
+            .with_player(active_player_id() as u32, |context| {
+                callback(context.player)
+            })
             .expect("active production player is missing");
     }
     unsafe {
@@ -7637,16 +7872,14 @@ impl ScopeToken {
         if self.slot >= player.scope_count as usize {
             return false;
         }
-        player
-            .scopes
-            .get(self.slot)
-            .is_some_and(|scope| scope.scope_ref == self.slot && scope.generation == self.generation)
+        player.scopes.get(self.slot).is_some_and(|scope| {
+            scope.scope_ref == self.slot && scope.generation == self.generation
+        })
     }
 
     #[inline]
     pub(crate) fn validate_top(&self, player: &DirPlayer) -> bool {
-        self.validate_active(player)
-            && self.slot + 1 == player.scope_count as usize
+        self.validate_active(player) && self.slot + 1 == player.scope_count as usize
     }
 }
 
@@ -7755,11 +7988,7 @@ fn pop_frame_bookkeeping(player: &mut DirPlayer, is_frame_script: bool) {
 }
 
 #[inline]
-fn pop_valid_top_frame(
-    player: &mut DirPlayer,
-    token: &ScopeToken,
-    is_frame_script: bool,
-) -> bool {
+fn pop_valid_top_frame(player: &mut DirPlayer, token: &ScopeToken, is_frame_script: bool) -> bool {
     if !token.validate_top(player) {
         return false;
     }
@@ -7848,43 +8077,40 @@ fn capture_handler_plan(
                 format!("Script {} not found", script_member_ref.cast_member),
             )
         })?;
-        let script = script_rc.as_ref();
-        let handler_rc = script
-            .get_own_handler(handler_name.clone())
-            .cloned()
-            .ok_or_else(|| {
-                ScriptError::new_code(
-                    ScriptErrorCode::HandlerNotFound,
-                    format!(
-                        "Handler {:?} not found for script {}",
-                        handler_name,
-                        script.name
-                    ),
-                )
-            })?;
-        let cast = player
-            .movie
-            .cast_manager
-            .get_cast(script.member_ref.cast_lib as u32)
-            .unwrap();
-        let names = cast.name_symbols.clone();
-        let first_param_is_me = handler_rc
-            .argument_name_ids
-            .first()
-            .and_then(|id| cast.lctx.as_ref()?.names.get(*id as usize))
-            .is_some_and(|name| name.eq_ignore_ascii_case("me"));
-        let is_frame_script = player
-            .movie
-            .score
-            .get_script_in_frame(player.movie.current_frame)
-            .is_some_and(|fs| {
-                script_member_ref.cast_lib == fs.cast_lib as i32
-                    && script_member_ref.cast_member == fs.cast_member as i32
-            });
-        let variable_multiplier = crate::director::file::get_variable_multiplier(
-            cast.capital_x,
-            cast.dir_version,
-        );
+    let script = script_rc.as_ref();
+    let handler_rc = script
+        .get_own_handler(handler_name.clone())
+        .cloned()
+        .ok_or_else(|| {
+            ScriptError::new_code(
+                ScriptErrorCode::HandlerNotFound,
+                format!(
+                    "Handler {:?} not found for script {}",
+                    handler_name, script.name
+                ),
+            )
+        })?;
+    let cast = player
+        .movie
+        .cast_manager
+        .get_cast(script.member_ref.cast_lib as u32)
+        .unwrap();
+    let names = cast.name_symbols.clone();
+    let first_param_is_me = handler_rc
+        .argument_name_ids
+        .first()
+        .and_then(|id| cast.lctx.as_ref()?.names.get(*id as usize))
+        .is_some_and(|name| name.eq_ignore_ascii_case("me"));
+    let is_frame_script = player
+        .movie
+        .score
+        .get_script_in_frame(player.movie.current_frame)
+        .is_some_and(|fs| {
+            script_member_ref.cast_lib == fs.cast_lib as i32
+                && script_member_ref.cast_member == fs.cast_member as i32
+        });
+    let variable_multiplier =
+        crate::director::file::get_variable_multiplier(cast.capital_x, cast.dir_version);
     Ok(HandlerPlan {
         code: HandlerCode {
             script: script_rc,
@@ -7915,7 +8141,10 @@ pub(crate) fn setup_handler_frame(
 ) -> Result<FrameSetup, ScriptError> {
     let (script_member_ref, handler_name) = handler_ref;
 
-    if !session.with_player(player_id, |ctx| expectation.validate(ctx.player)).unwrap_or(false) {
+    if !session
+        .with_player(player_id, |ctx| expectation.validate(ctx.player))
+        .unwrap_or(false)
+    {
         return Err(cancelled_scope_error());
     }
     // Resolve the old cast's owned handler before callbacks can mount another
@@ -7941,7 +8170,10 @@ pub(crate) fn setup_handler_frame(
             })
         })
         .unwrap_or_else(|| Err(cancelled_scope_error()));
-    if !session.with_player(player_id, |ctx| expectation.validate(ctx.player)).unwrap_or(false) {
+    if !session
+        .with_player(player_id, |ctx| expectation.validate(ctx.player))
+        .unwrap_or(false)
+    {
         return Err(cancelled_scope_error());
     }
     match virtual_result {
@@ -7964,10 +8196,12 @@ pub(crate) fn setup_handler_frame(
             ctx.symbols
                 .display(&handler_name)
                 .map(str::to_owned)
-                .map_err(|_| ScriptError::new_code(
-                    ScriptErrorCode::InvalidReference,
-                    "foreign or stale setup handler symbol".to_owned(),
-                ))
+                .map_err(|_| {
+                    ScriptError::new_code(
+                        ScriptErrorCode::InvalidReference,
+                        "foreign or stale setup handler symbol".to_owned(),
+                    )
+                })
         })
         .ok_or_else(cancelled_scope_error)??;
     let js_handler = session
@@ -7990,26 +8224,38 @@ pub(crate) fn setup_handler_frame(
             .with_player(player_id, |ctx| {
                 arg_list
                     .iter()
-                    .map(|value| crate::player::driver::checked_internal_datum(ctx.player, ctx.symbols, value).cloned())
+                    .map(|value| {
+                        crate::player::driver::checked_internal_datum(
+                            ctx.player,
+                            ctx.symbols,
+                            value,
+                        )
+                        .cloned()
+                    })
                     .collect::<Result<Vec<_>, _>>()
             })
             .ok_or_else(cancelled_scope_error)??;
-        return Ok(FrameSetup::Pending(crate::player::driver::SetupCallbackPlan {
-            player_id,
-            owner,
-            kind: crate::player::driver::SetupCallbackKind::JavaScript,
-            script_ref: script_member_ref,
-            handler_name: handler_name_text,
-            receiver: receiver.map(Datum::ScriptInstanceRef),
-            args,
-            retained_plan: plan_result.ok(),
-            expectation,
-            child_policy: None,
-            push_return,
-        }));
+        return Ok(FrameSetup::Pending(
+            crate::player::driver::SetupCallbackPlan {
+                player_id,
+                owner,
+                kind: crate::player::driver::SetupCallbackKind::JavaScript,
+                script_ref: script_member_ref,
+                handler_name: handler_name_text,
+                receiver: receiver.map(Datum::ScriptInstanceRef),
+                args,
+                retained_plan: plan_result.ok(),
+                expectation,
+                child_policy: None,
+                push_return,
+            },
+        ));
     }
 
-    if !session.with_player(player_id, |ctx| expectation.validate(ctx.player)).unwrap_or(false) {
+    if !session
+        .with_player(player_id, |ctx| expectation.validate(ctx.player))
+        .unwrap_or(false)
+    {
         return Err(cancelled_scope_error());
     }
     let plan = match plan_result {
@@ -8023,9 +8269,9 @@ pub(crate) fn setup_handler_frame(
 
     let (scope_ref, scope_owner, scope_epoch) = session
         .with_player(player_id, |ctx| {
-        let player = ctx.player;
-        let handler_name_id = plan.code.handler.name_id;
-        let first_param_is_me = plan.first_param_is_me;
+            let player = ctx.player;
+            let handler_name_id = plan.code.handler.name_id;
+            let first_param_is_me = plan.first_param_is_me;
 
             let is_instance_receiver = receiver.is_some();
             let receiver_arg = if let Some(script_instance_ref) = receiver.as_ref() {
@@ -8071,7 +8317,11 @@ pub(crate) fn setup_handler_frame(
             let scope = player.scopes.get_mut(scope_ref).unwrap();
             scope.args.extend_from_slice(arg_list);
 
-            Ok::<_, ScriptError>((scope_ref, player.owner.clone(), player.scope_invalidation_epoch))
+            Ok::<_, ScriptError>((
+                scope_ref,
+                player.owner.clone(),
+                player.scope_invalidation_epoch,
+            ))
         })
         .ok_or_else(cancelled_scope_error)??;
 
@@ -8080,8 +8330,10 @@ pub(crate) fn setup_handler_frame(
             owner: scope_owner,
             slot: scope_ref,
             generation: session
-            .with_player(player_id, |ctx| ctx.player.scopes.get(scope_ref).unwrap().generation)
-            .ok_or_else(cancelled_scope_error)?,
+                .with_player(player_id, |ctx| {
+                    ctx.player.scopes.get(scope_ref).unwrap().generation
+                })
+                .ok_or_else(cancelled_scope_error)?,
             epoch: scope_epoch,
         },
         code: plan.code,
@@ -8142,7 +8394,12 @@ pub(crate) fn setup_handler_frame(
     // generation it was built under. Untouched by a session with no
     // breakpoints, where the generation stays 0 and the cache never misses.
     let (ir_enabled, bp_generation) = session
-        .with_player(player_id, |ctx| (ctx.player.ir_enabled, ctx.player.breakpoint_manager.generation))
+        .with_player(player_id, |ctx| {
+            (
+                ctx.player.ir_enabled,
+                ctx.player.breakpoint_manager.generation,
+            )
+        })
         .ok_or_else(cancelled_scope_error)?;
     let ir = if ir_enabled {
         let handler_def = ctx.code.handler.as_ref();
@@ -8158,7 +8415,9 @@ pub(crate) fn setup_handler_frame(
                         // Before `is_worth_compiling`, so the escape ceiling is
                         // judged on the op stream that will actually run.
                         let breakpoints = session
-                            .with_player(player_id, |ctx| ctx.player.breakpoint_manager.breakpoints.clone())
+                            .with_player(player_id, |ctx| {
+                                ctx.player.breakpoint_manager.breakpoints.clone()
+                            })
                             .unwrap_or_default();
                         crate::player::compiled::apply_breakpoints(
                             &mut c,
@@ -8293,13 +8552,21 @@ async fn eval_startup_payload(code: Option<String>, flag: &str) {
     }
     debug!(">>> startup {}: {}", flag, code);
     let Some(session_handle) = retained_session_handle() else {
-        crate::console_error!("startup {} FAILED ({}): runtime session is not initialized", flag, code);
+        crate::console_error!(
+            "startup {} FAILED ({}): runtime session is not initialized",
+            flag,
+            code
+        );
         return;
     };
     let player_id = active_player_id() as u32;
     let turn = {
         let mut session = session_handle.borrow_mut();
-        let eval_id = match crate::player::eval::start_eval_lingo_command(&mut session, player_id, code.clone()) {
+        let eval_id = match crate::player::eval::start_eval_lingo_command(
+            &mut session,
+            player_id,
+            code.clone(),
+        ) {
             Ok(eval_id) => eval_id,
             Err(err) => {
                 crate::console_error!("startup {} FAILED ({}): {}", flag, code, err.message);
@@ -8314,7 +8581,10 @@ async fn eval_startup_payload(code: Option<String>, flag: &str) {
             crate::console_error!("startup {} FAILED ({}): {}", flag, code, err.message);
         }
         crate::player::eval::EvalTurn::Pending { .. } => {
-            debug!(">>> startup {} suspended; session retained continuation", flag);
+            debug!(
+                ">>> startup {} suspended; session retained continuation",
+                flag
+            );
         }
     }
 }
@@ -8326,7 +8596,9 @@ async fn eval_startup_payload_owned(
     code: Option<String>,
     flag: &str,
 ) -> Result<(), ScriptError> {
-    let Some(code) = code else { return Ok(()); };
+    let Some(code) = code else {
+        return Ok(());
+    };
     let code = normalize_startup_do_quotes(code.trim());
     if code.is_empty() {
         return Ok(());
@@ -8380,7 +8652,14 @@ async fn run_startup_do_owned(
             })
         })
         .ok_or_else(cancelled_scope_error)??;
-    eval_startup_payload_owned(session, player_id, owner, code, if before { "--doBefore" } else { "--do" }).await
+    eval_startup_payload_owned(
+        session,
+        player_id,
+        owner,
+        code,
+        if before { "--doBefore" } else { "--do" },
+    )
+    .await
 }
 
 async fn run_startup_go_owned(
@@ -8426,8 +8705,13 @@ async fn dispatch_pending_stream_status_owned(
             task_ids.sort_unstable();
             for task_id in task_ids {
                 let last_phase = context.player.stream_status_reported.get(&task_id).copied();
-                let Some(task) = context.player.net_manager.get_task(task_id) else { continue };
-                let Some(task_state) = context.player.net_manager.get_task_state(Some(task_id)) else { continue };
+                let Some(task) = context.player.net_manager.get_task(task_id) else {
+                    continue;
+                };
+                let Some(task_state) = context.player.net_manager.get_task_state(Some(task_id))
+                else {
+                    continue;
+                };
                 let is_done = task_state.result.is_some();
                 if last_phase.is_none() {
                     context.player.stream_status_reported.insert(
@@ -8471,10 +8755,10 @@ async fn dispatch_pending_stream_status_owned(
                         }
                         None => {}
                     }
-                    context.player.stream_status_reported.insert(
-                        task_id,
-                        crate::player::net_task::StreamStatusPhase::Final,
-                    );
+                    context
+                        .player
+                        .stream_status_reported
+                        .insert(task_id, crate::player::net_task::StreamStatusPhase::Final);
                 }
             }
             Ok(result)
@@ -8506,7 +8790,11 @@ async fn dispatch_pending_stream_status_owned(
         )
         .await
         {
-            Ok(_) | Err(ScriptError { code: ScriptErrorCode::HandlerNotFound, .. }) => {}
+            Ok(_)
+            | Err(ScriptError {
+                code: ScriptErrorCode::HandlerNotFound,
+                ..
+            }) => {}
             Err(error) if error.code == ScriptErrorCode::Abort => return Ok(()),
             Err(error) => warn!("streamStatus callback failed: {}", error.message),
         }
@@ -8523,7 +8811,9 @@ async fn run_movie_init_sequence() {
     // them. See player::gif.
     crate::player::gif::install_pending();
     let flash_actions = reserve_player_mut(|player| {
-        player.pre_dispatch_flash_members().map(|_| player.take_flash_host_actions())
+        player
+            .pre_dispatch_flash_members()
+            .map(|_| player.take_flash_host_actions())
     });
     if let Err(error) = flash_actions.and_then(emit_flash_host_actions) {
         warn!("Flash host preparation failed: {}", error.message);
@@ -8624,15 +8914,14 @@ async fn run_movie_init_sequence() {
     });
 
     for (behavior_ref, sprite_num) in &behaviors_to_init {
-        if let Err(err) =
-            Score::initialize_behavior_defaults_async(
-                session_handle.clone(),
-                player_id,
-                owner.clone(),
-                behavior_ref.clone(),
-                *sprite_num,
-            )
-            .await
+        if let Err(err) = Score::initialize_behavior_defaults_async(
+            session_handle.clone(),
+            player_id,
+            owner.clone(),
+            behavior_ref.clone(),
+            *sprite_num,
+        )
+        .await
         {
             log::warn!("Failed to initialize behavior defaults: {}", err.message);
         }
@@ -8731,11 +9020,17 @@ async fn run_movie_init_sequence() {
                 )
                 .await;
 
-                if let crate::player::handlers::datum_handlers::DatumDispatch::Pending { request, reason } = result {
+                if let crate::player::handlers::datum_handlers::DatumDispatch::Pending {
+                    request,
+                    reason,
+                } = result
+                {
                     retain_datum_pending(request, reason);
                     return;
                 }
-                if let crate::player::handlers::datum_handlers::DatumDispatch::Sync(Err(err)) = result {
+                if let crate::player::handlers::datum_handlers::DatumDispatch::Sync(Err(err)) =
+                    result
+                {
                     if err.code == ScriptErrorCode::Abort {
                         reserve_player_mut(|player| {
                             player.is_in_frame_update = false;
@@ -8792,10 +9087,7 @@ async fn run_movie_init_sequence() {
             if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
                 return Err(cancelled_scope_error());
             }
-            crate::player::events::prepare_w3d_timer_events(
-                &mut context,
-                now_ms,
-            )
+            crate::player::events::prepare_w3d_timer_events(&mut context, now_ms)
         }) {
         Some(Ok(callbacks)) => callbacks,
         _ => return,
@@ -8817,9 +9109,16 @@ async fn run_movie_init_sequence() {
                 };
                 if let Some(handler) = handler {
                     if let Err(error) = crate::player::eval::invoke_script_callback_owned(
-                        session_handle.clone(), player_id, owner.clone(), Some(instance),
-                        handler, callback.args, false,
-                    ).await {
+                        session_handle.clone(),
+                        player_id,
+                        owner.clone(),
+                        Some(instance),
+                        handler,
+                        callback.args,
+                        false,
+                    )
+                    .await
+                    {
                         if error.code != ScriptErrorCode::Abort {
                             log::error!("W3D callback failed: {}", error.message);
                         }
@@ -8830,9 +9129,14 @@ async fn run_movie_init_sequence() {
             crate::player::events::W3dCallbackReceiver::Static { .. }
             | crate::player::events::W3dCallbackReceiver::Global => {
                 if let Err(error) = crate::player::events::player_invoke_global_event_owned(
-                    session_handle.clone(), player_id, owner.clone(),
-                    callback.handler_name, callback.args,
-                ).await {
+                    session_handle.clone(),
+                    player_id,
+                    owner.clone(),
+                    callback.handler_name,
+                    callback.args,
+                )
+                .await
+                {
                     if error.code != ScriptErrorCode::Abort {
                         log::error!("W3D global callback failed: {}", error.message);
                     }
@@ -8852,28 +9156,30 @@ async fn run_movie_init_sequence() {
         Ok(deltas) => deltas,
         Err(_) => return,
     };
-    let collision_callbacks = match session_handle
-        .borrow_mut()
-        .with_player(player_id, |mut context| {
-            if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
-                return Err(cancelled_scope_error());
-            }
-            crate::player::events::tick_w3d_animations(&mut context, animation_dt)?;
-            crate::player::events::tick_w3d_particles(&mut context, particle_dt)?;
-            let dirty = crate::player::events::W3dDirtyTransformInput::new(
-                owner.clone(), context.player.w3d_dirty_transform_ids.clone(),
-            );
-            let mut callbacks =
-                crate::player::events::prepare_w3d_collision_callbacks(&mut context, &dirty)?;
-            callbacks.extend(
-                crate::player::events::prepare_physx_collision_callbacks(&mut context)?,
-            );
-            context.player.w3d_dirty_transform_ids.clear();
-            Ok(callbacks)
-        }) {
-        Some(Ok(callbacks)) => callbacks,
-        _ => return,
-    };
+    let collision_callbacks =
+        match session_handle
+            .borrow_mut()
+            .with_player(player_id, |mut context| {
+                if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                    return Err(cancelled_scope_error());
+                }
+                crate::player::events::tick_w3d_animations(&mut context, animation_dt)?;
+                crate::player::events::tick_w3d_particles(&mut context, particle_dt)?;
+                let dirty = crate::player::events::W3dDirtyTransformInput::new(
+                    owner.clone(),
+                    context.player.w3d_dirty_transform_ids.clone(),
+                );
+                let mut callbacks =
+                    crate::player::events::prepare_w3d_collision_callbacks(&mut context, &dirty)?;
+                callbacks.extend(crate::player::events::prepare_physx_collision_callbacks(
+                    &mut context,
+                )?);
+                context.player.w3d_dirty_transform_ids.clear();
+                Ok(callbacks)
+            }) {
+            Some(Ok(callbacks)) => callbacks,
+            _ => return,
+        };
     for callback in collision_callbacks {
         if !owner.same_identity(&callback.owner) || !owner.is_arena_live() {
             return;
@@ -8891,9 +9197,16 @@ async fn run_movie_init_sequence() {
                 };
                 if let Some(handler) = handler {
                     if let Err(error) = crate::player::eval::invoke_script_callback_owned(
-                        session_handle.clone(), player_id, owner.clone(), Some(instance),
-                        handler, callback.args, false,
-                    ).await {
+                        session_handle.clone(),
+                        player_id,
+                        owner.clone(),
+                        Some(instance),
+                        handler,
+                        callback.args,
+                        false,
+                    )
+                    .await
+                    {
                         if error.code != ScriptErrorCode::Abort {
                             log::error!("W3D callback failed: {}", error.message);
                         }
@@ -8904,9 +9217,14 @@ async fn run_movie_init_sequence() {
             crate::player::events::W3dCallbackReceiver::Static { .. }
             | crate::player::events::W3dCallbackReceiver::Global => {
                 if let Err(error) = crate::player::events::player_invoke_global_event_owned(
-                    session_handle.clone(), player_id, owner.clone(),
-                    callback.handler_name, callback.args,
-                ).await {
+                    session_handle.clone(),
+                    player_id,
+                    owner.clone(),
+                    callback.handler_name,
+                    callback.args,
+                )
+                .await
+                {
                     if error.code != ScriptErrorCode::Abort {
                         log::error!("W3D global callback failed: {}", error.message);
                     }
@@ -8990,9 +9308,7 @@ impl FrameUpdateFlagGuard {
             .session
             .borrow_mut()
             .with_player(self.player_id, |context| {
-                if !self.owner.same_identity(&context.player.owner)
-                    || !self.owner.is_arena_live()
-                {
+                if !self.owner.same_identity(&context.player.owner) || !self.owner.is_arena_live() {
                     return false;
                 }
                 context.player.is_in_frame_update = false;
@@ -9102,33 +9418,33 @@ pub async fn run_movie_init_owned_at(
             if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
                 return Err(cancelled_scope_error());
             }
-                    let player = &mut *context.player;
-                    let mut result = Vec::new();
-                    for channel in player.active_stage_behavior_channels() {
-                        let Some((sprite_num, fallback)) = player
-                            .movie
-                            .score
-                            .channels
-                            .get(channel)
-                            .map(|channel| (
-                                channel.sprite.number as u32,
-                                channel.sprite.script_instance_list.clone(),
-                            )) else { continue };
-                        for behavior in player.get_sprite_script_instance_ids(
-                            sprite_num as i16,
-                            fallback.as_slice(),
-                        ) {
-                            if player
-                                .allocator
-                                .get_script_instance_entry(behavior.id())
-                                .is_some_and(|entry| !entry.script_instance.begin_sprite_called)
-                            {
-                                result.push((behavior, sprite_num));
-                            }
-                        }
+            let player = &mut *context.player;
+            let mut result = Vec::new();
+            for channel in player.active_stage_behavior_channels() {
+                let Some((sprite_num, fallback)) =
+                    player.movie.score.channels.get(channel).map(|channel| {
+                        (
+                            channel.sprite.number as u32,
+                            channel.sprite.script_instance_list.clone(),
+                        )
+                    })
+                else {
+                    continue;
+                };
+                for behavior in
+                    player.get_sprite_script_instance_ids(sprite_num as i16, fallback.as_slice())
+                {
+                    if player
+                        .allocator
+                        .get_script_instance_entry(behavior.id())
+                        .is_some_and(|entry| !entry.script_instance.begin_sprite_called)
+                    {
+                        result.push((behavior, sprite_num));
                     }
-                    Ok::<_, ScriptError>(result)
-                })
+                }
+            }
+            Ok::<_, ScriptError>(result)
+        })
         .ok_or_else(cancelled_scope_error)??;
     for (behavior, sprite_num) in behaviors {
         Score::initialize_behavior_defaults_async(
@@ -9137,7 +9453,8 @@ pub async fn run_movie_init_owned_at(
             owner.clone(),
             behavior,
             sprite_num,
-        ).await?;
+        )
+        .await?;
     }
     // Preserve Director's ordered frame/movie, stage-sprite, and film-loop
     // dispatch. The owner-bound dispatcher returns only the channels whose
@@ -9233,7 +9550,11 @@ pub async fn run_movie_init_owned_at(
                 return Err(cancelled_scope_error());
             }
             context.player.is_in_frame_update = true;
-            context.player.movie.score.apply_tween_modifiers(context.player.movie.current_frame);
+            context
+                .player
+                .movie
+                .score
+                .apply_tween_modifiers(context.player.movie.current_frame);
             Ok(())
         })
         .ok_or_else(cancelled_scope_error)??;
@@ -9249,7 +9570,8 @@ pub async fn run_movie_init_owned_at(
                 },
                 args: Vec::new(),
             },
-        ).await?;
+        )
+        .await?;
         dispatch_system_event_to_timeouts_owned(
             session.clone(),
             player_id,
@@ -9259,35 +9581,41 @@ pub async fn run_movie_init_owned_at(
         )
         .await?;
         crate::player::events::player_invoke_global_event_owned(
-            session.clone(), player_id, owner.clone(),
-            Symbol::builtin(BuiltInSymbol::StartMovie), Vec::new(),
-        ).await?;
+            session.clone(),
+            player_id,
+            owner.clone(),
+            Symbol::builtin(BuiltInSymbol::StartMovie),
+            Vec::new(),
+        )
+        .await?;
         crate::player::handlers::movie::execute_movie_async(
             session.clone(),
-        crate::player::handlers::movie::MovieAsyncRequest {
-            player_id,
-            owner: owner.clone(),
-            kind: crate::player::handlers::movie::MovieAsyncKind::InitEnterFrame,
-            args: Vec::new(),
-        },
-    ).await?;
+            crate::player::handlers::movie::MovieAsyncRequest {
+                player_id,
+                owner: owner.clone(),
+                kind: crate::player::handlers::movie::MovieAsyncKind::InitEnterFrame,
+                args: Vec::new(),
+            },
+        )
+        .await?;
         dispatch_system_event_to_timeouts_owned(
             session.clone(),
             player_id,
             owner.clone(),
             BuiltInSymbol::ExitFrame,
-        Vec::new(),
-    )
-    .await?;
-    crate::player::handlers::movie::execute_movie_async(
-        session.clone(),
-        crate::player::handlers::movie::MovieAsyncRequest {
-            player_id,
-            owner: owner.clone(),
-            kind: crate::player::handlers::movie::MovieAsyncKind::InitExitFrame,
-            args: Vec::new(),
-        },
-    ).await?;
+            Vec::new(),
+        )
+        .await?;
+        crate::player::handlers::movie::execute_movie_async(
+            session.clone(),
+            crate::player::handlers::movie::MovieAsyncRequest {
+                player_id,
+                owner: owner.clone(),
+                kind: crate::player::handlers::movie::MovieAsyncKind::InitExitFrame,
+                args: Vec::new(),
+            },
+        )
+        .await?;
         Ok::<(), ScriptError>(())
     }
     .await;
@@ -9306,7 +9634,8 @@ pub async fn run_movie_init_owned_at(
             // startup Go, has completed successfully.  A failed or canceled
             // initializer must be retried by the next owned playback loop.
             context.player.last_initialized_frame = Some(context.player.movie.current_frame);
-            context.player.playback_init_count = context.player.playback_init_count.saturating_add(1);
+            context.player.playback_init_count =
+                context.player.playback_init_count.saturating_add(1);
             Ok::<(), ScriptError>(())
         })
         .ok_or_else(cancelled_scope_error)??;
@@ -9326,7 +9655,8 @@ pub async fn run_movie_init_owned(
         player_id,
         owner,
         crate::player::testing_shared::now_ms().max(0.0),
-    ).await
+    )
+    .await
 }
 
 /// Finish one owner-bound playback loop and decide whether a same-owner replay
@@ -9347,7 +9677,9 @@ pub(crate) fn finish_playback_owned(
         if error.code != ScriptErrorCode::Abort {
             let _ = session.borrow_mut().with_player(player_id, |context| {
                 if owner.same_identity(&context.player.owner) && owner.is_arena_live() {
-                    context.player.on_script_error_with_symbols(&error, Some(context.symbols));
+                    context
+                        .player
+                        .on_script_error_with_symbols(&error, Some(context.symbols));
                 }
             });
         }
@@ -9411,14 +9743,9 @@ pub(crate) fn start_playback_owned(
         .ok_or_else(cancelled_scope_error)??;
 
     spawn_local(async move {
-        let result = run_playback_loop_owned(
-            session.clone(),
-            player_id,
-            owner.clone(),
-            cancel_rx,
-            epoch,
-        )
-        .await;
+        let result =
+            run_playback_loop_owned(session.clone(), player_id, owner.clone(), cancel_rx, epoch)
+                .await;
         finish_playback_owned(session, player_id, owner, epoch, result);
     });
     Ok(())
@@ -9445,7 +9772,8 @@ pub(crate) fn stop_playback_owned(
     runtime
         .with_player(player_id, |context| {
             context.player.stop();
-            context.player.playback_stop_count = context.player.playback_stop_count.saturating_add(1);
+            context.player.playback_stop_count =
+                context.player.playback_stop_count.saturating_add(1);
         })
         .ok_or_else(cancelled_scope_error)?;
     Ok(())
@@ -9454,10 +9782,7 @@ pub(crate) fn stop_playback_owned(
 /// Select one owned playback operation against the loop's cancellation
 /// channel.  Dropping the losing operation is intentional: the owned frame
 /// and callback guards release their session state on cancellation.
-async fn await_playback_or_cancel<'a, T, F>(
-    cancel_rx: &'a Receiver<()>,
-    operation: F,
-) -> Option<T>
+async fn await_playback_or_cancel<'a, T, F>(cancel_rx: &'a Receiver<()>, operation: F) -> Option<T>
 where
     F: Future<Output = T> + 'a,
 {
@@ -9543,10 +9868,8 @@ fn tick_sound_manager_owned(
             // gives SoundManager its required mutable player reference without
             // manufacturing overlapping `&mut SoundManager`/`&mut DirPlayer`
             // aliases through a raw pointer.
-            let mut sound_manager = std::mem::replace(
-                &mut context.player.sound_manager,
-                SoundManager::empty(),
-            );
+            let mut sound_manager =
+                std::mem::replace(&mut context.player.sound_manager, SoundManager::empty());
             let result = sound_manager.update(delta, context.player);
             context.player.sound_manager = sound_manager;
             result
@@ -9622,7 +9945,7 @@ async fn run_playback_loop_owned(
             None => {
                 cleanup_after_playback_cancel(&session, player_id, &owner, epoch).await?;
                 return Ok(());
-            },
+            }
         }
     }
 
@@ -9651,8 +9974,8 @@ async fn run_playback_loop_owned(
                         }),
                     context.player.current_frame_tempo,
                 ))
-        })
-        .ok_or_else(cancelled_scope_error)??;
+            })
+            .ok_or_else(cancelled_scope_error)??;
         if !state.0 {
             stop_movie_sequence_owned(session.clone(), player_id, owner.clone()).await?;
             return Ok(());
@@ -9665,7 +9988,10 @@ async fn run_playback_loop_owned(
                     if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
                         return Err(cancelled_scope_error());
                     }
-                    Ok((context.player.is_in_transition, context.player.is_dispatching_events))
+                    Ok((
+                        context.player.is_in_transition,
+                        context.player.is_dispatching_events,
+                    ))
                 })
                 .ok_or_else(cancelled_scope_error)??;
             let stop_phase = Rc::new(Cell::new(PlaybackTransitionStopPhase::NotStarted));
@@ -9749,9 +10075,9 @@ async fn run_playback_loop_owned(
             {
                 Some(result) => result?,
                 None => {
-                cleanup_after_playback_cancel(&session, player_id, &owner, epoch).await?;
-                return Ok(());
-            },
+                    cleanup_after_playback_cancel(&session, player_id, &owner, epoch).await?;
+                    return Ok(());
+                }
             }
             continue;
         }
@@ -9763,7 +10089,10 @@ async fn run_playback_loop_owned(
                     if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
                         return Err(cancelled_scope_error());
                     }
-                    Ok((context.player.is_in_transition, context.player.is_dispatching_events))
+                    Ok((
+                        context.player.is_in_transition,
+                        context.player.is_dispatching_events,
+                    ))
                 })
                 .ok_or_else(cancelled_scope_error)??;
             let stop_phase = Rc::new(Cell::new(PlaybackTransitionStopPhase::NotStarted));
@@ -9832,8 +10161,7 @@ async fn run_playback_loop_owned(
                 if !flash_loading_owned(&session, player_id, &owner)? {
                     break;
                 }
-                let wait = timeout(Duration::from_millis(100), future::pending::<()>())
-                    .map(|_| ());
+                let wait = timeout(Duration::from_millis(100), future::pending::<()>()).map(|_| ());
                 if await_playback_or_cancel(&cancel_rx, wait).await.is_none() {
                     cleanup_after_playback_cancel(&session, player_id, &owner, epoch).await?;
                     return Ok(());
@@ -9845,12 +10173,7 @@ async fn run_playback_loop_owned(
         let frame_now_ms = bench_now_ms();
         let frame = await_playback_or_cancel(
             &cancel_rx,
-            run_single_frame_owned_at(
-                session.clone(),
-                player_id,
-                owner.clone(),
-                frame_now_ms,
-            ),
+            run_single_frame_owned_at(session.clone(), player_id, owner.clone(), frame_now_ms),
         )
         .await;
         let (playing, paused) = match frame {
@@ -9858,7 +10181,7 @@ async fn run_playback_loop_owned(
             None => {
                 cleanup_after_playback_cancel(&session, player_id, &owner, epoch).await?;
                 return Ok(());
-            },
+            }
         };
         if !playing {
             continue;
@@ -9880,9 +10203,9 @@ async fn run_playback_loop_owned(
                     result?;
                 }
                 None => {
-                cleanup_after_playback_cancel(&session, player_id, &owner, epoch).await?;
-                return Ok(());
-            },
+                    cleanup_after_playback_cancel(&session, player_id, &owner, epoch).await?;
+                    return Ok(());
+                }
             }
         }
 
@@ -9895,7 +10218,11 @@ async fn run_playback_loop_owned(
                 Ok(context.player.current_frame_tempo)
             })
             .ok_or_else(cancelled_scope_error)??;
-        let delta = if tempo == 0 { 1.0 / 30.0 } else { 1.0 / tempo as f64 };
+        let delta = if tempo == 0 {
+            1.0 / 30.0
+        } else {
+            1.0 / tempo as f64
+        };
         tick_sound_manager_owned(&session, player_id, &owner, delta)?;
 
         let cue_events = session
@@ -9918,7 +10245,10 @@ async fn run_playback_loop_owned(
                     let channel_ref = context.player.alloc_datum(Datum::Symbol(channel));
                     let number_ref = context.player.alloc_datum(Datum::Int(cue_number));
                     let name_ref = context.player.alloc_datum(Datum::String(cue_name));
-                    Ok((vec![channel_ref, number_ref, name_ref], context.symbols.intern("cuePassed")))
+                    Ok((
+                        vec![channel_ref, number_ref, name_ref],
+                        context.symbols.intern("cuePassed"),
+                    ))
                 })
                 .ok_or_else(cancelled_scope_error)??;
             match await_playback_or_cancel(
@@ -9937,9 +10267,9 @@ async fn run_playback_loop_owned(
                     result?;
                 }
                 None => {
-                cleanup_after_playback_cancel(&session, player_id, &owner, epoch).await?;
-                return Ok(());
-            },
+                    cleanup_after_playback_cancel(&session, player_id, &owner, epoch).await?;
+                    return Ok(());
+                }
             }
         }
 
@@ -9970,7 +10300,7 @@ async fn run_playback_loop_owned(
             None => {
                 cleanup_after_playback_cancel(&session, player_id, &owner, epoch).await?;
                 return Ok(());
-            },
+            }
         }
     }
 }
@@ -10056,11 +10386,14 @@ pub async fn run_single_frame_owned_at(
     // Global timeout and stream-status work happen once per frame, before
     // frame script dispatch, matching the recovered frame-loop ordering.
     crate::player::fire_pending_timeouts_owned_at(
-        session.clone(), player_id, owner.clone(), frame_now_ms,
-    ).await?;
-    crate::player::dispatch_pending_stream_status_owned(
-        session.clone(), player_id, owner.clone(),
-    ).await?;
+        session.clone(),
+        player_id,
+        owner.clone(),
+        frame_now_ms,
+    )
+    .await?;
+    crate::player::dispatch_pending_stream_status_owned(session.clone(), player_id, owner.clone())
+        .await?;
     let unpuppet_changed = session
         .borrow_mut()
         .with_player(player_id, |context| {
@@ -10068,7 +10401,11 @@ pub async fn run_single_frame_owned_at(
                 return Err(cancelled_scope_error());
             }
             let frame = context.player.movie.current_frame;
-            Ok(context.player.movie.score.process_pending_unpuppet_reverts(frame))
+            Ok(context
+                .player
+                .movie
+                .score
+                .process_pending_unpuppet_reverts(frame))
         })
         .ok_or_else(cancelled_scope_error)??;
     if unpuppet_changed {
@@ -10101,7 +10438,9 @@ pub async fn run_single_frame_owned_at(
         crate::player::handlers::movie::MovieAsyncRequest {
             player_id,
             owner: owner.clone(),
-            kind: crate::player::handlers::movie::MovieAsyncKind::FrameUpdate { now_ms: frame_now_ms },
+            kind: crate::player::handlers::movie::MovieAsyncKind::FrameUpdate {
+                now_ms: frame_now_ms,
+            },
             args: Vec::new(),
         },
     )
@@ -10112,7 +10451,8 @@ pub async fn run_single_frame_owned_at(
             if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
                 return Err(cancelled_scope_error());
             }
-            context.player.playback_frame_count = context.player.playback_frame_count.saturating_add(1);
+            context.player.playback_frame_count =
+                context.player.playback_frame_count.saturating_add(1);
             Ok::<(), ScriptError>(())
         })
         .ok_or_else(cancelled_scope_error)??;
@@ -10125,7 +10465,8 @@ pub async fn run_single_frame_owned_at(
         owner.clone(),
         BuiltInSymbol::ExitFrame,
         Vec::new(),
-    ).await?;
+    )
+    .await?;
     // An eager goto can replace the movie while frame callbacks are pending;
     // the replacement owns the next init sequence and must not be advanced by
     // this stale frame.
@@ -10141,28 +10482,35 @@ pub async fn run_single_frame_owned_at(
     if pending_after_callbacks {
         return Ok((playing, paused));
     }
-    let (is_delayed, has_player_frame_changed, has_frame_changed_in_go, go_same_frame, go_direction) =
-        session
-            .borrow_mut()
-            .with_player(player_id, |context| {
-                if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
-                    return Err(cancelled_scope_error());
+    let (
+        is_delayed,
+        has_player_frame_changed,
+        has_frame_changed_in_go,
+        go_same_frame,
+        go_direction,
+    ) = session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                return Err(cancelled_scope_error());
+            }
+            let delayed = context.player.delay_until.map_or(false, |until| {
+                if chrono::Local::now() < until {
+                    true
+                } else {
+                    context.player.delay_until = None;
+                    false
                 }
-                let delayed = context.player.delay_until.map_or(false, |until| {
-                    if chrono::Local::now() < until { true } else {
-                        context.player.delay_until = None;
-                        false
-                    }
-                });
-                Ok((
-                    delayed,
-                    context.player.has_player_frame_changed,
-                    context.player.has_frame_changed_in_go,
-                    context.player.go_same_frame,
-                    context.player.go_direction,
-                ))
-            })
-            .ok_or_else(cancelled_scope_error)??;
+            });
+            Ok((
+                delayed,
+                context.player.has_player_frame_changed,
+                context.player.has_frame_changed_in_go,
+                context.player.go_same_frame,
+                context.player.go_direction,
+            ))
+        })
+        .ok_or_else(cancelled_scope_error)??;
     if is_delayed {
         return Ok((playing, paused));
     }
@@ -10172,7 +10520,10 @@ pub async fn run_single_frame_owned_at(
             if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
                 return Err(cancelled_scope_error());
             }
-            Ok((context.player.movie.current_frame, context.player.get_next_frame()))
+            Ok((
+                context.player.movie.current_frame,
+                context.player.get_next_frame(),
+            ))
         })
         .ok_or_else(cancelled_scope_error)??;
     // Exit-frame handlers have already completed in the owned MovieAsync
@@ -10216,18 +10567,19 @@ pub async fn run_single_frame_owned_at(
                 context.player.has_frame_changed_in_go = false;
                 context.player.has_player_frame_changed = false;
                 Ok::<(), ScriptError>(())
-        })
+            })
             .ok_or_else(cancelled_scope_error)??;
     } else {
         let ended = end_score_sprites_owned(
             session.clone(),
             player_id,
             owner.clone(),
-        ScoreRef::Stage,
-        previous_frame,
-        next_frame,
-        false,
-        ).await?;
+            ScoreRef::Stage,
+            previous_frame,
+            next_frame,
+            false,
+        )
+        .await?;
         session
             .borrow_mut()
             .with_player(player_id, |context| {
@@ -10253,9 +10605,8 @@ pub async fn run_single_frame_owned_at(
             if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
                 return Err(cancelled_scope_error());
             }
-            let ordinary_advance = !has_player_frame_changed
-                && !go_same_frame
-                && !has_frame_changed_in_go;
+            let ordinary_advance =
+                !has_player_frame_changed && !go_same_frame && !has_frame_changed_in_go;
             if !context.player.is_script_paused && ordinary_advance {
                 context.player.advance_frame();
                 context.player.begin_all_sprites(context.symbols);
@@ -10363,8 +10714,7 @@ async fn end_score_sprites_owned_with_policy(
                 // score, including D6+ channels synthesized from
                 // channel_initialization_data that have no sprite span.
                 for channel in &score.channels {
-                    if channel.sprite.entered && !channel.sprite.exited
-                    {
+                    if channel.sprite.entered && !channel.sprite.exited {
                         let channel_number = channel.number as u32;
                         if !ended.contains(&channel_number) {
                             ended.push(channel_number);
@@ -10386,7 +10736,8 @@ async fn end_score_sprites_owned_with_policy(
             let frame_script_ended = matches!(&score_ref, ScoreRef::Stage)
                 && ended.iter().any(|channel| {
                     *channel == 0
-                        && score.channels
+                        && score
+                            .channels
                             .get(0)
                             .is_some_and(|channel| !channel.sprite.script_instance_list.is_empty())
                 });
@@ -10408,7 +10759,8 @@ async fn end_score_sprites_owned_with_policy(
             &owner,
             Symbol::builtin(BuiltInSymbol::EndSprite),
             &[],
-        ).await;
+        )
+        .await;
         if let Err(error) = static_result {
             if error.code != ScriptErrorCode::Abort
                 && error_policy == EndSpriteErrorPolicy::CollectForStop
@@ -10441,14 +10793,24 @@ async fn end_score_sprites_owned_with_policy(
                     handler,
                     Vec::new(),
                     false,
-                ).await;
+                )
+                .await;
                 match callback_result {
-                    Ok(_) | Err(ScriptError { code: ScriptErrorCode::HandlerNotFound, .. }) => {}
-                    Err(ScriptError { code: ScriptErrorCode::Abort, .. }) => break,
+                    Ok(_)
+                    | Err(ScriptError {
+                        code: ScriptErrorCode::HandlerNotFound,
+                        ..
+                    }) => {}
+                    Err(ScriptError {
+                        code: ScriptErrorCode::Abort,
+                        ..
+                    }) => break,
                     Err(error) => {
                         if error_policy == EndSpriteErrorPolicy::ReportAndContinue {
                             let _ = session.borrow_mut().with_player(player_id, |context| {
-                                if owner.same_identity(&context.player.owner) && owner.is_arena_live() {
+                                if owner.same_identity(&context.player.owner)
+                                    && owner.is_arena_live()
+                                {
                                     context.player.on_script_error_with_symbols(
                                         &error,
                                         Some(context.symbols),
@@ -10463,7 +10825,10 @@ async fn end_score_sprites_owned_with_policy(
             }
         }
     }
-    Ok(EndScoreSpritesResult { ended_channels, first_error })
+    Ok(EndScoreSpritesResult {
+        ended_channels,
+        first_error,
+    })
 }
 
 async fn end_score_sprites_owned(
@@ -10507,7 +10872,12 @@ async fn advance_filmloops_owned(
             let refs = context.player.active_stage_filmloop_member_refs();
             let mut plans = Vec::new();
             for member_ref in refs {
-                let Some(member) = context.player.movie.cast_manager.find_member_by_ref(&member_ref) else {
+                let Some(member) = context
+                    .player
+                    .movie
+                    .cast_manager
+                    .find_member_by_ref(&member_ref)
+                else {
                     continue;
                 };
                 let CastMemberType::FilmLoop(film_loop) = &member.member_type else {
@@ -10517,7 +10887,11 @@ async fn advance_filmloops_owned(
                 let frame_count = film_loop.score.frame_count.unwrap_or(1).max(1);
                 let next = old_frame + 1;
                 let next_frame = if next > frame_count {
-                    if film_loop.info.loops != 0 { 1 } else { frame_count }
+                    if film_loop.info.loops != 0 {
+                        1
+                    } else {
+                        frame_count
+                    }
                 } else {
                     next
                 };
@@ -10539,7 +10913,8 @@ async fn advance_filmloops_owned(
             old_frame,
             next_frame,
             false,
-        ).await?;
+        )
+        .await?;
         let changed = session
             .borrow_mut()
             .with_player(player_id, |context| {
@@ -10547,7 +10922,12 @@ async fn advance_filmloops_owned(
                     return Err(cancelled_scope_error());
                 }
                 let mut changed = false;
-                if let Some(member) = context.player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                if let Some(member) = context
+                    .player
+                    .movie
+                    .cast_manager
+                    .find_mut_member_by_ref(&member_ref)
+                {
                     if let CastMemberType::FilmLoop(film_loop) = &mut member.member_type {
                         for sprite_num in ended {
                             film_loop.score.get_sprite_mut(sprite_num as i16).exited = true;
@@ -10557,8 +10937,17 @@ async fn advance_filmloops_owned(
                     }
                 }
                 if changed {
-                    context.player.begin_score_sprites(score_ref.clone(), next_frame, context.symbols);
-                    if let Some(member) = context.player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                    context.player.begin_score_sprites(
+                        score_ref.clone(),
+                        next_frame,
+                        context.symbols,
+                    );
+                    if let Some(member) = context
+                        .player
+                        .movie
+                        .cast_manager
+                        .find_mut_member_by_ref(&member_ref)
+                    {
                         if let CastMemberType::FilmLoop(film_loop) = &mut member.member_type {
                             film_loop.score.apply_tween_modifiers(next_frame);
                         }
@@ -10590,7 +10979,8 @@ pub async fn run_single_frame_owned(
         player_id,
         owner,
         crate::player::testing_shared::now_ms().max(0.0),
-    ).await
+    )
+    .await
 }
 
 /// Perform the movie transition for gotoNetMovie.
@@ -10769,8 +11159,12 @@ async fn transition_to_net_movie_owned(
                 .player
                 .net_manager
                 .get_task_result(Some(task_id))
-                .ok_or_else(|| ScriptError::new(format!("No response received for task {task_id}")))?
-                .map_err(|_| ScriptError::new(format!("Network request failed for task {task_id}")))?;
+                .ok_or_else(|| {
+                    ScriptError::new(format!("No response received for task {task_id}"))
+                })?
+                .map_err(|_| {
+                    ScriptError::new(format!("Network request failed for task {task_id}"))
+                })?;
             let file_name = task
                 .resolved_url
                 .path_segments()
@@ -10781,8 +11175,10 @@ async fn transition_to_net_movie_owned(
             Ok((bytes, file_name, base_url))
         })
         .ok_or_else(cancelled_scope_error)??;
-    let dir_file = read_director_file_bytes(&data_bytes, &file_name, &base_url)
-        .map_err(|error| ScriptError::new(format!("Failed to parse movie file '{file_name}': {error}")))?;
+    let dir_file =
+        read_director_file_bytes(&data_bytes, &file_name, &base_url).map_err(|error| {
+            ScriptError::new(format!("Failed to parse movie file '{file_name}': {error}"))
+        })?;
 
     let previous_dispatching = session
         .borrow_mut()
@@ -10792,7 +11188,10 @@ async fn transition_to_net_movie_owned(
             }
             context.player.is_playing = false;
             context.player.is_in_transition = true;
-            Ok(std::mem::replace(&mut context.player.is_dispatching_events, false))
+            Ok(std::mem::replace(
+                &mut context.player.is_dispatching_events,
+                false,
+            ))
         })
         .ok_or_else(cancelled_scope_error)??;
     stop_phase.set(PlaybackTransitionStopPhase::InProgress);
@@ -10814,7 +11213,9 @@ async fn transition_to_net_movie_owned(
             }
             context.player.is_dispatching_events = previous_dispatching;
             context.player.movie.score.reset();
-            context.player.queue_player_notification(PlayerNotificationKind::ScoreChanged);
+            context
+                .player
+                .queue_player_notification(PlayerNotificationKind::ScoreChanged);
             context.player.clear_script_instance_list_caches();
             context.player.movie.frame_script_instance = None;
             context.player.movie.frame_script_member = None;
@@ -10826,13 +11227,10 @@ async fn transition_to_net_movie_owned(
             Ok::<(), ScriptError>(())
         })
         .ok_or_else(cancelled_scope_error)??;
-    if let Err(error) = DirPlayer::load_movie_from_dir_owned(
-        session.clone(),
-        player_id,
-        owner.clone(),
-        dir_file,
-    )
-    .await {
+    if let Err(error) =
+        DirPlayer::load_movie_from_dir_owned(session.clone(), player_id, owner.clone(), dir_file)
+            .await
+    {
         let _ = session.borrow_mut().with_player(player_id, |context| {
             if owner.same_identity(&context.player.owner) && owner.is_arena_live() {
                 context.player.is_dispatching_events = previous_dispatching;
@@ -10867,11 +11265,13 @@ async fn transition_to_net_movie_owned(
             context.player.pending_goto_net_movie = None;
             context.player.is_playing = true;
             context.player.pending_movie_init = false;
-            context.player.movie_mount_generation = context.player.movie_mount_generation.wrapping_add(1);
+            context.player.movie_mount_generation =
+                context.player.movie_mount_generation.wrapping_add(1);
             Ok::<(), ScriptError>(())
         })
         .ok_or_else(cancelled_scope_error)??;
-    let result = run_movie_init_owned_at(session.clone(), player_id, owner.clone(), bench_now_ms()).await;
+    let result =
+        run_movie_init_owned_at(session.clone(), player_id, owner.clone(), bench_now_ms()).await;
     let _ = session.borrow_mut().with_player(player_id, |context| {
         if owner.same_identity(&context.player.owner) && owner.is_arena_live() {
             context.player.is_in_transition = false;
@@ -11014,12 +11414,10 @@ pub(crate) async fn mount_net_movie(task_id: u32, target: MovieFrameTarget, eage
         player.is_playing = false;
     });
 
-    DirPlayer::load_movie_from_dir_owned(
-        session.clone(), player_id, owner.clone(), dir_file,
-    )
-    .await
-    .is_ok()
-    || return false;
+    DirPlayer::load_movie_from_dir_owned(session.clone(), player_id, owner.clone(), dir_file)
+        .await
+        .is_ok()
+        || return false;
 
     // Apply frame target if specified, restore is_playing before init sequence
     reserve_player_mut(|player| {
@@ -11065,19 +11463,18 @@ async fn restart_current_movie_owned(
     owner: OwnerToken,
     stop_phase: Rc<Cell<PlaybackTransitionStopPhase>>,
 ) -> Result<(), ScriptError> {
-    let (bytes, file_name, base_url) = session
-        .borrow_mut()
-        .with_player(player_id, |context| {
-            if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
-                return Err(cancelled_scope_error());
-            }
-            context
-                .player
-                .movie_reload_data
-                .clone()
-                .ok_or_else(|| ScriptError::new("current movie bytes are unavailable".to_owned()))
-        })
-        .ok_or_else(cancelled_scope_error)??;
+    let (bytes, file_name, base_url) =
+        session
+            .borrow_mut()
+            .with_player(player_id, |context| {
+                if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                    return Err(cancelled_scope_error());
+                }
+                context.player.movie_reload_data.clone().ok_or_else(|| {
+                    ScriptError::new("current movie bytes are unavailable".to_owned())
+                })
+            })
+            .ok_or_else(cancelled_scope_error)??;
     let dir_file = read_director_file_bytes(&bytes, &file_name, &base_url)
         .map_err(|error| ScriptError::new(format!("Failed to re-parse movie bytes: {error}")))?;
     session
@@ -11110,7 +11507,9 @@ async fn restart_current_movie_owned(
                 return Err(cancelled_scope_error());
             }
             context.player.movie.score.reset();
-            context.player.queue_player_notification(PlayerNotificationKind::ScoreChanged);
+            context
+                .player
+                .queue_player_notification(PlayerNotificationKind::ScoreChanged);
             context.player.clear_script_instance_list_caches();
             context.player.movie.frame_script_instance = None;
             context.player.movie.frame_script_member = None;
@@ -11124,13 +11523,10 @@ async fn restart_current_movie_owned(
             Ok::<(), ScriptError>(())
         })
         .ok_or_else(cancelled_scope_error)??;
-    if let Err(error) = DirPlayer::load_movie_from_dir_owned(
-        session.clone(),
-        player_id,
-        owner.clone(),
-        dir_file,
-    )
-    .await {
+    if let Err(error) =
+        DirPlayer::load_movie_from_dir_owned(session.clone(), player_id, owner.clone(), dir_file)
+            .await
+    {
         let _ = session.borrow_mut().with_player(player_id, |context| {
             if owner.same_identity(&context.player.owner) && owner.is_arena_live() {
                 context.player.is_in_transition = false;
@@ -11150,7 +11546,8 @@ async fn restart_current_movie_owned(
             Ok::<(), ScriptError>(())
         })
         .ok_or_else(cancelled_scope_error)??;
-    let result = run_movie_init_owned_at(session.clone(), player_id, owner.clone(), bench_now_ms()).await;
+    let result =
+        run_movie_init_owned_at(session.clone(), player_id, owner.clone(), bench_now_ms()).await;
     let _ = session.borrow_mut().with_player(player_id, |context| {
         if owner.same_identity(&context.player.owner) && owner.is_arena_live() {
             context.player.is_in_transition = false;
@@ -11219,10 +11616,9 @@ async fn restart_current_movie() {
         player.is_playing = false;
     });
 
-    if let Err(error) = DirPlayer::load_movie_from_dir_owned(
-        session.clone(), player_id, owner.clone(), dir_file,
-    )
-    .await
+    if let Err(error) =
+        DirPlayer::load_movie_from_dir_owned(session.clone(), player_id, owner.clone(), dir_file)
+            .await
     {
         log::warn!("restart: owner-bound movie load failed: {}", error.message);
         return;
@@ -11313,13 +11709,19 @@ pub async fn fire_pending_timeouts() {
         if target_ref != DatumRef::Void {
             let result = call_datum_handler_active(&target_ref, handler_name.clone(), &args).await;
             match result {
-                crate::player::handlers::datum_handlers::DatumDispatch::Pending { request, reason } => {
+                crate::player::handlers::datum_handlers::DatumDispatch::Pending {
+                    request,
+                    reason,
+                } => {
                     retain_datum_pending(request, reason);
                 }
                 crate::player::handlers::datum_handlers::DatumDispatch::Sync(Err(err))
                     if err.code != ScriptErrorCode::HandlerNotFound =>
                 {
-                    warn!("Timeout '{}' handler '{:?}' error: {}", timeout_name, handler_name, err.message);
+                    warn!(
+                        "Timeout '{}' handler '{:?}' error: {}",
+                        timeout_name, handler_name, err.message
+                    );
                 }
                 _ => {}
             }
@@ -11327,7 +11729,10 @@ pub async fn fire_pending_timeouts() {
             player_invoke_global_event(Symbol::builtin(BuiltInSymbol::Timeout), &args).await
         {
             if err.code != ScriptErrorCode::HandlerNotFound {
-                warn!("Timeout '{}' handler '{:?}' error: {}", timeout_name, handler_name, err.message);
+                warn!(
+                    "Timeout '{}' handler '{:?}' error: {}",
+                    timeout_name, handler_name, err.message
+                );
             }
         }
     }
@@ -11358,12 +11763,14 @@ async fn dispatch_timeout_target_owned(
             context
                 .player
                 .checked_movie_datum_ref(context.symbols, &target_ref)?;
-            Ok(crate::player::handlers::datum_handlers::player_call_datum_handler(
-                &mut context,
-                &target_ref,
-                handler_name.clone(),
-                &args,
-            ))
+            Ok(
+                crate::player::handlers::datum_handlers::player_call_datum_handler(
+                    &mut context,
+                    &target_ref,
+                    handler_name.clone(),
+                    &args,
+                ),
+            )
         })
         .ok_or_else(cancelled_scope_error)??;
 
@@ -11385,12 +11792,15 @@ async fn dispatch_timeout_target_owned(
             )
             .await
             {
-                Ok(_) | Err(ScriptError { code: ScriptErrorCode::HandlerNotFound, .. }) => {}
+                Ok(_)
+                | Err(ScriptError {
+                    code: ScriptErrorCode::HandlerNotFound,
+                    ..
+                }) => {}
                 Err(error) if error.code == ScriptErrorCode::Abort => return Ok(()),
                 Err(error) => warn!(
                     "Timeout '{}' child handler error: {}",
-                    timeout_name,
-                    error.message
+                    timeout_name, error.message
                 ),
             }
         }
@@ -11415,23 +11825,26 @@ async fn dispatch_timeout_target_owned(
                     if !session
                         .borrow_mut()
                         .with_player(player_id, |context| {
-                            owner.same_identity(&context.player.owner)
-                                && owner.is_arena_live()
+                            owner.same_identity(&context.player.owner) && owner.is_arena_live()
                         })
                         .unwrap_or(false)
                     {
                         return Err(cancelled_scope_error());
                     }
-                    session
-                        .borrow_mut()
-                        .apply_child_completion(player_id, completion, scope.return_value)?;
+                    session.borrow_mut().apply_child_completion(
+                        player_id,
+                        completion,
+                        scope.return_value,
+                    )?;
                 }
-                Err(ScriptError { code: ScriptErrorCode::HandlerNotFound, .. }) => {}
+                Err(ScriptError {
+                    code: ScriptErrorCode::HandlerNotFound,
+                    ..
+                }) => {}
                 Err(error) if error.code == ScriptErrorCode::Abort => return Ok(()),
                 Err(error) => warn!(
                     "Timeout '{}' child handler error: {}",
-                    timeout_name,
-                    error.message
+                    timeout_name, error.message
                 ),
             }
         }
@@ -11440,9 +11853,7 @@ async fn dispatch_timeout_target_owned(
         {
             warn!(
                 "Timeout '{}' handler '{:?}' error: {}",
-                timeout_name,
-                handler_name,
-                error.message
+                timeout_name, handler_name, error.message
             );
         }
         crate::player::handlers::datum_handlers::DatumDispatch::Pending { request, reason } => {
@@ -11499,12 +11910,15 @@ async fn dispatch_system_event_to_timeouts_owned(
             )
             .await
             {
-                Ok(_) | Err(ScriptError { code: ScriptErrorCode::HandlerNotFound, .. }) => {}
+                Ok(_)
+                | Err(ScriptError {
+                    code: ScriptErrorCode::HandlerNotFound,
+                    ..
+                }) => {}
                 Err(error) if error.code == ScriptErrorCode::Abort => return Ok(()),
                 Err(error) => warn!(
                     "Timeout system event {:?} error: {}",
-                    handler_name,
-                    error.message
+                    handler_name, error.message
                 ),
             }
         } else {
@@ -11593,8 +12007,7 @@ pub(crate) async fn fire_pending_timeouts_owned_at(
                 Err(error) if error.code == ScriptErrorCode::HandlerNotFound => {}
                 Err(error) => warn!(
                     "Timeout '{}' global handler error: {}",
-                    timeout_name,
-                    error.message
+                    timeout_name, error.message
                 ),
             }
         }
@@ -11610,12 +12023,8 @@ pub(crate) async fn fire_pending_timeouts_owned(
     player_id: u32,
     owner: OwnerToken,
 ) -> Result<(), ScriptError> {
-    fire_pending_timeouts_owned_at(
-        session,
-        player_id,
-        owner,
-        testing_shared::now_ms().max(0.0),
-    ).await
+    fire_pending_timeouts_owned_at(session, player_id, owner, testing_shared::now_ms().max(0.0))
+        .await
 }
 
 pub async fn run_single_frame() -> (bool, bool) {
@@ -11624,8 +12033,8 @@ pub async fn run_single_frame() -> (bool, bool) {
     if !is_playing {
         return (false, is_script_paused);
     }
-    let session_handle = retained_session_handle()
-        .expect("frame advancement requires the owning runtime session");
+    let session_handle =
+        retained_session_handle().expect("frame advancement requires the owning runtime session");
     let player_id = active_player_id() as u32;
     let owner = session_handle
         .borrow_mut()
@@ -11843,7 +12252,7 @@ pub async fn run_single_frame() -> (bool, bool) {
     } else {
         player_wait_available().await;
 
-            dispatch_event_to_all_behaviors(Symbol::builtin(BuiltInSymbol::ExitFrame), &vec![]).await;
+        dispatch_event_to_all_behaviors(Symbol::builtin(BuiltInSymbol::ExitFrame), &vec![]).await;
 
         player_wait_available().await;
 
@@ -12020,15 +12429,14 @@ pub async fn run_single_frame() -> (bool, bool) {
 
     // Initialize behavior default properties
     for (behavior_ref, sprite_num) in &behaviors_to_init {
-        if let Err(err) =
-            Score::initialize_behavior_defaults_async(
-                session_handle.clone(),
-                player_id,
-                owner.clone(),
-                behavior_ref.clone(),
-                *sprite_num,
-            )
-            .await
+        if let Err(err) = Score::initialize_behavior_defaults_async(
+            session_handle.clone(),
+            player_id,
+            owner.clone(),
+            behavior_ref.clone(),
+            *sprite_num,
+        )
+        .await
         {
             console_warn!("Failed to initialize behavior defaults: {}", err.message);
         }
@@ -12685,7 +13093,9 @@ pub async fn run_frame_loop() {
         // Pre-dispatch Flash members for sprites on the current frame so they start
         // loading before Lingo scripts try to access them.
         let flash_actions = reserve_player_mut(|player| {
-            player.pre_dispatch_flash_members().map(|_| player.take_flash_host_actions())
+            player
+                .pre_dispatch_flash_members()
+                .map(|_| player.take_flash_host_actions())
         });
         if let Err(error) = flash_actions.and_then(emit_flash_host_actions) {
             warn!("Flash host preparation failed: {}", error.message);
@@ -12732,8 +13142,11 @@ pub async fn run_frame_loop() {
                 player.is_playing && !player.is_script_paused && !player.pending_movie_init
             });
             if active {
-                if let Err(err) =
-                    player_invoke_frame_and_movie_scripts(Symbol::builtin(BuiltInSymbol::Idle), &vec![]).await
+                if let Err(err) = player_invoke_frame_and_movie_scripts(
+                    Symbol::builtin(BuiltInSymbol::Idle),
+                    &vec![],
+                )
+                .await
                 {
                     warn!("idle dispatch failed: {}", err.message);
                 }
@@ -12771,19 +13184,31 @@ pub async fn run_frame_loop() {
                 break;
             }
             for (channel_num, cue_number, cue_name) in events {
-                let Some(session) = retained_session_handle() else { break };
+                let Some(session) = retained_session_handle() else {
+                    break;
+                };
                 let player_id = active_player_id() as u32;
-                let Some((args, cue_symbol)) = session.borrow_mut().with_player(player_id, |mut context| {
-                    let chan_symbol = context.symbols.intern(&format!("sound{}", channel_num));
-                    let chan_sym = context.player.alloc_datum(crate::director::lingo::datum::Datum::Symbol(chan_symbol));
-                    let number_ref = context.player.alloc_datum(crate::director::lingo::datum::Datum::Int(cue_number));
-                    let name_ref = context.player.alloc_datum(crate::director::lingo::datum::Datum::String(cue_name));
-                    (vec![chan_sym, number_ref, name_ref], context.symbols.intern("cuePassed"))
-                }) else { break };
-                if let Err(err) =
-                    player_invoke_frame_and_movie_scripts(cue_symbol, &args)
-                        .await
-                {
+                let Some((args, cue_symbol)) =
+                    session.borrow_mut().with_player(player_id, |mut context| {
+                        let chan_symbol = context.symbols.intern(&format!("sound{}", channel_num));
+                        let chan_sym = context
+                            .player
+                            .alloc_datum(crate::director::lingo::datum::Datum::Symbol(chan_symbol));
+                        let number_ref = context
+                            .player
+                            .alloc_datum(crate::director::lingo::datum::Datum::Int(cue_number));
+                        let name_ref = context
+                            .player
+                            .alloc_datum(crate::director::lingo::datum::Datum::String(cue_name));
+                        (
+                            vec![chan_sym, number_ref, name_ref],
+                            context.symbols.intern("cuePassed"),
+                        )
+                    })
+                else {
+                    break;
+                };
+                if let Err(err) = player_invoke_frame_and_movie_scripts(cue_symbol, &args).await {
                     warn!("cuePassed dispatch failed: {}", err.message);
                 }
             }
@@ -13009,7 +13434,10 @@ pub fn init_player() {
     unsafe {
         // Production owns the host player in the retained RuntimeSession so
         // evaluator continuations and handler drivers share one graph.
-        let mut session = RuntimeSession::new(SymbolOwner { session: 1, generation: 1 });
+        let mut session = RuntimeSession::new(SymbolOwner {
+            session: 1,
+            generation: 1,
+        });
         assert!(session.add_player(0, tx.clone()));
         PLAYER_SESSION_HANDLE.with(|slot| {
             *slot.borrow_mut() = Some(Rc::new(RefCell::new(session)));
@@ -13017,7 +13445,8 @@ pub fn init_player() {
         PLAYER_OPT = None;
         // PLAYER_NAMES = Some(lasso::Rodeo::default());
     }
-    let command_session = retained_session_handle().expect("init_player must retain RuntimeSession");
+    let command_session =
+        retained_session_handle().expect("init_player must retain RuntimeSession");
     let command_owner = command_session
         .borrow_mut()
         .with_player(0, |context| context.player.owner.clone())
@@ -13163,9 +13592,7 @@ fn bench_minimal_script() -> crate::player::script::Script {
 pub fn run_bytecode_benchmark() -> String {
     use crate::director::chunks::handler::{Bytecode, HandlerDef};
     use crate::director::lingo::opcode::OpCode;
-    use crate::player::bytecode::handler_manager::{
-        BytecodeHandlerContext, try_execute_bytecode_sync,
-    };
+    use crate::player::bytecode::handler_manager::{BytecodeHandlerContext, try_execute_bytecode_sync};
     use crate::player::symbols::symbol::Symbol;
 
     fn run(bytecode: Vec<Bytecode>) -> (usize, f64) {
@@ -13190,16 +13617,16 @@ pub fn run_bytecode_benchmark() -> String {
         let script = bench_minimal_script();
         let (scope_ref, scope_owner, scope_generation, scope_epoch) = session
             .with_player(1, |mut runtime| {
-            let scope_ref = runtime.player.push_scope();
-            let scope_generation = runtime.player.scopes[scope_ref].generation;
-            (
-                scope_ref,
-                runtime.player.owner.clone(),
-                scope_generation,
-                runtime.player.scope_invalidation_epoch,
-            )
-        })
-        .unwrap();
+                let scope_ref = runtime.player.push_scope();
+                let scope_generation = runtime.player.scopes[scope_ref].generation;
+                (
+                    scope_ref,
+                    runtime.player.owner.clone(),
+                    scope_generation,
+                    runtime.player.scope_invalidation_epoch,
+                )
+            })
+            .unwrap();
         let ctx = BytecodeHandlerContext {
             scope: ScopeToken {
                 owner: scope_owner,
@@ -13224,15 +13651,17 @@ pub fn run_bytecode_benchmark() -> String {
                 .and_then(|result| result);
             match step {
                 Some(Ok(HandlerExecutionResult::Advance)) => {
-                    let done = session.with_player(1, |runtime| {
-                        let scope = runtime.player.scopes.get_mut(scope_ref).unwrap();
-                        if scope.bytecode_index + 1 >= total_ops {
-                            true
-                        } else {
-                            scope.bytecode_index += 1;
-                            false
-                        }
-                    }).unwrap();
+                    let done = session
+                        .with_player(1, |runtime| {
+                            let scope = runtime.player.scopes.get_mut(scope_ref).unwrap();
+                            if scope.bytecode_index + 1 >= total_ops {
+                                true
+                            } else {
+                                scope.bytecode_index += 1;
+                                false
+                            }
+                        })
+                        .unwrap();
                     if done {
                         break;
                     }
@@ -13243,7 +13672,9 @@ pub fn run_bytecode_benchmark() -> String {
             }
         }
         let elapsed_ms = bench_now_ms() - start;
-        session.with_player(1, |runtime| runtime.player.pop_scope()).unwrap();
+        session
+            .with_player(1, |runtime| runtime.player.pop_scope())
+            .unwrap();
         (total_ops, elapsed_ms)
     }
 
@@ -13276,21 +13707,24 @@ pub fn run_bytecode_benchmark() -> String {
         let script = bench_minimal_script();
         let (scope_ref, scope_owner, scope_generation, scope_epoch) = session
             .with_player(1, |mut runtime| {
-            let s = runtime.player.push_scope();
-            let d = runtime.player.alloc_datum(crate::director::lingo::datum::Datum::Int(1));
-            runtime.player
-                .scopes
-                .get_mut(s)
-                .unwrap()
-                .set_local(0, crate::player::scope::StackDatum::Ref(d));
-            (
-                s,
-                runtime.player.owner.clone(),
-                runtime.player.scopes[s].generation,
-                runtime.player.scope_invalidation_epoch,
-            )
-        })
-        .unwrap();
+                let s = runtime.player.push_scope();
+                let d = runtime
+                    .player
+                    .alloc_datum(crate::director::lingo::datum::Datum::Int(1));
+                runtime
+                    .player
+                    .scopes
+                    .get_mut(s)
+                    .unwrap()
+                    .set_local(0, crate::player::scope::StackDatum::Ref(d));
+                (
+                    s,
+                    runtime.player.owner.clone(),
+                    runtime.player.scopes[s].generation,
+                    runtime.player.scope_invalidation_epoch,
+                )
+            })
+            .unwrap();
         let ctx = BytecodeHandlerContext {
             scope: ScopeToken {
                 owner: scope_owner,
@@ -13314,15 +13748,17 @@ pub fn run_bytecode_benchmark() -> String {
                 .and_then(|result| result);
             match step {
                 Some(Ok(HandlerExecutionResult::Advance)) => {
-                    let done = session.with_player(1, |runtime| {
-                        let scope = runtime.player.scopes.get_mut(scope_ref).unwrap();
-                        if scope.bytecode_index + 1 >= total_ops {
-                            true
-                        } else {
-                            scope.bytecode_index += 1;
-                            false
-                        }
-                    }).unwrap();
+                    let done = session
+                        .with_player(1, |runtime| {
+                            let scope = runtime.player.scopes.get_mut(scope_ref).unwrap();
+                            if scope.bytecode_index + 1 >= total_ops {
+                                true
+                            } else {
+                                scope.bytecode_index += 1;
+                                false
+                            }
+                        })
+                        .unwrap();
                     if done {
                         break;
                     }
@@ -13331,7 +13767,9 @@ pub fn run_bytecode_benchmark() -> String {
             }
         }
         let elapsed_ms = bench_now_ms() - start;
-        session.with_player(1, |runtime| runtime.player.pop_scope()).unwrap();
+        session
+            .with_player(1, |runtime| runtime.player.pop_scope())
+            .unwrap();
         (total_ops, elapsed_ms)
     }
 
@@ -13457,15 +13895,17 @@ pub fn run_bytecode_benchmark() -> String {
         assert!(session.add_player(1, async_std::channel::unbounded().0));
         let mut sink = 0usize;
         let start = bench_now_ms();
-        session.with_player(1, |runtime| {
-            for i in 0..n {
-                // Small ints are pooled (ref_count = MAX), so this remains the
-                // same allocation/drop workload without an ambient player.
-                let r = runtime.player.alloc_datum(Datum::Int((i % 200) as i32));
-                sink = sink.wrapping_add(r.unwrap());
-                drop(r);
-            }
-        }).unwrap();
+        session
+            .with_player(1, |runtime| {
+                for i in 0..n {
+                    // Small ints are pooled (ref_count = MAX), so this remains the
+                    // same allocation/drop workload without an ambient player.
+                    let r = runtime.player.alloc_datum(Datum::Int((i % 200) as i32));
+                    sink = sink.wrapping_add(r.unwrap());
+                    drop(r);
+                }
+            })
+            .unwrap();
         let ms = bench_now_ms() - start;
         out.push_str(&line("alloc_datum(Int)+drop", n, ms));
         out.push_str(&format!("   [sink={}]\n", sink & 1));
@@ -13590,23 +14030,10 @@ pub fn run_bytecode_benchmark() -> String {
                 .unwrap();
             let warmup = 1 << 20;
             for pass in 1..=2 {
-                session.with_player(1, |mut runtime| {
-                    for i in 0..warmup {
-                        runtime.player.scopes[scope_ref].bytecode_index = i % chunk;
-                        let _ = compiled::run_handler_resumable(
-                            &compiled_esc,
-                            &scope_token,
-                            runtime.player,
-                            runtime.symbols,
-                        );
-                    }
-                }).unwrap();
-                let start = bench_now_ms();
-                let mut done = 0usize;
-                session.with_player(1, |mut runtime| {
-                    while done < escapes {
-                        for i in 0..chunk {
-                            runtime.player.scopes[scope_ref].bytecode_index = i;
+                session
+                    .with_player(1, |mut runtime| {
+                        for i in 0..warmup {
+                            runtime.player.scopes[scope_ref].bytecode_index = i % chunk;
                             let _ = compiled::run_handler_resumable(
                                 &compiled_esc,
                                 &scope_token,
@@ -13614,59 +14041,97 @@ pub fn run_bytecode_benchmark() -> String {
                                 runtime.symbols,
                             );
                         }
-                        done += chunk;
-                    }
-                }).unwrap();
+                    })
+                    .unwrap();
+                let start = bench_now_ms();
+                let mut done = 0usize;
+                session
+                    .with_player(1, |mut runtime| {
+                        while done < escapes {
+                            for i in 0..chunk {
+                                runtime.player.scopes[scope_ref].bytecode_index = i;
+                                let _ = compiled::run_handler_resumable(
+                                    &compiled_esc,
+                                    &scope_token,
+                                    runtime.player,
+                                    runtime.symbols,
+                                );
+                            }
+                            done += chunk;
+                        }
+                    })
+                    .unwrap();
                 let ms = bench_now_ms() - start;
-                out.push_str(&line(&format!("IR escape re-entry: validated wrapper p{pass}"), done, ms));
+                out.push_str(&line(
+                    &format!("IR escape re-entry: validated wrapper p{pass}"),
+                    done,
+                    ms,
+                ));
                 out.push('\n');
 
-                session.with_player(1, |mut runtime| {
-                    let scope = &mut runtime.player.scopes[scope_ref];
-                    for i in 0..warmup {
-                        scope.bytecode_index = i % chunk;
-                        let _ = compiled::run_handler_stub(&compiled_esc, scope);
-                    }
-                }).unwrap();
-                let start = bench_now_ms();
-                let mut stub_done = 0usize;
-                session.with_player(1, |mut runtime| {
-                    let scope = &mut runtime.player.scopes[scope_ref];
-                    while stub_done < escapes {
-                        for i in 0..chunk {
-                            scope.bytecode_index = i;
+                session
+                    .with_player(1, |mut runtime| {
+                        let scope = &mut runtime.player.scopes[scope_ref];
+                        for i in 0..warmup {
+                            scope.bytecode_index = i % chunk;
                             let _ = compiled::run_handler_stub(&compiled_esc, scope);
                         }
-                        stub_done += chunk;
-                    }
-                }).unwrap();
+                    })
+                    .unwrap();
+                let start = bench_now_ms();
+                let mut stub_done = 0usize;
+                session
+                    .with_player(1, |mut runtime| {
+                        let scope = &mut runtime.player.scopes[scope_ref];
+                        while stub_done < escapes {
+                            for i in 0..chunk {
+                                scope.bytecode_index = i;
+                                let _ = compiled::run_handler_stub(&compiled_esc, scope);
+                            }
+                            stub_done += chunk;
+                        }
+                    })
+                    .unwrap();
                 let ms = bench_now_ms() - start;
-                out.push_str(&line(&format!("IR escape control: &mut Scope stub p{pass}"), stub_done, ms));
+                out.push_str(&line(
+                    &format!("IR escape control: &mut Scope stub p{pass}"),
+                    stub_done,
+                    ms,
+                ));
                 out.push('\n');
 
-                session.with_player(1, |mut runtime| {
-                    let scope = &mut runtime.player.scopes[scope_ref];
-                    scope.ensure_locals(compiled_esc.n_locals);
-                    std::hint::black_box(scope.locals.len());
-                }).unwrap();
-                let start = bench_now_ms();
-                let mut local_done = 0usize;
-                session.with_player(1, |mut runtime| {
-                    let scope = &mut runtime.player.scopes[scope_ref];
-                    while local_done < escapes {
+                session
+                    .with_player(1, |mut runtime| {
+                        let scope = &mut runtime.player.scopes[scope_ref];
                         scope.ensure_locals(compiled_esc.n_locals);
                         std::hint::black_box(scope.locals.len());
-                        local_done += 1;
-                    }
-                }).unwrap();
+                    })
+                    .unwrap();
+                let start = bench_now_ms();
+                let mut local_done = 0usize;
+                session
+                    .with_player(1, |mut runtime| {
+                        let scope = &mut runtime.player.scopes[scope_ref];
+                        while local_done < escapes {
+                            scope.ensure_locals(compiled_esc.n_locals);
+                            std::hint::black_box(scope.locals.len());
+                            local_done += 1;
+                        }
+                    })
+                    .unwrap();
                 let ms = bench_now_ms() - start;
-                out.push_str(&line(&format!("IR scope local sizing p{pass}"), local_done, ms));
+                out.push_str(&line(
+                    &format!("IR scope local sizing p{pass}"),
+                    local_done,
+                    ms,
+                ));
                 out.push('\n');
             }
 
-            session.with_player(1, |runtime| runtime.player.pop_scope()).unwrap();
+            session
+                .with_player(1, |runtime| runtime.player.pop_scope())
+                .unwrap();
         }
-
     }
     out
 }
@@ -13703,16 +14168,18 @@ mod cursor_reset_tests {
         run_test(async {
             let player = TestPlayer::new();
             let runtime = player.harness_runtime();
-            runtime.with_context(|context| {
-                let p = context.player;
-                p.cursor = CursorRef::System(200);
-                p.cursor_is_hidden = true;
-                p.wants_pointer_lock = true;
-                p.reset_cursor_for_new_movie();
-                assert!(matches!(p.cursor, CursorRef::System(0)));
-                assert!(!p.cursor_is_hidden);
-                assert!(!p.wants_pointer_lock);
-            }).expect("harness player must remain owned");
+            runtime
+                .with_context(|context| {
+                    let p = context.player;
+                    p.cursor = CursorRef::System(200);
+                    p.cursor_is_hidden = true;
+                    p.wants_pointer_lock = true;
+                    p.reset_cursor_for_new_movie();
+                    assert!(matches!(p.cursor, CursorRef::System(0)));
+                    assert!(!p.cursor_is_hidden);
+                    assert!(!p.wants_pointer_lock);
+                })
+                .expect("harness player must remain owned");
         });
     }
 
@@ -13748,14 +14215,18 @@ mod cursor_reset_tests {
                 .expect("captured owner must reset its player");
             session
                 .borrow_mut()
-                .with_player(player_id, |context| context.player.is_in_frame_update = true)
+                .with_player(player_id, |context| {
+                    context.player.is_in_frame_update = true
+                })
                 .expect("replacement player must remain owned");
             drop(guard);
 
             assert_eq!(
                 session.borrow_mut().with_player(player_id, |context| {
-                    (context.player.owner.same_identity(&replacement),
-                     context.player.is_in_frame_update)
+                    (
+                        context.player.owner.same_identity(&replacement),
+                        context.player.is_in_frame_update,
+                    )
                 }),
                 Some((true, true))
             );
@@ -13776,7 +14247,10 @@ mod cursor_reset_tests {
                 .with_player(player_id, |context| {
                     let do_symbol = Symbol::builtin(BuiltInSymbol::Do);
                     let update_stage_source = context.symbols.intern("updateStage()");
-                    let member_ref = CastMemberRef { cast_lib: 1, cast_member: 1 };
+                    let member_ref = CastMemberRef {
+                        cast_lib: 1,
+                        cast_member: 1,
+                    };
                     let handler = Rc::new(crate::director::chunks::handler::HandlerDef {
                         name_id: 0,
                         bytecode_array: vec![
@@ -13849,11 +14323,15 @@ mod cursor_reset_tests {
                 args: Vec::new(),
             };
             let mut frame = Box::pin(crate::player::handlers::movie::execute_movie_async(
-                session.clone(), frame_request(),
+                session.clone(),
+                frame_request(),
             ));
             let waker = futures::task::noop_waker();
             let mut cx = std::task::Context::from_waker(&waker);
-            assert!(matches!(frame.as_mut().poll(&mut cx), std::task::Poll::Pending));
+            assert!(matches!(
+                frame.as_mut().poll(&mut cx),
+                std::task::Poll::Pending
+            ));
             assert_eq!(
                 session
                     .borrow_mut()
@@ -13870,9 +14348,13 @@ mod cursor_reset_tests {
             );
 
             let mut frame = Box::pin(crate::player::handlers::movie::execute_movie_async(
-                session.clone(), frame_request(),
+                session.clone(),
+                frame_request(),
             ));
-            assert!(matches!(frame.as_mut().poll(&mut cx), std::task::Poll::Pending));
+            assert!(matches!(
+                frame.as_mut().poll(&mut cx),
+                std::task::Poll::Pending
+            ));
             assert_eq!(
                 session
                     .borrow_mut()
@@ -13886,14 +14368,18 @@ mod cursor_reset_tests {
                 .expect("captured owner must reset its player");
             session
                 .borrow_mut()
-                .with_player(player_id, |context| context.player.is_in_frame_update = true)
+                .with_player(player_id, |context| {
+                    context.player.is_in_frame_update = true
+                })
                 .expect("replacement player must remain owned");
             drop(frame);
 
             assert_eq!(
                 session.borrow_mut().with_player(player_id, |context| {
-                    (context.player.owner.same_identity(&replacement),
-                     context.player.is_in_frame_update)
+                    (
+                        context.player.owner.same_identity(&replacement),
+                        context.player.is_in_frame_update,
+                    )
                 }),
                 Some((true, true))
             );
@@ -13918,7 +14404,10 @@ mod cursor_reset_tests {
             });
             let waker = futures::task::noop_waker();
             let mut cx = std::task::Context::from_waker(&waker);
-            assert!(matches!(suspended.as_mut().poll(&mut cx), std::task::Poll::Pending));
+            assert!(matches!(
+                suspended.as_mut().poll(&mut cx),
+                std::task::Poll::Pending
+            ));
 
             let replacement = session
                 .borrow_mut()
@@ -13926,14 +14415,18 @@ mod cursor_reset_tests {
                 .expect("captured owner must reset its player");
             session
                 .borrow_mut()
-                .with_player(player_id, |context| context.player.is_in_frame_update = true)
+                .with_player(player_id, |context| {
+                    context.player.is_in_frame_update = true
+                })
                 .expect("replacement player must remain owned");
             drop(suspended);
 
             assert_eq!(
                 session.borrow_mut().with_player(player_id, |context| {
-                    (context.player.owner.same_identity(&replacement),
-                     context.player.is_in_frame_update)
+                    (
+                        context.player.owner.same_identity(&replacement),
+                        context.player.is_in_frame_update,
+                    )
                 }),
                 Some((true, true))
             );
@@ -13989,11 +14482,7 @@ mod cursor_reset_tests {
                                     index as i64,
                                     1,
                                 ),
-                                Bytecode::new(
-                                    crate::director::lingo::opcode::OpCode::Ret,
-                                    0,
-                                    2,
-                                ),
+                                Bytecode::new(crate::director::lingo::opcode::OpCode::Ret, 0, 2),
                             ],
                             bytecode_index_map: FxHashMap::default(),
                             argument_name_ids: vec![],
@@ -14005,21 +14494,9 @@ mod cursor_reset_tests {
                     let exit_handler = Rc::new(HandlerDef {
                         name_id: 0,
                         bytecode_array: vec![
-                            Bytecode::new(
-                                crate::director::lingo::opcode::OpCode::GetGlobal,
-                                1,
-                                0,
-                            ),
-                            Bytecode::new(
-                                crate::director::lingo::opcode::OpCode::SetGlobal,
-                                2,
-                                1,
-                            ),
-                            Bytecode::new(
-                                crate::director::lingo::opcode::OpCode::Ret,
-                                0,
-                                2,
-                            ),
+                            Bytecode::new(crate::director::lingo::opcode::OpCode::GetGlobal, 1, 0),
+                            Bytecode::new(crate::director::lingo::opcode::OpCode::SetGlobal, 2, 1),
+                            Bytecode::new(crate::director::lingo::opcode::OpCode::Ret, 0, 2),
                         ],
                         bytecode_index_map: FxHashMap::default(),
                         argument_name_ids: vec![],
@@ -14051,9 +14528,7 @@ mod cursor_reset_tests {
                         name: "lifecycle-behavior".to_owned(),
                         chunk: script_chunk(),
                         script_type: ScriptType::Score,
-                        handlers: FxHashMap::from_iter([
-                            (begin_sprite.clone(), set_global(4)),
-                        ]),
+                        handlers: FxHashMap::from_iter([(begin_sprite.clone(), set_global(4))]),
                         handler_names_raw: vec!["beginSprite".to_owned()],
                         handler_names: vec![begin_sprite],
                         properties: RefCell::new(FxHashMap::default()),
@@ -14102,30 +14577,38 @@ mod cursor_reset_tests {
                     cast.scripts.insert(2, static_script);
                     cast.scripts.insert(3, timeout_script);
                     context.player.movie.cast_manager.casts.push(cast);
-                    let instance = context.player.allocator.alloc_script_instance(
-                        ScriptInstance {
+                    let instance = context
+                        .player
+                        .allocator
+                        .alloc_script_instance(ScriptInstance {
                             instance_id: 1,
                             script: behavior_ref,
                             ancestor: None,
                             properties: FxHashMap::default(),
                             begin_sprite_called: false,
-                        },
-                    );
+                        });
                     let instance_id = instance.id();
-                    let timeout_instance = context.player.allocator.alloc_script_instance(
-                        ScriptInstance {
-                            instance_id: 2,
-                            script: timeout_ref,
-                            ancestor: None,
-                            properties: FxHashMap::default(),
-                            begin_sprite_called: false,
-                        },
-                    );
+                    let timeout_instance =
+                        context
+                            .player
+                            .allocator
+                            .alloc_script_instance(ScriptInstance {
+                                instance_id: 2,
+                                script: timeout_ref,
+                                ancestor: None,
+                                properties: FxHashMap::default(),
+                                begin_sprite_called: false,
+                            });
                     let timeout_instance_ref = timeout_instance.clone();
                     let mut channel = SpriteChannel::new(1);
                     channel.sprite.entered = true;
                     channel.sprite.script_instance_list = vec![instance];
-                    context.player.movie.score.channels.push(SpriteChannel::new(0));
+                    context
+                        .player
+                        .movie
+                        .score
+                        .channels
+                        .push(SpriteChannel::new(0));
                     context.player.movie.score.channels.push(channel);
                     let timeout_target = context
                         .player
@@ -14160,14 +14643,12 @@ mod cursor_reset_tests {
                 .borrow_mut()
                 .with_player(player_id, |context| {
                     let value = |symbol: &Symbol| {
-                        context
-                            .player
-                            .globals
-                            .get(symbol)
-                            .and_then(|value| match context.player.get_datum(value) {
+                        context.player.globals.get(symbol).and_then(|value| {
+                            match context.player.get_datum(value) {
                                 Datum::Int(value) => Some(*value),
                                 _ => None,
-                            })
+                            }
+                        })
                     };
                     (
                         context
@@ -14183,13 +14664,20 @@ mod cursor_reset_tests {
                 observed,
                 (
                     Some(true),
-                    [Some(1), Some(1), Some(1), Some(1), Some(1), Some(1), Some(1)],
+                    [
+                        Some(1),
+                        Some(1),
+                        Some(1),
+                        Some(1),
+                        Some(1),
+                        Some(1),
+                        Some(1)
+                    ],
                 )
             );
         });
     }
 }
-
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod handler_gap_tests {
@@ -14204,22 +14692,27 @@ mod handler_gap_tests {
             let session = runtime.session();
             let player_id = runtime.player_id();
             let owner = runtime.owner().clone();
-            runtime.with_context(|context| {
-                let p = context.player;
-                p.is_playing = true;
-                p.in_frame_script = true;
-            }).expect("harness player must remain owned");
+            runtime
+                .with_context(|context| {
+                    let p = context.player;
+                    p.is_playing = true;
+                    p.in_frame_script = true;
+                })
+                .expect("harness player must remain owned");
             let held = timeout(
                 Duration::from_millis(30),
                 wait_for_handler_gap_owned(session.clone(), player_id, owner.clone()),
-            ).await;
+            )
+            .await;
             assert!(held.is_err(), "input ran inside the frame handler");
-            runtime.with_context(|context| context.player.in_frame_script = false)
+            runtime
+                .with_context(|context| context.player.in_frame_script = false)
                 .expect("harness player must remain owned");
             let released = timeout(
                 Duration::from_millis(200),
                 wait_for_handler_gap_owned(session, player_id, owner),
-            ).await;
+            )
+            .await;
             assert!(
                 matches!(released, Ok(Ok(()))),
                 "input never ran after the handler returned"
@@ -14235,16 +14728,19 @@ mod handler_gap_tests {
             let session = runtime.session();
             let player_id = runtime.player_id();
             let owner = runtime.owner().clone();
-            runtime.with_context(|context| {
-                let p = context.player;
-                p.is_playing = true;
-                p.in_frame_script = true;
-                p.in_mouse_command = true;
-            }).expect("harness player must remain owned");
+            runtime
+                .with_context(|context| {
+                    let p = context.player;
+                    p.is_playing = true;
+                    p.in_frame_script = true;
+                    p.in_mouse_command = true;
+                })
+                .expect("harness player must remain owned");
             let released = timeout(
                 Duration::from_millis(200),
                 wait_for_handler_gap_owned(session, player_id, owner),
-            ).await;
+            )
+            .await;
             assert!(matches!(released, Ok(Ok(()))));
         });
     }
@@ -14260,7 +14756,10 @@ mod handler_gap_tests {
             owner.mark_arena_dead();
 
             let result = wait_for_handler_gap_owned(session, player_id, owner).await;
-            assert!(result.is_err(), "retired owners must not reach input handling");
+            assert!(
+                result.is_err(),
+                "retired owners must not reach input handling"
+            );
         });
     }
 
@@ -14272,13 +14771,17 @@ mod handler_gap_tests {
             let session = runtime.session();
             let player_id = runtime.player_id();
             let owner = runtime.owner().clone();
-            runtime.with_context(|context| {
-                context.player.is_playing = true;
-                context.player.in_frame_script = true;
-            }).expect("harness player must remain owned");
+            runtime
+                .with_context(|context| {
+                    context.player.is_playing = true;
+                    context.player.in_frame_script = true;
+                })
+                .expect("harness player must remain owned");
 
             let mut gap = Box::pin(wait_for_handler_gap_owned(
-                session.clone(), player_id, owner.clone(),
+                session.clone(),
+                player_id,
+                owner.clone(),
             ));
             let waker = futures::task::noop_waker();
             let mut context = std::task::Context::from_waker(&waker);
@@ -14291,10 +14794,13 @@ mod handler_gap_tests {
                 .borrow_mut()
                 .reset_player_owned(player_id, &owner)
                 .expect("captured owner must reset its player");
-            session.borrow_mut().with_player(player_id, |context| {
-                context.player.is_playing = true;
-                context.player.in_frame_script = true;
-            }).expect("replacement player must remain installed");
+            session
+                .borrow_mut()
+                .with_player(player_id, |context| {
+                    context.player.is_playing = true;
+                    context.player.in_frame_script = true;
+                })
+                .expect("replacement player must remain installed");
             async_std::task::sleep(Duration::from_millis(10)).await;
 
             assert!(matches!(
@@ -14304,9 +14810,11 @@ mod handler_gap_tests {
             let replacement_state = session
                 .borrow_mut()
                 .with_player(player_id, |context| {
-                    (context.player.owner.same_identity(&replacement_owner),
-                     context.player.is_playing,
-                     context.player.in_frame_script)
+                    (
+                        context.player.owner.same_identity(&replacement_owner),
+                        context.player.is_playing,
+                        context.player.in_frame_script,
+                    )
                 })
                 .expect("replacement player must remain installed");
             assert_eq!(replacement_state, (true, true, true));
@@ -14317,7 +14825,10 @@ mod handler_gap_tests {
 #[cfg(test)]
 mod handler_code_lifetime_tests {
     use super::*;
-    use crate::director::chunks::{handler::{Bytecode, HandlerDef}, script::ScriptChunk};
+    use crate::director::chunks::{
+        handler::{Bytecode, HandlerDef},
+        script::ScriptChunk,
+    };
     use crate::director::lingo::opcode::OpCode;
     use crate::director::enums::ScriptType;
     use crate::player::cast_lib::{CastLib, CastMemberRef};
@@ -14341,7 +14852,10 @@ mod handler_code_lifetime_tests {
         let mut handlers = fxhash::FxHashMap::default();
         handlers.insert(handler_name.clone(), handler);
         Rc::new(crate::player::script::Script {
-            member_ref: CastMemberRef { cast_lib: 1, cast_member: 1 },
+            member_ref: CastMemberRef {
+                cast_lib: 1,
+                cast_member: 1,
+            },
             name: name.to_owned(),
             chunk: ScriptChunk {
                 script_number: 1,
@@ -14395,7 +14909,8 @@ mod handler_code_lifetime_tests {
         // must continue to observe the old immutable snapshot.
         let replacement_handler = handler(OpCode::PushInt16);
         let replacement_script = script("replacement-script", replacement_handler.clone());
-        let replacement_names: Rc<[Symbol]> = Rc::from(vec![Symbol::builtin(BuiltInSymbol::Script)]);
+        let replacement_names: Rc<[Symbol]> =
+            Rc::from(vec![Symbol::builtin(BuiltInSymbol::Script)]);
         drop(source_cast.scripts.insert(1, replacement_script).unwrap());
         source_cast.name_symbols = replacement_names;
         drop(replacement_handler);
@@ -14463,15 +14978,23 @@ mod scope_token_tests {
         let anchored_id = player.bitmap_manager.add_bitmap(anchored);
         let anchored_handle = player.bitmap_manager.local_handle(anchored_id).unwrap();
 
-        let ephemeral_id = player
-            .bitmap_manager
-            .add_ephemeral_bitmap(Bitmap::new(1, 1, 32, 32, 8, PaletteRef::Default));
+        let ephemeral_id = player.bitmap_manager.add_ephemeral_bitmap(Bitmap::new(
+            1,
+            1,
+            32,
+            32,
+            8,
+            PaletteRef::Default,
+        ));
         let ephemeral_handle = player.bitmap_manager.local_handle(ephemeral_id).unwrap();
         let retained = player.alloc_datum(Datum::BitmapRef(ephemeral_handle.clone()));
         player.stage_image = Some(ephemeral_id);
         player.flash_frame_buffers.insert(1, ephemeral_id);
         player.nested_movie_images.insert(
-            CastMemberRef { cast_lib: 1, cast_member: 1 },
+            CastMemberRef {
+                cast_lib: 1,
+                cast_member: 1,
+            },
             ephemeral_id,
         );
         player.w3d_frame_buffers.insert((1, 1), ephemeral_id);
@@ -14483,13 +15006,19 @@ mod scope_token_tests {
         assert!(player.nested_movie_images.is_empty());
         assert!(player.w3d_frame_buffers.is_empty());
         assert!(player.bitmap_manager.get_bitmap(ephemeral_id).is_none());
-        assert!(player
-            .bitmap_manager
-            .get_bitmap_handle(&ephemeral_handle)
-            .is_none());
+        assert!(
+            player
+                .bitmap_manager
+                .get_bitmap_handle(&ephemeral_handle)
+                .is_none()
+        );
         let fresh_anchor = player.bitmap_manager.local_handle(anchored_id).unwrap();
         assert_eq!(
-            player.bitmap_manager.get_bitmap_handle(&fresh_anchor).unwrap().data,
+            player
+                .bitmap_manager
+                .get_bitmap_handle(&fresh_anchor)
+                .unwrap()
+                .data,
             vec![1, 2, 3, 4]
         );
 
@@ -14505,7 +15034,10 @@ mod scope_token_tests {
         }));
         let old_owner = player.owner.clone();
         let swf = include_bytes!("../../tests/fixtures/flash_initial_access.swf").to_vec();
-        let member_ref = CastMemberRef { cast_lib: 1, cast_member: 1 };
+        let member_ref = CastMemberRef {
+            cast_lib: 1,
+            cast_member: 1,
+        };
         player.movie.cast_manager.casts.push({
             let mut cast = CastLib::test_external(1, 0);
             cast.members.insert(
@@ -14534,7 +15066,10 @@ mod scope_token_tests {
         player.reset_owned_core();
 
         assert!(!old_owner.is_arena_live());
-        assert_eq!(player.movie.score.channels[1].sprite.member, Some(member_ref));
+        assert_eq!(
+            player.movie.score.channels[1].sprite.member,
+            Some(member_ref)
+        );
         assert!(player.flash_sprite_loaded.is_empty());
         assert!(player.flash_host_actions.is_empty());
         assert!(player.flash_ready_sprites.is_empty());
@@ -14549,7 +15084,9 @@ mod scope_token_tests {
         let actions = player.take_flash_host_actions();
         assert_eq!(actions.len(), 1);
         match &actions[0] {
-            FlashHostAction::Load { fence, generation, .. } => {
+            FlashHostAction::Load {
+                fence, generation, ..
+            } => {
                 assert!(fence.owner.same_identity(&new_owner));
                 assert_eq!(*generation, new_generation);
             }
@@ -14574,19 +15111,18 @@ mod scope_token_tests {
             .borrow_mut()
             .reserve_for_pair(1, 1, 1)
             .expect("old generation");
-        assert!(player
-            .flash_binding_state
-            .borrow_mut()
-            .publish_first(1, 1, 1, old_generation));
-        player
-            .flash_binding_state
-            .borrow_mut()
-            .transition_member(
-                1,
-                Some((1, 1)),
-                Some((1, 2)),
-                FlashMemberClassification::ValidFlash,
-            );
+        assert!(
+            player
+                .flash_binding_state
+                .borrow_mut()
+                .publish_first(1, 1, 1, old_generation)
+        );
+        player.flash_binding_state.borrow_mut().transition_member(
+            1,
+            Some((1, 1)),
+            Some((1, 2)),
+            FlashMemberClassification::ValidFlash,
+        );
         let new_generation = player
             .flash_binding_state
             .borrow_mut()
@@ -14607,18 +15143,18 @@ mod scope_token_tests {
             } if *generation == old_generation
         )));
         assert_eq!(player.flash_instance_generation(1), Some(new_generation));
-        assert!(player
-            .flash_binding_state
-            .borrow()
-            .is_current(1, new_generation));
+        assert!(
+            player
+                .flash_binding_state
+                .borrow()
+                .is_current(1, new_generation)
+        );
     }
 
     #[test]
     fn failed_first_publication_retires_old_generation_before_replacement() {
         let mut state = FlashBindingState::new();
-        let old_generation = state
-            .reserve_for_pair(1, 3, 4)
-            .expect("old generation");
+        let old_generation = state.reserve_for_pair(1, 3, 4).expect("old generation");
         assert!(state.retire_failed_publication(1, 3, 4, old_generation));
         assert!(state.is_retired_generation(1, 3, 4, old_generation));
         let replacement = state
@@ -14632,9 +15168,7 @@ mod scope_token_tests {
     #[test]
     fn failed_stale_publication_records_exact_old_generation_for_teardown() {
         let mut state = FlashBindingState::new();
-        let old_generation = state
-            .reserve_for_pair(1, 7, 8)
-            .expect("old generation");
+        let old_generation = state.reserve_for_pair(1, 7, 8).expect("old generation");
         let replacement = state
             .reserve_for_pair(1, 7, 9)
             .expect("replacement generation");
@@ -14665,10 +15199,12 @@ mod scope_token_tests {
         player.invalidate_flash_for_cast_lib(4);
         assert_eq!(player.flash_instance_generation(1), None);
         assert_eq!(player.flash_binding_origin(1), FlashBindingOrigin::Absent);
-        assert!(!player
-            .flash_binding_state
-            .borrow()
-            .is_retired_generation(1, 4, 8, generation));
+        assert!(
+            !player
+                .flash_binding_state
+                .borrow()
+                .is_retired_generation(1, 4, 8, generation)
+        );
         assert!(player.take_flash_host_actions().is_empty());
     }
 
@@ -14689,23 +15225,29 @@ mod scope_token_tests {
             .borrow_mut()
             .reserve_for_pair(1, 5, 9)
             .expect("first generation");
-        assert!(player
-            .flash_binding_state
-            .borrow_mut()
-            .publish_first(1, 5, 9, first));
-        assert!(player
-            .flash_binding_state
-            .borrow_mut()
-            .retire_current_for_pair(1, 5, 9, first));
+        assert!(
+            player
+                .flash_binding_state
+                .borrow_mut()
+                .publish_first(1, 5, 9, first)
+        );
+        assert!(
+            player
+                .flash_binding_state
+                .borrow_mut()
+                .retire_current_for_pair(1, 5, 9, first)
+        );
         let second = player
             .flash_binding_state
             .borrow_mut()
             .reserve_for_pair(1, 5, 9)
             .expect("second generation");
-        assert!(player
-            .flash_binding_state
-            .borrow_mut()
-            .publish_first(1, 5, 9, second));
+        assert!(
+            player
+                .flash_binding_state
+                .borrow_mut()
+                .publish_first(1, 5, 9, second)
+        );
         player.flash_sprite_loaded.insert((1, 5, 9));
         player.invalidate_flash_for_cast_lib(5);
         let actions = player.take_flash_host_actions();
@@ -14742,10 +15284,12 @@ mod scope_token_tests {
             .pre_dispatch_flash_members()
             .expect("reconciliation should complete");
         assert_eq!(player.flash_instance_generation(1), None);
-        assert!(!player
-            .flash_binding_state
-            .borrow()
-            .is_retired_generation(1, 6, 1, generation));
+        assert!(
+            !player
+                .flash_binding_state
+                .borrow()
+                .is_retired_generation(1, 6, 1, generation)
+        );
         assert!(player.take_flash_host_actions().is_empty());
     }
 
@@ -14770,15 +15314,20 @@ mod scope_token_tests {
     #[test]
     fn owned_filmloop_advancement_invalidates_cache_and_holds_one_shot_end_frame() {
         async_std::task::block_on(async {
-            let session = RuntimeSession::new(SymbolOwner { session: 77, generation: 1 }).into_handle();
-            assert!(session
-                .borrow_mut()
-                .add_player(1, channel::unbounded().0));
+            let session = RuntimeSession::new(SymbolOwner {
+                session: 77,
+                generation: 1,
+            })
+            .into_handle();
+            assert!(session.borrow_mut().add_player(1, channel::unbounded().0));
             let owner = session
                 .borrow_mut()
                 .with_player(1, |context| context.player.owner.clone())
                 .expect("filmloop test player must exist");
-            let member_ref = CastMemberRef { cast_lib: 1, cast_member: 1 };
+            let member_ref = CastMemberRef {
+                cast_lib: 1,
+                cast_member: 1,
+            };
 
             session
                 .borrow_mut()
@@ -14813,7 +15362,12 @@ mod scope_token_tests {
                             },
                             score: filmloop_score,
                             current_frame: 1,
-                            initial_rect: IntRect { left: 0, top: 0, right: 1, bottom: 1 },
+                            initial_rect: IntRect {
+                                left: 0,
+                                top: 0,
+                                right: 1,
+                                bottom: 1,
+                            },
                             cached_total_frames: Some(2),
                         }),
                     );
@@ -14829,7 +15383,10 @@ mod scope_token_tests {
                     context.player.movie.current_frame = 1;
                     // Seed both caches so the owned mutation must invalidate
                     // them rather than merely producing the same lookup.
-                    assert_eq!(context.player.active_stage_filmloop_member_refs(), vec![member_ref]);
+                    assert_eq!(
+                        context.player.active_stage_filmloop_member_refs(),
+                        vec![member_ref]
+                    );
                 })
                 .expect("filmloop setup must remain owner-bound");
 
@@ -14884,12 +15441,15 @@ mod scope_token_tests {
                 .borrow_mut()
                 .with_player(1, |context| {
                     (
-                        context.player.movie.cast_manager.find_member_by_ref(&member_ref).and_then(
-                            |member| match &member.member_type {
+                        context
+                            .player
+                            .movie
+                            .cast_manager
+                            .find_member_by_ref(&member_ref)
+                            .and_then(|member| match &member.member_type {
                                 CastMemberType::FilmLoop(filmloop) => Some(filmloop.current_frame),
                                 _ => None,
-                            },
-                        ),
+                            }),
                         context.player.behavior_channel_cache_generation,
                         context.player.active_stage_filmloop_cache_generation,
                         context.player.stage_dirty,
@@ -14903,15 +15463,20 @@ mod scope_token_tests {
     #[test]
     fn owned_stop_ends_persistent_stage_and_filmloop_spans_once() {
         async_std::task::block_on(async {
-            let session = RuntimeSession::new(SymbolOwner { session: 78, generation: 1 }).into_handle();
-            assert!(session
-                .borrow_mut()
-                .add_player(1, channel::unbounded().0));
+            let session = RuntimeSession::new(SymbolOwner {
+                session: 78,
+                generation: 1,
+            })
+            .into_handle();
+            assert!(session.borrow_mut().add_player(1, channel::unbounded().0));
             let owner = session
                 .borrow_mut()
                 .with_player(1, |context| context.player.owner.clone())
                 .expect("stop test player must exist");
-            let member_ref = CastMemberRef { cast_lib: 1, cast_member: 1 };
+            let member_ref = CastMemberRef {
+                cast_lib: 1,
+                cast_member: 1,
+            };
 
             session
                 .borrow_mut()
@@ -14953,7 +15518,12 @@ mod scope_token_tests {
                             },
                             score: filmloop_score,
                             current_frame: 1,
-                            initial_rect: IntRect { left: 0, top: 0, right: 1, bottom: 1 },
+                            initial_rect: IntRect {
+                                left: 0,
+                                top: 0,
+                                right: 1,
+                                bottom: 1,
+                            },
                             cached_total_frames: Some(20),
                         }),
                     );
@@ -14964,21 +15534,26 @@ mod scope_token_tests {
                     let mut stage_channel = SpriteChannel::new(1);
                     stage_channel.sprite.member = Some(member_ref);
                     stage_channel.sprite.entered = true;
-                    context.player.movie.score.channels = vec![
-                        SpriteChannel::new(0),
-                        stage_channel,
-                        SpriteChannel::new(2),
-                    ];
+                    context.player.movie.score.channels =
+                        vec![SpriteChannel::new(0), stage_channel, SpriteChannel::new(2)];
                     context.player.movie.score.channels[2].sprite.entered = true;
                     context.player.movie.score.channels[2].sprite.exited = true;
-                    context.player.movie.score.sprite_spans.push(ScoreSpriteSpan {
-                        channel_number: 1,
-                        start_frame: 1,
-                        end_frame: 20,
-                        scripts: Vec::new(),
-                    });
+                    context
+                        .player
+                        .movie
+                        .score
+                        .sprite_spans
+                        .push(ScoreSpriteSpan {
+                            channel_number: 1,
+                            start_frame: 1,
+                            end_frame: 20,
+                            scripts: Vec::new(),
+                        });
                     context.player.movie.current_frame = 5;
-                    assert_eq!(context.player.active_stage_filmloop_member_refs(), vec![member_ref]);
+                    assert_eq!(
+                        context.player.active_stage_filmloop_member_refs(),
+                        vec![member_ref]
+                    );
                 })
                 .expect("stop fixture setup must remain owner-bound");
 
@@ -15036,10 +15611,12 @@ mod scope_token_tests {
     #[test]
     fn cancelled_movie_transition_restores_only_the_captured_owner_flags() {
         async_std::task::block_on(async {
-            let session = RuntimeSession::new(SymbolOwner { session: 79, generation: 1 }).into_handle();
-            assert!(session
-                .borrow_mut()
-                .add_player(1, channel::unbounded().0));
+            let session = RuntimeSession::new(SymbolOwner {
+                session: 79,
+                generation: 1,
+            })
+            .into_handle();
+            assert!(session.borrow_mut().add_player(1, channel::unbounded().0));
             let owner = session
                 .borrow_mut()
                 .with_player(1, |context| context.player.owner.clone())
@@ -15047,28 +15624,37 @@ mod scope_token_tests {
             let (cancel_tx, cancel_rx) = channel::bounded(1);
             let (started_tx, started_rx) = channel::bounded(1);
             let cancel_task = async_std::task::spawn(async move {
-                started_rx.recv().await.expect("transition operation must start");
-                cancel_tx.send(()).await.expect("transition cancellation must be delivered");
+                started_rx
+                    .recv()
+                    .await
+                    .expect("transition operation must start");
+                cancel_tx
+                    .send(())
+                    .await
+                    .expect("transition cancellation must be delivered");
             });
             let initial_flags = (false, true);
             let session_for_operation = session.clone();
             let owner_for_operation = owner.clone();
-            let result = await_playback_or_cancel(
-                &cancel_rx,
-                async move {
-                    session_for_operation
-                        .borrow_mut()
-                        .with_player(1, |context| {
-                            context.player.is_in_transition = true;
-                            context.player.is_dispatching_events = false;
-                        });
-                    started_tx.send(()).await.expect("transition start must be observed");
-                    future::pending::<()>().await;
-                    let _ = owner_for_operation;
-                },
-            )
+            let result = await_playback_or_cancel(&cancel_rx, async move {
+                session_for_operation
+                    .borrow_mut()
+                    .with_player(1, |context| {
+                        context.player.is_in_transition = true;
+                        context.player.is_dispatching_events = false;
+                    });
+                started_tx
+                    .send(())
+                    .await
+                    .expect("transition start must be observed");
+                future::pending::<()>().await;
+                let _ = owner_for_operation;
+            })
             .await;
-            assert!(result.is_none(), "cancellation must drop the pending transition");
+            assert!(
+                result.is_none(),
+                "cancellation must drop the pending transition"
+            );
             cancel_task.await;
             restore_playback_transition_flags_owned(
                 &session,
@@ -15079,11 +15665,12 @@ mod scope_token_tests {
             )
             .await;
             assert_eq!(
-                session
-                    .borrow_mut()
-                    .with_player(1, |context| {
-                        (context.player.is_in_transition, context.player.is_dispatching_events)
-                    }),
+                session.borrow_mut().with_player(1, |context| {
+                    (
+                        context.player.is_in_transition,
+                        context.player.is_dispatching_events,
+                    )
+                }),
                 Some(initial_flags),
             );
 
@@ -15107,13 +15694,13 @@ mod scope_token_tests {
             )
             .await;
             assert_eq!(
-                session
-                    .borrow_mut()
-                    .with_player(1, |context| {
-                        (context.player.owner.same_identity(&replacement),
-                            context.player.is_in_transition,
-                            context.player.is_dispatching_events)
-                    }),
+                session.borrow_mut().with_player(1, |context| {
+                    (
+                        context.player.owner.same_identity(&replacement),
+                        context.player.is_in_transition,
+                        context.player.is_dispatching_events,
+                    )
+                }),
                 Some((true, true, false)),
                 "stale cancellation must not rewrite replacement flags",
             );
@@ -15161,7 +15748,9 @@ mod scope_token_tests {
                     .expect("transition operation must reach its mount boundary");
             });
 
-            let outcome = await_playback_transition_or_cancel(&cancel_rx, operation, stop_phase.clone()).await;
+            let outcome =
+                await_playback_transition_or_cancel(&cancel_rx, operation, stop_phase.clone())
+                    .await;
             cancellation.await;
             assert!(outcome.cancelled);
             assert!(matches!(outcome.result, Some(Ok(()))));
@@ -15176,7 +15765,11 @@ mod scope_token_tests {
     #[test]
     fn reset_during_pending_stop_cancels_old_owner_without_touching_replacement() {
         async_std::task::block_on(async {
-            let session = RuntimeSession::new(SymbolOwner { session: 86, generation: 1 }).into_handle();
+            let session = RuntimeSession::new(SymbolOwner {
+                session: 86,
+                generation: 1,
+            })
+            .into_handle();
             let (command_tx, _command_rx) = channel::unbounded();
             assert!(session.borrow_mut().add_player(1, command_tx));
             let owner = session
@@ -15194,10 +15787,7 @@ mod scope_token_tests {
             let operation_session = session.clone();
             let operation_owner = owner.clone();
             let operation = async move {
-                started_tx
-                    .send(())
-                    .await
-                    .expect("pending stop must start");
+                started_tx.send(()).await.expect("pending stop must start");
                 release_rx
                     .recv()
                     .await
@@ -15239,7 +15829,13 @@ mod scope_token_tests {
                 reset_task,
             );
             assert!(outcome.cancelled);
-            assert!(matches!(outcome.result, Some(Err(ScriptError { code: ScriptErrorCode::Abort, .. }))));
+            assert!(matches!(
+                outcome.result,
+                Some(Err(ScriptError {
+                    code: ScriptErrorCode::Abort,
+                    ..
+                }))
+            ));
             assert_eq!(
                 session.borrow_mut().with_player(1, |context| {
                     (
@@ -15256,7 +15852,11 @@ mod scope_token_tests {
     #[test]
     fn owned_stop_cleanup_error_is_propagated_and_replay_is_consumed() {
         async_std::task::block_on(async {
-            let session = RuntimeSession::new(SymbolOwner { session: 87, generation: 1 }).into_handle();
+            let session = RuntimeSession::new(SymbolOwner {
+                session: 87,
+                generation: 1,
+            })
+            .into_handle();
             let (command_tx, _command_rx) = channel::unbounded();
             assert!(session.borrow_mut().add_player(1, command_tx));
             let owner = session
@@ -15268,12 +15868,17 @@ mod scope_token_tests {
                 .begin_playback_loop(1, &owner)
                 .expect("cleanup loop must be claimable")
                 .expect("cleanup loop must be installed");
-            assert_eq!(session.borrow_mut().cancel_playback_loop(1, &owner, true), Some(epoch));
-            assert!(session
-                .borrow_mut()
-                .begin_playback_loop(1, &owner)
-                .expect("same-owner replay must be accepted")
-                .is_none());
+            assert_eq!(
+                session.borrow_mut().cancel_playback_loop(1, &owner, true),
+                Some(epoch)
+            );
+            assert!(
+                session
+                    .borrow_mut()
+                    .begin_playback_loop(1, &owner)
+                    .expect("same-owner replay must be accepted")
+                    .is_none()
+            );
 
             // Keep the cancellation record and replay request, but make the
             // captured capability stale before cleanup starts.  This reaches
@@ -15289,12 +15894,16 @@ mod scope_token_tests {
                     ..
                 })
             ));
-            assert!(session
-                .borrow_mut()
-                .discard_playback_replay_request(1, &owner, epoch));
-            assert!(!session
-                .borrow_mut()
-                .take_playback_replay_request(1, &owner, epoch));
+            assert!(
+                session
+                    .borrow_mut()
+                    .discard_playback_replay_request(1, &owner, epoch)
+            );
+            assert!(
+                !session
+                    .borrow_mut()
+                    .take_playback_replay_request(1, &owner, epoch)
+            );
         });
     }
 
@@ -15342,50 +15951,53 @@ mod scope_token_tests {
     fn non_top_teardown_does_not_mutate_replacement_state() {
         let mut player = make_player(OwnerToken::transitional());
         {
-                let parent_slot = player.push_scope();
-                let parent = token_for(&player, parent_slot);
-                player.handler_stack_depth = 1;
-                player.in_frame_script = true;
-                let child_slot = player.push_scope();
-                let child = token_for(&player, child_slot);
-                player.handler_stack_depth = 2;
-                let before_depth = player.handler_stack_depth;
-                let before_count = player.scope_count;
-                let before_last = player.last_handler_result.clone();
-                let before_frame = player.in_frame_script;
-                let before_parent_passed = player.scopes[parent_slot].passed;
-                let before_child_stack = player.scopes[child_slot].stack.len();
-                let child_value = player.alloc_datum(Datum::Int(42));
-                player.scopes[child_slot].return_value = child_value.clone();
+            let parent_slot = player.push_scope();
+            let parent = token_for(&player, parent_slot);
+            player.handler_stack_depth = 1;
+            player.in_frame_script = true;
+            let child_slot = player.push_scope();
+            let child = token_for(&player, child_slot);
+            player.handler_stack_depth = 2;
+            let before_depth = player.handler_stack_depth;
+            let before_count = player.scope_count;
+            let before_last = player.last_handler_result.clone();
+            let before_frame = player.in_frame_script;
+            let before_parent_passed = player.scopes[parent_slot].passed;
+            let before_child_stack = player.scopes[child_slot].stack.len();
+            let child_value = player.alloc_datum(Datum::Int(42));
+            player.scopes[child_slot].return_value = child_value.clone();
 
-                assert!(teardown_handler_frame(&mut player, &parent, true).is_err());
-                assert_eq!(player.handler_stack_depth, before_depth);
-                assert_eq!(player.scope_count, before_count);
-                assert_eq!(player.last_handler_result, before_last);
-                assert_eq!(player.in_frame_script, before_frame);
-                assert_eq!(player.scopes[parent_slot].passed, before_parent_passed);
-                assert_eq!(player.scopes[child_slot].stack.len(), before_child_stack);
-                assert!(child.validate_top(&player));
+            assert!(teardown_handler_frame(&mut player, &parent, true).is_err());
+            assert_eq!(player.handler_stack_depth, before_depth);
+            assert_eq!(player.scope_count, before_count);
+            assert_eq!(player.last_handler_result, before_last);
+            assert_eq!(player.in_frame_script, before_frame);
+            assert_eq!(player.scopes[parent_slot].passed, before_parent_passed);
+            assert_eq!(player.scopes[child_slot].stack.len(), before_child_stack);
+            assert!(child.validate_top(&player));
 
-                assert!(teardown_handler_frame(&mut player, &child, false).is_ok());
-                assert_eq!(player.handler_stack_depth, 1);
-                assert!(parent.validate_top(&player));
-                let result = ScopeResult { passed: true, return_value: child_value.clone() };
-                assert!(deliver_scope_return(&mut player, &parent, &result, true));
-                assert!(player.scopes[parent_slot].passed);
-                assert_eq!(player.scopes[parent_slot].stack.len(), 1);
-                let pushed = {
-                    let (scopes, allocator, bitmap_manager) = (
-                        &mut player.scopes,
-                        &mut player.allocator,
-                        &mut player.bitmap_manager,
-                    );
-                    scopes[parent_slot]
-                        .stack
-                        .get_ref_with(0, allocator, bitmap_manager)
-                        .unwrap()
-                };
-                assert!(matches!(player.get_datum(&pushed), Datum::Int(42)));
+            assert!(teardown_handler_frame(&mut player, &child, false).is_ok());
+            assert_eq!(player.handler_stack_depth, 1);
+            assert!(parent.validate_top(&player));
+            let result = ScopeResult {
+                passed: true,
+                return_value: child_value.clone(),
+            };
+            assert!(deliver_scope_return(&mut player, &parent, &result, true));
+            assert!(player.scopes[parent_slot].passed);
+            assert_eq!(player.scopes[parent_slot].stack.len(), 1);
+            let pushed = {
+                let (scopes, allocator, bitmap_manager) = (
+                    &mut player.scopes,
+                    &mut player.allocator,
+                    &mut player.bitmap_manager,
+                );
+                scopes[parent_slot]
+                    .stack
+                    .get_ref_with(0, allocator, bitmap_manager)
+                    .unwrap()
+            };
+            assert!(matches!(player.get_datum(&pushed), Datum::Int(42)));
         }
     }
 
@@ -15393,19 +16005,19 @@ mod scope_token_tests {
     fn setup_expectation_anchors_parent_and_rejects_stack_epoch_changes() {
         let mut player = make_player(OwnerToken::transitional());
         {
-                let parent_slot = player.push_scope();
-                let parent = token_for(&player, parent_slot);
-                let expectation = SetupExpectation::capture(&player, Some(&parent));
-                assert!(expectation.validate(&player));
+            let parent_slot = player.push_scope();
+            let parent = token_for(&player, parent_slot);
+            let expectation = SetupExpectation::capture(&player, Some(&parent));
+            assert!(expectation.validate(&player));
 
-                let child_slot = player.push_scope();
-                assert!(!expectation.validate(&player));
-                player.pop_scope();
-                assert!(expectation.validate(&player));
+            let child_slot = player.push_scope();
+            assert!(!expectation.validate(&player));
+            player.pop_scope();
+            assert!(expectation.validate(&player));
 
-                player.bump_scope_invalidation_epoch();
-                assert!(!expectation.validate(&player));
-                assert_eq!(child_slot, parent_slot + 1);
+            player.bump_scope_invalidation_epoch();
+            assert!(!expectation.validate(&player));
+            assert_eq!(child_slot, parent_slot + 1);
         }
         let mut root_player = make_player(OwnerToken::transitional());
         let root_slot = root_player.push_scope();
@@ -15426,26 +16038,26 @@ mod scope_token_tests {
     fn post_await_unwind_and_return_guards_leave_stale_scopes_untouched() {
         let mut player = make_player(OwnerToken::transitional());
         {
-                let slot = player.push_scope();
-                let token = token_for(&player, slot);
-                player.handler_stack_depth = 1;
-                let mut parents = Vec::new();
-                player.bump_scope_invalidation_epoch();
-                assert!(!unwind_handler_frames(
-                    &mut player,
-                    &token,
-                    false,
-                    &mut parents
-                ));
-                assert_eq!(player.scope_count, 1);
-                assert_eq!(player.handler_stack_depth, 1);
+            let slot = player.push_scope();
+            let token = token_for(&player, slot);
+            player.handler_stack_depth = 1;
+            let mut parents = Vec::new();
+            player.bump_scope_invalidation_epoch();
+            assert!(!unwind_handler_frames(
+                &mut player,
+                &token,
+                false,
+                &mut parents
+            ));
+            assert_eq!(player.scope_count, 1);
+            assert_eq!(player.handler_stack_depth, 1);
 
-                let result = ScopeResult {
-                    passed: true,
-                    return_value: DatumRef::Void,
-                };
-                assert!(!deliver_scope_return(&mut player, &token, &result, true));
-                assert!(player.scopes[slot].stack.is_empty());
+            let result = ScopeResult {
+                passed: true,
+                return_value: DatumRef::Void,
+            };
+            assert!(!deliver_scope_return(&mut player, &token, &result, true));
+            assert!(player.scopes[slot].stack.is_empty());
         }
     }
 
@@ -15465,7 +16077,10 @@ mod scope_token_tests {
             }),
         );
         Rc::new(Script {
-            member_ref: CastMemberRef { cast_lib: 1, cast_member: 1 },
+            member_ref: CastMemberRef {
+                cast_lib: 1,
+                cast_member: 1,
+            },
             name: "eager-old".to_owned(),
             chunk: ScriptChunk {
                 script_number: 1,
@@ -15491,9 +16106,12 @@ mod scope_token_tests {
         old_cast.scripts.insert(1, plan_script());
         player.movie.cast_manager.casts.push(old_cast);
         let expectation = SetupExpectation::capture(&player, None);
-        let member = CastMemberRef { cast_lib: 1, cast_member: 1 };
-        let plan = capture_handler_plan(&player, &member, &Symbol::builtin(BuiltInSymbol::New))
-            .unwrap();
+        let member = CastMemberRef {
+            cast_lib: 1,
+            cast_member: 1,
+        };
+        let plan =
+            capture_handler_plan(&player, &member, &Symbol::builtin(BuiltInSymbol::New)).unwrap();
         player.movie_mount_generation += 1;
         player.movie.cast_manager.casts[0] = CastLib::test_external(1, 0);
         assert!(token.validate_top(&player));
