@@ -429,7 +429,8 @@ export async function dirplayer_testBrowserOwnerTimerProbe(
   operation = 'schedule',
 ) {
   const callbacks = _browserOwnerCallbacks.get(ownerKey);
-  if (!callbacks || typeof name !== 'string' || !Number.isSafeInteger(incarnation) || incarnation <= 0) return false;
+  const canProbeCurrent = operation === 'current' && _realVmOwnerKeys.has(ownerKey);
+  if ((!callbacks && !canProbeCurrent) || typeof name !== 'string' || !Number.isSafeInteger(incarnation) || incarnation <= 0) return false;
   if (operation === 'schedule') {
     dispatchRealVmCallback(ownerKey, 'onScheduleTimeoutOwned', name, period, incarnation, ownerKey);
   } else if (operation === 'clear') {

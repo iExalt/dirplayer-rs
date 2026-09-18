@@ -57,9 +57,12 @@ impl TimeoutManager {
         if self.timeouts.contains_key(timeout_name) {
             return Some(timeout_name.to_owned());
         }
+        // HashMap iteration is unordered; choose a stable key for ambiguous
+        // case-insensitive fallback while preserving exact-match precedence.
         self.timeouts
             .keys()
-            .find(|key| key.eq_ignore_ascii_case(timeout_name))
+            .filter(|key| key.eq_ignore_ascii_case(timeout_name))
+            .min()
             .cloned()
     }
 
