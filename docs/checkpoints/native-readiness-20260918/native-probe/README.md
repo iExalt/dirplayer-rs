@@ -3,9 +3,12 @@
 This receipt records the probe-only native route in worktree
 `/private/tmp/dirplayer-native-readiness-cumulative-20260918`, branch
 `codex/native-dirplayer-readiness`. The accepted combined baseline source is
-`7cd3cc78`; baseline evidence is `731b0d0a`. The exact accepted probe source
-commit is `42c21c82350590c3a05584c1a643a6b79dc16727`, with tree
-`1bd0853ed4c21f92148d5171b5dcb0e901b058b7`. No final evidence commit hash is
+`7cd3cc78`; baseline evidence is `731b0d0a`. The original probe source is
+commit `42c21c82350590c3a05584c1a643a6b79dc16727`, with tree
+`1bd0853ed4c21f92148d5171b5dcb0e901b058b7`. The final probe
+source/correction atop that original is commit
+`1a99d618df29da6a1bf915aee826a3a8e9dcb7be`, with tree
+`39f85f08e2a13cd4c0163f0dbe15bc0e1ab08b59`. No final evidence commit hash is
 recorded yet. The probe changes only the native test registration, disposable
 fixture/generator/validator, and this evidence checkpoint. No production
 runtime, backend, host, API, or browser build was changed.
@@ -35,7 +38,8 @@ The native route exercised by `test_native_director_probe_shape` is:
 4. `TestPlayer::snapshot_stage` at `vm-rust/src/player/testing.rs:151-163`
    allocates the native bitmap and calls
    `render_stage_to_bitmap` at `vm-rust/src/rendering.rs:450-462`. The
-   `StageSnapshot` assertion observes a 32x32 RGBA result with visible pixels.
+   `StageSnapshot` assertion observes a 32x32 RGBA result with a white
+   `(0,0)` corner, black `(16,16)` center, and 576 opaque black pixels.
    `NATIVE_PROBE_PNG`, when set by an evidence run, writes the same PNG to the
    caller-selected path. No absolute evidence path is used by the test.
 5. The later `TestPlayer::step_frame` path at `testing.rs:128-149` calls
@@ -76,7 +80,13 @@ classification.
 ## Evidence and classification
 
 The success test proves native local load, D5 parse, startup script dispatch,
-shape score setup, and CPU RGBA capture. It does not prove a native renderer
+shape score setup, and CPU RGBA capture. The original all-white PNG and its
+`visible_pixels` predicate remain valid evidence for startup and CPU capture,
+but did not prove authored shape visibility because they counted the white
+stage background. The corrected contrast fixture supports the authored
+QuickDraw shape rendering claim with exact assertions: a white `(0,0)` corner,
+a black `(16,16)` center, and 576 opaque black pixels in the 32x32 snapshot.
+It does not prove a native renderer
 binding or a completed native frame-advance loop. The separately filtered
 step-frame test loads and initializes the same valid fixture, captures once,
 then asserts the exact existing boundary `frame execution failed: owned player
@@ -122,11 +132,11 @@ mise exec -- python3 vm-rust/tests/fixtures/validate_native_director_probe.py
 CARGO_TARGET_DIR=/private/tmp/dirplayer-native-readiness-native-stage2-fff7dcc3/target \
   mise exec -- cargo test --manifest-path vm-rust/Cargo.toml --test mod --locked --offline --no-run
 
-NATIVE_PROBE_PNG=/private/tmp/dirplayer-native-readiness-native-stage2-fff7dcc3/evidence/native-probe-stage.png \
+NATIVE_PROBE_PNG=docs/checkpoints/native-readiness-20260918/native-probe/native-probe-stage.png \
 CARGO_TARGET_DIR=/private/tmp/dirplayer-native-readiness-native-stage2-fff7dcc3/target \
   perl -e 'alarm 30; exec @ARGV' -- mise exec -- cargo test --manifest-path vm-rust/Cargo.toml --test mod --locked --offline test_native_director_probe_shape -- --nocapture
 
-NATIVE_PROBE_PNG=/private/tmp/dirplayer-native-readiness-native-stage2-fff7dcc3/evidence/native-probe-stage.png \
+NATIVE_PROBE_PNG=docs/checkpoints/native-readiness-20260918/native-probe/native-probe-stage.png \
 CARGO_TARGET_DIR=/private/tmp/dirplayer-native-readiness-native-stage2-fff7dcc3/target \
   perl -e 'alarm 30; exec @ARGV' -- mise exec -- cargo test --manifest-path vm-rust/Cargo.toml --test mod --locked --offline test_native_director_probe_shape -- --nocapture
 
@@ -143,10 +153,20 @@ and `phases=prepare,start,enter,exit`. The boundary tests each reported
 `1 passed; 0 failed` while asserting their expected panic text. The earlier
 two-run evidence remains retained in the preceding success logs.
 
+The later bounded contrast run used the regenerated fixture and the same
+focused filter, passed `1 passed; 0 failed`, and reported
+`black_pixels=576`; its PNG had 448 opaque white pixels. It is recorded in
+`/private/tmp/native-probe-success-contrast2.log` and did not rerun either
+boundary filter or any broad test suite.
+
 ## Hashes and retained artifacts
 
-The validator reported the parser-valid fixture as 1149 bytes with SHA-256
+The earlier all-white probe fixture was 1149 bytes with SHA-256
 `ea8ecbe400fee03797fe322fe69814db96cad95e6f7d756365f43babd29d5e9b`.
+Its `visible_pixels` predicate counted the white stage background and did not
+prove authored shape rendering, so that PNG was superseded. The current
+contrast fixture is 1149 bytes and has SHA-256
+`a2175f3488938f61d88145c2b99ec50e4129cfc656038b79410086883d6483e3`.
 
 Retained logs and hashes:
 
@@ -154,17 +174,22 @@ Retained logs and hashes:
 | --- | --- |
 | `/private/tmp/native-probe-generator-final.log` | `61327ef9fb4211603568985f7fc5a11f827f5d958b0f93d81c6b46ccc3c28aee` |
 | `/private/tmp/native-probe-validator-final.log` | `1f86df919613d04d5ee6c76461a8448fd27527e88e4ad52113b170e333731937` |
+| `/private/tmp/native-probe-generator-contrast.log` | `61327ef9fb4211603568985f7fc5a11f827f5d958b0f93d81c6b46ccc3c28aee` |
+| `/private/tmp/native-probe-validator-contrast.log` | `0d1af70cd7dcb09a910feb2fb5e6878495f4c0e549431b96e6e99fb661d07fab` |
+| `/private/tmp/native-probe-build-contrast.log` | `c13c0797a4ab60dc6870ad4054bd71dcbb0d03b86e893c85b7ca55742102bd18` |
+| `/private/tmp/native-probe-success-contrast.log` (first encoding, expected fixture assertion failure) | `10846daf4f4ba3bad486cad6e3e57913379055d0cc1d857443a3d3c6d3ca3f27` |
+| `/private/tmp/native-probe-success-contrast2.log` | `3a28a09cd2fa136fbe8acef79f8e725d03903d322f1bfd4089a542e81f186c73` |
 | `/private/tmp/native-probe-success3.log` | `e39a29f33ecb0570f7b49469ebeca4a16d95daa2f94867261da54fbdd1348f1c` |
 | `/private/tmp/native-probe-success4.log` | `d86970aede6bdcc7322ad1ab9e17fdd646e923f1865010a11709d9b8bfd4ebad` |
 | `/private/tmp/native-probe-build-source-fix.log` | `2d14cffe3b44785b5fe551181e3e8c15a33109f8f873f19d012360b2a9a9abd8` |
 | `/private/tmp/native-probe-success-source-fix.log` | `a8937a8f33add6b4597e9da222917fa1d20ed71e86c1fef404c2ef878571fa9e` |
 | `/private/tmp/native-probe-step-source-fix.log` | `37e10451130d24f126ec368366619ae399c4f40d03e5c3565b8715dd2014f8d7` |
 | `/private/tmp/native-probe-missing-source-fix.log` | `d5828fad0c3ef43d217566ae403f70bd107ef99f4897e56623b747b9267cc6e2` |
-| `/private/tmp/dirplayer-native-readiness-native-stage2-fff7dcc3/evidence/native-probe-stage.png` | `da721b75691d6c62690cdc3dd09a7c63e12b88448465bc3922d5ce1b568cbde34` |
-| `/private/tmp/dirplayer-native-probe-evidence-20260918.tar.gz` | `6574f8d0fd5ba804a592aba66bdd2fdb884d6ca15bae9859fc3805d47ac0d6f0` |
+| `docs/checkpoints/native-readiness-20260918/native-probe/native-probe-stage.png` | `0a1253f93d101cde9faeda623b5a9e3ea8c0dca8f8b89b7717caefee9365309d` |
+| `/private/tmp/dirplayer-native-probe-evidence-corrected-20260918.tar.gz` | `f032da61eb102ebc501808d00a74ae9e2d1216315ffcdcce07446db538c6d5de` |
 
-The PNG is copied into this checkpoint as
-`native-probe-stage.png` with the same SHA-256. The source fixture is retained
+The successful contrast PNG is retained as the tracked canonical
+`native-probe-stage.png` with the SHA-256 above. The source fixture is retained
 in the worktree and its hash is recorded above; the generator and validator
 are the reproducible source of that artifact. The archive contains:
 
@@ -177,5 +202,10 @@ native-probe-success4.log
 native-probe-success-source-fix.log
 native-probe-step-source-fix.log
 native-probe-missing-source-fix.log
+native-probe-generator-contrast.log
+native-probe-validator-contrast.log
+native-probe-build-contrast.log
+native-probe-success-contrast.log
+native-probe-success-contrast2.log
 native-probe-stage.png
 ```
