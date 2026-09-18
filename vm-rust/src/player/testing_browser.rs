@@ -750,6 +750,35 @@ fn child_browser_owner_capability(
     ))
 }
 
+async fn await_child_command_idle(
+    session: crate::player::session::RuntimeSessionHandle,
+    player_id: u32,
+    owner: &crate::player::ownership::OwnerToken,
+) -> Result<(), String> {
+    let command_tx = session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            if !owner.is_arena_live() || !owner.same_identity(&context.player.owner) {
+                return None;
+            }
+            Some(context.player.queue_tx.clone())
+        })
+        .flatten()
+        .ok_or_else(|| "nested timer child became stale before idle drain".to_owned())?;
+    let (future, completer) = ManualFuture::new();
+    command_tx
+        .send(crate::player::PlayerVMExecutionItem {
+            command: PlayerVMCommand::DrainInputFlagCleanup,
+            completer: Some(completer),
+        })
+        .await
+        .map_err(|_| "nested timer child command loop stopped during idle drain".to_owned())?;
+    future
+        .await
+        .map(|_| ())
+        .map_err(|error| format!("nested timer idle drain failed: {}", error.message))
+}
+
 fn install_nested_movie_fixture(
     handle: &crate::BrowserPlayerHandle,
     member_number: u32,
@@ -3191,6 +3220,7 @@ impl BrowserTestPlayer {
                 observed_child_timeout
             ));
         }
+        await_child_command_idle(root_a.session().clone(), child_a, &child_owner_a).await?;
         let replacement_timer = create_owned_timeout_with_handler(
             root_a.session().clone(),
             child_a,
@@ -3216,6 +3246,7 @@ impl BrowserTestPlayer {
                 "nested stale timeout changed handler state: {stale_observed:?}"
             ));
         }
+        await_child_command_idle(root_a.session().clone(), child_a, &child_owner_a).await?;
         child_capability
             .trigger_timeout("ChildTimer".to_owned(), replacement_timer as f64)
             .map_err(|error| format!("nested replacement child timeout tick failed: {error:?}"))?;
@@ -3238,6 +3269,7 @@ impl BrowserTestPlayer {
                 observed_child_timeout
             ));
         }
+        await_child_command_idle(root_a.session().clone(), child_a, &child_owner_a).await?;
         if browser_owner_timer_probe(
             &child_owner_key_a,
             "ChildTimer",
