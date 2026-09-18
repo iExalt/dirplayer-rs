@@ -40,18 +40,29 @@ native_e2e_test!(test_native_director_probe_shape, |player| async move {
             snapshot.data.len(),
             (snapshot.width * snapshot.height * 4) as usize
         );
-        let visible_pixels = snapshot
+        let pixel = |x: u32, y: u32| {
+            let offset = ((y * snapshot.width + x) * 4) as usize;
+            [
+                snapshot.data[offset],
+                snapshot.data[offset + 1],
+                snapshot.data[offset + 2],
+                snapshot.data[offset + 3],
+            ]
+        };
+        assert_eq!(pixel(0, 0), [255, 255, 255, 255], "stage corner changed");
+        assert_eq!(pixel(16, 16), [0, 0, 0, 255], "shape center missing");
+        let black_pixels = snapshot
             .data
             .chunks_exact(4)
-            .filter(|rgba| rgba[3] != 0 && rgba[..3].iter().any(|channel| *channel != 0))
+            .filter(|rgba| **rgba == [0, 0, 0, 255])
             .count();
-        assert!(visible_pixels > 0, "shape snapshot was empty");
+        assert_eq!(black_pixels, 576, "inset shape pixel count changed");
         if let Ok(output_path) = std::env::var("NATIVE_PROBE_PNG") {
             std::fs::write(output_path, snapshot.to_png()).map_err(|error| error.to_string())?;
         }
         println!(
-            "native probe state=initialized frame={} snapshot={}x{} visible_pixels={}",
-            initial_frame, snapshot.width, snapshot.height, visible_pixels
+            "native probe state=initialized frame={} snapshot={}x{} black_pixels={}",
+            initial_frame, snapshot.width, snapshot.height, black_pixels
         );
 
         println!(
