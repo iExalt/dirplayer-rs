@@ -1,18 +1,34 @@
-use std::collections::VecDeque;
 use itertools::Itertools;
+use std::collections::VecDeque;
 
 use crate::{
-    director::lingo::datum::{Datum, DatumType, StringChunkExpr, StringChunkSource, StringChunkType, datum_bool},
+    director::lingo::datum::{
+        datum_bool, Datum, DatumType, StringChunkExpr, StringChunkSource, StringChunkType,
+    },
     player::{
-        ColorRef, DatumRef, DirPlayer, ScriptError, bitmap::{bitmap::{Bitmap, BuiltInPalette, PaletteRef}, drawing::CopyPixelsParams}, cast_lib::CastMemberRef, cast_member::Media, font::{get_text_index_at_pos, measure_text, measure_text_wrapped, DrawTextParams}, handlers::datum_handlers::{
-            cast_member_ref::{borrow_member_mut_with_player, checked_get_datum}, string::{string_get_lines, string_get_words}, string_chunk::StringChunkUtils
-        }, symbols::{symbol::Symbol, symbol_table::SymbolTable}
+        bitmap::{
+            bitmap::{Bitmap, BuiltInPalette, PaletteRef},
+            drawing::CopyPixelsParams,
+        },
+        cast_lib::CastMemberRef,
+        cast_member::Media,
+        font::{get_text_index_at_pos, measure_text, measure_text_wrapped, DrawTextParams},
+        handlers::datum_handlers::{
+            cast_member_ref::{borrow_member_mut_with_player, checked_get_datum},
+            string::{string_get_lines, string_get_words},
+            string_chunk::StringChunkUtils,
+        },
+        symbols::{symbol::Symbol, symbol_table::SymbolTable},
+        ColorRef, DatumRef, DirPlayer, ScriptError,
     },
 };
 
 pub struct FieldMemberHandlers {}
 
-fn builtin_symbol(symbol: &Symbol, symbols: &SymbolTable) -> Result<crate::player::symbols::builtin::BuiltInSymbol, ScriptError> {
+fn builtin_symbol(
+    symbol: &Symbol,
+    symbols: &SymbolTable,
+) -> Result<crate::player::symbols::builtin::BuiltInSymbol, ScriptError> {
     Ok(symbol.into_builtin_or_error(symbols)?)
 }
 
@@ -33,7 +49,8 @@ impl FieldMemberHandlers {
                     .find_member_by_ref(&member_ref)
                     .unwrap();
                 let field = member.member_type.as_field().unwrap();
-                let count_of = checked_get_datum(player, &args[0], symbols)?.symbol_value(symbols)?;
+                let count_of =
+                    checked_get_datum(player, &args[0], symbols)?.symbol_value(symbols)?;
                 if args.len() != 1 {
                     return Err(ScriptError::new("count requires 1 argument".to_string()));
                 }
@@ -53,7 +70,8 @@ impl FieldMemberHandlers {
                     .find_member_by_ref(&member_ref)
                     .unwrap();
                 let field = member.member_type.as_field().unwrap();
-                let prop_name = checked_get_datum(player, &args[0], symbols)?.symbol_value(symbols)?;
+                let prop_name =
+                    checked_get_datum(player, &args[0], symbols)?.symbol_value(symbols)?;
                 let start = checked_get_datum(player, &args[1], symbols)?.int_value()?;
                 let end = if args.len() > 2 {
                     checked_get_datum(player, &args[2], symbols)?.int_value()?
@@ -120,7 +138,8 @@ impl FieldMemberHandlers {
                 // terminates and the movie hard-stucks. Without word-wrap,
                 // a paged narrative member only has \r\n line breaks so the
                 // visible page boundary is determined purely by wrapping.
-                let (pt_vals, _flags) = checked_get_datum(player, &args[0], symbols)?.to_point_inline()?;
+                let (pt_vals, _flags) =
+                    checked_get_datum(player, &args[0], symbols)?.to_point_inline()?;
                 let x = pt_vals[0] as i32;
                 let y = pt_vals[1] as i32;
                 let member_ref = checked_get_datum(player, datum, symbols)?.to_member_ref()?;
@@ -153,7 +172,11 @@ impl FieldMemberHandlers {
                     &field_font_name,
                     &player.movie.cast_manager,
                     &mut player.bitmap_manager,
-                    if field_font_size > 0 { Some(field_font_size) } else { None },
+                    if field_font_size > 0 {
+                        Some(field_font_size)
+                    } else {
+                        None
+                    },
                     None,
                 );
                 let font_arc = field_font.or_else(|| player.font_manager.get_system_font());
@@ -164,7 +187,11 @@ impl FieldMemberHandlers {
                 let min_space_adv = {
                     let sz = font_rc.font_size.max(font_rc.char_height) as i32;
                     let v = ((sz as f32) * 0.30).round() as i16;
-                    if v > 0 { Some(v) } else { None }
+                    if v > 0 {
+                        Some(v)
+                    } else {
+                        None
+                    }
                 };
                 let params = DrawTextParams {
                     font: &font_rc,
@@ -172,7 +199,11 @@ impl FieldMemberHandlers {
                     line_spacing,
                     top_spacing,
                     char_spacing: 0,
-                    member_width: if word_wrap && wrap_width > 0 { Some(wrap_width) } else { None },
+                    member_width: if word_wrap && wrap_width > 0 {
+                        Some(wrap_width)
+                    } else {
+                        None
+                    },
                     // Match the renderer's space clamp so locToCharPos
                     // returns positions consistent with the drawn layout.
                     min_space_advance: min_space_adv,
@@ -218,7 +249,8 @@ impl FieldMemberHandlers {
                     .find_member_by_ref(&member_ref)
                     .unwrap();
                 let field = member.member_type.as_field().unwrap();
-                let step = super::text::line_step_px(field.fixed_line_space, field.font_size).max(1);
+                let step =
+                    super::text::line_step_px(field.fixed_line_space, field.font_size).max(1);
                 let arg = checked_get_datum(player, &args[0], symbols)?.int_value()?;
                 if handler_name == "linePosToLocV" {
                     let line_num = arg.max(1);
@@ -325,12 +357,20 @@ impl FieldMemberHandlers {
             }
             "line" => {
                 let lines = string_get_lines(&field.text);
-                let line_datums: VecDeque<_> = lines.into_iter().map(Datum::String).map(|d| player.alloc_datum(d)).collect();
+                let line_datums: VecDeque<_> = lines
+                    .into_iter()
+                    .map(Datum::String)
+                    .map(|d| player.alloc_datum(d))
+                    .collect();
                 Ok(Datum::List(DatumType::List, line_datums, false))
             }
             "word" => {
                 let words = string_get_words(&field.text);
-                let word_datums: VecDeque<_> = words.into_iter().map(Datum::String).map(|d| player.alloc_datum(d)).collect();
+                let word_datums: VecDeque<_> = words
+                    .into_iter()
+                    .map(Datum::String)
+                    .map(|d| player.alloc_datum(d))
+                    .collect();
                 Ok(Datum::List(DatumType::List, word_datums, false))
             }
             // `member.char` / `member.item` — sibling of `member.line` /
@@ -342,7 +382,8 @@ impl FieldMemberHandlers {
             // chunk-of-member entry.)
             "char" => {
                 let chars: Vec<String> = field.text.chars().map(|c| c.to_string()).collect();
-                let char_datums: VecDeque<_> = chars.into_iter()
+                let char_datums: VecDeque<_> = chars
+                    .into_iter()
                     .map(Datum::String)
                     .map(|d| player.alloc_datum(d))
                     .collect();
@@ -351,7 +392,8 @@ impl FieldMemberHandlers {
             "item" => {
                 let delim = player.movie.item_delimiter;
                 let items: Vec<String> = field.text.split(delim).map(|s| s.to_string()).collect();
-                let item_datums: VecDeque<_> = items.into_iter()
+                let item_datums: VecDeque<_> = items
+                    .into_iter()
                     .map(Datum::String)
                     .map(|d| player.alloc_datum(d))
                     .collect();
@@ -373,7 +415,9 @@ impl FieldMemberHandlers {
                 let rect_h = (field.rect_bottom as i32 - field.rect_top as i32).max(0);
                 let cm_ref = cast_member_ref.clone();
                 let frame = player.movie.current_frame;
-                let sprite_h: Option<i32> = player.movie.score
+                let sprite_h: Option<i32> = player
+                    .movie
+                    .score
                     .get_sorted_channels(frame)
                     .iter()
                     .find_map(|ch| {
@@ -418,7 +462,10 @@ impl FieldMemberHandlers {
                 let top_spacing = field.top_spacing;
                 let alignment = field.alignment.clone();
                 let word_wrap = field.word_wrap;
-                let fore_color = field.fore_color.clone().unwrap_or(ColorRef::PaletteIndex(255));
+                let fore_color = field
+                    .fore_color
+                    .clone()
+                    .unwrap_or(ColorRef::PaletteIndex(255));
                 let field_width = field.width;
 
                 // Try to get custom font, fall back to system font
@@ -455,8 +502,14 @@ impl FieldMemberHandlers {
                 // the wrap-aware path.
                 let (measured_w, measured_h) = if word_wrap && field_width > 0 {
                     measure_text_wrapped(
-                        &text_clone, &font, field_width, true,
-                        fixed_line_space, top_spacing, 0, 0,
+                        &text_clone,
+                        &font,
+                        field_width,
+                        true,
+                        fixed_line_space,
+                        top_spacing,
+                        0,
+                        0,
                     )
                 } else {
                     measure_text(&text_clone, &font, None, fixed_line_space, top_spacing, 0)
@@ -465,7 +518,11 @@ impl FieldMemberHandlers {
                     // Clamp to authored field.width when set — a wrapped
                     // field's display width is the authored width, not the
                     // measured (which may be the longest unwrapped line).
-                    if word_wrap { field_width } else { field_width.max(measured_w) }
+                    if word_wrap {
+                        field_width
+                    } else {
+                        field_width.max(measured_w)
+                    }
                 } else {
                     measured_w
                 };
@@ -522,7 +579,8 @@ impl FieldMemberHandlers {
                             original_dst_rect: None,
                             bg_color_explicit: false,
                             fore_color_explicit: false,
-                            ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
+                            ink9_mask_bitmap: None,
+                            ink9_mask_offset: (0, 0),
                             floor_rule: false,
                         };
 
@@ -553,14 +611,18 @@ impl FieldMemberHandlers {
             "charCount" => {
                 let delimiter = player.movie.item_delimiter;
                 let count = StringChunkUtils::resolve_chunk_count(
-                    &field.text, StringChunkType::Char, delimiter,
+                    &field.text,
+                    StringChunkType::Char,
+                    delimiter,
                 )?;
                 Ok(Datum::Int(count as i32))
             }
             "wordCount" => {
                 let delimiter = player.movie.item_delimiter;
                 let count = StringChunkUtils::resolve_chunk_count(
-                    &field.text, StringChunkType::Word, delimiter,
+                    &field.text,
+                    StringChunkType::Word,
+                    delimiter,
                 )?;
                 Ok(Datum::Int(count as i32))
             }
@@ -568,7 +630,9 @@ impl FieldMemberHandlers {
                 // Director treats paragraphs as \r-delimited, same as lines.
                 let delimiter = player.movie.item_delimiter;
                 let count = StringChunkUtils::resolve_chunk_count(
-                    &field.text, StringChunkType::Line, delimiter,
+                    &field.text,
+                    StringChunkType::Line,
+                    delimiter,
                 )?;
                 Ok(Datum::Int(count as i32))
             }
@@ -584,13 +648,19 @@ impl FieldMemberHandlers {
                 let end_val = field.sel_end;
                 let start = player.alloc_datum(Datum::Int(start_val));
                 let end = player.alloc_datum(Datum::Int(end_val));
-                Ok(Datum::List(DatumType::List, VecDeque::from(vec![start, end]), false))
+                Ok(Datum::List(
+                    DatumType::List,
+                    VecDeque::from(vec![start, end]),
+                    false,
+                ))
             }
             "selectedText" => {
                 let len = field.text.len() as i32;
                 let lo = field.sel_start.min(field.sel_end).clamp(0, len);
                 let hi = field.sel_start.max(field.sel_end).clamp(0, len);
-                Ok(Datum::String(field.text[lo as usize..hi as usize].to_string()))
+                Ok(Datum::String(
+                    field.text[lo as usize..hi as usize].to_string(),
+                ))
             }
             // `the selection of member` — Director 11.5 Scripting
             // Dictionary p.1187: "returns the offsets of the start and
@@ -612,7 +682,9 @@ impl FieldMemberHandlers {
             "kerning" => Ok(datum_bool(field.kerning)),
             "kerningThreshold" => Ok(Datum::Int(field.kerning_threshold as i32)),
             "useHypertextStyles" => Ok(datum_bool(field.use_hypertext_styles)),
-            "antiAliasType" => Ok(Datum::Symbol(Symbol::builtin(field.anti_alias_type.clone()))),
+            "antiAliasType" => Ok(Datum::Symbol(Symbol::builtin(
+                field.anti_alias_type.clone(),
+            ))),
             _ => Err(ScriptError::new(format!(
                 "Cannot get castMember property {} for field",
                 prop
@@ -683,7 +755,7 @@ impl FieldMemberHandlers {
                     field_data.rect_bottom = y2 as i16;
 
                     Ok(())
-                }
+                },
             ),
             "alignment" => borrow_member_mut_with_player(
                 player,
@@ -876,7 +948,11 @@ impl FieldMemberHandlers {
                 member_ref,
                 |player, symbols| value.int_value(),
                 |cast_member, value, symbols| {
-                    cast_member.member_type.as_field_mut().unwrap().box_drop_shadow = value? as u16;
+                    cast_member
+                        .member_type
+                        .as_field_mut()
+                        .unwrap()
+                        .box_drop_shadow = value? as u16;
                     Ok(())
                 },
             ),
@@ -926,7 +1002,8 @@ impl FieldMemberHandlers {
                 |player, symbols| value.int_value(),
                 |cast_member, value, symbols| {
                     let v = value? as u8;
-                    cast_member.member_type.as_field_mut().unwrap().fore_color = Some(ColorRef::PaletteIndex(v));
+                    cast_member.member_type.as_field_mut().unwrap().fore_color =
+                        Some(ColorRef::PaletteIndex(v));
                     Ok(())
                 },
             ),
@@ -937,7 +1014,8 @@ impl FieldMemberHandlers {
                 |player, symbols| value.int_value(),
                 |cast_member, value, symbols| {
                     let v = value? as u8;
-                    cast_member.member_type.as_field_mut().unwrap().back_color = Some(ColorRef::PaletteIndex(v));
+                    cast_member.member_type.as_field_mut().unwrap().back_color =
+                        Some(ColorRef::PaletteIndex(v));
                     Ok(())
                 },
             ),
@@ -950,7 +1028,11 @@ impl FieldMemberHandlers {
                     let field = cast_member.member_type.as_field_mut().unwrap();
                     match value? {
                         Media::Field(new_field) => field.clone_from(&new_field),
-                        _ => return Err(ScriptError::new("Invalid media value for field".to_string())),
+                        _ => {
+                            return Err(ScriptError::new(
+                                "Invalid media value for field".to_string(),
+                            ))
+                        }
                     };
                     Ok(())
                 },
@@ -1010,7 +1092,11 @@ impl FieldMemberHandlers {
                 member_ref,
                 |_player, symbols| value.int_value(),
                 |cast_member, value, symbols| {
-                    cast_member.member_type.as_field_mut().unwrap().kerning_threshold = value? as u16;
+                    cast_member
+                        .member_type
+                        .as_field_mut()
+                        .unwrap()
+                        .kerning_threshold = value? as u16;
                     Ok(())
                 },
             ),
@@ -1020,7 +1106,11 @@ impl FieldMemberHandlers {
                 member_ref,
                 |_player, symbols| value.bool_value(),
                 |cast_member, value, symbols| {
-                    cast_member.member_type.as_field_mut().unwrap().use_hypertext_styles = value?;
+                    cast_member
+                        .member_type
+                        .as_field_mut()
+                        .unwrap()
+                        .use_hypertext_styles = value?;
                     Ok(())
                 },
             ),
@@ -1030,7 +1120,11 @@ impl FieldMemberHandlers {
                 member_ref,
                 |_player, symbols| value.symbol_value(symbols),
                 |cast_member, value, symbols| {
-                    cast_member.member_type.as_field_mut().unwrap().anti_alias_type = builtin_symbol(&value?, symbols)?;
+                    cast_member
+                        .member_type
+                        .as_field_mut()
+                        .unwrap()
+                        .anti_alias_type = builtin_symbol(&value?, symbols)?;
                     Ok(())
                 },
             ),

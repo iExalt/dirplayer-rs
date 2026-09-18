@@ -330,7 +330,12 @@ impl NetManager {
         let task_id = prepared.task.id;
         if prepared.should_start {
             #[cfg(not(target_arch = "wasm32"))]
-            if prepared.task.resolved_url.to_string().starts_with("file://") {
+            if prepared
+                .task
+                .resolved_url
+                .to_string()
+                .starts_with("file://")
+            {
                 // Preserve the native compatibility path: file:// requests
                 // complete synchronously so existing preload callers can read
                 // the result immediately.
@@ -363,7 +368,12 @@ impl NetManager {
         let task_id = task.id;
         let already_done = shared_state
             .try_lock()
-            .and_then(|state| state.task_states.get(&task_id).map(|value| value.result.is_some()))
+            .and_then(|state| {
+                state
+                    .task_states
+                    .get(&task_id)
+                    .map(|value| value.result.is_some())
+            })
             .unwrap_or(false);
         if already_done {
             return;
@@ -440,8 +450,7 @@ impl NetManager {
                     Err(_) => 0,
                 };
                 let mut shared_state = shared_state.lock().await;
-                shared_state
-                    .update_task_progress(task_id, final_bytes, final_bytes);
+                shared_state.update_task_progress(task_id, final_bytes, final_bytes);
                 shared_state.fulfill_task(task_id, result).await;
             }
         } else {

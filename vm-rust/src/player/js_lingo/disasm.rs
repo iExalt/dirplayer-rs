@@ -116,10 +116,12 @@ fn format_operand(ir: &JsScriptIR, op: JsOp, operand: &[u8], offset: usize) -> S
             Ok(v) => format!(" {}", v),
             Err(e) => format!(" <{}>", e),
         },
-        JsOpFormat::Local | JsOpFormat::Qarg | JsOpFormat::Qvar => match read_u16_operand(operand) {
-            Ok(v) => format!(" {}", v),
-            Err(e) => format!(" <{}>", e),
-        },
+        JsOpFormat::Local | JsOpFormat::Qarg | JsOpFormat::Qvar => {
+            match read_u16_operand(operand) {
+                Ok(v) => format!(" {}", v),
+                Err(e) => format!(" <{}>", e),
+            }
+        }
         JsOpFormat::Const => match read_u16_operand(operand) {
             Ok(idx) => {
                 let label = ir

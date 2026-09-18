@@ -35,7 +35,11 @@ fn install_globals(rt: &JsRuntime) {
         let s = args.get(0).map(|v| v.to_string()).unwrap_or_default();
         let radix = args.get(1).and_then(|v| {
             let n = v.to_int32();
-            if (2..=36).contains(&n) { Some(n as u32) } else { None }
+            if (2..=36).contains(&n) {
+                Some(n as u32)
+            } else {
+                None
+            }
         });
         Ok(parse_int_radix(&s, radix))
     });
@@ -58,20 +62,30 @@ fn install_globals(rt: &JsRuntime) {
     });
     rt.define_native("Number", |args| {
         let n = args.get(0).map(|v| v.to_number()).unwrap_or(0.0);
-        Ok(if n == n.trunc() && n.abs() < i32::MAX as f64 && !n.is_nan() {
-            JsValue::Int(n as i32)
-        } else {
-            JsValue::Number(n)
-        })
+        Ok(
+            if n == n.trunc() && n.abs() < i32::MAX as f64 && !n.is_nan() {
+                JsValue::Int(n as i32)
+            } else {
+                JsValue::Number(n)
+            },
+        )
     });
     rt.define_native("Boolean", |args| {
-        Ok(JsValue::Bool(args.get(0).map(|v| v.to_bool()).unwrap_or(false)))
+        Ok(JsValue::Bool(
+            args.get(0).map(|v| v.to_bool()).unwrap_or(false),
+        ))
     });
 
     // Constants on the global object.
-    rt.global.borrow_mut().set_own("NaN", JsValue::Number(f64::NAN));
-    rt.global.borrow_mut().set_own("Infinity", JsValue::Number(f64::INFINITY));
-    rt.global.borrow_mut().set_own("undefined", JsValue::Undefined);
+    rt.global
+        .borrow_mut()
+        .set_own("NaN", JsValue::Number(f64::NAN));
+    rt.global
+        .borrow_mut()
+        .set_own("Infinity", JsValue::Number(f64::INFINITY));
+    rt.global
+        .borrow_mut()
+        .set_own("undefined", JsValue::Undefined);
 }
 
 fn install_math(rt: &JsRuntime) {
@@ -88,59 +102,103 @@ fn install_math(rt: &JsRuntime) {
         m.set_own("SQRT2", JsValue::Number(std::f64::consts::SQRT_2));
         m.set_own("SQRT1_2", JsValue::Number(1.0 / std::f64::consts::SQRT_2));
 
-        m.set_own("abs",  native("abs",  |a| unary_num(a, f64::abs)));
+        m.set_own("abs", native("abs", |a| unary_num(a, f64::abs)));
         m.set_own("ceil", native("ceil", |a| unary_num(a, f64::ceil)));
         m.set_own("floor", native("floor", |a| unary_num(a, f64::floor)));
-        m.set_own("round", native("round", |a| unary_num(a, |n| {
-            // JS round: .5 rounds toward +Inf (not banker's rounding).
-            if n.is_nan() || n.is_infinite() { return n; }
-            (n + 0.5).floor()
-        })));
+        m.set_own(
+            "round",
+            native("round", |a| {
+                unary_num(a, |n| {
+                    // JS round: .5 rounds toward +Inf (not banker's rounding).
+                    if n.is_nan() || n.is_infinite() {
+                        return n;
+                    }
+                    (n + 0.5).floor()
+                })
+            }),
+        );
         m.set_own("sqrt", native("sqrt", |a| unary_num(a, f64::sqrt)));
-        m.set_own("sin",  native("sin",  |a| unary_num(a, f64::sin)));
-        m.set_own("cos",  native("cos",  |a| unary_num(a, f64::cos)));
-        m.set_own("tan",  native("tan",  |a| unary_num(a, f64::tan)));
+        m.set_own("sin", native("sin", |a| unary_num(a, f64::sin)));
+        m.set_own("cos", native("cos", |a| unary_num(a, f64::cos)));
+        m.set_own("tan", native("tan", |a| unary_num(a, f64::tan)));
         m.set_own("asin", native("asin", |a| unary_num(a, f64::asin)));
         m.set_own("acos", native("acos", |a| unary_num(a, f64::acos)));
         m.set_own("atan", native("atan", |a| unary_num(a, f64::atan)));
-        m.set_own("atan2", native("atan2", |a| {
-            let y = a.get(0).map(|v| v.to_number()).unwrap_or(f64::NAN);
-            let x = a.get(1).map(|v| v.to_number()).unwrap_or(f64::NAN);
-            Ok(JsValue::Number(y.atan2(x)))
-        }));
-        m.set_own("log",  native("log",  |a| unary_num(a, f64::ln)));
-        m.set_own("exp",  native("exp",  |a| unary_num(a, f64::exp)));
-        m.set_own("pow",  native("pow",  |a| {
-            let b = a.get(0).map(|v| v.to_number()).unwrap_or(f64::NAN);
-            let e = a.get(1).map(|v| v.to_number()).unwrap_or(f64::NAN);
-            Ok(JsValue::Number(b.powf(e)))
-        }));
-        m.set_own("min", native("min", |a| {
-            if a.is_empty() { return Ok(JsValue::Number(f64::INFINITY)); }
-            let mut r = f64::INFINITY;
-            for v in a { let n = v.to_number(); if n.is_nan() { return Ok(JsValue::Number(f64::NAN)); } if n < r { r = n; } }
-            Ok(JsValue::Number(r))
-        }));
-        m.set_own("max", native("max", |a| {
-            if a.is_empty() { return Ok(JsValue::Number(f64::NEG_INFINITY)); }
-            let mut r = f64::NEG_INFINITY;
-            for v in a { let n = v.to_number(); if n.is_nan() { return Ok(JsValue::Number(f64::NAN)); } if n > r { r = n; } }
-            Ok(JsValue::Number(r))
-        }));
+        m.set_own(
+            "atan2",
+            native("atan2", |a| {
+                let y = a.get(0).map(|v| v.to_number()).unwrap_or(f64::NAN);
+                let x = a.get(1).map(|v| v.to_number()).unwrap_or(f64::NAN);
+                Ok(JsValue::Number(y.atan2(x)))
+            }),
+        );
+        m.set_own("log", native("log", |a| unary_num(a, f64::ln)));
+        m.set_own("exp", native("exp", |a| unary_num(a, f64::exp)));
+        m.set_own(
+            "pow",
+            native("pow", |a| {
+                let b = a.get(0).map(|v| v.to_number()).unwrap_or(f64::NAN);
+                let e = a.get(1).map(|v| v.to_number()).unwrap_or(f64::NAN);
+                Ok(JsValue::Number(b.powf(e)))
+            }),
+        );
+        m.set_own(
+            "min",
+            native("min", |a| {
+                if a.is_empty() {
+                    return Ok(JsValue::Number(f64::INFINITY));
+                }
+                let mut r = f64::INFINITY;
+                for v in a {
+                    let n = v.to_number();
+                    if n.is_nan() {
+                        return Ok(JsValue::Number(f64::NAN));
+                    }
+                    if n < r {
+                        r = n;
+                    }
+                }
+                Ok(JsValue::Number(r))
+            }),
+        );
+        m.set_own(
+            "max",
+            native("max", |a| {
+                if a.is_empty() {
+                    return Ok(JsValue::Number(f64::NEG_INFINITY));
+                }
+                let mut r = f64::NEG_INFINITY;
+                for v in a {
+                    let n = v.to_number();
+                    if n.is_nan() {
+                        return Ok(JsValue::Number(f64::NAN));
+                    }
+                    if n > r {
+                        r = n;
+                    }
+                }
+                Ok(JsValue::Number(r))
+            }),
+        );
         // Math.random owns state per JsRuntime, so two runtimes can be
         // interleaved without consuming one another's deterministic stream.
         let random_state = rt.random_state();
-        m.set_own("random", native("random", move |_| {
-            let mut x = random_state.get();
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            random_state.set(x);
-            // Convert to [0, 1).
-            Ok(JsValue::Number((x >> 11) as f64 / ((1u64 << 53) as f64)))
-        }));
+        m.set_own(
+            "random",
+            native("random", move |_| {
+                let mut x = random_state.get();
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                random_state.set(x);
+                // Convert to [0, 1).
+                Ok(JsValue::Number((x >> 11) as f64 / ((1u64 << 53) as f64)))
+            }),
+        );
     }
-    rt.global.borrow_mut().set_own("Math", JsValue::Object(math));
+    rt.global
+        .borrow_mut()
+        .set_own("Math", JsValue::Object(math));
 }
 
 #[cfg(test)]
@@ -176,7 +234,10 @@ mod tests {
         for _ in 0..4 {
             assert_eq!(random(&a), random(&b));
         }
-        assert_ne!(random(&JsRuntime::with_stdlib_seed(7).expect("seed")), random(&c));
+        assert_ne!(
+            random(&JsRuntime::with_stdlib_seed(7).expect("seed")),
+            random(&c)
+        );
     }
 
     #[test]
@@ -246,14 +307,19 @@ fn install_string_object(rt: &JsRuntime) {
     {
         let mut o = s.borrow_mut();
         o.class_name = "String";
-        o.set_own("fromCharCode", native("fromCharCode", |a| {
-            let mut out = String::new();
-            for v in a {
-                let c = v.to_int32() as u32;
-                if let Some(ch) = char::from_u32(c) { out.push(ch); }
-            }
-            Ok(JsValue::String(Rc::new(out)))
-        }));
+        o.set_own(
+            "fromCharCode",
+            native("fromCharCode", |a| {
+                let mut out = String::new();
+                for v in a {
+                    let c = v.to_int32() as u32;
+                    if let Some(ch) = char::from_u32(c) {
+                        out.push(ch);
+                    }
+                }
+                Ok(JsValue::String(Rc::new(out)))
+            }),
+        );
     }
     rt.global.borrow_mut().set_own("String", JsValue::Object(s));
 }
@@ -286,8 +352,14 @@ fn install_date(rt: &JsRuntime) {
 
 // ===== Helpers =====
 
-fn native(name: &'static str, f: impl Fn(&[JsValue]) -> Result<JsValue, JsError> + 'static) -> JsValue {
-    JsValue::Native(Rc::new(NativeFn { name, call: Box::new(f) }))
+fn native(
+    name: &'static str,
+    f: impl Fn(&[JsValue]) -> Result<JsValue, JsError> + 'static,
+) -> JsValue {
+    JsValue::Native(Rc::new(NativeFn {
+        name,
+        call: Box::new(f),
+    }))
 }
 
 fn unary_num(args: &[JsValue], f: impl Fn(f64) -> f64) -> Result<JsValue, JsError> {
@@ -306,17 +378,25 @@ fn parse_int_radix(s: &str, radix: Option<u32>) -> JsValue {
     let radix = match radix {
         Some(r) => r,
         None => {
-            if s.starts_with("0x") || s.starts_with("0X") { s = &s[2..]; 16 }
-            else { 10 }
+            if s.starts_with("0x") || s.starts_with("0X") {
+                s = &s[2..];
+                16
+            } else {
+                10
+            }
         }
     };
     let mut digits = String::new();
     for c in s.chars() {
         let d = c.to_digit(radix);
-        if d.is_none() { break; }
+        if d.is_none() {
+            break;
+        }
         digits.push(c);
     }
-    if digits.is_empty() { return JsValue::Number(f64::NAN); }
+    if digits.is_empty() {
+        return JsValue::Number(f64::NAN);
+    }
     match i64::from_str_radix(&digits, radix) {
         Ok(v) => {
             let v = v as i64 * sign as i64;
@@ -338,15 +418,29 @@ fn parse_float(s: &str) -> JsValue {
     let mut saw_e = false;
     for (i, c) in s.char_indices() {
         match c {
-            '-' | '+' if i == 0 => { end = i + 1; }
-            '0'..='9' => { end = i + 1; }
-            '.' if !saw_dot && !saw_e => { saw_dot = true; end = i + 1; }
-            'e' | 'E' if !saw_e && end > 0 => { saw_e = true; end = i + 1; }
-            '-' | '+' if saw_e && s[..i].ends_with(|c: char| c == 'e' || c == 'E') => { end = i + 1; }
+            '-' | '+' if i == 0 => {
+                end = i + 1;
+            }
+            '0'..='9' => {
+                end = i + 1;
+            }
+            '.' if !saw_dot && !saw_e => {
+                saw_dot = true;
+                end = i + 1;
+            }
+            'e' | 'E' if !saw_e && end > 0 => {
+                saw_e = true;
+                end = i + 1;
+            }
+            '-' | '+' if saw_e && s[..i].ends_with(|c: char| c == 'e' || c == 'E') => {
+                end = i + 1;
+            }
             _ => break,
         }
     }
-    if end == 0 { return JsValue::Number(f64::NAN); }
+    if end == 0 {
+        return JsValue::Number(f64::NAN);
+    }
     match s[..end].parse::<f64>() {
         Ok(n) => JsValue::Number(n),
         Err(_) => JsValue::Number(f64::NAN),

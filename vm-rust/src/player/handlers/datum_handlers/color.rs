@@ -1,7 +1,9 @@
 use crate::{
     director::lingo::datum::Datum,
     player::{
-        bitmap::bitmap::{get_system_default_palette, nearest_palette_index, resolve_color_ref, PaletteRef},
+        bitmap::bitmap::{
+            get_system_default_palette, nearest_palette_index, resolve_color_ref, PaletteRef,
+        },
         compare::validate_direct_symbol_fields,
         session::ExecutionContext,
         sprite::ColorRef,
@@ -28,21 +30,21 @@ impl ColorDatumHandlers {
                 .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
             let datum_value = checked_datum(player, &datum, symbols)?;
             match handler_name_lower {
-            "hexstring" => {
-                let color_ref = datum_value.to_color_ref()?;
-                let (r, g, b) = resolve_color_ref(
-                    &player.movie.cast_manager.palettes(),
-                    color_ref,
-                    &PaletteRef::BuiltIn(get_system_default_palette()),
-                    8,
-                );
-                let hex_string = format!("#{:02X}{:02X}{:02X}", r, g, b);
-                Ok(player.alloc_datum(Datum::String(hex_string)))
-            }
-            "duplicate" => Ok(datum.clone()),
-            _ => Err(ScriptError::new(format!(
-                "no handler {handler_name_display} for color"
-            ))),
+                "hexstring" => {
+                    let color_ref = datum_value.to_color_ref()?;
+                    let (r, g, b) = resolve_color_ref(
+                        &player.movie.cast_manager.palettes(),
+                        color_ref,
+                        &PaletteRef::BuiltIn(get_system_default_palette()),
+                        8,
+                    );
+                    let hex_string = format!("#{:02X}{:02X}{:02X}", r, g, b);
+                    Ok(player.alloc_datum(Datum::String(hex_string)))
+                }
+                "duplicate" => Ok(datum.clone()),
+                _ => Err(ScriptError::new(format!(
+                    "no handler {handler_name_display} for color"
+                ))),
             }
         })
     }
@@ -93,10 +95,15 @@ impl ColorDatumHandlers {
                 },
             },
             "ilk" => Ok(player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Color)))),
-            "colortype" => match color_ref {
-                ColorRef::Rgb(..) => Ok(player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Rgb)))),
-                ColorRef::PaletteIndex(_) => Ok(player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::PaletteIndex)))),
-            },
+            "colortype" => {
+                match color_ref {
+                    ColorRef::Rgb(..) => {
+                        Ok(player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Rgb))))
+                    }
+                    ColorRef::PaletteIndex(_) => Ok(player
+                        .alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::PaletteIndex)))),
+                }
+            }
             "paletteindex" => match color_ref {
                 ColorRef::PaletteIndex(i) => Ok(player.alloc_datum(Datum::Int(*i as i32))),
                 // Director 11.5 Scripting Dictionary p.832: `.paletteIndex` on

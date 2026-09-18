@@ -42,7 +42,9 @@ pub async fn dispatch_pending_stream_status() {
 
             // Phase 1: Report "Connecting" if not yet reported
             if last_phase.is_none() {
-                player.stream_status_reported.insert(task_id, StreamStatusPhase::Connecting);
+                player
+                    .stream_status_reported
+                    .insert(task_id, StreamStatusPhase::Connecting);
                 // If already done, skip Connecting and go straight to final
                 if !is_done {
                     result.push(StreamEvent {
@@ -56,10 +58,13 @@ pub async fn dispatch_pending_stream_status() {
             }
 
             // Phase 2: Report "InProgress" while downloading (bytes_loaded > 0 but not done)
-            if !is_done && task_state.bytes_loaded > 0
+            if !is_done
+                && task_state.bytes_loaded > 0
                 && last_phase.map_or(true, |p| p < StreamStatusPhase::Final)
             {
-                player.stream_status_reported.insert(task_id, StreamStatusPhase::InProgress);
+                player
+                    .stream_status_reported
+                    .insert(task_id, StreamStatusPhase::InProgress);
                 result.push(StreamEvent {
                     url: url.clone(),
                     state: "InProgress",
@@ -93,7 +98,9 @@ pub async fn dispatch_pending_stream_status() {
                     }
                     None => {}
                 }
-                player.stream_status_reported.insert(task_id, StreamStatusPhase::Final);
+                player
+                    .stream_status_reported
+                    .insert(task_id, StreamStatusPhase::Final);
             }
         }
         result
@@ -106,9 +113,16 @@ pub async fn dispatch_pending_stream_status() {
             let bytes_so_far_datum = player.alloc_datum(Datum::Int(event.bytes_so_far));
             let bytes_total_datum = player.alloc_datum(Datum::Int(event.bytes_total));
             let error_datum = player.alloc_datum(Datum::Int(event.error));
-            vec![url_datum, state_datum, bytes_so_far_datum, bytes_total_datum, error_datum]
+            vec![
+                url_datum,
+                state_datum,
+                bytes_so_far_datum,
+                bytes_total_datum,
+                error_datum,
+            ]
         });
-        let _ = player_invoke_global_event(Symbol::builtin(BuiltInSymbol::StreamStatus), &args).await;
+        let _ =
+            player_invoke_global_event(Symbol::builtin(BuiltInSymbol::StreamStatus), &args).await;
         player_wait_available().await;
     }
 }

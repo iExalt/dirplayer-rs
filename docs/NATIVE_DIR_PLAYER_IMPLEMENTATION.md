@@ -9,13 +9,72 @@ The Stage 1 committed base is `dev` at
 combined-checkpoint integration recorded below; the complete Stage 2 exit gate
 and Stages 3–6 remain open. See the [publication checkpoint](checkpoints/native-ownership-20260917/README.md)
 for the archived review inputs and the [live integration receipt](checkpoints/stage2-checkpoint-integration-20260917/README.md)
-for current source identity and verification.
+for that earlier bounded source identity and verification.
+
+## Resumed working checkpoint
+
+The latest published runtime revision is `fa80cb17` (bounded compiled backjump
+accounting and validation history); full Stage 2 remains open. The user has
+resumed after reboot. All 43 saved worktree identities matched the durable
+[reboot handoff](checkpoints/reboot-handoff-20260917/README.md), with current
+coordination and storage instructions in its
+[resume note](checkpoints/reboot-handoff-20260917/resume.md).
+
+The resumed explicit-owner score migration passed native test compilation
+(`cargo test --tests --no-run --locked --offline`, `CARGO_INCREMENTAL=0`), with
+the receipt under `~/Projects/.dirplayer-work/native-stage2/validation/compile-fourth-pass.log`.
+The focused native mount/unsupported-host contract now passes (one test;
+`native-mounted-contract.log` in the same validation directory). The production
+loader assigns child member `1:1` while preserving parent member `1:91`; the
+initial-load flags remain correct, and full native Flash startup explicitly
+rejects unsupported host access and cleans up its child. This repairs the
+previously reproduced missing-member regression at that bounded native gate.
+The latest native library suite passes **600/0**, including the Stage startup
+phase simulation (both-flag preservation, intrinsic sizing, puppet/name rules)
+and FilmLoop relative-score/behavior-identity checks through the active-score
+pass, shared session-ID allocator exhaustion and reset/reload cache cleanup.
+Receipts: `native-lib-reset-final.log` and the focused checks recorded in the
+resume note. Sharing the
+allocator between test harnesses and browser handles removes colliding host
+owner keys; the fourth focused browser run verifies distinct keys and actual
+Ruffle publication/readiness. Isolated child Flash reads remain A=7/B=9 with
+numeric child id 2 in both sessions. All four focused browser wrappers now pass
+(`browser-focused-four-final4.log`, 33.6s): real WebGL2 parent composition and
+nested lifecycle, response decoding, two-owner pointer delivery/reset-recreation
+and readiness rejection, and reset reentry. Canvas2D linked-Movie composition
+lacks a production rendering branch and is not covered by this acceptance.
+The combined 19-fixture browser gate and final production WASM build also pass.
+The navigator accepted this bounded component; exact source/artifact identities
+and receipts are in [its acceptance record](checkpoints/score-child-pointer-20260917/README.md).
+The navigator has accepted the bounded Stage 2.7 callback-origin component:
+612 native tests, 12 frontend manager tests, 38 lifecycle/LocalConnection tests,
+the actual callback/disposal fixture and the combined 20-fixture browser gate
+pass. The production VM package and frontend build pass with matching packaged
+WASM and current callback bindings. Runtime callbacks preserve exact origin
+through registration, Ruffle emission, frontend routing and pre-decode VM
+validation. Necessary SpriteAsync callFunction and scheduler repairs are included.
+Exact sources, separate artifacts, receipts and the preserved source overlay are
+in the [callback acceptance record](checkpoints/callback-origin-20260917/README.md).
+The [sprite get/set component](checkpoints/sprite-variable-20260918/README.md)
+is now accepted locally: native 628/0, frontend 15+38, focused browser 1/0,
+combined browser 21/0 and matching production VM/frontend artifacts pass. Actual
+early retained-object property/method access, source-variable reassignment,
+replacement rejection and sibling/reset/disposal isolation are verified. Its
+62-file accepted source overlay preserves earlier components. These resumed
+changes remain unpublished and full Stage 2 remains open. The next bounded item
+is the [reviewed timer contract](checkpoints/timeout-host-ownership-audit-20260917.md).
+The refreshed [lexical inventory](checkpoints/stage2-closure-inventory-20260918.md)
+and [input follow-up](checkpoints/input-command-followup-20260918.md) record
+remaining work; neither is semantic closure or runtime acceptance.
+Full Stage 2 remains open; no Stage 3 work has started.
+Earlier 595-test receipts describe the pre-migration checkpoint.
 
 ## Current Stage 1 checkpoint
 
 Stage 1 remains accepted at its committed source identity. The runtime has since
-advanced through the bounded Stage 2 checkpoint integration below, while the
-seven recorded Ruffle working-tree edits remain unchanged.
+advanced through the bounded Stage 2 checkpoint integration below. The seven
+recorded Ruffle working-tree edits were preserved through the subsequent
+callback-registry integration described above.
 
 - [x] **1.1:** Accept the scoped baseline with retained revisions, licenses,
   toolchains and fixture availability in the
@@ -71,8 +130,9 @@ records the reconciled hashes, commands and source-frozen results:
 The browser command first regenerated its runner but could not bind its local
 port in the sandbox; the identical elevated run passed all 13 fixtures. These
 are fresh live-checkout executions, but remain scoped rather than a full movie
-campaign. Ruffle callback-origin work remains an isolated, uncompiled nine-file
-proposal. Global player/renderer paths remain; the later JS object checkpoint below
+campaign. At this earlier checkpoint, Ruffle callback-origin work was an isolated,
+uncompiled nine-file proposal; see the current status above for its integration.
+Global player/renderer paths remain; the later JS object checkpoint below
 removes JS-Lingo registry TLS. Passing
 native library tests is not a working native player.
 
@@ -167,11 +227,14 @@ lacks its required movie. Native Xtras, Shockwave 3D, native nested Director,
 full campaign and Linux/Windows certification remain deferred as specified in
 the roadmap, while existing browser behavior must be preserved.
 
-Use one Cargo target, `/private/tmp/dirplayer-parser-review-build/target`, with
-`CARGO_INCREMENTAL=0`. Do not copy dependency/build trees. Retain compact
-commands/logs/manifests and reviewed source deltas before removing obsolete
-artifacts. This publication stops at the verified integration checkpoint; all
-remaining Stage 2 exit gates and Stages 3–6 remain open.
+Use one Cargo target,
+`/Users/clliaw/Projects/.dirplayer-work/native-stage2/target`, with
+`CARGO_INCREMENTAL=0`. Keep logs and manifests in the sibling `validation/`
+directory, and handoffs inside the repository. The user requires ongoing work
+and caches to stay in the repository or `~/Projects`; `/tmp` is only for
+truly disposable scratch files. Do not copy dependency/build trees. Full
+Stage 2 and Stages 3–6 remain open; the current implementation goal stops
+after Stage 2.
 
 ## Historical checkpoints — not the current to-do list
 

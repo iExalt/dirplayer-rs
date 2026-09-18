@@ -1,0 +1,74 @@
+{
+  "goal": "Full Stage 2; stop before Stage 3; active, not complete or blocked",
+  "published": {
+    "dirplayer-rs": "f6706ea6ff4b34b2f51992701c312d6c48281998",
+    "childhood-redux": "995d7d49e939e44f02cb56ba92123d4b15dc96ab"
+  },
+  "accepted_uncommitted": "None. Stage2.1 reclamation and Stage2.2 three builtins published; focused3/full576native/WASM accepted isolated evidence.",
+  "active_writers": {
+    "stage2_lead": "ChildFlashlead+singleCargo monitor; reviewreferenceWASMrepair+fullbrowseracceptancematrix; coordinate corefreeze beforefreshbuild.",
+    "reference_audit": "Currently readonly interactiveSWF feasibility; decoderimplementation approved onlyafterlead releases currentbrowser37552 sourcefreeze. Own narrowflash_object visibility/browsermethod/e2ewrapper then, no concurrentcorewrites.",
+    "flash_fixture_repair": "ROOT-approved IMPLEMENT MouseDown owner migration. Solewriter commands.rs; events.rs helpervisibility; session.rs typeddeferredflagcleanup; flash_object.rs or src/js_api.rs ABI; flashPlayerManager.ts+tests; dirplayer-js-api/index.js/d.ts asneeded. NO nested/mod/testing_browser/template. No buildswithoutlead.",
+    "root": "MouseDown navigator/reviewer +mainplan/docs. Compiledproposalpaused."
+  },
+  "validation": "Browser2 exec82785 terminal1 after releasebuild2m49+60sPlaywrighttimeout. ZERO nestedfixturemarkers andNO[page]console inrawlog. Rootverifiedlog_test_action directlyconsole.log ande2e lacks pageerror/requestfailedlisteners. OuterPlaywrighttestentered doesNOTproveRustfixtureentry; no phaseidentified. Native595/WASM13 remainvalid.",
+  "remaining": "Stage2.1 accepted. ChildFlash current: reusable production frontend controller exact parent identity/recursive callback+host teardown/registration rollback; directreset replace both loops and prove execution; owner-qualified rollback after reentry; no RefMut temporary spans host/errorcleanup. Timer design deferred until overlapfree. FullStage2.2-2.7,2.9,2.10 remain;2.8 accepted scoped. Interpreter dispatch read-only finding: explicit bytecode driver works; HandlerFrame.ir cached but production never calls run_handler_resumable. Must wire actual compiled execution, not remove required surface. Proposal docs/checkpoints/interpreter-dispatch-audit-20260917.md. Timer design now also covers snapshot ready-list incarnation validation before each awaited dispatch. Manager threebranch candidate preserves ignoredargs: PuppetTransition validatesoptionalargs onlyIntmode, Preload onlychosenarg, SpriteBox first5. Tests geometryrect/defaultpreload/foreignignored + consumedforeign/stale; await3+fullsuite. Browserpilot required productioncontroller exports and actual2root/childRuffle pixels/reset/stale/failure fixture.",
+  "preserve": "Ruffle HEAD79d1ca0 + seven preexisting dirty files; mise a8d105...; no fmt; shared target /private/tmp/dirplayer-parser-review-build/target; offline locked mise",
+  "publication": "Docs-only checkpoints pushed and remote refs verified; all24 source WIP files hash-verified unchanged. No further publication authorized.",
+  "review_findings": [
+    "Host capability-failure/direct disposal must retire both descendant and self callback/controller registrations; parent-only hook insufficient. Core pilot repairing under lead.",
+    "Fixture generator staged under /private/tmp/dirplayer-child-fixture-staging; root verified SWF FileLengthLE, integer payload offset15 not type14, and existing ShowFrame/End; pilot notified before parse feasibility.",
+    "Production compiled-driver total_backjumps has no reader; future compiled integration must define tested accounting/yield policy. Audit appendix added.",
+    "Single input-scope id overwrite loses baseline on either overlap drop order; pilot tasked stack/unwind or justified rejection before mutation plus checked scope id exhaustion.",
+    "Flash move/down require exact Rust owner+generation validation between calls and after down; missing generation/native semantics flagged.",
+    "OwnedEventStopScope, OwnedScoreContextScope, OwnedStaticEventGuard borrow_mut in Drop/release; need actual suspended MouseDown cancellation under borrow coverage and narrow cleanup extension proposal.",
+    "Bad SWF provenance and structural validator overclaim postregistration failure; reference asked to remove unsupported lifecycle claims.",
+    "Frozen browser failure cleanup assertion uses harness success-only Sets; failed registration bypasses tracked registrar so absence is tautological. Root and lead independently rejected; reference replacing with direct production callback probe and actual manager host lookup/operation proof.",
+    "Flash pointer Rust bridge maps every JS value to unit while new host returns FlashOwnedResult including ok:false; must decode envelope and check generation, not treat host-error as success. Core notified for repair after compile freeze release.",
+    "Reset6flagsclear currently beforedriver/evaluatorcancellation; core asked ensure baseline finalizedafteroldexecutionteardown so cancellationcannotreintroduce flags. Staticguard registrationwrapping flagged checkedpreflight for newdeferredcleanup identity."
+  ],
+  "main_uncommitted_docs": [
+    "childhood-redux/docs/NATIVE_DIR_PLAYER_PLAN.md (2.6 parser evidence only)",
+    "dirplayer-rs/docs/checkpoints/flash-nested-host-audit-20260917.md",
+    "dirplayer-rs/docs/checkpoints/interpreter-dispatch-audit-20260917.md",
+    "dirplayer-rs/docs/checkpoints/nested-flash-fixture-20260917/",
+    "dirplayer-rs/docs/checkpoints/mouse-down-ownership-audit-20260917.md"
+  ],
+  "frontend_child_repair": {
+    "reviewed_source": "flashPlayerManager.ts fc694774a0df235d552be6ee4295fd3f735cf34b16bcdbc8e35b4665006c65eb; tests5a2a9305cc078addaf1ad1bb6a155bc9192054f11dd5106ac2b40579c0c163fe",
+    "result": "Pilot+lead report1suite9testsPASS; exact command in flash-nested-host audit; no durable raw log. Parent-subtree and exact-host hooks reviewed. Fullchildacceptance pending."
+  },
+  "fixture": "Production parser proof1/0 accepted asfeasibility; exacthashestest262c1f28, DCRAb0561f50, B966fa1fe matchedlive. Root regeneratedall4byte-identically. Actualbrowsercandidate incomplete pixels/delays/postregistrationfailure/controller wiring; rootfeedbacksentlead.",
+  "next": "Lead finishesadapterreexports+diagnostics andfreshservertransportprobe onexistingbuiltWASM; preservegatefilter/timeouts. Reference staginginteractiveSWFgenerator underway, no liveinputedits. Decodefixturelater. FullStage2active,nopublication.",
+  "next_compiled_proposal": "Paused whileactualMouseDownwrongownerbugfixed. Preserve notes; no IRimplementationauthorized. MissingIRproductioncall, breakpointrequestconstruction and unreadbackjumpcounter remain2.2.",
+  "input_command": "Core implemented stack-based completed-suffix unwind, checked scope ids, drainbeforeenter,7initialnative regressions (unexecuted). Root reviewed stack logic plausible. Still actor/script sideeffect tests, actual nested eventguard future cancellation underborrow, and Flash typed result decoding/reentry coverage open.",
+  "current_turn": "Automatic goal continuation explicitly fullStage2; previous publication turn progress. All pilots resumed. Lead singleCargo monitor, coordinate source-ready core+browser freeze then compile. No new build yet.",
+  "event_cleanup_approval": "Root approved core events.rs OwnedEventStopScope+OwnedStaticEventGuard exactowner/scope typed deferredcleanup mailbox, stack/completed suffix for eventstop, idempotent staticrelease; session+commands tests. Actual suspendedspriteMouseDown/staticfallback dropunderborrow plus pending/script effect positivecontrol, exactcleanup and resetstale isolation. ScoreContext excludedunlessactualpathreached. Lead localnavigator routine details/builds.",
+  "frontend_latest": "Manager10/0 frontend1. Broader lifecycle initially36/2 due two setups notawaitingrealownerregistrationPromise. Referencefixed exactly2awaits scripts/flash-owner-lifecycle.test.mjs b332ac162aad2a0c3dea296115358bda1c3ad54599023b262022a025fa436c74, reportsBun38/0; rootreviewed2linediff. Lead has receipt task. Otherowner-scopedcallbacks and Rufflebridge routesgreen perlead. BrowserRuffle notyetexecuted.",
+  "compiled_proposal": "Reviewed productionturnintegration location; cacheOwnerToken+generation + activeframegenerationrefresh includingNone; postIRescapedebuggercheck; exactscopePCskiponce afterbreakpoint/stepresume; callerprovidedlineindices. Futurecommands/sessionbreakpointwaitercancel overlapscurrenteventbatch so noimplementationyet. LeafIRcountonlyapproved.",
+  "compiled_leaf": "ACCEPTED LOCALLY bounded IR accounting only, source56a6b09f and native11artifact6466025f. Portable receipt docs/checkpoints/compiled-accounting-20260917 created root; plan2.2 updated narrow evidence. ProductionIR/debugger stillopen, nopublication.",
+  "event_tests": "Three actual command tests source-reviewed by root/lead: behavior pending inside event scope then drop under borrow; pumped SetGlobal7; reset before drop stale isolation. Static fallback actual pending drop remains required. Root requested second colliding owner in script effect test and deferred evaluator registry cleanup assertions. Keep frozen compilation moving.",
+  "pointer_validation_approval": "Root approved after livebrowserfreeze releases: reference narrow pub(crate) decoder visibility in flash_object.rs, BrowserTestPlayer decoder-envelope cases and e2e/nested wrapper using existing realWASMbrowserharness. Hosterror/stale/malformed/expectedgeneration cases; no productionfault hook/newrunner. ActualinteractiveSWF fixture needs concrete read-onlyfeasibility proposal beforeauthoring; real buttonpress writesglobal and2owner/reset/coords tests required. Leadcoordinates writes/builds.",
+  "bootstrap_finding": "Root foundmissingnamedexports registerNestedFlashOwner/retireNestedFlashOwner in browsertemplate; js_api.rs wasm_bindgen moduleimports both, productionindexexports, templateonlywindowhooks. Leadconfirmed generatedmodJSstaticimports. NarrowrealAPIreexport approved; refreshgeneratedadapter+transportprobe NO Rustrebuild. e2e.spec pageerror/requestfail/HTTP/harnesspositivecontrol diagnostics bycoreexclusivewriter.",
+  "current_turn_progress": {
+    "classification": "progress",
+    "published": {
+      "dirplayer-rs/dev": "fa80cb175625ac0e72022ff399247623f66b00cd",
+      "childhood-redux/main": "3d221ba1e30399374652406642991d964312b813"
+    },
+    "goal": "Complete full Stage 2; stop before Stage 3. No new publication authorization.",
+    "child_failure_receipt": "/private/tmp/dirplayer-child-flash-validation/native-mounted-diagnostic-1/",
+    "child_failure": "Parsed D5 raw channel6 pair1:1; parent member1:91 entered=true; child2 memberNone entered=true, owner79/2/1, LocalOwned, generationNone. One failing newly added regression; old595 passing historical.",
+    "score_migration": "Approved to stage2_lead/core: explicit DirPlayer::begin_score_sprites with ScoreRef, short get_score/get_score_mut borrows, snapshots around whole-player effects; include create_behavior and all begin_sprites ambient uses, begin_all_sprites and direct filmloop callsites. Preserve semantics, no ambient/dummy-score/unsafe adapters. Test mounted case, owner collisions, Stage effects, FilmLoop behavior then native/WASM/browser.",
+    "core_files": [
+      "vm-rust/src/player/score.rs",
+      "vm-rust/src/player/mod.rs",
+      "vm-rust/src/player/nested.rs"
+    ],
+    "pointer_assets": "Six new files integrated vm-rust/tests/fixtures; root independently regenerated bytes and ran validator+malformed-length and actual-CallMethod negative checks. a2112fdcd.. b60c316cc.. reentry26ecc422.. . Structural only, not browser evidence.",
+    "reference_assignment": "Approved decoder matrix and real owned pointer/reset-reentry BrowserTestPlayer tests; root reviewer; exclusive testing_browser.rs,e2e/.../nested.rs,flash_object.rs decoder visibility-only. Realtwo BrowserHandles, actualRuffle, zero initial variables, move/press/order, isolation/reset/recreate. Fresh positivecontrol/armedRuffleinstances for reentry. RealExternalInterface movehook resetscapturedBrowserHandle synchronously, presscounternoincrement, staleownererror/Bstillworks. No mocks/newrunner/builds.",
+    "reference_corrections": "Generalize rootregisterhelper to capture real player.queue_tx instead of dummy forgottenreceiver. Use commands::run_player_command(command,None,session,id,owner) -> CommandTurn::Complete result for selectedhandle, not self.harness_runtime default. RAII restore globalhooks before closuresdrop.",
+    "monitor": "stage2_lead sole Cargo/browser monitor; root doesnotpoll processes. Bothwriters mustfreeze before combinedWASM snapshot.",
+    "next": "Review core migration and reference browser diffs/receipts; keep full Stage2 open. Root docs updated failure/review history; no further commits."
+  }
+}

@@ -1,16 +1,16 @@
 pub mod blowfish;
-pub mod writer;
 pub mod reader;
 pub mod types;
+pub mod writer;
 
-use std::collections::VecDeque;
 use async_std::{channel::Sender, task::spawn_local};
 use binary_reader::BinaryReader;
-use fxhash::FxHashMap;
 use futures::FutureExt;
+use fxhash::FxHashMap;
 use itertools::Itertools;
 use num::FromPrimitive;
 use num_derive::FromPrimitive;
+use std::collections::VecDeque;
 use wasm_bindgen::{closure::Closure, JsCast};
 use web_sys::{CloseEvent, Event, MessageEvent, WebSocket};
 
@@ -22,9 +22,17 @@ macro_rules! multiuser_log {
 }
 
 use crate::{
-    director::{lingo::datum::{Datum, DatumType}, static_datum::StaticDatum},
+    director::{
+        lingo::datum::{Datum, DatumType},
+        static_datum::StaticDatum,
+    },
     player::{
-        DatumRef, DirPlayer, PlayerVMExecutionItem, ScriptError, events::player_dispatch_callback_event, reserve_player_mut, reserve_player_ref, symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable}, xtra::manager::{MultiuserConnectRequest, MultiuserSendRequest, XtraPendingOrValue}, xtra::multiuser::blowfish::{DEFAULT_CIPHER_KEY, MUSBlowfish}
+        events::player_dispatch_callback_event,
+        reserve_player_mut, reserve_player_ref,
+        symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable},
+        xtra::manager::{MultiuserConnectRequest, MultiuserSendRequest, XtraPendingOrValue},
+        xtra::multiuser::blowfish::{MUSBlowfish, DEFAULT_CIPHER_KEY},
+        DatumRef, DirPlayer, PlayerVMExecutionItem, ScriptError,
     },
 };
 
@@ -48,7 +56,11 @@ pub(crate) enum MultiuserSocketEvent {
     Opened(MultiuserConnectRequest),
     Message(Vec<u8>),
     Error(String),
-    Closed { code: u16, reason: String, was_clean: bool },
+    Closed {
+        code: u16,
+        reason: String,
+        was_clean: bool,
+    },
 }
 
 fn socket_event_command(
@@ -162,7 +174,9 @@ impl MultiuserXtraInstance {
     }
 
     pub fn receive_binary_data(&mut self, data: &[u8]) {
-        use crate::player::xtra::multiuser::reader::{MUS_HEADER, MUS_FRAME_HEADER_SIZE, MusReader};
+        use crate::player::xtra::multiuser::reader::{
+            MusReader, MUS_FRAME_HEADER_SIZE, MUS_HEADER,
+        };
 
         self.recv_buffer.extend_from_slice(data);
         loop {
@@ -171,13 +185,18 @@ impl MultiuserXtraInstance {
             }
             let header = u16::from_be_bytes([self.recv_buffer[0], self.recv_buffer[1]]);
             if header != MUS_HEADER {
-                multiuser_log!("Multiuser: Invalid message header 0x{:04x}, discarding recv buffer", header);
+                multiuser_log!(
+                    "Multiuser: Invalid message header 0x{:04x}, discarding recv buffer",
+                    header
+                );
                 self.recv_buffer.clear();
                 break;
             }
             let payload_size = u32::from_be_bytes([
-                self.recv_buffer[2], self.recv_buffer[3],
-                self.recv_buffer[4], self.recv_buffer[5],
+                self.recv_buffer[2],
+                self.recv_buffer[3],
+                self.recv_buffer[4],
+                self.recv_buffer[5],
             ]) as usize;
             let total_size = MUS_FRAME_HEADER_SIZE + payload_size;
             if self.recv_buffer.len() < total_size {
@@ -193,21 +212,36 @@ impl MultiuserXtraInstance {
     }
 
     fn receive_binary_data_without_callback(&mut self, data: &[u8]) {
-        use crate::player::xtra::multiuser::reader::{MUS_HEADER, MUS_FRAME_HEADER_SIZE, MusReader};
+        use crate::player::xtra::multiuser::reader::{
+            MusReader, MUS_FRAME_HEADER_SIZE, MUS_HEADER,
+        };
         self.recv_buffer.extend_from_slice(data);
         loop {
-            if self.recv_buffer.len() < MUS_FRAME_HEADER_SIZE { break; }
+            if self.recv_buffer.len() < MUS_FRAME_HEADER_SIZE {
+                break;
+            }
             let header = u16::from_be_bytes([self.recv_buffer[0], self.recv_buffer[1]]);
-            if header != MUS_HEADER { self.recv_buffer.clear(); break; }
+            if header != MUS_HEADER {
+                self.recv_buffer.clear();
+                break;
+            }
             let payload_size = u32::from_be_bytes([
-                self.recv_buffer[2], self.recv_buffer[3], self.recv_buffer[4], self.recv_buffer[5],
+                self.recv_buffer[2],
+                self.recv_buffer[3],
+                self.recv_buffer[4],
+                self.recv_buffer[5],
             ]) as usize;
             let total_size = MUS_FRAME_HEADER_SIZE + payload_size;
-            if self.recv_buffer.len() < total_size { break; }
+            if self.recv_buffer.len() < total_size {
+                break;
+            }
             let msg_bytes: Vec<u8> = self.recv_buffer.drain(..total_size).collect();
-            match BinaryReader::read_mus_message_payload(&msg_bytes[MUS_FRAME_HEADER_SIZE..], None) {
+            match BinaryReader::read_mus_message_payload(&msg_bytes[MUS_FRAME_HEADER_SIZE..], None)
+            {
                 Ok(message) => self.push_message_without_callback(message),
-                Err(error) => multiuser_log!("Multiuser: Failed to read binary message: {:?}", error),
+                Err(error) => {
+                    multiuser_log!("Multiuser: Failed to read binary message: {:?}", error)
+                }
             }
         }
     }
@@ -242,34 +276,58 @@ fn checked_retained(
     crate::player::compare::validate_direct_symbol_fields(value, symbols)?;
     if let Datum::ScriptInstanceRef(instance) = value {
         use crate::player::allocator::ScriptInstanceAllocatorTrait;
-        player.allocator.get_script_instance_opt(instance).ok_or_else(|| {
-            ScriptError::new_code(
-                crate::player::ScriptErrorCode::InvalidReference,
-                "foreign or stale Multiuser callback target".to_owned(),
-            )
-        })?;
+        player
+            .allocator
+            .get_script_instance_opt(instance)
+            .ok_or_else(|| {
+                ScriptError::new_code(
+                    crate::player::ScriptErrorCode::InvalidReference,
+                    "foreign or stale Multiuser callback target".to_owned(),
+                )
+            })?;
     }
     Ok(())
 }
 
-fn required_arg<'a>(player: &'a DirPlayer, args: &'a [DatumRef], index: usize) -> Result<&'a Datum, ScriptError> {
-    let arg = args.get(index).ok_or_else(|| ScriptError::new(format!("missing Multiuser argument {}", index + 1)))?;
+fn required_arg<'a>(
+    player: &'a DirPlayer,
+    args: &'a [DatumRef],
+    index: usize,
+) -> Result<&'a Datum, ScriptError> {
+    let arg = args
+        .get(index)
+        .ok_or_else(|| ScriptError::new(format!("missing Multiuser argument {}", index + 1)))?;
     checked_datum(player, arg)
 }
 
-fn string_arg(player: &DirPlayer, symbols: &SymbolTable, args: &[DatumRef], index: usize) -> Result<String, ScriptError> {
+fn string_arg(
+    player: &DirPlayer,
+    symbols: &SymbolTable,
+    args: &[DatumRef],
+    index: usize,
+) -> Result<String, ScriptError> {
     let value = required_arg(player, args, index)?;
     crate::player::compare::validate_direct_symbol_fields(value, symbols)?;
     value.string_value(symbols)
 }
 
-fn int_arg(player: &DirPlayer, symbols: &SymbolTable, args: &[DatumRef], index: usize) -> Result<i32, ScriptError> {
+fn int_arg(
+    player: &DirPlayer,
+    symbols: &SymbolTable,
+    args: &[DatumRef],
+    index: usize,
+) -> Result<i32, ScriptError> {
     let value = required_arg(player, args, index)?;
     crate::player::compare::validate_direct_symbol_fields(value, symbols)?;
     value.int_value()
 }
 
-fn optional_int_fallback(player: &DirPlayer, symbols: &SymbolTable, args: &[DatumRef], index: usize) -> Result<i32, ScriptError> {
+fn optional_int_fallback(
+    player: &DirPlayer,
+    symbols: &SymbolTable,
+    args: &[DatumRef],
+    index: usize,
+) -> Result<i32, ScriptError> {
     args.get(index)
         .map(|arg| {
             let value = checked_datum(player, arg)?;
@@ -280,7 +338,12 @@ fn optional_int_fallback(player: &DirPlayer, symbols: &SymbolTable, args: &[Datu
         .map(|value| value.unwrap_or(0))
 }
 
-fn optional_string_fallback(player: &DirPlayer, symbols: &SymbolTable, args: &[DatumRef], index: usize) -> Result<String, ScriptError> {
+fn optional_string_fallback(
+    player: &DirPlayer,
+    symbols: &SymbolTable,
+    args: &[DatumRef],
+    index: usize,
+) -> Result<String, ScriptError> {
     args.get(index)
         .map(|arg| {
             let value = checked_datum(player, arg)?;
@@ -306,7 +369,9 @@ fn first_property_string(
             _ => None,
         };
         if key == Some(wanted) {
-            return Ok(checked_datum(player, value_ref)?.string_value(symbols).unwrap_or_default());
+            return Ok(checked_datum(player, value_ref)?
+                .string_value(symbols)
+                .unwrap_or_default());
         }
     }
     Ok(String::new())
@@ -322,15 +387,44 @@ fn owned_static_datum(
         Datum::Int(value) => StaticDatum::Int(*value),
         Datum::Float(value) => StaticDatum::Float(*value),
         Datum::String(value) => StaticDatum::String(value.clone()),
-        Datum::Symbol(value) => StaticDatum::Symbol(symbols.display(value).map_err(|_| ScriptError::new_code(crate::player::ScriptErrorCode::InvalidReference, "foreign Multiuser symbol".to_owned()))?.to_owned()),
-        Datum::List(_, values, _) => StaticDatum::List(values.iter().map(|value| owned_static_datum(player, symbols, checked_datum(player, value)?)).collect::<Result<_, _>>()?),
-        Datum::PropList(values, _) => StaticDatum::PropList(values.iter().map(|(key, value)| Ok((
-            owned_static_datum(player, symbols, checked_datum(player, key)?)?,
-            owned_static_datum(player, symbols, checked_datum(player, value)?)?,
-        ))).collect::<Result<_, ScriptError>>()?),
+        Datum::Symbol(value) => StaticDatum::Symbol(
+            symbols
+                .display(value)
+                .map_err(|_| {
+                    ScriptError::new_code(
+                        crate::player::ScriptErrorCode::InvalidReference,
+                        "foreign Multiuser symbol".to_owned(),
+                    )
+                })?
+                .to_owned(),
+        ),
+        Datum::List(_, values, _) => StaticDatum::List(
+            values
+                .iter()
+                .map(|value| owned_static_datum(player, symbols, checked_datum(player, value)?))
+                .collect::<Result<_, _>>()?,
+        ),
+        Datum::PropList(values, _) => StaticDatum::PropList(
+            values
+                .iter()
+                .map(|(key, value)| {
+                    Ok((
+                        owned_static_datum(player, symbols, checked_datum(player, key)?)?,
+                        owned_static_datum(player, symbols, checked_datum(player, value)?)?,
+                    ))
+                })
+                .collect::<Result<_, ScriptError>>()?,
+        ),
         Datum::Point(values, _) => StaticDatum::IntPoint(values[0] as i32, values[1] as i32),
-        Datum::Rect(values, _) => StaticDatum::IntRect(values[0] as i32, values[1] as i32, values[2] as i32, values[3] as i32),
-        Datum::Media(_) => crate::director::static_datum::static_datum_from_datum(player, symbols, datum)?,
+        Datum::Rect(values, _) => StaticDatum::IntRect(
+            values[0] as i32,
+            values[1] as i32,
+            values[2] as i32,
+            values[3] as i32,
+        ),
+        Datum::Media(_) => {
+            crate::director::static_datum::static_datum_from_datum(player, symbols, datum)?
+        }
         _ => StaticDatum::Void,
     })
 }
@@ -352,7 +446,24 @@ fn prepare_connect_request(
             password = first_property_string(player, symbols, pairs, BuiltInSymbol::Password)?;
             movie_id = first_property_string(player, symbols, pairs, BuiltInSymbol::Movieid)?;
         }
-        Ok(MultiuserConnectRequest { username, password, host, port, movie_id, mode: optional_int_fallback(player, symbols, args, 3)?, encryption_key: optional_string_fallback(player, symbols, args, 4)?, websocket_path: player.external_params.get("multiuser_websocket_path").cloned(), websocket_ssl: player.external_params.get("multiuser_websocket_ssl").filter(|value| !value.is_empty()).map(|value| value == "true" || value == "1") })
+        Ok(MultiuserConnectRequest {
+            username,
+            password,
+            host,
+            port,
+            movie_id,
+            mode: optional_int_fallback(player, symbols, args, 3)?,
+            encryption_key: optional_string_fallback(player, symbols, args, 4)?,
+            websocket_path: player
+                .external_params
+                .get("multiuser_websocket_path")
+                .cloned(),
+            websocket_ssl: player
+                .external_params
+                .get("multiuser_websocket_ssl")
+                .filter(|value| !value.is_empty())
+                .map(|value| value == "true" || value == "1"),
+        })
     } else {
         Ok(MultiuserConnectRequest {
             username: string_arg(player, symbols, args, 0).unwrap_or_default(),
@@ -362,8 +473,15 @@ fn prepare_connect_request(
             movie_id: string_arg(player, symbols, args, 4).unwrap_or_default(),
             mode: optional_int_fallback(player, symbols, args, 5)?,
             encryption_key: optional_string_fallback(player, symbols, args, 6)?,
-            websocket_path: player.external_params.get("multiuser_websocket_path").cloned(),
-            websocket_ssl: player.external_params.get("multiuser_websocket_ssl").filter(|value| !value.is_empty()).map(|value| value == "true" || value == "1"),
+            websocket_path: player
+                .external_params
+                .get("multiuser_websocket_path")
+                .cloned(),
+            websocket_ssl: player
+                .external_params
+                .get("multiuser_websocket_ssl")
+                .filter(|value| !value.is_empty())
+                .map(|value| value == "true" || value == "1"),
         })
     }
 }
@@ -375,19 +493,28 @@ fn prepare_send_request(
     args: &[DatumRef],
 ) -> Result<MultiuserSendRequest, ScriptError> {
     if matches!(instance.connection_mode, MultiuserConnectionMode::Text) {
-        return Ok(MultiuserSendRequest::Text { message: string_arg(player, symbols, args, 2)? });
+        return Ok(MultiuserSendRequest::Text {
+            message: string_arg(player, symbols, args, 2)?,
+        });
     }
     let subject = string_arg(player, symbols, args, 1)?;
     let content = owned_static_datum(player, symbols, required_arg(player, args, 2)?)?;
     let recipients = match required_arg(player, args, 0)? {
-        Datum::List(_, values, _) => values.iter().map(|value| {
-            let value = checked_datum(player, value)?;
-            crate::player::compare::validate_direct_symbol_fields(value, symbols)?;
-            Ok(value.string_value(symbols).unwrap_or_default())
-        }).collect::<Result<_, ScriptError>>()?,
+        Datum::List(_, values, _) => values
+            .iter()
+            .map(|value| {
+                let value = checked_datum(player, value)?;
+                crate::player::compare::validate_direct_symbol_fields(value, symbols)?;
+                Ok(value.string_value(symbols).unwrap_or_default())
+            })
+            .collect::<Result<_, ScriptError>>()?,
         Datum::String(value) => vec![value.clone()],
         Datum::Int(0) => Vec::new(),
-        _ => return Err(ScriptError::new("Invalid recipients argument, expected list or string".to_owned())),
+        _ => {
+            return Err(ScriptError::new(
+                "Invalid recipients argument, expected list or string".to_owned(),
+            ))
+        }
     };
     Ok(MultiuserSendRequest::Binary {
         recipients,
@@ -422,7 +549,12 @@ impl MultiuserXtraManager {
         };
         let bytes = match request {
             MultiuserSendRequest::Text { message } => message.into_bytes(),
-            MultiuserSendRequest::Binary { recipients, subject, content, sender_id } => {
+            MultiuserSendRequest::Binary {
+                recipients,
+                subject,
+                content,
+                sender_id,
+            } => {
                 let message = MultiuserMessage {
                     error_code: 0,
                     recipients,
@@ -434,7 +566,8 @@ impl MultiuserXtraManager {
                 message.to_bytes(None)
             }
         };
-        tx.try_send(bytes).map_err(|_| ScriptError::new("Multiuser socket send queue is closed".to_owned()))
+        tx.try_send(bytes)
+            .map_err(|_| ScriptError::new("Multiuser socket send queue is closed".to_owned()))
     }
 
     pub(crate) fn handle_socket_event(
@@ -489,32 +622,43 @@ impl MultiuserXtraManager {
                     };
                     let mut cipher = MUSBlowfish::new(&key);
                     if let Some(tx) = instance.socket_tx.as_ref() {
-                    tx.try_send(message.to_bytes(Some(&mut cipher))).map_err(|_| {
-                            ScriptError::new("Multiuser socket send queue is closed".to_owned())
-                        })?;
+                        tx.try_send(message.to_bytes(Some(&mut cipher)))
+                            .map_err(|_| {
+                                ScriptError::new("Multiuser socket send queue is closed".to_owned())
+                            })?;
                     }
                 }
             }
             MultiuserSocketEvent::Message(bytes) => match instance.connection_mode {
-                MultiuserConnectionMode::Binary => instance.receive_binary_data_without_callback(&bytes),
-                MultiuserConnectionMode::Text => instance.push_message_without_callback(MultiuserMessage {
-                    error_code: 0,
-                    recipients: Vec::new(),
-                    sender_id: String::new(),
-                    subject: String::new(),
-                    content: StaticDatum::String(String::from_utf8_lossy(&bytes).into_owned()),
-                    time_stamp: 0,
-                }),
+                MultiuserConnectionMode::Binary => {
+                    instance.receive_binary_data_without_callback(&bytes)
+                }
+                MultiuserConnectionMode::Text => {
+                    instance.push_message_without_callback(MultiuserMessage {
+                        error_code: 0,
+                        recipients: Vec::new(),
+                        sender_id: String::new(),
+                        subject: String::new(),
+                        content: StaticDatum::String(String::from_utf8_lossy(&bytes).into_owned()),
+                        time_stamp: 0,
+                    })
+                }
             },
-            MultiuserSocketEvent::Error(message) => instance.push_message_without_callback(MultiuserMessage {
-                error_code: -1,
-                recipients: Vec::new(),
-                sender_id: "System".to_owned(),
-                subject: "ConnectToNetServer".to_owned(),
-                content: StaticDatum::String(message),
-                time_stamp: 0,
-            }),
-            MultiuserSocketEvent::Closed { code, reason, was_clean } => instance.push_message_without_callback(MultiuserMessage {
+            MultiuserSocketEvent::Error(message) => {
+                instance.push_message_without_callback(MultiuserMessage {
+                    error_code: -1,
+                    recipients: Vec::new(),
+                    sender_id: "System".to_owned(),
+                    subject: "ConnectToNetServer".to_owned(),
+                    content: StaticDatum::String(message),
+                    time_stamp: 0,
+                })
+            }
+            MultiuserSocketEvent::Closed {
+                code,
+                reason,
+                was_clean,
+            } => instance.push_message_without_callback(MultiuserMessage {
                 error_code: if was_clean { 0 } else { -(code as i32) },
                 recipients: Vec::new(),
                 sender_id: "System".to_owned(),
@@ -524,15 +668,17 @@ impl MultiuserXtraManager {
             }),
         }
         if let Some((target, handler_name)) = instance.net_message_handler.clone() {
-            queue.try_send(PlayerVMExecutionItem {
-                command: crate::player::commands::PlayerVMCommand::TriggerXtraCallback {
-                    owner: owner.clone(),
-                    target,
-                    handler_name,
-                    args: Vec::new(),
-                },
-                completer: None,
-            }).map_err(|_| ScriptError::new("Multiuser callback queue is closed".to_owned()))?;
+            queue
+                .try_send(PlayerVMExecutionItem {
+                    command: crate::player::commands::PlayerVMCommand::TriggerXtraCallback {
+                        owner: owner.clone(),
+                        target,
+                        handler_name,
+                        args: Vec::new(),
+                    },
+                    completer: None,
+                })
+                .map_err(|_| ScriptError::new("Multiuser callback queue is closed".to_owned()))?;
         }
         Ok(())
     }
@@ -546,15 +692,30 @@ impl MultiuserXtraManager {
         queue: Sender<PlayerVMExecutionItem>,
     ) -> Result<MultiuserConnectPreparation, ScriptError> {
         if !self.owner.same_identity(&owner) || !owner.is_arena_live() {
-            return Err(ScriptError::new_code(crate::player::ScriptErrorCode::InvalidReference, "stale Multiuser owner".to_owned()));
+            return Err(ScriptError::new_code(
+                crate::player::ScriptErrorCode::InvalidReference,
+                "stale Multiuser owner".to_owned(),
+            ));
         }
-        let instance = self.instances.get(&instance_id).ok_or_else(|| ScriptError::new(format!("Multiuser instance #{} not found", instance_id)))?;
+        let instance = self.instances.get(&instance_id).ok_or_else(|| {
+            ScriptError::new(format!("Multiuser instance #{} not found", instance_id))
+        })?;
         if instance.generation != generation {
-            return Err(ScriptError::new_code(crate::player::ScriptErrorCode::InvalidReference, "stale Multiuser instance generation".to_owned()));
+            return Err(ScriptError::new_code(
+                crate::player::ScriptErrorCode::InvalidReference,
+                "stale Multiuser instance generation".to_owned(),
+            ));
         }
-        MultiuserConnectionMode::from_i32(request.mode)
-            .ok_or_else(|| ScriptError::new(format!("Invalid connection mode: {}", request.mode)))?;
-        Ok(MultiuserConnectPreparation { owner, instance_id, generation, request, queue })
+        MultiuserConnectionMode::from_i32(request.mode).ok_or_else(|| {
+            ScriptError::new(format!("Invalid connection mode: {}", request.mode))
+        })?;
+        Ok(MultiuserConnectPreparation {
+            owner,
+            instance_id,
+            generation,
+            request,
+            queue,
+        })
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -564,22 +725,43 @@ impl MultiuserXtraManager {
         connected: &mut Option<ConnectedMultiuserSocket>,
     ) -> Result<Option<MultiuserSocketResource>, ScriptError> {
         if !self.owner.same_identity(&preparation.owner) || !preparation.owner.is_arena_live() {
-            return Err(ScriptError::new_code(crate::player::ScriptErrorCode::InvalidReference, "stale Multiuser owner".to_owned()));
+            return Err(ScriptError::new_code(
+                crate::player::ScriptErrorCode::InvalidReference,
+                "stale Multiuser owner".to_owned(),
+            ));
         }
-        let instance = self.instances.get_mut(&preparation.instance_id).ok_or_else(|| ScriptError::new(format!("Multiuser instance #{} not found", preparation.instance_id)))?;
+        let instance = self
+            .instances
+            .get_mut(&preparation.instance_id)
+            .ok_or_else(|| {
+                ScriptError::new(format!(
+                    "Multiuser instance #{} not found",
+                    preparation.instance_id
+                ))
+            })?;
         if instance.generation != preparation.generation {
-            return Err(ScriptError::new_code(crate::player::ScriptErrorCode::InvalidReference, "stale Multiuser instance generation".to_owned()));
+            return Err(ScriptError::new_code(
+                crate::player::ScriptErrorCode::InvalidReference,
+                "stale Multiuser instance generation".to_owned(),
+            ));
         }
         let Some(connected_ref) = connected.as_ref() else {
-            return Err(ScriptError::new("missing Multiuser connection result".to_owned()));
+            return Err(ScriptError::new(
+                "missing Multiuser connection result".to_owned(),
+            ));
         };
         if !connected_ref.owner.same_identity(&preparation.owner)
             || connected_ref.instance_id != preparation.instance_id
             || connected_ref.generation != preparation.generation
         {
-            return Err(ScriptError::new_code(crate::player::ScriptErrorCode::InvalidReference, "foreign Multiuser connection result".to_owned()));
+            return Err(ScriptError::new_code(
+                crate::player::ScriptErrorCode::InvalidReference,
+                "foreign Multiuser connection result".to_owned(),
+            ));
         }
-        let connected = connected.take().expect("validated Multiuser connection result");
+        let connected = connected
+            .take()
+            .expect("validated Multiuser connection result");
         instance.sender_id = connected.username;
         instance.connection_mode = connected.connection_mode;
         instance.socket_tx = Some(connected.socket_tx);
@@ -596,20 +778,42 @@ impl MultiuserXtraManager {
         let request = preparation.request.clone();
         let queue = preparation.queue.clone();
         let secure = request.websocket_ssl.unwrap_or_else(|| {
-            web_sys::window().and_then(|window| window.location().protocol().ok()).is_some_and(|protocol| protocol == "https:")
+            web_sys::window()
+                .and_then(|window| window.location().protocol().ok())
+                .is_some_and(|protocol| protocol == "https:")
         });
         let scheme = if secure { "wss" } else { "ws" };
-        let default_url = format!("{}://{}:{}{}", scheme, request.host, request.port, request.websocket_path.clone().unwrap_or_default());
+        let default_url = format!(
+            "{}://{}:{}{}",
+            scheme,
+            request.host,
+            request.port,
+            request.websocket_path.clone().unwrap_or_default()
+        );
         let url = web_sys::window()
-            .and_then(|window| js_sys::Reflect::get(&window, &"dirplayerResolveSocketUrl".into()).ok())
+            .and_then(|window| {
+                js_sys::Reflect::get(&window, &"dirplayerResolveSocketUrl".into()).ok()
+            })
             .and_then(|resolver| resolver.dyn_ref::<js_sys::Function>().cloned())
-            .and_then(|resolver| resolver.call2(&wasm_bindgen::JsValue::NULL, &request.host.as_str().into(), &wasm_bindgen::JsValue::from_f64(request.port as f64)).ok())
+            .and_then(|resolver| {
+                resolver
+                    .call2(
+                        &wasm_bindgen::JsValue::NULL,
+                        &request.host.as_str().into(),
+                        &wasm_bindgen::JsValue::from_f64(request.port as f64),
+                    )
+                    .ok()
+            })
             .and_then(|value| value.as_string())
             .filter(|value| !value.is_empty())
             .unwrap_or(default_url);
-        let socket = WebSocket::new(&url).map_err(|error| ScriptError::new(format!("failed to create Multiuser WebSocket: {:?}", error)))?;
+        let socket = WebSocket::new(&url).map_err(|error| {
+            ScriptError::new(format!("failed to create Multiuser WebSocket: {:?}", error))
+        })?;
         socket.set_binary_type(web_sys::BinaryType::Arraybuffer);
-        let connection_mode = MultiuserConnectionMode::from_i32(request.mode).ok_or_else(|| ScriptError::new(format!("Invalid connection mode: {}", request.mode)))?;
+        let connection_mode = MultiuserConnectionMode::from_i32(request.mode).ok_or_else(|| {
+            ScriptError::new(format!("Invalid connection mode: {}", request.mode))
+        })?;
         let queue_message = queue.clone();
         let event_owner = owner.clone();
         let onmessage = Closure::<dyn FnMut(_)>::new(move |message: MessageEvent| {
@@ -621,23 +825,47 @@ impl MultiuserXtraManager {
             } else {
                 return;
             };
-            let _ = queue_message.try_send(socket_event_command(&event_owner, instance_id, generation, MultiuserSocketEvent::Message(bytes)));
+            let _ = queue_message.try_send(socket_event_command(
+                &event_owner,
+                instance_id,
+                generation,
+                MultiuserSocketEvent::Message(bytes),
+            ));
         });
         let queue_error = queue.clone();
         let event_owner = owner.clone();
         let onerror = Closure::<dyn FnMut(_)>::new(move |_error: Event| {
-            let _ = queue_error.try_send(socket_event_command(&event_owner, instance_id, generation, MultiuserSocketEvent::Error("Multiuser WebSocket error".to_owned())));
+            let _ = queue_error.try_send(socket_event_command(
+                &event_owner,
+                instance_id,
+                generation,
+                MultiuserSocketEvent::Error("Multiuser WebSocket error".to_owned()),
+            ));
         });
         let queue_close = queue.clone();
         let event_owner = owner.clone();
         let onclose = Closure::<dyn FnMut(_)>::new(move |close: CloseEvent| {
-            let _ = queue_close.try_send(socket_event_command(&event_owner, instance_id, generation, MultiuserSocketEvent::Closed { code: close.code(), reason: close.reason(), was_clean: close.was_clean() }));
+            let _ = queue_close.try_send(socket_event_command(
+                &event_owner,
+                instance_id,
+                generation,
+                MultiuserSocketEvent::Closed {
+                    code: close.code(),
+                    reason: close.reason(),
+                    was_clean: close.was_clean(),
+                },
+            ));
         });
         let queue_open = queue;
         let open_request = request.clone();
         let event_owner = owner.clone();
         let onopen = Closure::<dyn FnMut(_)>::new(move |_open: Event| {
-            let _ = queue_open.try_send(socket_event_command(&event_owner, instance_id, generation, MultiuserSocketEvent::Opened(open_request.clone())));
+            let _ = queue_open.try_send(socket_event_command(
+                &event_owner,
+                instance_id,
+                generation,
+                MultiuserSocketEvent::Opened(open_request.clone()),
+            ));
         });
         socket.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
         socket.set_onerror(Some(onerror.as_ref().unchecked_ref()));
@@ -673,12 +901,12 @@ impl MultiuserXtraManager {
             connection_mode,
             socket_tx: tx,
             socket_resource: MultiuserSocketResource {
-            socket,
-            cancel_tx,
-            onmessage,
-            onerror,
-            onclose,
-            onopen,
+                socket,
+                cancel_tx,
+                onmessage,
+                onerror,
+                onclose,
+                onopen,
             },
         })
     }
@@ -687,11 +915,15 @@ impl MultiuserXtraManager {
     pub(crate) fn execute_connect_owned(
         _preparation: &MultiuserConnectPreparation,
     ) -> Result<(), ScriptError> {
-        Err(ScriptError::new("Multiuser WebSocket executor unavailable on native target".to_owned()))
+        Err(ScriptError::new(
+            "Multiuser WebSocket executor unavailable on native target".to_owned(),
+        ))
     }
 
     pub(crate) fn instance_generation(&self, instance_id: u32) -> Option<u64> {
-        self.instances.get(&instance_id).map(|instance| instance.generation)
+        self.instances
+            .get(&instance_id)
+            .map(|instance| instance.generation)
     }
 
     #[cfg(test)]
@@ -725,19 +957,22 @@ impl MultiuserXtraManager {
         let _ = args;
         self.instance_counter = self.instance_counter.wrapping_add(1);
         self.generation_counter = self.generation_counter.wrapping_add(1);
-        self.instances.insert(self.instance_counter, MultiuserXtraInstance {
-            generation: self.generation_counter,
-            net_message_handler: None,
-            message_queue: Vec::new(),
-            socket_tx: None,
-            connection_mode: MultiuserConnectionMode::Binary,
-            sender_id: String::new(),
-            recv_buffer: Vec::new(),
-            #[cfg(target_arch = "wasm32")]
-            socket_resource: None,
-            #[cfg(test)]
-            teardown_probe: None,
-        });
+        self.instances.insert(
+            self.instance_counter,
+            MultiuserXtraInstance {
+                generation: self.generation_counter,
+                net_message_handler: None,
+                message_queue: Vec::new(),
+                socket_tx: None,
+                connection_mode: MultiuserConnectionMode::Binary,
+                sender_id: String::new(),
+                recv_buffer: Vec::new(),
+                #[cfg(target_arch = "wasm32")]
+                socket_resource: None,
+                #[cfg(test)]
+                teardown_probe: None,
+            },
+        );
         Ok(self.instance_counter)
     }
 
@@ -758,13 +993,20 @@ impl MultiuserXtraManager {
                     "foreign or stale Multiuser manager owner".to_owned(),
                 ));
             }
-            let generation = self.instances.get(&instance_id).ok_or_else(|| {
-                ScriptError::new(format!("Multiuser instance #{} not found", instance_id))
-            })?.generation;
+            let generation = self
+                .instances
+                .get(&instance_id)
+                .ok_or_else(|| {
+                    ScriptError::new(format!("Multiuser instance #{} not found", instance_id))
+                })?
+                .generation;
             let pending = if handler_name.eq_ignore_ascii_case("connectToNetServer") {
                 let request = prepare_connect_request(player, symbols, args)?;
                 crate::player::xtra::manager::XtraPendingIntent::MultiuserConnect {
-                    owner: self.owner.clone(), instance_id, generation, request,
+                    owner: self.owner.clone(),
+                    instance_id,
+                    generation,
+                    request,
                 }
             } else {
                 let instance = self.instances.get(&instance_id).ok_or_else(|| {
@@ -777,10 +1019,15 @@ impl MultiuserXtraManager {
                 }
                 let request = prepare_send_request(player, symbols, instance, args)?;
                 crate::player::xtra::manager::XtraPendingIntent::MultiuserSend {
-                    owner: self.owner.clone(), instance_id, generation, request,
+                    owner: self.owner.clone(),
+                    instance_id,
+                    generation,
+                    request,
                 }
             };
-            return Ok(crate::player::xtra::manager::XtraPendingOrValue::Pending(pending));
+            return Ok(crate::player::xtra::manager::XtraPendingOrValue::Pending(
+                pending,
+            ));
         }
         self.call_instance_handler_explicit(player, symbols, instance_id, handler_name, args)
             .map(crate::player::xtra::manager::XtraPendingOrValue::Value)
@@ -806,7 +1053,9 @@ impl MultiuserXtraManager {
         match handler_name.to_lowercase().as_str() {
             "setnetbufferlimits" | "checknetmessages" => Ok(DatumRef::Void),
             "setnetmessagehandler" => {
-                let handler = args.first().ok_or_else(|| ScriptError::new("setNetMessageHandler requires a symbol".to_owned()))?;
+                let handler = args.first().ok_or_else(|| {
+                    ScriptError::new("setNetMessageHandler requires a symbol".to_owned())
+                })?;
                 let handler = match checked_datum(player, handler)? {
                     Datum::Void => None,
                     _ => {
@@ -823,25 +1072,57 @@ impl MultiuserXtraManager {
                 Ok(player.alloc_datum(Datum::Int(0)))
             }
             "getnetmessage" => {
-                let Some(message) = instance.next_message() else { return Ok(DatumRef::Void); };
-                let recipients = message.recipients.iter()
+                let Some(message) = instance.next_message() else {
+                    return Ok(DatumRef::Void);
+                };
+                let recipients = message
+                    .recipients
+                    .iter()
                     .map(|value| player.alloc_datum(Datum::String(value.clone())))
                     .collect::<VecDeque<_>>();
                 let values = [
-                    ("errorCode", player.alloc_datum(Datum::Int(message.error_code))),
-                    ("recipients", player.alloc_datum(Datum::List(DatumType::List, recipients, false))),
-                    ("senderID", player.alloc_datum(Datum::String(message.sender_id))),
-                    ("subject", player.alloc_datum(Datum::String(message.subject))),
-                    ("content", crate::director::static_datum::static_datum_to_runtime_with_symbols(&message.content, symbols, &mut player.allocator, &mut player.bitmap_manager)),
-                    ("timeStamp", player.alloc_datum(Datum::Int(message.time_stamp as i32))),
+                    (
+                        "errorCode",
+                        player.alloc_datum(Datum::Int(message.error_code)),
+                    ),
+                    (
+                        "recipients",
+                        player.alloc_datum(Datum::List(DatumType::List, recipients, false)),
+                    ),
+                    (
+                        "senderID",
+                        player.alloc_datum(Datum::String(message.sender_id)),
+                    ),
+                    (
+                        "subject",
+                        player.alloc_datum(Datum::String(message.subject)),
+                    ),
+                    (
+                        "content",
+                        crate::director::static_datum::static_datum_to_runtime_with_symbols(
+                            &message.content,
+                            symbols,
+                            &mut player.allocator,
+                            &mut player.bitmap_manager,
+                        ),
+                    ),
+                    (
+                        "timeStamp",
+                        player.alloc_datum(Datum::Int(message.time_stamp as i32)),
+                    ),
                 ];
-                let refs = values.into_iter().map(|(name, value)| {
-                    let key = player.alloc_datum(Datum::Symbol(symbols.intern(name)));
-                    (key, value)
-                }).collect();
+                let refs = values
+                    .into_iter()
+                    .map(|(name, value)| {
+                        let key = player.alloc_datum(Datum::Symbol(symbols.intern(name)));
+                        (key, value)
+                    })
+                    .collect();
                 Ok(player.alloc_datum(Datum::PropList(refs, false)))
             }
-            "getnumberwaitingnetmessages" => Ok(player.alloc_datum(Datum::Int(instance.message_queue.len() as i32))),
+            "getnumberwaitingnetmessages" => {
+                Ok(player.alloc_datum(Datum::Int(instance.message_queue.len() as i32)))
+            }
             "breakconnection" => {
                 let retired_generation = instance.generation;
                 instance.socket_tx = None;
@@ -875,13 +1156,32 @@ impl MultiuserXtraManager {
             }
             "getnetaddresscookie" => Ok(player.alloc_datum(Datum::String(String::new()))),
             "getneterrorstring" => {
-                let code = checked_datum(player, args.first().ok_or_else(|| ScriptError::new("getNetErrorString requires an error code".to_owned()))?)?.int_value()?;
-                let text = match code { 0 => "No error", -1 => "Connection failed", -2 => "Connection refused", -3 => "Connection timed out", -4 => "Invalid message", -5 => "Not connected", _ => "Unknown error" };
+                let code = checked_datum(
+                    player,
+                    args.first().ok_or_else(|| {
+                        ScriptError::new("getNetErrorString requires an error code".to_owned())
+                    })?,
+                )?
+                .int_value()?;
+                let text = match code {
+                    0 => "No error",
+                    -1 => "Connection failed",
+                    -2 => "Connection refused",
+                    -3 => "Connection timed out",
+                    -4 => "Invalid message",
+                    -5 => "Not connected",
+                    _ => "Unknown error",
+                };
                 Ok(player.alloc_datum(Datum::String(text.to_owned())))
             }
-            "getpeerconnectionlist" => Ok(player.alloc_datum(Datum::List(DatumType::List, VecDeque::new(), false))),
+            "getpeerconnectionlist" => {
+                Ok(player.alloc_datum(Datum::List(DatumType::List, VecDeque::new(), false)))
+            }
             "waitfornetconnection" => Ok(player.alloc_datum(Datum::Int(-1))),
-            _ => Err(ScriptError::new(format!("No handler {} found for Multiuser xtra instance #{}", handler_name, instance_id))),
+            _ => Err(ScriptError::new(format!(
+                "No handler {} found for Multiuser xtra instance #{}",
+                handler_name, instance_id
+            ))),
         }
     }
 
@@ -914,8 +1214,10 @@ impl MultiuserXtraManager {
     pub(crate) fn take_teardown_requests(
         &mut self,
     ) -> Vec<crate::player::xtra::manager::XtraTeardownRequest> {
-        self.released_instances.drain(..).map(|released| {
-                crate::player::xtra::manager::XtraTeardownRequest {
+        self.released_instances
+            .drain(..)
+            .map(
+                |released| crate::player::xtra::manager::XtraTeardownRequest {
                     xtra_name: "Multiuser",
                     owner: self.owner.clone(),
                     instance_id: released.instance_id,
@@ -924,8 +1226,8 @@ impl MultiuserXtraManager {
                     socket_resource: released.socket_resource,
                     #[cfg(test)]
                     drop_probe: released.teardown_probe,
-                }
-            })
+                },
+            )
             .collect()
     }
 
@@ -966,23 +1268,32 @@ impl MultiuserXtraManager {
     }
 }
 
-
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod socket_event_tests {
     use super::{MultiuserConnectionMode, MultiuserSocketEvent, MultiuserXtraManager};
-    use async_std::channel;
     use crate::director::static_datum::StaticDatum;
     use crate::player::ownership::{OwnerKey, OwnerToken};
     use crate::player::symbols::{builtin::BuiltInSymbol, symbol::Symbol};
+    use async_std::channel;
 
     #[test]
     fn stale_and_removed_events_are_discarded_without_mutating_current_instance() {
-        let owner = OwnerToken::new(OwnerKey { session: 41, player: 1, generation: 1 });
+        let owner = OwnerToken::new(OwnerKey {
+            session: 41,
+            player: 1,
+            generation: 1,
+        });
         let mut manager = MultiuserXtraManager::new_with_owner(owner.clone());
         let (queue, queued) = channel::unbounded();
         let instance_id = manager.create_instance(&Vec::new());
-        let generation = manager.instance_generation(instance_id).expect("instance generation");
-        manager.instances.get_mut(&instance_id).unwrap().connection_mode = MultiuserConnectionMode::Text;
+        let generation = manager
+            .instance_generation(instance_id)
+            .expect("instance generation");
+        manager
+            .instances
+            .get_mut(&instance_id)
+            .unwrap()
+            .connection_mode = MultiuserConnectionMode::Text;
 
         manager
             .handle_socket_event(
@@ -998,9 +1309,18 @@ mod socket_event_tests {
             &manager.instances[&instance_id].message_queue[0].content,
             StaticDatum::String(value) if value == "current"
         ));
-        assert!(queued.try_recv().is_err(), "an event without a handler must not enqueue a callback");
-        manager.instances.get_mut(&instance_id).unwrap().net_message_handler =
-            Some((crate::player::DatumRef::Void, Symbol::builtin(BuiltInSymbol::Nothing)));
+        assert!(
+            queued.try_recv().is_err(),
+            "an event without a handler must not enqueue a callback"
+        );
+        manager
+            .instances
+            .get_mut(&instance_id)
+            .unwrap()
+            .net_message_handler = Some((
+            crate::player::DatumRef::Void,
+            Symbol::builtin(BuiltInSymbol::Nothing),
+        ));
 
         manager
             .handle_socket_event(
@@ -1016,7 +1336,10 @@ mod socket_event_tests {
             &manager.instances[&instance_id].message_queue[1].content,
             StaticDatum::String(value) if value == "current error"
         ));
-        assert!(queued.try_recv().is_ok(), "current event should enqueue its callback");
+        assert!(
+            queued.try_recv().is_ok(),
+            "current event should enqueue its callback"
+        );
 
         manager
             .handle_socket_event(
@@ -1028,7 +1351,10 @@ mod socket_event_tests {
             )
             .expect("stale socket event should be discarded");
         assert_eq!(manager.instances[&instance_id].message_queue.len(), 2);
-        assert!(queued.try_recv().is_err(), "stale event must not enqueue a callback");
+        assert!(
+            queued.try_recv().is_err(),
+            "stale event must not enqueue a callback"
+        );
 
         manager.instances.remove(&instance_id);
         manager
@@ -1041,6 +1367,9 @@ mod socket_event_tests {
             )
             .expect("removed-instance socket event should be discarded");
         assert!(!manager.instances.contains_key(&instance_id));
-        assert!(queued.try_recv().is_err(), "removed event must not enqueue a callback");
+        assert!(
+            queued.try_recv().is_err(),
+            "removed event must not enqueue a callback"
+        );
     }
 }

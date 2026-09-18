@@ -2,9 +2,10 @@ use crate::{
     director::lingo::datum::Datum,
     player::{
         compare::validate_direct_symbol_fields,
+        reserve_player_mut,
         session::ExecutionContext,
-        reserve_player_mut, DatumRef, DirPlayer, ScriptError,
         symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable},
+        DatumRef, DirPlayer, ScriptError,
     },
 };
 
@@ -31,7 +32,10 @@ impl VectorDatumHandlers {
                 Ok(values)
             }
             Datum::Void | Datum::Int(0) => Ok([0.0, 0.0, 0.0]),
-            _ => Err(ScriptError::new(format!("Expected a vector, got {}", datum.type_str()))),
+            _ => Err(ScriptError::new(format!(
+                "Expected a vector, got {}",
+                datum.type_str()
+            ))),
         }
     }
 
@@ -46,7 +50,10 @@ impl VectorDatumHandlers {
                 player.get_datum(&list[2]).float_value()?,
             ]),
             Datum::Void | Datum::Int(0) => Ok([0.0, 0.0, 0.0]),
-            _ => Err(ScriptError::new(format!("Expected a vector, got {}", datum.type_str()))),
+            _ => Err(ScriptError::new(format!(
+                "Expected a vector, got {}",
+                datum.type_str()
+            ))),
         }
     }
 
@@ -72,83 +79,85 @@ impl VectorDatumHandlers {
             let builtin = handler_name.into_builtin();
 
             match builtin {
-            Some(BuiltInSymbol::GetAt) => {
-                Self::get_at(player, symbols, &datum, args)
-            }
-            Some(BuiltInSymbol::SetAt) => {
-                Self::set_at(player, symbols, &datum, args)
-            }
-            Some(BuiltInSymbol::Duplicate) => {
-                let vec = Self::checked_datum_to_vec(player, symbols, &datum)?;
-                Ok(player.alloc_datum(Datum::Vector(vec)))
-            }
-            Some(BuiltInSymbol::DistanceTo) => {
-                if args.is_empty() {
-                    return Err(ScriptError::new("distanceTo requires a vector".to_string()));
+                Some(BuiltInSymbol::GetAt) => Self::get_at(player, symbols, &datum, args),
+                Some(BuiltInSymbol::SetAt) => Self::set_at(player, symbols, &datum, args),
+                Some(BuiltInSymbol::Duplicate) => {
+                    let vec = Self::checked_datum_to_vec(player, symbols, &datum)?;
+                    Ok(player.alloc_datum(Datum::Vector(vec)))
                 }
-                let a = Self::checked_datum_to_vec(player, symbols, &datum)?;
-                let b = Self::checked_datum_to_vec(player, symbols, &args[0])?;
-                let dx = a[0] - b[0];
-                let dy = a[1] - b[1];
-                let dz = a[2] - b[2];
-                Ok(player.alloc_datum(Datum::Float((dx*dx + dy*dy + dz*dz).sqrt())))
-            }
-            Some(BuiltInSymbol::GetNormalized) => {
-                let [x, y, z] = Self::checked_datum_to_vec(player, symbols, &datum)?;
-                let len = (x*x + y*y + z*z).sqrt();
-                if len > 1e-10 {
-                    Ok(player.alloc_datum(Datum::Vector([x/len, y/len, z/len])))
-                } else {
-                    Ok(player.alloc_datum(Datum::Vector([0.0, 0.0, 0.0])))
+                Some(BuiltInSymbol::DistanceTo) => {
+                    if args.is_empty() {
+                        return Err(ScriptError::new("distanceTo requires a vector".to_string()));
+                    }
+                    let a = Self::checked_datum_to_vec(player, symbols, &datum)?;
+                    let b = Self::checked_datum_to_vec(player, symbols, &args[0])?;
+                    let dx = a[0] - b[0];
+                    let dy = a[1] - b[1];
+                    let dz = a[2] - b[2];
+                    Ok(player.alloc_datum(Datum::Float((dx * dx + dy * dy + dz * dz).sqrt())))
                 }
-            }
-            Some(BuiltInSymbol::Normalize) => {
-                let [x, y, z] = Self::checked_datum_to_vec(player, symbols, &datum)?;
-                let len = (x*x + y*y + z*z).sqrt();
-                if len > 1e-10 {
-                    player
-                        .allocator
-                        .replace_vector(&datum, [x/len, y/len, z/len])?;
+                Some(BuiltInSymbol::GetNormalized) => {
+                    let [x, y, z] = Self::checked_datum_to_vec(player, symbols, &datum)?;
+                    let len = (x * x + y * y + z * z).sqrt();
+                    if len > 1e-10 {
+                        Ok(player.alloc_datum(Datum::Vector([x / len, y / len, z / len])))
+                    } else {
+                        Ok(player.alloc_datum(Datum::Vector([0.0, 0.0, 0.0])))
+                    }
                 }
-                Ok(DatumRef::Void)
-            }
-            Some(BuiltInSymbol::CrossProduct | BuiltInSymbol::Cross) => {
-                if args.is_empty() {
-                    return Err(ScriptError::new("crossProduct requires a vector".to_string()));
+                Some(BuiltInSymbol::Normalize) => {
+                    let [x, y, z] = Self::checked_datum_to_vec(player, symbols, &datum)?;
+                    let len = (x * x + y * y + z * z).sqrt();
+                    if len > 1e-10 {
+                        player
+                            .allocator
+                            .replace_vector(&datum, [x / len, y / len, z / len])?;
+                    }
+                    Ok(DatumRef::Void)
                 }
-                let a = Self::checked_datum_to_vec(player, symbols, &datum)?;
-                let b = Self::checked_datum_to_vec(player, symbols, &args[0])?;
-                Ok(player.alloc_datum(Datum::Vector([
-                    a[1]*b[2] - a[2]*b[1],
-                    a[2]*b[0] - a[0]*b[2],
-                    a[0]*b[1] - a[1]*b[0],
-                ])))
-            }
-            Some(BuiltInSymbol::DotProduct | BuiltInSymbol::Dot) => {
-                if args.is_empty() {
-                    return Err(ScriptError::new("dotProduct requires a vector".to_string()));
+                Some(BuiltInSymbol::CrossProduct | BuiltInSymbol::Cross) => {
+                    if args.is_empty() {
+                        return Err(ScriptError::new(
+                            "crossProduct requires a vector".to_string(),
+                        ));
+                    }
+                    let a = Self::checked_datum_to_vec(player, symbols, &datum)?;
+                    let b = Self::checked_datum_to_vec(player, symbols, &args[0])?;
+                    Ok(player.alloc_datum(Datum::Vector([
+                        a[1] * b[2] - a[2] * b[1],
+                        a[2] * b[0] - a[0] * b[2],
+                        a[0] * b[1] - a[1] * b[0],
+                    ])))
                 }
-                let a = Self::checked_datum_to_vec(player, symbols, &datum)?;
-                let b = Self::checked_datum_to_vec(player, symbols, &args[0])?;
-                Ok(player.alloc_datum(Datum::Float(a[0]*b[0] + a[1]*b[1] + a[2]*b[2])))
-            }
-            Some(BuiltInSymbol::AngleBetween) => {
-                if args.is_empty() {
-                    return Err(ScriptError::new("angleBetween requires a vector".to_string()));
+                Some(BuiltInSymbol::DotProduct | BuiltInSymbol::Dot) => {
+                    if args.is_empty() {
+                        return Err(ScriptError::new("dotProduct requires a vector".to_string()));
+                    }
+                    let a = Self::checked_datum_to_vec(player, symbols, &datum)?;
+                    let b = Self::checked_datum_to_vec(player, symbols, &args[0])?;
+                    Ok(player.alloc_datum(Datum::Float(a[0] * b[0] + a[1] * b[1] + a[2] * b[2])))
                 }
-                let a = Self::checked_datum_to_vec(player, symbols, &datum)?;
-                let b = Self::checked_datum_to_vec(player, symbols, &args[0])?;
-                let len_a = (a[0]*a[0] + a[1]*a[1] + a[2]*a[2]).sqrt();
-                let len_b = (b[0]*b[0] + b[1]*b[1] + b[2]*b[2]).sqrt();
-                let angle = if len_a > 1e-10 && len_b > 1e-10 {
-                    let cos_angle = (a[0]*b[0] + a[1]*b[1] + a[2]*b[2]) / (len_a * len_b);
-                    cos_angle.clamp(-1.0, 1.0).acos().to_degrees()
-                } else {
-                    0.0
-                };
-                Ok(player.alloc_datum(Datum::Float(angle)))
-            }
-            _ => Err(ScriptError::new(format!("No handler {handler_name_display} for vector"))),
+                Some(BuiltInSymbol::AngleBetween) => {
+                    if args.is_empty() {
+                        return Err(ScriptError::new(
+                            "angleBetween requires a vector".to_string(),
+                        ));
+                    }
+                    let a = Self::checked_datum_to_vec(player, symbols, &datum)?;
+                    let b = Self::checked_datum_to_vec(player, symbols, &args[0])?;
+                    let len_a = (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt();
+                    let len_b = (b[0] * b[0] + b[1] * b[1] + b[2] * b[2]).sqrt();
+                    let angle = if len_a > 1e-10 && len_b > 1e-10 {
+                        let cos_angle = (a[0] * b[0] + a[1] * b[1] + a[2] * b[2]) / (len_a * len_b);
+                        cos_angle.clamp(-1.0, 1.0).acos().to_degrees()
+                    } else {
+                        0.0
+                    };
+                    Ok(player.alloc_datum(Datum::Float(angle)))
+                }
+                _ => Err(ScriptError::new(format!(
+                    "No handler {handler_name_display} for vector"
+                ))),
             }
         })
     }
@@ -166,7 +175,9 @@ impl VectorDatumHandlers {
         let vec = Self::checked_datum_to_vec(player, symbols, datum)?;
         let index = checked_datum(player, &args[0], symbols)?.int_value()?;
         if !(1..=3).contains(&index) {
-            return Err(ScriptError::new("Index out of range for vector".to_string()));
+            return Err(ScriptError::new(
+                "Index out of range for vector".to_string(),
+            ));
         }
         Ok(player.alloc_datum(Datum::Float(vec[(index - 1) as usize])))
     }
@@ -179,15 +190,23 @@ impl VectorDatumHandlers {
         args: &[DatumRef],
     ) -> Result<DatumRef, ScriptError> {
         if args.len() < 2 {
-            return Err(ScriptError::new("setAt requires an index and value".to_string()));
+            return Err(ScriptError::new(
+                "setAt requires an index and value".to_string(),
+            ));
         }
         let mut vec = match checked_datum(player, datum, symbols)? {
             Datum::Vector(values) => *values,
-            _ => return Err(ScriptError::new("Cannot set prop of non-vector".to_string())),
+            _ => {
+                return Err(ScriptError::new(
+                    "Cannot set prop of non-vector".to_string(),
+                ))
+            }
         };
         let index = checked_datum(player, &args[0], symbols)?.int_value()?;
         if !(1..=3).contains(&index) {
-            return Err(ScriptError::new("Index out of range for vector".to_string()));
+            return Err(ScriptError::new(
+                "Index out of range for vector".to_string(),
+            ));
         }
         let value = checked_datum(player, &args[1], symbols)?.float_value()? as f64;
         vec[(index - 1) as usize] = value;
@@ -220,7 +239,9 @@ impl VectorDatumHandlers {
                         _ => player
                             .allocator
                             .try_get_datum(component_ref)
-                            .ok_or_else(|| ScriptError::new(format!("invalid datum reference {component_ref}")))?,
+                            .ok_or_else(|| {
+                                ScriptError::new(format!("invalid datum reference {component_ref}"))
+                            })?,
                     };
                     crate::player::compare::validate_direct_symbol_fields(component, symbols)?;
                     components[index] = component.float_value()?;
@@ -228,7 +249,12 @@ impl VectorDatumHandlers {
                 components
             }
             Datum::Void | Datum::Int(0) => [0.0, 0.0, 0.0],
-            _ => return Err(ScriptError::new(format!("Expected a vector, got {}", datum.type_str()))),
+            _ => {
+                return Err(ScriptError::new(format!(
+                    "Expected a vector, got {}",
+                    datum.type_str()
+                )))
+            }
         };
         let prop_name = symbols
             .display(&prop)
@@ -237,7 +263,9 @@ impl VectorDatumHandlers {
             Some(BuiltInSymbol::X) => Ok(Datum::Float(x)),
             Some(BuiltInSymbol::Y) => Ok(Datum::Float(y)),
             Some(BuiltInSymbol::Z) => Ok(Datum::Float(z)),
-            Some(BuiltInSymbol::Magnitude | BuiltInSymbol::Length) => Ok(Datum::Float((x * x + y * y + z * z).sqrt())),
+            Some(BuiltInSymbol::Magnitude | BuiltInSymbol::Length) => {
+                Ok(Datum::Float((x * x + y * y + z * z).sqrt()))
+            }
             Some(BuiltInSymbol::Ilk) => Ok(Datum::Symbol(BuiltInSymbol::Vector.into())),
             _ => Err(ScriptError::new(format!(
                 "Cannot get vector property {}",
@@ -256,7 +284,9 @@ impl VectorDatumHandlers {
     ) -> Result<(), ScriptError> {
         let is_vector = matches!(checked_datum(player, datum, symbols)?, Datum::Vector(_));
         if !is_vector {
-            return Err(ScriptError::new("Cannot set prop of non-vector".to_string()));
+            return Err(ScriptError::new(
+                "Cannot set prop of non-vector".to_string(),
+            ));
         }
         let prop_name = symbols
             .display(&prop)
@@ -327,30 +357,51 @@ impl VectorDatumHandlers {
             if let Datum::Transform3d(m) = player.get_datum_mut(&parent_ref) {
                 match parent_sub_prop.as_deref() {
                     Some("position") => {
-                        m[12] = vec[0]; m[13] = vec[1]; m[14] = vec[2];
+                        m[12] = vec[0];
+                        m[13] = vec[1];
+                        m[14] = vec[2];
                     }
                     Some("rotation") => {
                         let pos = [m[12], m[13], m[14]];
-                        let sx = (m[0]*m[0] + m[1]*m[1] + m[2]*m[2]).sqrt();
-                        let sy = (m[4]*m[4] + m[5]*m[5] + m[6]*m[6]).sqrt();
-                        let sz = (m[8]*m[8] + m[9]*m[9] + m[10]*m[10]).sqrt();
-                        let rot = crate::player::handlers::datum_handlers::transform3d::euler_to_matrix(vec[0], vec[1], vec[2]);
-                        m[0] = rot[0]*sx;  m[1] = rot[1]*sx;  m[2] = rot[2]*sx;
-                        m[4] = rot[4]*sy;  m[5] = rot[5]*sy;  m[6] = rot[6]*sy;
-                        m[8] = rot[8]*sz;  m[9] = rot[9]*sz;  m[10] = rot[10]*sz;
-                        m[12] = pos[0]; m[13] = pos[1]; m[14] = pos[2];
+                        let sx = (m[0] * m[0] + m[1] * m[1] + m[2] * m[2]).sqrt();
+                        let sy = (m[4] * m[4] + m[5] * m[5] + m[6] * m[6]).sqrt();
+                        let sz = (m[8] * m[8] + m[9] * m[9] + m[10] * m[10]).sqrt();
+                        let rot =
+                            crate::player::handlers::datum_handlers::transform3d::euler_to_matrix(
+                                vec[0], vec[1], vec[2],
+                            );
+                        m[0] = rot[0] * sx;
+                        m[1] = rot[1] * sx;
+                        m[2] = rot[2] * sx;
+                        m[4] = rot[4] * sy;
+                        m[5] = rot[5] * sy;
+                        m[6] = rot[6] * sy;
+                        m[8] = rot[8] * sz;
+                        m[9] = rot[9] * sz;
+                        m[10] = rot[10] * sz;
+                        m[12] = pos[0];
+                        m[13] = pos[1];
+                        m[14] = pos[2];
                     }
                     Some("scale") => {
                         // Set column lengths to new scale while preserving rotation direction
-                        let old_sx = (m[0]*m[0] + m[1]*m[1] + m[2]*m[2]).sqrt().max(1e-10);
-                        let old_sy = (m[4]*m[4] + m[5]*m[5] + m[6]*m[6]).sqrt().max(1e-10);
-                        let old_sz = (m[8]*m[8] + m[9]*m[9] + m[10]*m[10]).sqrt().max(1e-10);
+                        let old_sx = (m[0] * m[0] + m[1] * m[1] + m[2] * m[2]).sqrt().max(1e-10);
+                        let old_sy = (m[4] * m[4] + m[5] * m[5] + m[6] * m[6]).sqrt().max(1e-10);
+                        let old_sz = (m[8] * m[8] + m[9] * m[9] + m[10] * m[10])
+                            .sqrt()
+                            .max(1e-10);
                         let fx = vec[0] / old_sx;
                         let fy = vec[1] / old_sy;
                         let fz = vec[2] / old_sz;
-                        m[0] *= fx; m[1] *= fx; m[2] *= fx;
-                        m[4] *= fy; m[5] *= fy; m[6] *= fy;
-                        m[8] *= fz; m[9] *= fz; m[10] *= fz;
+                        m[0] *= fx;
+                        m[1] *= fx;
+                        m[2] *= fx;
+                        m[4] *= fy;
+                        m[5] *= fy;
+                        m[6] *= fy;
+                        m[8] *= fz;
+                        m[9] *= fz;
+                        m[10] *= fz;
                     }
                     _ => {}
                 }
@@ -470,15 +521,15 @@ mod tests {
 
     #[test]
     fn parent_writeback_marks_the_parent_transform() {
-        let mut session = RuntimeSession::new(SymbolOwner { session: 74, generation: 1 });
+        let mut session = RuntimeSession::new(SymbolOwner {
+            session: 74,
+            generation: 1,
+        });
         let (tx, _rx) = async_std::channel::unbounded();
         assert!(session.add_player(1, tx));
         let outcome = session.with_player(1, |mut runtime| {
             let parent = runtime.player.alloc_datum(Datum::transform3d([
-                1.0, 0.0, 0.0, 0.0,
-                0.0, 1.0, 0.0, 0.0,
-                0.0, 0.0, 1.0, 0.0,
-                0.0, 0.0, 0.0, 1.0,
+                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
             ]));
             let vector = runtime.player.alloc_datum(Datum::Vector([1.0, 2.0, 3.0]));
             let value = runtime.player.alloc_datum(Datum::Float(9.0));
@@ -486,18 +537,31 @@ mod tests {
             let _vector_id = vector.unwrap();
             let prop = runtime.symbols.intern("x");
             let sub_prop = runtime.symbols.intern("position");
-            runtime.player.transform_sub_refs.push((vector.clone(), parent.clone(), sub_prop));
+            runtime
+                .player
+                .transform_sub_refs
+                .push((vector.clone(), parent.clone(), sub_prop));
             VectorDatumHandlers::set_prop(runtime.player, runtime.symbols, &vector, prop, &value)?;
-            assert_eq!(runtime.player.w3d_dirty_transform_ids.contains(&parent_id), true);
+            assert_eq!(
+                runtime.player.w3d_dirty_transform_ids.contains(&parent_id),
+                true
+            );
             let vector_value = match runtime.player.get_datum(&vector) {
                 Datum::Vector(value) => *value,
                 _ => return Err(crate::player::ScriptError::new("expected vector".into())),
             };
             assert_eq!(vector_value, [9.0, 2.0, 3.0]);
-            assert!(!runtime.player.w3d_dirty_transform_ids.contains(&vector.unwrap()));
+            assert!(!runtime
+                .player
+                .w3d_dirty_transform_ids
+                .contains(&vector.unwrap()));
             let parent_position = match runtime.player.get_datum(&parent) {
                 Datum::Transform3d(matrix) => matrix[12],
-                _ => return Err(crate::player::ScriptError::new("expected parent transform".into())),
+                _ => {
+                    return Err(crate::player::ScriptError::new(
+                        "expected parent transform".into(),
+                    ))
+                }
             };
             assert_eq!(parent_position, 9.0);
             Ok::<(), crate::player::ScriptError>(())

@@ -231,9 +231,7 @@ impl VirtualScriptRegistry {
         script_member_ref: CastMemberRef,
         handler: Rc<dyn VirtualScriptHandler>,
     ) {
-        player
-            .virtual_scripts
-            .insert(script_member_ref, handler);
+        player.virtual_scripts.insert(script_member_ref, handler);
     }
 
     // -----------------------------------------------------------------------
@@ -479,9 +477,16 @@ mod tests {
         );
         let member_number = script_ref.cast_member as u32;
         assert!(member_number >= 2_000_000);
-        assert!(player.movie.cast_manager.casts[0].scripts.contains_key(&member_number));
-        assert!(!player.movie.cast_manager.casts[0].members.contains_key(&member_number));
-        assert_eq!(player.movie.cast_manager.casts[0].max_member_id(), cast_max_before);
+        assert!(player.movie.cast_manager.casts[0]
+            .scripts
+            .contains_key(&member_number));
+        assert!(!player.movie.cast_manager.casts[0]
+            .members
+            .contains_key(&member_number));
+        assert_eq!(
+            player.movie.cast_manager.casts[0].max_member_id(),
+            cast_max_before
+        );
         assert_eq!(
             VirtualScriptRegistry::find_by_name(&player, "javascriptproxy"),
             Some(script_ref.clone())
@@ -591,12 +596,8 @@ mod tests {
         )
         .is_err());
 
-        let (instance_ref, _) = VirtualScriptRegistry::create_instance(
-            &mut player,
-            &symbols,
-            &script_ref,
-        )
-        .unwrap();
+        let (instance_ref, _) =
+            VirtualScriptRegistry::create_instance(&mut player, &symbols, &script_ref).unwrap();
         assert!(VirtualScriptRegistry::try_get_instance_prop(
             &mut player,
             &symbols,
@@ -612,13 +613,14 @@ mod tests {
             &DatumRef::Void,
         )
         .is_err());
-        assert!(javascript_proxy::JavascriptProxy.get_prop(
-            &mut player,
-            &symbols,
-            &instance_ref,
-            foreign_symbols.intern("foreignDefaultProperty"),
-        )
-        .is_err());
+        assert!(javascript_proxy::JavascriptProxy
+            .get_prop(
+                &mut player,
+                &symbols,
+                &instance_ref,
+                foreign_symbols.intern("foreignDefaultProperty"),
+            )
+            .is_err());
 
         player.virtual_scripts.clear();
         let local_name = symbols.intern("localProperty");
@@ -664,12 +666,10 @@ mod tests {
         );
         let instances_before = player.allocator.script_instance_count();
         let datums_before = player.allocator.datum_count();
-        assert!(VirtualScriptRegistry::create_instance(
-            &mut player,
-            &local_symbols,
-            &script_ref,
-        )
-        .is_err());
+        assert!(
+            VirtualScriptRegistry::create_instance(&mut player, &local_symbols, &script_ref,)
+                .is_err()
+        );
         assert_eq!(player.allocator.script_instance_count(), instances_before);
         assert_eq!(player.allocator.datum_count(), datums_before);
     }
@@ -687,7 +687,8 @@ mod tests {
             "DerivedProxy",
             Rc::new(javascript_proxy::JavascriptProxy),
         );
-        let (receiver, _) = VirtualScriptRegistry::create_instance(&mut player, &symbols, &derived).unwrap();
+        let (receiver, _) =
+            VirtualScriptRegistry::create_instance(&mut player, &symbols, &derived).unwrap();
         let call_name = symbols.intern("call");
         let result = VirtualScriptRegistry::try_call_handler(
             &mut player,
@@ -717,10 +718,22 @@ mod tests {
         assert!(session.add_player(1, tx_a));
         assert!(session.add_player(2, tx_b));
         session
-            .with_player(1, |ctx| ctx.player.movie.cast_manager.casts.push(CastLib::test_external(1, 0)))
+            .with_player(1, |ctx| {
+                ctx.player
+                    .movie
+                    .cast_manager
+                    .casts
+                    .push(CastLib::test_external(1, 0))
+            })
             .unwrap();
         session
-            .with_player(2, |ctx| ctx.player.movie.cast_manager.casts.push(CastLib::test_external(1, 0)))
+            .with_player(2, |ctx| {
+                ctx.player
+                    .movie
+                    .cast_manager
+                    .casts
+                    .push(CastLib::test_external(1, 0))
+            })
             .unwrap();
 
         let ref_a = session

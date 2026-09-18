@@ -8,9 +8,7 @@
 //! either pops a new tab (success) or is blocked by the popup blocker
 //! (failure).
 
-use crate::{
-    player::{DatumRef, DirPlayer, ScriptError, symbols::symbol_table::SymbolTable},
-};
+use crate::player::{symbols::symbol_table::SymbolTable, DatumRef, DirPlayer, ScriptError};
 
 #[derive(Clone, Debug)]
 pub(crate) struct OpenUrlHostIntent {
@@ -34,7 +32,9 @@ impl OpenUrlXtra {
         if !Self::has_handler(name) {
             return Err(ScriptError::new(format!("OpenURL: no handler {}", name)));
         }
-        let arg = args.first().ok_or_else(|| ScriptError::new("gsOpenURL requires a URL argument".to_owned()))?;
+        let arg = args
+            .first()
+            .ok_or_else(|| ScriptError::new("gsOpenURL requires a URL argument".to_owned()))?;
         let url = player
             .allocator
             .try_get_datum(arg)
@@ -52,5 +52,4 @@ impl OpenUrlXtra {
             }),
         ))
     }
-
 }

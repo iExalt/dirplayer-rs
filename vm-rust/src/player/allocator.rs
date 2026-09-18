@@ -150,8 +150,7 @@ impl<T> Arena<T> {
         }
         let idx = id - 1;
         let chunk_idx = idx / ARENA_CHUNK_SIZE;
-        chunk_idx < self.chunks.len()
-            && self.chunks[chunk_idx][idx % ARENA_CHUNK_SIZE].is_some()
+        chunk_idx < self.chunks.len() && self.chunks[chunk_idx][idx % ARENA_CHUNK_SIZE].is_some()
     }
 
     pub fn len(&self) -> usize {
@@ -164,7 +163,9 @@ impl<T> Arena<T> {
             let chunk_idx = idx / ARENA_CHUNK_SIZE;
             let slot_idx = idx % ARENA_CHUNK_SIZE;
             if chunk_idx < self.chunks.len() {
-                self.chunks[chunk_idx][slot_idx].as_ref().map(|v| (idx + 1, v))
+                self.chunks[chunk_idx][slot_idx]
+                    .as_ref()
+                    .map(|v| (idx + 1, v))
             } else {
                 None
             }
@@ -217,8 +218,10 @@ pub struct ScriptInstanceRefEntry {
 }
 
 pub trait ResetableAllocator {
-    fn reset(&mut self, bitmap_manager: &mut crate::player::bitmap::manager::BitmapManager)
-        -> OwnerToken;
+    fn reset(
+        &mut self,
+        bitmap_manager: &mut crate::player::bitmap::manager::BitmapManager,
+    ) -> OwnerToken;
 }
 
 pub(crate) trait DatumAllocatorTrait {
@@ -293,7 +296,9 @@ impl DatumAllocator {
     }
 
     #[inline]
-    pub fn owner_token(&self) -> OwnerToken { self.owner.clone() }
+    pub fn owner_token(&self) -> OwnerToken {
+        self.owner.clone()
+    }
 
     /// Drain deferred drops against this allocator. The queue is owner-local;
     /// the key check protects against accidental transfer between epochs.
@@ -348,9 +353,15 @@ impl DatumAllocator {
     }
 
     fn valid_datum_ref(&self, reference: &DatumRef) -> Option<DatumId> {
-        let DatumRef::Ref(_) = reference else { return None };
-        let Some(owner) = reference.owner() else { return None };
-        let Some(ptr) = reference.ref_count_ptr() else { return None };
+        let DatumRef::Ref(_) = reference else {
+            return None;
+        };
+        let Some(owner) = reference.owner() else {
+            return None;
+        };
+        let Some(ptr) = reference.ref_count_ptr() else {
+            return None;
+        };
         if !owner.same_identity(&self.owner) || !owner.is_arena_live() {
             return None;
         }
@@ -459,9 +470,7 @@ impl DatumAllocator {
     }
 
     fn valid_script_ref(&self, reference: &ScriptInstanceRef) -> Option<ScriptInstanceId> {
-        if !reference.owner().same_identity(&self.owner)
-            || !reference.owner().is_arena_live()
-        {
+        if !reference.owner().same_identity(&self.owner) || !reference.owner().is_arena_live() {
             return None;
         }
         let id = reference.id();
@@ -548,7 +557,10 @@ impl DatumAllocator {
         if self.script_instance_count() >= MAX_SCRIPT_INSTANCE_ID as usize {
             panic!("Script instance limit reached");
         }
-        if !self.script_instances.contains(self.script_instance_counter as usize) {
+        if !self
+            .script_instances
+            .contains(self.script_instance_counter as usize)
+        {
             self.script_instance_counter
         } else if self.script_instance_counter + 1 < MAX_SCRIPT_INSTANCE_ID
             && !self
@@ -577,10 +589,13 @@ impl DatumAllocator {
     }
 
     pub fn datum_type_stats(&self) -> String {
-        let mut counts: std::collections::HashMap<String, (usize, usize)> = std::collections::HashMap::new();
+        let mut counts: std::collections::HashMap<String, (usize, usize)> =
+            std::collections::HashMap::new();
         // Int-specific tracking
-        let mut int_rc_dist: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
-        let mut int_value_dist: std::collections::HashMap<i32, usize> = std::collections::HashMap::new();
+        let mut int_rc_dist: std::collections::HashMap<u32, usize> =
+            std::collections::HashMap::new();
+        let mut int_value_dist: std::collections::HashMap<i32, usize> =
+            std::collections::HashMap::new();
         let mut int_samples: Vec<(usize, i32, u32)> = Vec::new(); // (id, value, rc)
 
         for (id, entry) in self.datums.iter() {
@@ -600,10 +615,13 @@ impl DatumAllocator {
             }
         }
         let mut sorted: Vec<_> = counts.into_iter().collect();
-        sorted.sort_by(|a, b| b.1.0.cmp(&a.1.0));
+        sorted.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
         let mut result = format!("Live datums: {}\n", self.datums.len());
         for (type_name, (count, total_rc)) in &sorted {
-            result.push_str(&format!("  {}: {} (total rc: {})\n", type_name, count, total_rc));
+            result.push_str(&format!(
+                "  {}: {} (total rc: {})\n",
+                type_name, count, total_rc
+            ));
         }
         result.push_str(&format!("Free list: {}\n", self.datums.free_list.len()));
 
@@ -624,9 +642,12 @@ impl DatumAllocator {
         }
 
         // Int alloc/dealloc counters
-        result.push_str(&format!("Int allocs: {}, deallocs: {}, delta: {}\n",
-            self.int_alloc_count, self.int_dealloc_count,
-            self.int_alloc_count as i64 - self.int_dealloc_count as i64));
+        result.push_str(&format!(
+            "Int allocs: {}, deallocs: {}, delta: {}\n",
+            self.int_alloc_count,
+            self.int_dealloc_count,
+            self.int_alloc_count as i64 - self.int_dealloc_count as i64
+        ));
 
         // Show new Int datums since snapshot (if set)
         if self.snapshot_max_id > 0 {
@@ -643,8 +664,10 @@ impl DatumAllocator {
                     }
                 }
             }
-            result.push_str(&format!("New Int datums since snapshot (id>{}): {}\n",
-                self.snapshot_max_id, new_ints));
+            result.push_str(&format!(
+                "New Int datums since snapshot (id>{}): {}\n",
+                self.snapshot_max_id, new_ints
+            ));
             result.push_str("New Int samples:\n");
             for (id, val, rc) in &new_int_samples {
                 result.push_str(&format!("  #{}: val={}, rc={}\n", id, val, rc));
@@ -710,7 +733,11 @@ impl DatumAllocator {
             return None;
         }
         if let Some(entry) = self.script_instances.get(id as usize) {
-            Some(ScriptInstanceRef::from_id(id, entry.ref_count.get(), self.owner.clone()))
+            Some(ScriptInstanceRef::from_id(
+                id,
+                entry.ref_count.get(),
+                self.owner.clone(),
+            ))
         } else {
             None
         }
@@ -790,9 +817,12 @@ impl DatumAllocator {
         if is_int {
             self.int_alloc_count += 1;
         }
-        Ok(DatumRef::from_allocated(id, ref_count_ptr, self.owner.clone()))
+        Ok(DatumRef::from_allocated(
+            id,
+            ref_count_ptr,
+            self.owner.clone(),
+        ))
     }
-
 }
 
 impl DatumAllocatorTrait for DatumAllocator {
@@ -807,14 +837,12 @@ impl DatumAllocatorTrait for DatumAllocator {
             _ => None,
         };
         if let Some(bitmap) = &bitmap_to_incref {
-            bitmap_manager
-                .get_bitmap_handle(bitmap)
-                .ok_or_else(|| {
-                    ScriptError::new_code(
-                        ScriptErrorCode::InvalidReference,
-                        "invalid bitmap handle".to_string(),
-                    )
-                })?;
+            bitmap_manager.get_bitmap_handle(bitmap).ok_or_else(|| {
+                ScriptError::new_code(
+                    ScriptErrorCode::InvalidReference,
+                    "invalid bitmap handle".to_string(),
+                )
+            })?;
         }
         if let Some(bitmap) = &bitmap_to_incref {
             bitmap_manager
@@ -836,10 +864,12 @@ impl DatumAllocatorTrait for DatumAllocator {
     fn get_datum(&self, id: &DatumRef) -> &Datum {
         match id {
             DatumRef::Ref(_) => {
-                let datum_id = self
-                    .valid_datum_ref(id)
-                    .expect("foreign or stale DatumRef");
-                &self.datums.get(datum_id).expect("validated datum disappeared").datum
+                let datum_id = self.valid_datum_ref(id).expect("foreign or stale DatumRef");
+                &self
+                    .datums
+                    .get(datum_id)
+                    .expect("validated datum disappeared")
+                    .datum
             }
             DatumRef::Void => &Datum::Void,
         }
@@ -849,9 +879,7 @@ impl DatumAllocatorTrait for DatumAllocator {
     fn get_datum_mut(&mut self, id: &DatumRef) -> &mut Datum {
         match id {
             DatumRef::Ref(_) => {
-                let datum_id = self
-                    .valid_datum_ref(id)
-                    .expect("foreign or stale DatumRef");
+                let datum_id = self.valid_datum_ref(id).expect("foreign or stale DatumRef");
                 &mut self
                     .datums
                     .get_mut(datum_id)
@@ -895,25 +923,22 @@ impl ScriptInstanceAllocatorTrait for DatumAllocator {
             .expect("foreign or stale ScriptInstanceRef")
     }
 
-    fn get_script_instance_opt(
-        &self,
-        instance_ref: &ScriptInstanceRef,
-    ) -> Option<&ScriptInstance> {
+    fn get_script_instance_opt(&self, instance_ref: &ScriptInstanceRef) -> Option<&ScriptInstance> {
         self.valid_script_ref(instance_ref)
             .and_then(|id| self.script_instances.get(id as usize))
             .map(|entry| &entry.script_instance)
     }
 
-    fn get_script_instance_mut(
-        &mut self,
-        instance_ref: &ScriptInstanceRef,
-    ) -> &mut ScriptInstance {
+    fn get_script_instance_mut(&mut self, instance_ref: &ScriptInstanceRef) -> &mut ScriptInstance {
         let id = self
             .valid_script_ref(instance_ref)
             .expect("foreign or stale ScriptInstanceRef");
-        &mut self.script_instances.get_mut(id as usize).unwrap().script_instance
+        &mut self
+            .script_instances
+            .get_mut(id as usize)
+            .unwrap()
+            .script_instance
     }
-
 }
 
 impl ResetableAllocator for DatumAllocator {
@@ -973,7 +998,6 @@ impl ResetableAllocator for DatumAllocator {
         reset_guard.armed = false;
         self.owner.clone()
     }
-
 }
 
 struct ResetGuard {
@@ -1040,16 +1064,12 @@ mod ownership_tests {
             .alloc_datum(Datum::transform3d([0.0; 16]), &mut bitmaps)
             .unwrap();
 
-        alloc
-            .replace_vector(&vector, [4.0, 5.0, 6.0])
-            .unwrap();
+        alloc.replace_vector(&vector, [4.0, 5.0, 6.0]).unwrap();
         assert!(matches!(
             alloc.try_get_datum(&vector),
             Some(Datum::Vector(values)) if *values == [4.0, 5.0, 6.0]
         ));
-        alloc
-            .replace_transform3d(&transform, [1.0; 16])
-            .unwrap();
+        alloc.replace_transform3d(&transform, [1.0; 16]).unwrap();
         assert!(matches!(
             alloc.try_get_datum(&transform),
             Some(Datum::Transform3d(values)) if **values == [1.0; 16]
@@ -1140,9 +1160,7 @@ mod ownership_tests {
             .unwrap();
         assert_eq!(stale_vector.unwrap(), fresh_vector.unwrap());
         assert_eq!(stale_transform.unwrap(), fresh_transform.unwrap());
-        assert!(alloc
-            .replace_vector(&stale_vector, [17.0; 3])
-            .is_err());
+        assert!(alloc.replace_vector(&stale_vector, [17.0; 3]).is_err());
         assert!(alloc
             .replace_transform3d(&stale_transform, [18.0; 16])
             .is_err());
@@ -1169,9 +1187,7 @@ mod ownership_tests {
             .alloc_datum(Datum::BitmapRef(bitmap_handle.clone()), &mut bitmaps)
             .unwrap();
         assert_eq!(
-            bitmaps
-                .ephemeral_refcount_for_test(&bitmap_handle)
-                .unwrap(),
+            bitmaps.ephemeral_refcount_for_test(&bitmap_handle).unwrap(),
             1
         );
         assert!(alloc.replace_vector(&bitmap_ref, [13.0; 3]).is_err());
@@ -1181,9 +1197,7 @@ mod ownership_tests {
             Some(Datum::BitmapRef(handle)) if handle == &bitmap_handle
         ));
         assert_eq!(
-            bitmaps
-                .ephemeral_refcount_for_test(&bitmap_handle)
-                .unwrap(),
+            bitmaps.ephemeral_refcount_for_test(&bitmap_handle).unwrap(),
             1
         );
         assert!(bitmaps.get_bitmap_handle(&bitmap_handle).is_some());
@@ -1213,7 +1227,10 @@ mod ownership_tests {
             .unwrap_err();
         assert_eq!(foreign_error.code, ScriptErrorCode::InvalidReference);
         assert_eq!(alloc.datum_count(), before_count);
-        assert_eq!(bitmaps.ephemeral_refcount_for_test(&local_handle).unwrap(), 0);
+        assert_eq!(
+            bitmaps.ephemeral_refcount_for_test(&local_handle).unwrap(),
+            0
+        );
 
         bitmaps.rotate_handles().unwrap();
         let stale_error = alloc
@@ -1271,11 +1288,7 @@ mod ownership_tests {
         let child_id = child.unwrap();
         let list = alloc
             .alloc_datum(
-                Datum::List(
-                    DatumType::List,
-                    VecDeque::from([child.clone()]),
-                    false,
-                ),
+                Datum::List(DatumType::List, VecDeque::from([child.clone()]), false),
                 &mut bitmaps,
             )
             .unwrap();
@@ -1311,7 +1324,9 @@ mod ownership_tests {
         let stale_after_reset = stale.clone();
         assert!(alloc.try_get_datum(&reused).is_some());
         drop(stale_after_reset);
-        assert!(matches!(alloc.try_get_datum(&reused), Some(Datum::String(value)) if value == "new"));
+        assert!(
+            matches!(alloc.try_get_datum(&reused), Some(Datum::String(value)) if value == "new")
+        );
         drop(stale);
         drop(old);
         drop(reused);
@@ -1556,10 +1571,16 @@ mod ownership_tests {
             .alloc_datum(Datum::String("rejected".into()), &mut bitmaps)
             .is_err());
         assert!(matches!(alloc.alloc_int(1), DatumRef::Void));
-        assert!(matches!(alloc.alloc_symbol(local_test_symbol()), DatumRef::Void));
+        assert!(matches!(
+            alloc.alloc_symbol(local_test_symbol()),
+            DatumRef::Void
+        ));
         let script = ScriptInstance {
             instance_id: 7,
-            script: crate::player::cast_lib::CastMemberRef { cast_lib: 1, cast_member: 1 },
+            script: crate::player::cast_lib::CastMemberRef {
+                cast_lib: 1,
+                cast_member: 1,
+            },
             ancestor: None,
             properties: FxHashMap::default(),
             begin_sprite_called: false,
@@ -1630,9 +1651,7 @@ mod ownership_tests {
         let unshared_chunk = alloc
             .alloc_datum(
                 Datum::StringChunk(
-                    crate::director::lingo::datum::StringChunkSource::Datum(
-                        unshared_child.clone(),
-                    ),
+                    crate::director::lingo::datum::StringChunkSource::Datum(unshared_child.clone()),
                     chunk_expr.clone(),
                     "u".to_owned(),
                 ),
@@ -1654,9 +1673,7 @@ mod ownership_tests {
         let retained_chunk = alloc
             .alloc_datum(
                 Datum::StringChunk(
-                    crate::director::lingo::datum::StringChunkSource::Datum(
-                        retained_child.clone(),
-                    ),
+                    crate::director::lingo::datum::StringChunkSource::Datum(retained_child.clone()),
                     chunk_expr,
                     "r".to_owned(),
                 ),
@@ -1750,9 +1767,7 @@ mod ownership_tests {
         let old_chunk = alloc
             .alloc_datum(
                 Datum::StringChunk(
-                    crate::director::lingo::datum::StringChunkSource::Datum(
-                        old_child.clone(),
-                    ),
+                    crate::director::lingo::datum::StringChunkSource::Datum(old_child.clone()),
                     chunk_expr.clone(),
                     "o".to_owned(),
                 ),
@@ -1787,9 +1802,7 @@ mod ownership_tests {
         let fresh_chunk = alloc
             .alloc_datum(
                 Datum::StringChunk(
-                    crate::director::lingo::datum::StringChunkSource::Datum(
-                        fresh_child.clone(),
-                    ),
+                    crate::director::lingo::datum::StringChunkSource::Datum(fresh_child.clone()),
                     chunk_expr.clone(),
                     "f".to_owned(),
                 ),
@@ -1832,9 +1845,7 @@ mod ownership_tests {
         let left_chunk = left
             .alloc_datum(
                 Datum::StringChunk(
-                    crate::director::lingo::datum::StringChunkSource::Datum(
-                        left_child.clone(),
-                    ),
+                    crate::director::lingo::datum::StringChunkSource::Datum(left_child.clone()),
                     chunk_expr.clone(),
                     "l".to_owned(),
                 ),
@@ -1859,9 +1870,7 @@ mod ownership_tests {
         let right_chunk = right
             .alloc_datum(
                 Datum::StringChunk(
-                    crate::director::lingo::datum::StringChunkSource::Datum(
-                        right_child.clone(),
-                    ),
+                    crate::director::lingo::datum::StringChunkSource::Datum(right_child.clone()),
                     chunk_expr,
                     "r".to_owned(),
                 ),

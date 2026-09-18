@@ -15,10 +15,7 @@ use super::{
     datum_ref::{DatumId, DatumRef},
     driver,
     sprite::ColorRef,
-    symbols::{
-        builtin::BuiltInSymbol,
-        symbol_table::SymbolTable,
-    },
+    symbols::{builtin::BuiltInSymbol, symbol_table::SymbolTable},
     DirPlayer,
 };
 
@@ -161,11 +158,9 @@ pub(crate) fn snapshot_owned_value(
     while let Some(frame) = frames.pop() {
         match frame {
             Frame::Enter { reference, is_root } => {
-                let SnapshotRef::Node(snapshot_id) = snapshot_ref_for_source(
-                    source,
-                    &reference,
-                    &states,
-                )? else {
+                let SnapshotRef::Node(snapshot_id) =
+                    snapshot_ref_for_source(source, &reference, &states)?
+                else {
                     if is_root {
                         snapshot_root = Some(SnapshotRef::Void);
                     }
@@ -186,14 +181,11 @@ pub(crate) fn snapshot_owned_value(
                     }
                 }
 
-                let datum = source
-                    .allocator
-                    .try_get_datum(&reference)
-                    .ok_or_else(|| {
-                        ValueTransferError::InvalidReference(format!(
-                            "invalid source datum reference {reference}"
-                        ))
-                    })?;
+                let datum = source.allocator.try_get_datum(&reference).ok_or_else(|| {
+                    ValueTransferError::InvalidReference(format!(
+                        "invalid source datum reference {reference}"
+                    ))
+                })?;
                 states.insert(reference.unwrap(), VisitState::Active(snapshot_id));
 
                 let pending = match datum {
@@ -309,7 +301,8 @@ pub(crate) fn import_owned_value(
     let mut imported: HashMap<SnapshotId, DatumRef> = HashMap::new();
 
     for node_id in order {
-        let datum = match materialize_node(snapshot.node(node_id)?, &imported, destination_symbols) {
+        let datum = match materialize_node(snapshot.node(node_id)?, &imported, destination_symbols)
+        {
             Ok(datum) => datum,
             Err(error) => {
                 rollback_import(destination, &mut imported);
@@ -436,10 +429,7 @@ fn finish_pending_node(
     }
 }
 
-fn snapshot_leaf(
-    datum: &Datum,
-    symbols: &SymbolTable,
-) -> Result<SnapshotNode, ValueTransferError> {
+fn snapshot_leaf(datum: &Datum, symbols: &SymbolTable) -> Result<SnapshotNode, ValueTransferError> {
     match datum {
         Datum::Int(value) => Ok(SnapshotNode::Int(*value)),
         Datum::Float(value) => Ok(SnapshotNode::Float(*value)),
@@ -585,10 +575,7 @@ fn allocate_destination(
         .map_err(|error| ValueTransferError::Allocation(error.message))
 }
 
-fn rollback_import(
-    destination: &mut DirPlayer,
-    imported: &mut HashMap<SnapshotId, DatumRef>,
-) {
+fn rollback_import(destination: &mut DirPlayer, imported: &mut HashMap<SnapshotId, DatumRef>) {
     imported.clear();
     destination
         .allocator
@@ -608,9 +595,7 @@ mod tests {
     use super::*;
     use crate::director::lingo::datum::VarRef;
     use crate::player::{
-        allocator::ScriptInstanceAllocatorTrait,
-        cast_lib::CastMemberRef,
-        ownership::OwnerToken,
+        allocator::ScriptInstanceAllocatorTrait, cast_lib::CastMemberRef, ownership::OwnerToken,
         script::ScriptInstance,
     };
     use async_std::channel;
@@ -798,7 +783,9 @@ mod tests {
         else {
             panic!("expected datum-backed string chunk")
         };
-        assert!(matches!(destination.get_datum(source_ref), Datum::String(value) if value == "one two"));
+        assert!(
+            matches!(destination.get_datum(source_ref), Datum::String(value) if value == "one two")
+        );
         assert_eq!(expression.start, 1);
         assert_eq!(expression.end, 1);
         assert_eq!(cached, "one");
@@ -938,12 +925,10 @@ mod tests {
         ));
         assert_eq!(destination.allocator.datum_count(), before);
 
-        let unsupported = source.alloc_datum(Datum::VarRef(VarRef::Script(
-            CastMemberRef {
-                cast_lib: 1,
-                cast_member: 1,
-            },
-        )));
+        let unsupported = source.alloc_datum(Datum::VarRef(VarRef::Script(CastMemberRef {
+            cast_lib: 1,
+            cast_member: 1,
+        })));
         assert!(matches!(
             snapshot_owned_value(&source, &source_symbols, &unsupported),
             Err(ValueTransferError::UnsupportedDatum(DatumType::VarRef))
@@ -959,7 +944,9 @@ mod tests {
         ));
         assert!(matches!(
             snapshot_owned_value(&source, &source_symbols, &flash),
-            Err(ValueTransferError::UnsupportedDatum(DatumType::FlashObjectRef))
+            Err(ValueTransferError::UnsupportedDatum(
+                DatumType::FlashObjectRef
+            ))
         ));
     }
 
@@ -976,8 +963,11 @@ mod tests {
             snapshot_owned_value(&source, &source_symbols, &root),
             Err(ValueTransferError::InvalidReference(_))
         ));
-        let copied = import_owned_value(&snapshot, &mut destination, &mut destination_symbols).unwrap();
-        assert!(matches!(destination.get_datum(&copied), Datum::String(value) if value == "snapshot"));
+        let copied =
+            import_owned_value(&snapshot, &mut destination, &mut destination_symbols).unwrap();
+        assert!(
+            matches!(destination.get_datum(&copied), Datum::String(value) if value == "snapshot")
+        );
 
         let dead_owner = destination.owner.clone();
         dead_owner.begin_reset();

@@ -2,7 +2,11 @@
 #[derive(Clone)]
 pub enum SnapshotOutput {
     /// Raw RGBA pixel data (native — used for reference-file comparison).
-    Rgba { width: u32, height: u32, data: Vec<u8> },
+    Rgba {
+        width: u32,
+        height: u32,
+        data: Vec<u8>,
+    },
     /// Base64-encoded PNG string (browser — from canvas.toDataURL).
     Base64Png(String),
 }
@@ -12,7 +16,11 @@ impl SnapshotOutput {
     /// clamped to the image bounds.
     pub fn crop(self, left: i32, top: i32, right: i32, bottom: i32) -> Self {
         match self {
-            SnapshotOutput::Rgba { width, height, data } => {
+            SnapshotOutput::Rgba {
+                width,
+                height,
+                data,
+            } => {
                 let l = (left.max(0) as u32).min(width);
                 let t = (top.max(0) as u32).min(height);
                 let r = (right.max(0) as u32).min(width);
@@ -25,12 +33,17 @@ impl SnapshotOutput {
                     let end = start + (cw * 4) as usize;
                     cropped.extend_from_slice(&data[start..end]);
                 }
-                SnapshotOutput::Rgba { width: cw, height: ch, data: cropped }
+                SnapshotOutput::Rgba {
+                    width: cw,
+                    height: ch,
+                    data: cropped,
+                }
             }
             SnapshotOutput::Base64Png(b64) => {
                 use base64::Engine;
                 let png_bytes = base64::engine::general_purpose::STANDARD
-                    .decode(&b64).expect("Invalid base64 in snapshot");
+                    .decode(&b64)
+                    .expect("Invalid base64 in snapshot");
                 let img = image::load_from_memory_with_format(&png_bytes, image::ImageFormat::Png)
                     .expect("Failed to decode PNG snapshot");
                 let (iw, ih) = (img.width(), img.height());
@@ -40,7 +53,8 @@ impl SnapshotOutput {
                 let b = (bottom.max(0) as u32).min(ih);
                 let cropped = image::imageops::crop_imm(&img, l, t, r - l, b - t).to_image();
                 let mut buf = std::io::Cursor::new(Vec::new());
-                cropped.write_to(&mut buf, image::ImageFormat::Png)
+                cropped
+                    .write_to(&mut buf, image::ImageFormat::Png)
                     .expect("Failed to encode cropped PNG");
                 let new_b64 = base64::engine::general_purpose::STANDARD.encode(buf.into_inner());
                 SnapshotOutput::Base64Png(new_b64)
@@ -84,25 +98,39 @@ impl SnapshotContext {
     }
 
     /// Like [`verify`], but overrides the diff tolerance for this snapshot only.
-    pub fn verify_with_ratio(&self, name: &str, output: SnapshotOutput, max_diff_ratio: f64) -> Result<(), String> {
+    pub fn verify_with_ratio(
+        &self,
+        name: &str,
+        output: SnapshotOutput,
+        max_diff_ratio: f64,
+    ) -> Result<(), String> {
         let snapshot_path = format!("{}/{}", self.suite, self.test);
 
         // Browser: emit to the JS collector; logging happens async via __saveSnapshot callback.
         #[cfg(target_arch = "wasm32")]
-        emit_snapshot(&snapshot_path, name, &output, max_diff_ratio, self.pixel_tolerance);
+        emit_snapshot(
+            &snapshot_path,
+            name,
+            &output,
+            max_diff_ratio,
+            self.pixel_tolerance,
+        );
 
         // Native: compare synchronously and log the result in one line.
         #[cfg(not(target_arch = "wasm32"))]
         {
-            match crate::player::testing::StageSnapshot::from_output(output)
-                .assert_snapshot(&snapshot_path, name, max_diff_ratio, self.pixel_tolerance)
-            {
+            match crate::player::testing::StageSnapshot::from_output(output).assert_snapshot(
+                &snapshot_path,
+                name,
+                max_diff_ratio,
+                self.pixel_tolerance,
+            ) {
                 Ok(Some(ratio)) => super::log_test_action(&format!(
-                    "Snapshot: {} — {:.3}% diff", name, ratio * 100.0
+                    "Snapshot: {} — {:.3}% diff",
+                    name,
+                    ratio * 100.0
                 )),
-                Ok(None) => super::log_test_action(&format!(
-                    "Snapshot: {} — no reference", name
-                )),
+                Ok(None) => super::log_test_action(&format!("Snapshot: {} — no reference", name)),
                 Err(e) => return Err(e),
             }
         }
@@ -113,7 +141,13 @@ impl SnapshotContext {
 
 /// Emit a snapshot result. On browser, sends to the JS snapshot collector.
 /// On native, this is a no-op (native tests handle snapshots via StageSnapshot).
-pub fn emit_snapshot(suite: &str, name: &str, output: &SnapshotOutput, max_diff_ratio: f64, pixel_tolerance: u8) {
+pub fn emit_snapshot(
+    suite: &str,
+    name: &str,
+    output: &SnapshotOutput,
+    max_diff_ratio: f64,
+    pixel_tolerance: u8,
+) {
     #[cfg(target_arch = "wasm32")]
     {
         if let SnapshotOutput::Base64Png(base64) = output {
@@ -131,5 +165,7 @@ pub fn emit_snapshot(suite: &str, name: &str, output: &SnapshotOutput, max_diff_
         }
     }
     #[cfg(not(target_arch = "wasm32"))]
-    { let _ = (suite, name, output, max_diff_ratio, pixel_tolerance); }
+    {
+        let _ = (suite, name, output, max_diff_ratio, pixel_tolerance);
+    }
 }

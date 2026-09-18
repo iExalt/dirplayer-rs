@@ -108,8 +108,8 @@ pub fn is_gif(data: &[u8]) -> bool {
 /// Decode every frame into the bitmap manager. Returns None if the data is not
 /// a GIF the decoder accepts.
 pub fn decode_gif(data: &[u8], bitmap_manager: &mut BitmapManager) -> Option<GifAnimation> {
-    use image::AnimationDecoder;
     use image::codecs::gif::GifDecoder;
+    use image::AnimationDecoder;
 
     if !is_gif(data) {
         return None;
@@ -142,7 +142,14 @@ pub fn decode_gif(data: &[u8], bitmap_manager: &mut BitmapManager) -> Option<Gif
         }
         width = width.max(w);
         height = height.max(h);
-        let mut bitmap = Bitmap::new(w, h, 32, 32, 8, PaletteRef::BuiltIn(BuiltInPalette::SystemWin));
+        let mut bitmap = Bitmap::new(
+            w,
+            h,
+            32,
+            32,
+            8,
+            PaletteRef::BuiltIn(BuiltInPalette::SystemWin),
+        );
         bitmap.data = buf.into_raw();
         bitmap.use_alpha = true;
         frames.push(bitmap_manager.add_bitmap(bitmap));
@@ -194,7 +201,9 @@ static PENDING: std::sync::Mutex<Option<Vec<((u32, u32), GifAnimation)>>> =
 
 pub fn register_pending(cast_lib: u32, number: u32, anim: GifAnimation) {
     if let Ok(mut guard) = PENDING.lock() {
-        guard.get_or_insert_with(Vec::new).push(((cast_lib, number), anim));
+        guard
+            .get_or_insert_with(Vec::new)
+            .push(((cast_lib, number), anim));
     }
 }
 
@@ -231,9 +240,18 @@ pub fn tick_gif_animations() {
             }
         }
         for ((cast_lib, number), image_ref) in moved {
-            let member_ref = crate::CastMemberRef { cast_lib: cast_lib as i32, cast_member: number as i32 };
-            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
-                if let crate::player::cast_member::CastMemberType::Bitmap(b) = &mut member.member_type {
+            let member_ref = crate::CastMemberRef {
+                cast_lib: cast_lib as i32,
+                cast_member: number as i32,
+            };
+            if let Some(member) = player
+                .movie
+                .cast_manager
+                .find_mut_member_by_ref(&member_ref)
+            {
+                if let crate::player::cast_member::CastMemberType::Bitmap(b) =
+                    &mut member.member_type
+                {
                     b.image_ref = image_ref;
                 }
             }
@@ -263,8 +281,8 @@ mod tests {
     fn tiny_gif() -> Vec<u8> {
         let mut g = Vec::new();
         g.extend_from_slice(b"GIF89a");
-        g.extend_from_slice(&[2, 0, 2, 0]);          // 2x2
-        g.extend_from_slice(&[0x80, 0, 0]);           // global table, 2 colours
+        g.extend_from_slice(&[2, 0, 2, 0]); // 2x2
+        g.extend_from_slice(&[0x80, 0, 0]); // global table, 2 colours
         g.extend_from_slice(&[255, 0, 0, 0, 255, 0]); // red, green
         for idx in [0u8, 1u8] {
             g.extend_from_slice(&[0x21, 0xF9, 4, 0, 5, 0, 0, 0]); // 50 ms delay
@@ -273,7 +291,10 @@ mod tests {
             g.push(2);
             let data: Vec<u8> = match idx {
                 0 => vec![0x84, 0x8F, 0xA9, 0xCB, 0xED, 0x0F, 0x00],
-                _ => vec![0x8C, 0x2D, 0x99, 0x87, 0x2A, 0x1C, 0xDC, 0x33, 0xA0, 0x02, 0x75, 0xEC, 0x95, 0xFA, 0xA8, 0xDE, 0x60, 0x8C, 0x04, 0x91, 0x4C, 0x01, 0x00],
+                _ => vec![
+                    0x8C, 0x2D, 0x99, 0x87, 0x2A, 0x1C, 0xDC, 0x33, 0xA0, 0x02, 0x75, 0xEC, 0x95,
+                    0xFA, 0xA8, 0xDE, 0x60, 0x8C, 0x04, 0x91, 0x4C, 0x01, 0x00,
+                ],
             };
             g.push(data.len() as u8);
             g.extend_from_slice(&data);
@@ -287,7 +308,7 @@ mod tests {
     fn recognises_both_gif_signatures() {
         assert!(is_gif(b"GIF87a....."));
         assert!(is_gif(b"GIF89a....."));
-        assert!(!is_gif(b"FFFF000000060004"));   // a styled-text XMED payload
+        assert!(!is_gif(b"FFFF000000060004")); // a styled-text XMED payload
         assert!(!is_gif(b"3DGM"));
         assert!(!is_gif(b"GIF"));
     }
@@ -309,7 +330,11 @@ mod tests {
         let mut anim = GifAnimation {
             frames: vec![1, 2, 3],
             delays_ms: vec![100, 100, 100],
-            width: 4, height: 4, current: 0, last_switch_ms: 0.0, running: true,
+            width: 4,
+            height: 4,
+            current: 0,
+            last_switch_ms: 0.0,
+            running: true,
         };
         // First call only starts the clock.
         assert!(!anim.advance(1000.0));
@@ -324,8 +349,13 @@ mod tests {
     #[test]
     fn single_frame_never_advances() {
         let mut anim = GifAnimation {
-            frames: vec![7], delays_ms: vec![100],
-            width: 1, height: 1, current: 0, last_switch_ms: 0.0, running: true,
+            frames: vec![7],
+            delays_ms: vec![100],
+            width: 1,
+            height: 1,
+            current: 0,
+            last_switch_ms: 0.0,
+            running: true,
         };
         assert!(!anim.advance(9999.0));
         assert_eq!(anim.current_ref(), 7);
@@ -334,8 +364,13 @@ mod tests {
     #[test]
     fn a_long_pause_resyncs_instead_of_catching_up() {
         let mut anim = GifAnimation {
-            frames: vec![1, 2], delays_ms: vec![20, 20],
-            width: 1, height: 1, current: 0, last_switch_ms: 0.0, running: true,
+            frames: vec![1, 2],
+            delays_ms: vec![20, 20],
+            width: 1,
+            height: 1,
+            current: 0,
+            last_switch_ms: 0.0,
+            running: true,
         };
         anim.advance(0.0);
         // Tab hidden for a minute: 3000 frames' worth of delay.
@@ -346,8 +381,11 @@ mod tests {
 
 /// True when this member number is a GIF the player has loaded.
 pub fn is_gif_member(player: &crate::player::DirPlayer, cast_lib: i32, number: i32) -> bool {
-    cast_lib >= 0 && number >= 0
-        && player.gif_animations.contains_key(&(cast_lib as u32, number as u32))
+    cast_lib >= 0
+        && number >= 0
+        && player
+            .gif_animations
+            .contains_key(&(cast_lib as u32, number as u32))
 }
 
 /// True when this sprite's member is an animated GIF.
@@ -413,7 +451,11 @@ pub fn control_sprite_gif(
             cast_lib: key.0 as i32,
             cast_member: key.1 as i32,
         };
-        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+        if let Some(member) = player
+            .movie
+            .cast_manager
+            .find_mut_member_by_ref(&member_ref)
+        {
             if let crate::player::cast_member::CastMemberType::Bitmap(b) = &mut member.member_type {
                 b.image_ref = image_ref;
             }
@@ -430,7 +472,11 @@ mod control_tests {
         GifAnimation {
             frames: vec![1, 2, 3],
             delays_ms: vec![100, 100, 100],
-            width: 4, height: 4, current: 0, last_switch_ms: 0.0, running: true,
+            width: 4,
+            height: 4,
+            current: 0,
+            last_switch_ms: 0.0,
+            running: true,
         }
     }
 

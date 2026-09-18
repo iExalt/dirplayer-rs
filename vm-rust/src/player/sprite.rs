@@ -38,7 +38,7 @@ impl ColorRef {
                     let dr = *r as i32 - pr as i32;
                     let dg = *g as i32 - pg as i32;
                     let db = *b as i32 - pb as i32;
-                    let distance = (dr*dr + dg*dg + db*db) as u32;
+                    let distance = (dr * dr + dg * dg + db * db) as u32;
                     if distance < best_distance {
                         best_distance = distance;
                         best_index = i;

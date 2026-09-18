@@ -5,13 +5,13 @@ use async_std::channel;
 
 use crate::director::file::read_director_file_bytes;
 pub use crate::director::static_datum::StaticDatum;
+use crate::player::testing_shared::HarnessRuntime;
+pub use crate::player::testing_shared::{SnapshotOutput, TestHarness};
 use crate::player::{
     bitmap::bitmap::{get_system_default_palette, Bitmap, PaletteRef},
     commands::run_command_loop,
     PlayerVMExecutionItem,
 };
-pub use crate::player::testing_shared::{TestHarness, SnapshotOutput};
-use crate::player::testing_shared::HarnessRuntime;
 use crate::rendering::render_stage_to_bitmap;
 
 /// Global lock to ensure only one TestPlayer runs at a time.
@@ -38,12 +38,18 @@ impl TestPlayer {
         crate::player::spawn_player_local(async move {
             run_command_loop(rx, command_session, command_player_id, command_owner).await;
         });
-        TestPlayer { _tx: tx, _lock: lock, runtime }
+        TestPlayer {
+            _tx: tx,
+            _lock: lock,
+            runtime,
+        }
     }
 }
 
 impl TestHarness for TestPlayer {
-    fn harness_runtime(&self) -> &HarnessRuntime { &self.runtime }
+    fn harness_runtime(&self) -> &HarnessRuntime {
+        &self.runtime
+    }
 
     fn asset_path(&self, relative: &str) -> String {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
@@ -77,11 +83,14 @@ impl TestHarness for TestPlayer {
             abs.to_string_lossy().to_string()
         };
 
-        let data_bytes =
-            std::fs::read(&abs_path).unwrap_or_else(|e| panic!("Failed to read {}: {}", abs_path, e));
+        let data_bytes = std::fs::read(&abs_path)
+            .unwrap_or_else(|e| panic!("Failed to read {}: {}", abs_path, e));
 
         let file_name = Path::new(&abs_path)
-            .file_name().unwrap().to_string_lossy().to_string();
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
 
         // A correct file URL for the movie's DIRECTORY, built with
         // `Url::from_directory_path` rather than string concatenation.
@@ -140,26 +149,42 @@ impl TestHarness for TestPlayer {
         )
         .await
         .unwrap_or_else(|error| panic!("frame execution failed: {}", error));
-        let delay_ms = self.runtime.with_context(|context| {
-            let tempo = context.player.movie.get_effective_tempo();
-            if tempo > 0 { 1000 / tempo } else { 33 }
-        }).unwrap_or(33);
+        let delay_ms = self
+            .runtime
+            .with_context(|context| {
+                let tempo = context.player.movie.get_effective_tempo();
+                if tempo > 0 {
+                    1000 / tempo
+                } else {
+                    33
+                }
+            })
+            .unwrap_or(33);
         std::thread::sleep(std::time::Duration::from_millis(delay_ms as u64));
         is_playing
     }
 
     fn snapshot_stage(&self) -> SnapshotOutput {
-        self.runtime.with_context(|context| {
-            let w = context.player.movie.rect.width() as u16;
-            let h = context.player.movie.rect.height() as u16;
-            let mut bitmap = Bitmap::new(w, h, 32, 32, 0, PaletteRef::BuiltIn(get_system_default_palette()));
-            render_stage_to_bitmap(context.player, &mut bitmap, None);
-            SnapshotOutput::Rgba {
-                width: w as u32,
-                height: h as u32,
-                data: bitmap.data,
-            }
-        }).unwrap_or_else(|| panic!("harness player was replaced"))
+        self.runtime
+            .with_context(|context| {
+                let w = context.player.movie.rect.width() as u16;
+                let h = context.player.movie.rect.height() as u16;
+                let mut bitmap = Bitmap::new(
+                    w,
+                    h,
+                    32,
+                    32,
+                    0,
+                    PaletteRef::BuiltIn(get_system_default_palette()),
+                );
+                render_stage_to_bitmap(context.player, &mut bitmap, None);
+                SnapshotOutput::Rgba {
+                    width: w as u32,
+                    height: h as u32,
+                    data: bitmap.data,
+                }
+            })
+            .unwrap_or_else(|| panic!("harness player was replaced"))
     }
 }
 
@@ -196,8 +221,8 @@ static NATIVE_TEST_LOGGER: NativeTestLogger = NativeTestLogger;
 pub fn run_test<F: std::future::Future<Output = ()>>(f: F) {
     // `set_logger` errors if one is already installed (a second test in the same
     // process); that is fine, ignore it.
-    let _ = log::set_logger(&NATIVE_TEST_LOGGER)
-        .map(|()| log::set_max_level(log::LevelFilter::Warn));
+    let _ =
+        log::set_logger(&NATIVE_TEST_LOGGER).map(|()| log::set_max_level(log::LevelFilter::Warn));
     async_std::task::block_on(f);
 }
 
@@ -213,7 +238,15 @@ impl StageSnapshot {
     /// Create from a SnapshotOutput (native only).
     pub fn from_output(output: SnapshotOutput) -> Self {
         match output {
-            SnapshotOutput::Rgba { width, height, data } => StageSnapshot { width, height, data },
+            SnapshotOutput::Rgba {
+                width,
+                height,
+                data,
+            } => StageSnapshot {
+                width,
+                height,
+                data,
+            },
             _ => panic!("Expected Rgba snapshot on native"),
         }
     }
@@ -225,9 +258,13 @@ impl StageSnapshot {
         let mut buf: Vec<u8> = Vec::new();
         let encoder = image::codecs::png::PngEncoder::new(&mut buf);
         image::ImageEncoder::write_image(
-            encoder, img.as_raw(), self.width, self.height,
+            encoder,
+            img.as_raw(),
+            self.width,
+            self.height,
             image::ExtendedColorType::Rgba8,
-        ).expect("Failed to encode PNG");
+        )
+        .expect("Failed to encode PNG");
         buf
     }
 
@@ -240,8 +277,15 @@ impl StageSnapshot {
     /// Returns `Ok(Some(ratio))` when a comparison was made and passed,
     /// `Ok(None)` when there is no reference or the reference was updated,
     /// and `Err` when the diff exceeds the threshold.
-    pub fn assert_snapshot(&self, snapshot_path: &str, name: &str, max_diff_ratio: f64, pixel_tolerance: u8) -> Result<Option<f64>, String> {
-        let (suite, test) = snapshot_path.split_once('/')
+    pub fn assert_snapshot(
+        &self,
+        snapshot_path: &str,
+        name: &str,
+        max_diff_ratio: f64,
+        pixel_tolerance: u8,
+    ) -> Result<Option<f64>, String> {
+        let (suite, test) = snapshot_path
+            .split_once('/')
             .unwrap_or((snapshot_path, "default"));
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let base = Path::new(manifest_dir).join("tests/snapshots");
@@ -265,8 +309,8 @@ impl StageSnapshot {
 
         if reference_path.exists() {
             let reference_data = std::fs::read(&reference_path).unwrap();
-            let reference_img = image::load_from_memory(&reference_data)
-                .expect("Failed to decode reference PNG");
+            let reference_img =
+                image::load_from_memory(&reference_data).expect("Failed to decode reference PNG");
             let reference_rgba = reference_img.to_rgba8();
 
             let gw = reference_rgba.width();
@@ -286,9 +330,12 @@ impl StageSnapshot {
             for i in 0..pixel_count {
                 let off = i * 4;
                 let dr = (self.data[off] as i16 - reference_raw[off] as i16).unsigned_abs() as u8;
-                let dg = (self.data[off+1] as i16 - reference_raw[off+1] as i16).unsigned_abs() as u8;
-                let db = (self.data[off+2] as i16 - reference_raw[off+2] as i16).unsigned_abs() as u8;
-                let da = (self.data[off+3] as i16 - reference_raw[off+3] as i16).unsigned_abs() as u8;
+                let dg = (self.data[off + 1] as i16 - reference_raw[off + 1] as i16).unsigned_abs()
+                    as u8;
+                let db = (self.data[off + 2] as i16 - reference_raw[off + 2] as i16).unsigned_abs()
+                    as u8;
+                let da = (self.data[off + 3] as i16 - reference_raw[off + 3] as i16).unsigned_abs()
+                    as u8;
                 let ch_max = dr.max(dg).max(db).max(da);
                 if ch_max > pixel_tolerance {
                     diff_pixels += 1;
@@ -308,7 +355,12 @@ impl StageSnapshot {
             }
 
             let ratio = diff_pixels as f64 / pixel_count as f64;
-            let diff_path = base.join("diff").join(suite).join("native").join(test).join(&file_name);
+            let diff_path = base
+                .join("diff")
+                .join(suite)
+                .join("native")
+                .join(test)
+                .join(&file_name);
             if ratio > max_diff_ratio {
                 // Save diff image for failing snapshots only.
                 std::fs::create_dir_all(diff_path.parent().unwrap()).unwrap();
@@ -320,8 +372,12 @@ impl StageSnapshot {
                     "Snapshot '{}' differs from reference: {:.4}% pixels changed \
                      (max channel diff: {}, threshold: {:.4}%)\n  \
                      actual: {}\n  reference: {}",
-                    name, ratio * 100.0, max_diff, max_diff_ratio * 100.0,
-                    output_path.display(), reference_path.display(),
+                    name,
+                    ratio * 100.0,
+                    max_diff,
+                    max_diff_ratio * 100.0,
+                    output_path.display(),
+                    reference_path.display(),
                 ));
             }
             // Snapshot passed — remove any stale diff so the report doesn't flag it as changed.

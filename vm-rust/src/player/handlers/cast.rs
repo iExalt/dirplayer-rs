@@ -28,7 +28,11 @@ impl CastHandlers {
 
             let (c_start, c_end) = match &player.movie.file {
                 Some(file) => (file.config.min_member as u32, file.config.max_member as u32),
-                None => return Err(ScriptError::new("findEmpty: no movie file loaded".to_string())),
+                None => {
+                    return Err(ScriptError::new(
+                        "findEmpty: no movie file loaded".to_string(),
+                    ))
+                }
             };
 
             let cast_lib = if member_ref.cast_lib > 0 {
@@ -43,7 +47,11 @@ impl CastHandlers {
                 return Ok(player.alloc_datum(Datum::Int(member_num as i32)));
             }
 
-            let start = if member_num > c_start { member_num } else { c_start };
+            let start = if member_num > c_start {
+                member_num
+            } else {
+                c_start
+            };
             for slot in start..=c_end {
                 if !cast.members.contains_key(&slot) {
                     return Ok(player.alloc_datum(Datum::Int(slot as i32)));

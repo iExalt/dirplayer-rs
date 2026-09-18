@@ -21,13 +21,16 @@ use crate::{
     player::{
         cast_lib::{CastLib, CastMemberRef},
         cast_member::{CastMember, CastMemberType, FlashMember},
-        driver::{ActionCompletion, BroadcastPlan, DriverTurn, GlobalDispatch, InternalVmRequest, PendingAction, PendingCommand},
+        driver::{
+            ActionCompletion, BroadcastPlan, DriverTurn, GlobalDispatch, InternalVmRequest,
+            PendingAction, PendingCommand,
+        },
         eval::{EvalPending, EvalTurn, LingoExpr},
         ownership::OwnerToken,
+        score::SpriteChannel,
         script::{Script, ScriptHandlerRef},
         session::{EvalRequestTurn, RuntimeSession},
         symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolOwner},
-        score::SpriteChannel,
         DatumRef,
     },
 };
@@ -196,6 +199,7 @@ fn pump_child_to_completion(
             }
             EvalRequestTurn::Child(DriverTurn::Complete(_))
             | EvalRequestTurn::Child(DriverTurn::Error(_))
+            | EvalRequestTurn::SpriteAsync(_)
             | EvalRequestTurn::MovieAsync(_)
             | EvalRequestTurn::Flash(_)
             | EvalRequestTurn::ExternalXtra(_)
@@ -229,6 +233,7 @@ fn pending_child_internal(
                 turn_kind(&other)
             ),
             EvalRequestTurn::Evaluator(_)
+            | EvalRequestTurn::SpriteAsync(_)
             | EvalRequestTurn::MovieAsync(_)
             | EvalRequestTurn::Flash(_)
             | EvalRequestTurn::ExternalXtra(_)
@@ -271,7 +276,10 @@ fn waiting_evaluator_action(
         EvalTurn::Pending {
             request: EvalPending::Object { capability, .. },
         } => capability,
-        other => panic!("expected a pending evaluator action, got {}", eval_turn_kind(&other)),
+        other => panic!(
+            "expected a pending evaluator action, got {}",
+            eval_turn_kind(&other)
+        ),
     };
     (id, action)
 }
@@ -291,7 +299,9 @@ fn evaluator_external_probe_decline_redispatches_builtin_once() {
     let owner = owner(&mut session.borrow_mut());
     let object_type = session
         .borrow_mut()
-        .with_player(1, |context| context.player.alloc_datum(Datum::String("xml".to_owned())))
+        .with_player(1, |context| {
+            context.player.alloc_datum(Datum::String("xml".to_owned()))
+        })
         .expect("fixture player exists");
     let fallback_name = Symbol::builtin(BuiltInSymbol::NewObject);
     let request = crate::player::xtra::external::ExternalXtraRequest {
@@ -320,12 +330,7 @@ fn evaluator_external_probe_decline_redispatches_builtin_once() {
         panic!("external evaluator request must leave the session borrow first");
     };
     let turn = async_std::task::block_on(crate::player::commands::execute_eval_external_request(
-        &session,
-        id,
-        capability,
-        1,
-        owner,
-        request,
+        &session, id, capability, 1, owner, request,
     ));
     let EvalRequestTurn::Evaluator(EvalTurn::Complete(Ok(result))) = turn else {
         panic!("declined probe must redispatch the builtin and complete");
@@ -359,10 +364,7 @@ fn evaluator_unloaded_new_leaves_a_real_owner_load_request() {
         vec![],
         dispatch,
     );
-    assert!(matches!(
-        turn,
-        EvalRequestTurn::ExternalXtraLoad(_)
-    ));
+    assert!(matches!(turn, EvalRequestTurn::ExternalXtraLoad(_)));
 }
 
 #[test]
@@ -392,6 +394,57 @@ fn evaluator_object_xtra_call_leaves_the_host_request_owned() {
 }
 
 #[test]
+fn attached_sprite_handler_takes_precedence_over_sprite_async_host_turn() {
+    let (mut session, _primary, pass_handler, _error_handler) = callback_session();
+    let (receiver, owner) = session
+        .with_player(1, |context| {
+            let (instance_ref, _instance_datum) =
+                crate::player::handlers::datum_handlers::script::ScriptDatumHandlers::create_script_instance(
+                    context.player,
+                    context.symbols,
+                    &CastMemberRef {
+                        cast_lib: 1,
+                        cast_member: 1,
+                    },
+                )
+                .expect("callback fixture script instance should be creatable");
+            context.player.movie.score.channels = vec![
+                SpriteChannel::new(0),
+                SpriteChannel::new(1),
+            ];
+            context.player.movie.score.channels[1]
+                .sprite
+                .script_instance_list
+                .push(instance_ref);
+            (
+                context.player.alloc_datum(Datum::SpriteRef(1)),
+                context.player.owner.clone(),
+            )
+        })
+        .expect("callback fixture player exists");
+    let (id, capability) = waiting_evaluator_action(&mut session);
+    let turn = session.execute_eval_request(
+        id,
+        EvalPending::Object {
+            capability,
+            request: InternalVmRequest::SpriteAsync(crate::player::driver::SpriteAsyncRequest {
+                player_id: 1,
+                owner,
+                receiver,
+                sprite_num: 1,
+                handler: pass_handler.1,
+                args: vec![],
+            }),
+            reason: None,
+        },
+    );
+    assert!(
+        matches!(turn, EvalRequestTurn::Child(_)),
+        "attached handler must win before the Flash host turn"
+    );
+}
+
+#[test]
 fn declined_external_probe_lowers_async_builtin_to_typed_movie_request() {
     let session = Rc::new(RefCell::new(callback_session().0));
     let (id, capability) = waiting_evaluator_action(&mut session.borrow_mut());
@@ -409,8 +462,8 @@ fn declined_external_probe_lowers_async_builtin_to_typed_movie_request() {
         },
         args: vec![],
     };
-    let turn = async_std::task::block_on(
-        crate::player::commands::execute_eval_external_request_with(
+    let turn =
+        async_std::task::block_on(crate::player::commands::execute_eval_external_request_with(
             &session,
             id,
             capability,
@@ -418,8 +471,7 @@ fn declined_external_probe_lowers_async_builtin_to_typed_movie_request() {
             owner,
             request,
             |_request| Ok(None),
-        ),
-    );
+        ));
     assert!(matches!(
         turn,
         EvalRequestTurn::MovieAsync(crate::player::handlers::movie::MovieAsyncRequest {
@@ -447,7 +499,9 @@ fn reset_retires_evaluator_child_driver_and_callback_scope() {
     assert!(matches!(child_turn, EvalRequestTurn::Child(_)));
     assert!(session.eval_drivers.contains_key(&id));
     let old_owner = owner(&mut session);
-    let new_owner = session.reset_player_owned(1, &old_owner).expect("reset owner");
+    let new_owner = session
+        .reset_player_owned(1, &old_owner)
+        .expect("reset owner");
     assert!(!session.eval_drivers.contains_key(&id));
     assert!(new_owner.is_arena_live());
 }
@@ -468,8 +522,8 @@ fn evaluator_external_host_can_reenter_and_reset_rejects_late_completion() {
     };
     let host_session = session.clone();
     let host_owner = owner.clone();
-    let turn = async_std::task::block_on(
-        crate::player::commands::execute_eval_external_request_with(
+    let turn =
+        async_std::task::block_on(crate::player::commands::execute_eval_external_request_with(
             &session,
             id,
             capability,
@@ -487,8 +541,7 @@ fn evaluator_external_host_can_reenter_and_reset_rejects_late_completion() {
                     bytes: vec![],
                 }))
             },
-        ),
-    );
+        ));
     assert!(matches!(
         turn,
         EvalRequestTurn::Evaluator(EvalTurn::Complete(Err(_)))
@@ -515,8 +568,8 @@ fn evaluator_declined_host_reset_rejects_fallback_and_consumes_action() {
     };
     let host_session = session.clone();
     let host_owner = owner.clone();
-    let turn = async_std::task::block_on(
-        crate::player::commands::execute_eval_external_request_with(
+    let turn =
+        async_std::task::block_on(crate::player::commands::execute_eval_external_request_with(
             &session,
             id.clone(),
             capability.clone(),
@@ -530,9 +583,11 @@ fn evaluator_declined_host_reset_rejects_fallback_and_consumes_action() {
                     .expect("declined host can retire its captured owner");
                 Ok(None)
             },
-        ),
-    );
-    assert!(matches!(turn, EvalRequestTurn::Evaluator(EvalTurn::Complete(Err(_)))));
+        ));
+    assert!(matches!(
+        turn,
+        EvalRequestTurn::Evaluator(EvalTurn::Complete(Err(_)))
+    ));
     assert!(session
         .borrow_mut()
         .eval_action_anchor(&id, &capability)
@@ -553,8 +608,8 @@ fn evaluator_claimed_host_error_consumes_action() {
         },
         args: vec![],
     };
-    let turn = async_std::task::block_on(
-        crate::player::commands::execute_eval_external_request_with(
+    let turn =
+        async_std::task::block_on(crate::player::commands::execute_eval_external_request_with(
             &session,
             id.clone(),
             capability.clone(),
@@ -562,9 +617,11 @@ fn evaluator_claimed_host_error_consumes_action() {
             owner,
             request,
             |_request| Err(crate::player::ScriptError::new("host failure".to_owned())),
-        ),
-    );
-    assert!(matches!(turn, EvalRequestTurn::Evaluator(EvalTurn::Complete(Err(_)))));
+        ));
+    assert!(matches!(
+        turn,
+        EvalRequestTurn::Evaluator(EvalTurn::Complete(Err(_)))
+    ));
     assert!(session
         .borrow_mut()
         .eval_action_anchor(&id, &capability)
@@ -618,16 +675,20 @@ fn evaluator_child_prepared_route_runs_real_child_to_completion() {
         },
     );
     let initial_request = pending_child_internal(&mut session, &id, child_turn);
-    let mut turn = EvalRequestTurn::Child(DriverTurn::Pending(PendingAction::Internal(initial_request)));
+    let mut turn = EvalRequestTurn::Child(DriverTurn::Pending(PendingAction::Internal(
+        initial_request,
+    )));
     for _ in 0..8 {
         turn = match turn {
-            EvalRequestTurn::Child(DriverTurn::Pending(PendingAction::Internal(request))) => session
-                .complete_eval_child_action(
-                    id.clone(),
-                    request.ticket,
-                    ActionCompletion::InternalResult(DatumRef::Void),
-                )
-                .expect("child action should be accepted"),
+            EvalRequestTurn::Child(DriverTurn::Pending(PendingAction::Internal(request))) => {
+                session
+                    .complete_eval_child_action(
+                        id.clone(),
+                        request.ticket,
+                        ActionCompletion::InternalResult(DatumRef::Void),
+                    )
+                    .expect("child action should be accepted")
+            }
             EvalRequestTurn::Child(DriverTurn::Waiting) => session
                 .turn_eval_child(id.clone())
                 .expect("child continuation should remain registered"),
@@ -640,6 +701,7 @@ fn evaluator_child_prepared_route_runs_real_child_to_completion() {
             }
             EvalRequestTurn::Child(DriverTurn::Complete(_))
             | EvalRequestTurn::Child(DriverTurn::Error(_))
+            | EvalRequestTurn::SpriteAsync(_)
             | EvalRequestTurn::MovieAsync(_)
             | EvalRequestTurn::Flash(_)
             | EvalRequestTurn::ExternalXtra(_)
@@ -738,17 +800,20 @@ fn nested_callback_runs_actual_movie_async_child_through_command_pump() {
             callback_result
         },
     ))
-        .unwrap_or_else(|_| {
-            let state = session.borrow();
-            panic!(
-                "actual MovieAsync child owner pump timed out: retained={}, ready={}",
-                state.has_pending_commands(1),
-                state.has_ready_pending_commands(1),
-            )
-        })
-        .expect("actual MovieAsync child completion sender remains connected")
-        .expect("actual MovieAsync child should complete");
-    assert!(result.passed, "actual MovieAsync child lost ScopeResult::passed");
+    .unwrap_or_else(|_| {
+        let state = session.borrow();
+        panic!(
+            "actual MovieAsync child owner pump timed out: retained={}, ready={}",
+            state.has_pending_commands(1),
+            state.has_ready_pending_commands(1),
+        )
+    })
+    .expect("actual MovieAsync child completion sender remains connected")
+    .expect("actual MovieAsync child should complete");
+    assert!(
+        result.passed,
+        "actual MovieAsync child lost ScopeResult::passed"
+    );
     assert!(
         session.borrow().action_details(&child_ticket).is_none(),
         "completed MovieAsync child ticket must be retired"
@@ -768,13 +833,17 @@ fn nested_callback_external_load_wait_is_cancelled_by_owner_reset() {
                 "callback-load".to_owned(),
                 "CallbackXtra",
             )?;
-            context.player.xtra_manager_state.external.attach_continuation(
-                &request,
-                crate::player::xtra::external::ExternalXtraContinuation::Create {
-                    xtra_name: "CallbackXtra".to_owned(),
-                    args: Vec::new(),
-                },
-            )?;
+            context
+                .player
+                .xtra_manager_state
+                .external
+                .attach_continuation(
+                    &request,
+                    crate::player::xtra::external::ExternalXtraContinuation::Create {
+                        xtra_name: "CallbackXtra".to_owned(),
+                        args: Vec::new(),
+                    },
+                )?;
             Ok::<_, crate::player::ScriptError>(request)
         })
         .expect("external load request should be prepared")
@@ -804,9 +873,7 @@ fn nested_callback_external_load_wait_is_cancelled_by_owner_reset() {
         eval_sender: None,
     });
     let mut pump = Box::pin(crate::player::commands::execute_pending_commands(
-        &session,
-        1,
-        &captured,
+        &session, 1, &captured,
     ));
     let waker = futures::task::noop_waker();
     let mut context = std::task::Context::from_waker(&waker);
@@ -829,13 +896,19 @@ fn nested_callback_external_load_wait_is_cancelled_by_owner_reset() {
     assert_eq!(error.code, crate::player::ScriptErrorCode::Abort);
     assert!(session
         .borrow_mut()
-        .with_player(1, |context| context.player.owner.same_identity(&replacement))
+        .with_player(1, |context| context
+            .player
+            .owner
+            .same_identity(&replacement))
         .unwrap_or(false));
 }
 
 #[test]
 fn evaluator_sync_xtra_close_completes_receiver_and_drains_teardown() {
-    let mut session = RuntimeSession::new(SymbolOwner { session: 913, generation: 1 });
+    let mut session = RuntimeSession::new(SymbolOwner {
+        session: 913,
+        generation: 1,
+    });
     assert!(session.add_player(1, channel::unbounded().0));
     let (receiver_datum, close_symbol) = session
         .with_player(1, |context| {
@@ -848,7 +921,7 @@ fn evaluator_sync_xtra_close_completes_receiver_and_drains_teardown() {
                 .player
                 .alloc_datum(Datum::XtraInstance("multiuser".to_owned(), instance_id));
             (receiver, context.symbols.intern("close"))
-    })
+        })
         .expect("evaluator fixture player exists");
     let request = InternalVmRequest::Object {
         receiver: receiver_datum,
@@ -865,23 +938,23 @@ fn evaluator_sync_xtra_close_completes_receiver_and_drains_teardown() {
     // the Xtra while the session borrow is active; the route registered by
     // take_pending_eval_request_for must deliver the synchronous success to
     // the caller before the pump drains released host resources.
-    let progressed = async_std::task::block_on(crate::player::commands::pump_pending_eval_requests(
-        &session,
-        1,
-    ));
-    assert!(progressed);
-    assert!(
-        async_std::task::block_on(result_receiver.recv())
-            .expect("synchronous evaluator should complete its receiver")
-            .is_ok()
+    let progressed = async_std::task::block_on(
+        crate::player::commands::pump_pending_eval_requests(&session, 1),
     );
+    assert!(progressed);
+    assert!(async_std::task::block_on(result_receiver.recv())
+        .expect("synchronous evaluator should complete its receiver")
+        .is_ok());
     assert!(!session.borrow().has_pending_eval_requests(1));
     assert_eq!(session.borrow().pending_host_teardown_count(), 0);
 }
 
 #[test]
 fn evaluator_flash_request_uses_owned_transport_and_consumes_native_failure() {
-    let mut session = RuntimeSession::new(SymbolOwner { session: 914, generation: 1 });
+    let mut session = RuntimeSession::new(SymbolOwner {
+        session: 914,
+        generation: 1,
+    });
     assert!(session.add_player(1, channel::unbounded().0));
     let owner = session
         .with_player(1, |context| context.player.owner.clone())
@@ -904,7 +977,10 @@ fn evaluator_flash_request_uses_owned_transport_and_consumes_native_failure() {
             );
             context.player.movie.cast_manager.casts.push(cast);
             let mut channel = SpriteChannel::new(1);
-            channel.sprite.member = Some(CastMemberRef { cast_lib: 1, cast_member: 1 });
+            channel.sprite.member = Some(CastMemberRef {
+                cast_lib: 1,
+                cast_member: 1,
+            });
             context.player.movie.score.channels = vec![SpriteChannel::new(0), channel];
         })
         .expect("Flash fixture cast/member must be installed");
@@ -927,21 +1003,25 @@ fn evaluator_flash_request_uses_owned_transport_and_consumes_native_failure() {
         .borrow_mut()
         .start_eval_request(1, request)
         .expect("Flash request should create an evaluator continuation");
-    let progressed = async_std::task::block_on(crate::player::commands::pump_pending_eval_requests(
-        &session,
-        1,
-    ));
+    let progressed = async_std::task::block_on(
+        crate::player::commands::pump_pending_eval_requests(&session, 1),
+    );
     assert!(progressed, "the owner pump must consume the Flash request");
     let result = async_std::task::block_on(receiver.recv())
         .expect("owned Flash transport must complete its evaluator receiver");
     let error = result.expect_err("native Flash transport must fail explicitly");
-    assert!(error.message.contains("Flash host is unavailable on native"));
+    assert!(error
+        .message
+        .contains("Flash host is unavailable on native"));
     assert!(!session.borrow().has_pending_eval_requests(1));
 }
 
 #[test]
 fn requeued_real_eval_action_retires_old_route_before_final_receiver_result() {
-    let mut session = RuntimeSession::new(SymbolOwner { session: 915, generation: 1 });
+    let mut session = RuntimeSession::new(SymbolOwner {
+        session: 915,
+        generation: 1,
+    });
     assert!(session.add_player(1, channel::unbounded().0));
     let owner = session
         .with_player(1, |context| context.player.owner.clone())
@@ -968,7 +1048,10 @@ fn requeued_real_eval_action_retires_old_route_before_final_receiver_result() {
         .expect("multi-step evaluator should start");
     let first = match session.borrow_mut().turn_eval(id.clone()) {
         EvalTurn::Pending { request } => request,
-        other => panic!("evaluator should issue its first request, got {}", eval_turn_kind(&other)),
+        other => panic!(
+            "evaluator should issue its first request, got {}",
+            eval_turn_kind(&other)
+        ),
     };
     let first_action = match &first {
         EvalPending::Global { capability, .. }
@@ -1008,17 +1091,26 @@ fn requeued_real_eval_action_retires_old_route_before_final_receiver_result() {
     assert!(session
         .borrow_mut()
         .with_player(1, |context| {
-            matches!(context.player.allocator.try_get_datum(&result), Some(Datum::Int(3)))
+            matches!(
+                context.player.allocator.try_get_datum(&result),
+                Some(Datum::Int(3))
+            )
         })
         .unwrap_or(false));
-    assert!(seen_actions.len() >= 2, "continuation must issue a new action after the first result");
+    assert!(
+        seen_actions.len() >= 2,
+        "continuation must issue a new action after the first result"
+    );
     assert!(completed);
     assert!(session.borrow().inflight_eval_routes.is_empty());
 }
 
 #[test]
 fn reset_cancels_sibling_detached_eval_receivers_once() {
-    let mut session = RuntimeSession::new(SymbolOwner { session: 916, generation: 1 });
+    let mut session = RuntimeSession::new(SymbolOwner {
+        session: 916,
+        generation: 1,
+    });
     assert!(session.add_player(1, channel::unbounded().0));
     let owner = session
         .with_player(1, |context| context.player.owner.clone())
@@ -1069,7 +1161,10 @@ fn reset_cancels_sibling_detached_eval_receivers_once() {
             .expect("reset should complete every evaluator receiver")
             .expect_err("reset must reject stale evaluator work");
         assert_eq!(error.code, crate::player::ScriptErrorCode::Abort);
-        assert!(receiver.try_recv().is_err(), "reset must not complete a receiver twice");
+        assert!(
+            receiver.try_recv().is_err(),
+            "reset must not complete a receiver twice"
+        );
     }
     assert!(session.borrow().inflight_eval_routes.is_empty());
 }

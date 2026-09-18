@@ -14,13 +14,15 @@
 //! at the boundary in [`build_contacts`]. The solver's effective-mass /
 //! Baumgarte / friction-cone math.
 
-use crate::player::{ScriptError, cast_member::{
-    PhysXBodyType, PhysXConstraintKind, PhysXPhysicsState, PhysXShapeKind,
-}, symbols::{symbol::Symbol, symbol_table::SymbolTable}};
 use super::physx_gu::{
-    self as gu, contact_box_box, contact_capsule_capsule, contact_sphere_box, contact_sphere_capsule,
-    contact_sphere_sphere, q_integrate, q_rotate, q_rotate_inv, v_add, v_cross, v_dot, v_len_sq,
-    v_mul, v_neg, v_sub, GuContactBuffer,
+    self as gu, contact_box_box, contact_capsule_capsule, contact_sphere_box,
+    contact_sphere_capsule, contact_sphere_sphere, q_integrate, q_rotate, q_rotate_inv, v_add,
+    v_cross, v_dot, v_len_sq, v_mul, v_neg, v_sub, GuContactBuffer,
+};
+use crate::player::{
+    cast_member::{PhysXBodyType, PhysXConstraintKind, PhysXPhysicsState, PhysXShapeKind},
+    symbols::{symbol::Symbol, symbol_table::SymbolTable},
+    ScriptError,
 };
 
 /// Pair-data byte for box-box warm-starting (matches PhysX
@@ -38,8 +40,8 @@ struct ContactConstraint {
     /// satisfy the index-based lookup.
     body_b_is_static_terrain: bool,
     point: [f64; 3],
-    normal: [f64; 3],     // A→B convention (post-flip from PhysX's B→A)
-    penetration: f64,     // positive when penetrating
+    normal: [f64; 3], // A→B convention (post-flip from PhysX's B→A)
+    penetration: f64, // positive when penetrating
     friction: f64,
     restitution: f64,
     // Cached row state set by Prepare.
@@ -61,8 +63,15 @@ struct ContactConstraint {
 /// Step the world by `dt` seconds, sub-stepping `sub_steps` times.
 /// Mirrors `havok_physics::step_native(state, dt, sub_steps)` and the
 /// C# `PxsContext::Simulate(dt)`.
-pub fn step_native(state: &mut PhysXPhysicsState, dt: f64, sub_steps: u32, symbols: &SymbolTable) -> Result<(), ScriptError> {
-    if state.paused || !state.initialized { return Ok(()); }
+pub fn step_native(
+    state: &mut PhysXPhysicsState,
+    dt: f64,
+    sub_steps: u32,
+    symbols: &SymbolTable,
+) -> Result<(), ScriptError> {
+    if state.paused || !state.initialized {
+        return Ok(());
+    }
     // Clear pending collisions at the start of a tick. The narrowphase
     // appends a (bodyA_id, bodyB_id, points, normals) entry per colliding
     // pair on the LAST substep so Director's notifyCollisions only sees
@@ -94,7 +103,9 @@ pub(crate) fn apply_lingo_linear_impulse(
     imp: [f64; 3],
     local_point: Option<[f64; 3]>,
 ) {
-    if matches!(rb.body_type, PhysXBodyType::Static) || rb.pinned || rb.mass <= 0.0 { return; }
+    if matches!(rb.body_type, PhysXBodyType::Static) || rb.pinned || rb.mass <= 0.0 {
+        return;
+    }
     rb.linear_velocity = v_add(rb.linear_velocity, v_mul(imp, 1.0 / rb.mass));
     if let Some(p) = local_point {
         let q = axisangle_to_quat(rb.orientation);
@@ -118,7 +129,9 @@ pub(crate) fn apply_lingo_angular_impulse(
     rb: &mut crate::player::cast_member::PhysXRigidBody,
     imp: [f64; 3],
 ) {
-    if matches!(rb.body_type, PhysXBodyType::Static) || rb.pinned || rb.mass <= 0.0 { return; }
+    if matches!(rb.body_type, PhysXBodyType::Static) || rb.pinned || rb.mass <= 0.0 {
+        return;
+    }
     let dw = mul_inv_inertia(rb, imp);
     rb.angular_velocity = v_add(rb.angular_velocity, dw);
     rb.cached_is_sleeping = false;
@@ -133,7 +146,9 @@ pub(crate) fn apply_lingo_force(
     force: [f64; 3],
     local_point: Option<[f64; 3]>,
 ) {
-    if matches!(rb.body_type, PhysXBodyType::Static) || rb.pinned || rb.mass <= 0.0 { return; }
+    if matches!(rb.body_type, PhysXBodyType::Static) || rb.pinned || rb.mass <= 0.0 {
+        return;
+    }
     rb.pending_force = v_add(rb.pending_force, force);
     if let Some(p) = local_point {
         let q = axisangle_to_quat(rb.orientation);
@@ -147,30 +162,47 @@ pub(crate) fn apply_lingo_torque(
     rb: &mut crate::player::cast_member::PhysXRigidBody,
     torque: [f64; 3],
 ) {
-    if matches!(rb.body_type, PhysXBodyType::Static) || rb.pinned || rb.mass <= 0.0 { return; }
+    if matches!(rb.body_type, PhysXBodyType::Static) || rb.pinned || rb.mass <= 0.0 {
+        return;
+    }
     rb.pending_torque = v_add(rb.pending_torque, torque);
     rb.cached_is_sleeping = false;
 }
 
-
 /// Canonical (min, max) pair key for collision filter lookups. Mirrors C#'s
 /// `World.PairKey` so pairs added via `disableCollision(A,B)` find the same
 /// key whether the broadphase iterates (A,B) or (B,A).
-fn pair_key_names(a: Symbol, b: Symbol, symbols: &SymbolTable) -> Result<(Symbol, Symbol), ScriptError> {
-    let a_name = symbols.display(&a).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
-    let b_name = symbols.display(&b).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+fn pair_key_names(
+    a: Symbol,
+    b: Symbol,
+    symbols: &SymbolTable,
+) -> Result<(Symbol, Symbol), ScriptError> {
+    let a_name = symbols
+        .display(&a)
+        .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+    let b_name = symbols
+        .display(&b)
+        .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
     Ok(if a_name < b_name { (a, b) } else { (b, a) })
 }
 
-fn sub_step(state: &mut PhysXPhysicsState, dt: f64, is_last: bool, symbols: &SymbolTable) -> Result<(), ScriptError> {
-
+fn sub_step(
+    state: &mut PhysXPhysicsState,
+    dt: f64,
+    is_last: bool,
+    symbols: &SymbolTable,
+) -> Result<(), ScriptError> {
     // ---- 1. Apply gravity + damping to velocities ----
     let g = state.gravity;
     let lin_keep = (1.0 - state.linear_damping * dt).max(0.0);
     let ang_keep = (1.0 - state.angular_damping * dt).max(0.0);
     for body in state.bodies.iter_mut() {
-        if matches!(body.body_type, PhysXBodyType::Static) || body.pinned { continue; }
-        if body.cached_is_sleeping { continue; }
+        if matches!(body.body_type, PhysXBodyType::Static) || body.pinned {
+            continue;
+        }
+        if body.cached_is_sleeping {
+            continue;
+        }
         if matches!(body.body_type, PhysXBodyType::Dynamic) {
             body.linear_velocity = v_add(body.linear_velocity, v_mul(g, dt));
         }
@@ -188,8 +220,12 @@ fn sub_step(state: &mut PhysXPhysicsState, dt: f64, is_last: bool, symbols: &Sym
                 body.angular_velocity = v_add(body.angular_velocity, v_mul(dw, dt));
             }
         }
-        let body_lin_keep = (1.0 - body.linear_damping * dt).max(0.0).min(lin_keep.max(1.0));
-        let body_ang_keep = (1.0 - body.angular_damping * dt).max(0.0).min(ang_keep.max(1.0));
+        let body_lin_keep = (1.0 - body.linear_damping * dt)
+            .max(0.0)
+            .min(lin_keep.max(1.0));
+        let body_ang_keep = (1.0 - body.angular_damping * dt)
+            .max(0.0)
+            .min(ang_keep.max(1.0));
         body.linear_velocity = v_mul(body.linear_velocity, body_lin_keep.min(lin_keep));
         body.angular_velocity = v_mul(body.angular_velocity, body_ang_keep.min(ang_keep));
     }
@@ -206,17 +242,29 @@ fn sub_step(state: &mut PhysXPhysicsState, dt: f64, is_last: bool, symbols: &Sym
         for j in (i + 1)..state.bodies.len() {
             let bj = &state.bodies[j];
             // No pair if both static.
-            if matches!(bi.body_type, PhysXBodyType::Static) && matches!(bj.body_type, PhysXBodyType::Static) {
+            if matches!(bi.body_type, PhysXBodyType::Static)
+                && matches!(bj.body_type, PhysXBodyType::Static)
+            {
                 continue;
             }
             // Director collision filter (chapter 15): disableCollision and
             // friends — global off, body off, or pair off all skip the pair.
-            if global_off { continue; }
-            if state.body_collision_disabled.contains(&bi.name) { continue; }
-            if state.body_collision_disabled.contains(&bj.name) { continue; }
+            if global_off {
+                continue;
+            }
+            if state.body_collision_disabled.contains(&bi.name) {
+                continue;
+            }
+            if state.body_collision_disabled.contains(&bj.name) {
+                continue;
+            }
             let key = pair_key_names(bi.name.clone(), bj.name.clone(), symbols)?;
-            if state.disabled_collision_pairs.contains(&key) { continue; }
-            if aabb_overlap(&aabbs[i], &aabbs[j]) { pairs.push((i, j)); }
+            if state.disabled_collision_pairs.contains(&key) {
+                continue;
+            }
+            if aabb_overlap(&aabbs[i], &aabbs[j]) {
+                pairs.push((i, j));
+            }
         }
     }
 
@@ -231,10 +279,16 @@ fn sub_step(state: &mut PhysXPhysicsState, dt: f64, is_last: bool, symbols: &Sym
         for body_idx in 0..state.bodies.len() {
             let body = &state.bodies[body_idx];
             // Skip static-vs-static.
-            if matches!(body.body_type, PhysXBodyType::Static) { continue; }
+            if matches!(body.body_type, PhysXBodyType::Static) {
+                continue;
+            }
             // Honor body-level callback / collision filter.
-            if state.all_collisions_disabled { continue; }
-            if state.body_collision_disabled.contains(&body.name) { continue; }
+            if state.all_collisions_disabled {
+                continue;
+            }
+            if state.body_collision_disabled.contains(&body.name) {
+                continue;
+            }
             for terrain_idx in 0..state.terrains.len() {
                 let n_before = constraints.len();
                 build_terrain_contacts(state, body_idx, terrain_idx, &mut constraints);
@@ -255,7 +309,9 @@ fn sub_step(state: &mut PhysXPhysicsState, dt: f64, is_last: bool, symbols: &Sym
                             points.push(c.point);
                             normals.push(c.normal);
                         }
-                        state.pending_collisions.push((body_id, terrain.id, points, normals));
+                        state
+                            .pending_collisions
+                            .push((body_id, terrain.id, points, normals));
                     }
                 }
             }
@@ -286,7 +342,9 @@ fn sub_step(state: &mut PhysXPhysicsState, dt: f64, is_last: bool, symbols: &Sym
                     points.push(c.point);
                     normals.push(c.normal);
                 }
-                state.pending_collisions.push((body_a_id, body_b_id, points, normals));
+                state
+                    .pending_collisions
+                    .push((body_a_id, body_b_id, points, normals));
             }
         }
     }
@@ -304,14 +362,30 @@ fn sub_step(state: &mut PhysXPhysicsState, dt: f64, is_last: bool, symbols: &Sym
     let world_scale = state.scaling_factor[0].abs().max(1e-9);
     let max_pen_bias = 3.0 / world_scale;
     for c in constraints.iter_mut() {
-        prepare_constraint(c, &state.bodies, dt, baumgarte, slop, rest_threshold, max_pen_bias);
+        prepare_constraint(
+            c,
+            &state.bodies,
+            dt,
+            baumgarte,
+            slop,
+            rest_threshold,
+            max_pen_bias,
+        );
     }
     let velocity_iterations = 4;
     if state.use_soa_solver {
         // Verbatim PhysX 3.4 SoA solver path. Body-vs-terrain pairs (which
         // use the static-terrain sentinel and don't have a real body_b) stay
         // on the AoS path; everything else routes through PxsSolverSoa.
-        run_soa_solver_step(state, &mut constraints, dt, baumgarte, slop, rest_threshold, velocity_iterations);
+        run_soa_solver_step(
+            state,
+            &mut constraints,
+            dt,
+            baumgarte,
+            slop,
+            rest_threshold,
+            velocity_iterations,
+        );
     } else {
         for it in 0..velocity_iterations {
             // PhysX conclude pass: the final iteration solves WITHOUT the
@@ -336,14 +410,26 @@ fn sub_step(state: &mut PhysXPhysicsState, dt: f64, is_last: bool, symbols: &Sym
     const MAX_LIN_VEL: f64 = 1.0e5;
     const MAX_ANG_VEL: f64 = 1.0e3;
     for body in state.bodies.iter_mut() {
-        if matches!(body.body_type, PhysXBodyType::Static) || body.pinned { continue; }
-        if body.cached_is_sleeping { continue; }
-        if body.linear_velocity.iter().any(|v| !v.is_finite()) { body.linear_velocity = [0.0; 3]; }
-        if body.angular_velocity.iter().any(|v| !v.is_finite()) { body.angular_velocity = [0.0; 3]; }
+        if matches!(body.body_type, PhysXBodyType::Static) || body.pinned {
+            continue;
+        }
+        if body.cached_is_sleeping {
+            continue;
+        }
+        if body.linear_velocity.iter().any(|v| !v.is_finite()) {
+            body.linear_velocity = [0.0; 3];
+        }
+        if body.angular_velocity.iter().any(|v| !v.is_finite()) {
+            body.angular_velocity = [0.0; 3];
+        }
         let lv = v_len_sq(body.linear_velocity).sqrt();
-        if lv > MAX_LIN_VEL { body.linear_velocity = v_mul(body.linear_velocity, MAX_LIN_VEL / lv); }
+        if lv > MAX_LIN_VEL {
+            body.linear_velocity = v_mul(body.linear_velocity, MAX_LIN_VEL / lv);
+        }
         let av = v_len_sq(body.angular_velocity).sqrt();
-        if av > MAX_ANG_VEL { body.angular_velocity = v_mul(body.angular_velocity, MAX_ANG_VEL / av); }
+        if av > MAX_ANG_VEL {
+            body.angular_velocity = v_mul(body.angular_velocity, MAX_ANG_VEL / av);
+        }
         body.position = v_add(body.position, v_mul(body.linear_velocity, dt));
         // Orientation: integrate via quaternion in axis-angle storage.
         let q = axisangle_to_quat(body.orientation);
@@ -354,7 +440,8 @@ fn sub_step(state: &mut PhysXPhysicsState, dt: f64, is_last: bool, symbols: &Sym
         let lv = v_len_sq(body.linear_velocity);
         let av = v_len_sq(body.angular_velocity);
         if lv < state.sleep_threshold * state.sleep_threshold
-            && av < state.sleep_threshold * state.sleep_threshold {
+            && av < state.sleep_threshold * state.sleep_threshold
+        {
             body.cached_is_sleeping = true;
         }
     }
@@ -380,7 +467,10 @@ pub fn shape_center(body: &crate::player::cast_member::PhysXRigidBody) -> [f64; 
     if off[0] == 0.0 && off[1] == 0.0 && off[2] == 0.0 {
         return body.position;
     }
-    v_add(body.position, q_rotate(axisangle_to_quat(body.orientation), off))
+    v_add(
+        body.position,
+        q_rotate(axisangle_to_quat(body.orientation), off),
+    )
 }
 
 fn compute_aabb(body: &crate::player::cast_member::PhysXRigidBody) -> ([f64; 3], [f64; 3]) {
@@ -398,8 +488,16 @@ fn compute_aabb(body: &crate::player::cast_member::PhysXRigidBody) -> ([f64; 3],
         // AABB offset by the position.
         PhysXShapeKind::ConcaveShape if body.triangle_mesh.is_some() => {
             let mesh = body.triangle_mesh.as_ref().unwrap();
-            let mn = [mesh.aabb_min[0] as f64, mesh.aabb_min[1] as f64, mesh.aabb_min[2] as f64];
-            let mx = [mesh.aabb_max[0] as f64, mesh.aabb_max[1] as f64, mesh.aabb_max[2] as f64];
+            let mn = [
+                mesh.aabb_min[0] as f64,
+                mesh.aabb_min[1] as f64,
+                mesh.aabb_min[2] as f64,
+            ];
+            let mx = [
+                mesh.aabb_max[0] as f64,
+                mesh.aabb_max[1] as f64,
+                mesh.aabb_max[2] as f64,
+            ];
             (v_add(body.position, mn), v_add(body.position, mx))
         }
         PhysXShapeKind::Box | PhysXShapeKind::ConvexShape | PhysXShapeKind::ConcaveShape => {
@@ -428,9 +526,12 @@ fn compute_aabb(body: &crate::player::cast_member::PhysXRigidBody) -> ([f64; 3],
 }
 
 fn aabb_overlap(a: &([f64; 3], [f64; 3]), b: &([f64; 3], [f64; 3])) -> bool {
-    a.1[0] >= b.0[0] && a.0[0] <= b.1[0]
-        && a.1[1] >= b.0[1] && a.0[1] <= b.1[1]
-        && a.1[2] >= b.0[2] && a.0[2] <= b.1[2]
+    a.1[0] >= b.0[0]
+        && a.0[0] <= b.1[0]
+        && a.1[1] >= b.0[1]
+        && a.0[1] <= b.1[1]
+        && a.1[2] >= b.0[2]
+        && a.0[2] <= b.1[2]
 }
 
 pub fn axisangle_to_quat(o: [f64; 4]) -> [f64; 4] {
@@ -478,20 +579,29 @@ fn build_contacts(
     // Dispatch by shape pair. Single-contact pairs return Option<GuContact>;
     // manifold pairs (box-box, capsule-capsule) write directly to `buffer`.
     let single = match (a.shape, b.shape) {
-        (PhysXShapeKind::Sphere, PhysXShapeKind::Sphere) =>
-            contact_sphere_sphere(pa, a.radius, pb, b.radius, 0.0),
-        (PhysXShapeKind::Sphere, PhysXShapeKind::Box) =>
-            contact_sphere_box(pa, a.radius, b.half_extents, qb, pb, 0.0),
+        (PhysXShapeKind::Sphere, PhysXShapeKind::Sphere) => {
+            contact_sphere_sphere(pa, a.radius, pb, b.radius, 0.0)
+        }
+        (PhysXShapeKind::Sphere, PhysXShapeKind::Box) => {
+            contact_sphere_box(pa, a.radius, b.half_extents, qb, pb, 0.0)
+        }
         (PhysXShapeKind::Box, PhysXShapeKind::Sphere) => {
             // Reverse: PhysX dispatches sphere-as-shape0; flip the resulting normal.
-            contact_sphere_box(pb, b.radius, a.half_extents, qa, pa, 0.0)
-                .map(|c| gu::GuContact { normal: v_neg(c.normal), ..c })
+            contact_sphere_box(pb, b.radius, a.half_extents, qa, pa, 0.0).map(|c| gu::GuContact {
+                normal: v_neg(c.normal),
+                ..c
+            })
         }
-        (PhysXShapeKind::Sphere, PhysXShapeKind::Capsule) =>
-            contact_sphere_capsule(pa, a.radius, pb, qb, b.half_height, b.radius, 0.0),
+        (PhysXShapeKind::Sphere, PhysXShapeKind::Capsule) => {
+            contact_sphere_capsule(pa, a.radius, pb, qb, b.half_height, b.radius, 0.0)
+        }
         (PhysXShapeKind::Capsule, PhysXShapeKind::Sphere) => {
-            contact_sphere_capsule(pb, b.radius, pa, qa, a.half_height, a.radius, 0.0)
-                .map(|c| gu::GuContact { normal: v_neg(c.normal), ..c })
+            contact_sphere_capsule(pb, b.radius, pa, qa, a.half_height, a.radius, 0.0).map(|c| {
+                gu::GuContact {
+                    normal: v_neg(c.normal),
+                    ..c
+                }
+            })
         }
         _ => None,
     };
@@ -521,7 +631,17 @@ fn build_contacts(
     match (a.shape, b.shape) {
         (PhysXShapeKind::Box, PhysXShapeKind::Box) => {
             let mut pair_data: u8 = 0; // warm-start cache (not yet persistent across frames)
-            contact_box_box(buffer, a.half_extents, qa, pa, b.half_extents, qb, pb, &mut pair_data, 0.0);
+            contact_box_box(
+                buffer,
+                a.half_extents,
+                qa,
+                pa,
+                b.half_extents,
+                qb,
+                pb,
+                &mut pair_data,
+                0.0,
+            );
         }
         // Convex pairs route through the hull-vs-hull SAT + Sutherland-Hodgman
         // manifold. Boxes are wrapped as PolygonalBox on the fly so we can
@@ -536,35 +656,69 @@ fn build_contacts(
             use super::physx_gu_convex as gx;
             let owned_a;
             let poly_a: &gx::PolygonalData = match a.shape {
-                PhysXShapeKind::Box => { owned_a = gx::polygonal_box(a.half_extents); &owned_a }
+                PhysXShapeKind::Box => {
+                    owned_a = gx::polygonal_box(a.half_extents);
+                    &owned_a
+                }
                 PhysXShapeKind::ConvexShape | PhysXShapeKind::ConcaveShape => {
-                    if let Some(h) = &a.convex_hull { h } else {
+                    if let Some(h) = &a.convex_hull {
+                        h
+                    } else {
                         // Fallback to AABB box hull until a real cooked hull lands.
-                        owned_a = gx::polygonal_box(a.half_extents); &owned_a
+                        owned_a = gx::polygonal_box(a.half_extents);
+                        &owned_a
                     }
                 }
-                _ => { owned_a = gx::polygonal_box(a.half_extents); &owned_a }
+                _ => {
+                    owned_a = gx::polygonal_box(a.half_extents);
+                    &owned_a
+                }
             };
             let owned_b;
             let poly_b: &gx::PolygonalData = match b.shape {
-                PhysXShapeKind::Box => { owned_b = gx::polygonal_box(b.half_extents); &owned_b }
+                PhysXShapeKind::Box => {
+                    owned_b = gx::polygonal_box(b.half_extents);
+                    &owned_b
+                }
                 PhysXShapeKind::ConvexShape | PhysXShapeKind::ConcaveShape => {
-                    if let Some(h) = &b.convex_hull { h } else {
-                        owned_b = gx::polygonal_box(b.half_extents); &owned_b
+                    if let Some(h) = &b.convex_hull {
+                        h
+                    } else {
+                        owned_b = gx::polygonal_box(b.half_extents);
+                        &owned_b
                     }
                 }
-                _ => { owned_b = gx::polygonal_box(b.half_extents); &owned_b }
+                _ => {
+                    owned_b = gx::polygonal_box(b.half_extents);
+                    &owned_b
+                }
             };
             gx::contact_hull_hull(buffer, poly_a, poly_b, qa, pa, qb, pb, 0.0);
         }
         (PhysXShapeKind::Capsule, PhysXShapeKind::Capsule) => {
-            contact_capsule_capsule(buffer, pa, qa, a.half_height, a.radius, pb, qb, b.half_height, b.radius, 0.0);
+            contact_capsule_capsule(
+                buffer,
+                pa,
+                qa,
+                a.half_height,
+                a.radius,
+                pb,
+                qb,
+                b.half_height,
+                b.radius,
+                0.0,
+            );
         }
         (PhysXShapeKind::Capsule, PhysXShapeKind::Box) => {
             super::physx_gu_capsule_box::contact_capsule_box(
                 buffer,
-                pa, qa, a.half_height, a.radius,
-                pb, qb, b.half_extents,
+                pa,
+                qa,
+                a.half_height,
+                a.radius,
+                pb,
+                qb,
+                b.half_extents,
                 0.0,
             );
         }
@@ -574,8 +728,13 @@ fn build_contacts(
             // post-flip the normal so it lands in our (i=BodyA=Box, j=BodyB=Capsule) frame.
             super::physx_gu_capsule_box::contact_capsule_box(
                 buffer,
-                pb, qb, b.half_height, b.radius,
-                pa, qa, a.half_extents,
+                pb,
+                qb,
+                b.half_height,
+                b.radius,
+                pa,
+                qa,
+                a.half_extents,
                 0.0,
             );
             swap_normal = true;
@@ -585,35 +744,50 @@ fn build_contacts(
     let body_a = &state.bodies[i];
     let body_b = &state.bodies[j];
     for c in &buffer.contacts {
-        if c.separation > 0.0 { continue; }
+        if c.separation > 0.0 {
+            continue;
+        }
         let cc = if swap_normal {
-            gu::GuContact { normal: v_neg(c.normal), ..*c }
-        } else { *c };
+            gu::GuContact {
+                normal: v_neg(c.normal),
+                ..*c
+            }
+        } else {
+            *c
+        };
         push_contact(out, i, j, body_a, body_b, cc);
     }
 }
 
 fn push_contact(
     out: &mut Vec<ContactConstraint>,
-    i: usize, j: usize,
+    i: usize,
+    j: usize,
     a: &crate::player::cast_member::PhysXRigidBody,
     b: &crate::player::cast_member::PhysXRigidBody,
     c: gu::GuContact,
 ) {
     // PhysX → solver convention: normal flipped (B→A → A→B), pen = -separation.
     out.push(ContactConstraint {
-        body_a: i, body_b: j,
+        body_a: i,
+        body_b: j,
         body_b_is_static_terrain: false,
         point: c.point,
         normal: v_neg(c.normal),
         penetration: -c.separation,
         friction: (a.friction * b.friction).max(0.0).sqrt(),
         restitution: a.restitution.max(b.restitution),
-        eff_mass_n: 0.0, eff_mass_t1: 0.0, eff_mass_t2: 0.0,
+        eff_mass_n: 0.0,
+        eff_mass_t1: 0.0,
+        eff_mass_t2: 0.0,
         bias_n: 0.0,
-        tan1: [0.0; 3], tan2: [0.0; 3],
-        ra: [0.0; 3], rb: [0.0; 3],
-        impulse_n: 0.0, impulse_t1: 0.0, impulse_t2: 0.0,
+        tan1: [0.0; 3],
+        tan2: [0.0; 3],
+        ra: [0.0; 3],
+        rb: [0.0; 3],
+        impulse_n: 0.0,
+        impulse_t1: 0.0,
+        impulse_t2: 0.0,
         unbias_n: 0.0,
     });
 }
@@ -631,14 +805,18 @@ fn push_contact(
 
 fn build_mesh_contacts(
     state: &PhysXPhysicsState,
-    mesh_idx: usize, shape_idx: usize, swapped: bool,
+    mesh_idx: usize,
+    shape_idx: usize,
+    swapped: bool,
     out: &mut Vec<ContactConstraint>,
 ) {
     use super::physx_gu_mesh as mp;
 
     let mesh_body = &state.bodies[mesh_idx];
     let shape_body = &state.bodies[shape_idx];
-    let Some(mesh) = mesh_body.triangle_mesh.as_ref() else { return; };
+    let Some(mesh) = mesh_body.triangle_mesh.as_ref() else {
+        return;
+    };
 
     // Transform query shape into mesh-local space.
     //
@@ -671,9 +849,14 @@ fn build_mesh_contacts(
         PhysXShapeKind::Capsule => {
             let q = axisangle_to_quat(shape_body.orientation);
             let p0_w = v_add(shape_pos, q_rotate(q, [-shape_body.half_height, 0.0, 0.0]));
-            let p1_w = v_add(shape_pos, q_rotate(q, [ shape_body.half_height, 0.0, 0.0]));
-            mp::capsule_vs_mesh(mesh, f64_to_f32(to_local(p0_w)), f64_to_f32(to_local(p1_w)),
-                                shape_body.radius as f32, 0.0)
+            let p1_w = v_add(shape_pos, q_rotate(q, [shape_body.half_height, 0.0, 0.0]));
+            mp::capsule_vs_mesh(
+                mesh,
+                f64_to_f32(to_local(p0_w)),
+                f64_to_f32(to_local(p1_w)),
+                shape_body.radius as f32,
+                0.0,
+            )
         }
         // ConvexShape rides the box path: `createRigidBody` builds its hull
         // with `polygonal_box(half_extents)`, so an OBB test against the mesh
@@ -698,7 +881,9 @@ fn build_mesh_contacts(
     let pair_friction = (mesh_body.friction * shape_body.friction).max(0.0).sqrt();
     let pair_restitution = mesh_body.restitution.max(shape_body.restitution);
     for lc in &local_contacts {
-        if lc.separation > 0.0 { continue; }
+        if lc.separation > 0.0 {
+            continue;
+        }
         let pt_w = to_world_pt(f32_to_f64(lc.point));
         // Gu normal points triangle (B/mesh) → query shape (A). We need solver
         // convention A → B. The shape body in the (out_a, out_b) ordering
@@ -711,20 +896,31 @@ fn build_mesh_contacts(
             // outA = shape_idx, outB = mesh_idx ⇒ solver wants shape → mesh = -norm_w.
             v_neg(norm_w)
         };
-        let (out_a, out_b) = if swapped { (mesh_idx, shape_idx) } else { (shape_idx, mesh_idx) };
+        let (out_a, out_b) = if swapped {
+            (mesh_idx, shape_idx)
+        } else {
+            (shape_idx, mesh_idx)
+        };
         out.push(ContactConstraint {
-            body_a: out_a, body_b: out_b,
+            body_a: out_a,
+            body_b: out_b,
             body_b_is_static_terrain: false,
             point: pt_w,
             normal: solver_normal,
             penetration: -(lc.separation as f64),
             friction: pair_friction,
             restitution: pair_restitution,
-            eff_mass_n: 0.0, eff_mass_t1: 0.0, eff_mass_t2: 0.0,
+            eff_mass_n: 0.0,
+            eff_mass_t1: 0.0,
+            eff_mass_t2: 0.0,
             bias_n: 0.0,
-            tan1: [0.0; 3], tan2: [0.0; 3],
-            ra: [0.0; 3], rb: [0.0; 3],
-            impulse_n: 0.0, impulse_t1: 0.0, impulse_t2: 0.0,
+            tan1: [0.0; 3],
+            tan2: [0.0; 3],
+            ra: [0.0; 3],
+            rb: [0.0; 3],
+            impulse_n: 0.0,
+            impulse_t1: 0.0,
+            impulse_t2: 0.0,
             unbias_n: 0.0,
         });
     }
@@ -764,10 +960,14 @@ fn build_terrain_contacts(
         PhysXShapeKind::Capsule => {
             let q = axisangle_to_quat(body.orientation);
             let p0_w = v_add(body_pos, q_rotate(q, [-body.half_height, 0.0, 0.0]));
-            let p1_w = v_add(body_pos, q_rotate(q, [ body.half_height, 0.0, 0.0]));
-            hf::capsule_vs_heightfield(&terrain.height_field,
-                f64_to_f32(to_local(p0_w)), f64_to_f32(to_local(p1_w)),
-                body.radius as f32, 0.0)
+            let p1_w = v_add(body_pos, q_rotate(q, [body.half_height, 0.0, 0.0]));
+            hf::capsule_vs_heightfield(
+                &terrain.height_field,
+                f64_to_f32(to_local(p0_w)),
+                f64_to_f32(to_local(p1_w)),
+                body.radius as f32,
+                0.0,
+            )
         }
         PhysXShapeKind::Box => {
             let c = f64_to_f32(to_local(body_pos));
@@ -788,7 +988,9 @@ fn build_terrain_contacts(
     let pair_restitution = body.restitution.max(terrain.restitution);
 
     for lc in &local_contacts {
-        if lc.separation > 0.0 { continue; }
+        if lc.separation > 0.0 {
+            continue;
+        }
         let pt_w = to_world_pt(f32_to_f64(lc.point));
         // Gu normal: triangle (B = terrain) → query shape (A = body).
         let norm_w = to_world_vec(f32_to_f64(lc.normal));
@@ -803,17 +1005,25 @@ fn build_terrain_contacts(
             penetration: -(lc.separation as f64),
             friction: pair_friction,
             restitution: pair_restitution,
-            eff_mass_n: 0.0, eff_mass_t1: 0.0, eff_mass_t2: 0.0,
+            eff_mass_n: 0.0,
+            eff_mass_t1: 0.0,
+            eff_mass_t2: 0.0,
             bias_n: 0.0,
-            tan1: [0.0; 3], tan2: [0.0; 3],
-            ra: [0.0; 3], rb: [0.0; 3],
-            impulse_n: 0.0, impulse_t1: 0.0, impulse_t2: 0.0,
+            tan1: [0.0; 3],
+            tan2: [0.0; 3],
+            ra: [0.0; 3],
+            rb: [0.0; 3],
+            impulse_n: 0.0,
+            impulse_t1: 0.0,
+            impulse_t2: 0.0,
             unbias_n: 0.0,
         });
     }
 }
 
-fn q_inv(q: [f64; 4]) -> [f64; 4] { [-q[0], -q[1], -q[2], q[3]] }
+fn q_inv(q: [f64; 4]) -> [f64; 4] {
+    [-q[0], -q[1], -q[2], q[3]]
+}
 fn q_mul(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
     [
         a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
@@ -840,7 +1050,10 @@ fn static_ghost_body() -> crate::player::cast_member::PhysXRigidBody {
 fn prepare_constraint(
     c: &mut ContactConstraint,
     bodies: &[crate::player::cast_member::PhysXRigidBody],
-    dt: f64, baumgarte: f64, slop: f64, rest_threshold: f64,
+    dt: f64,
+    baumgarte: f64,
+    slop: f64,
+    rest_threshold: f64,
     max_pen_bias: f64,
 ) {
     let a = &bodies[c.body_a];
@@ -854,7 +1067,11 @@ fn prepare_constraint(
     c.ra = v_sub(c.point, a.position);
     // For static-terrain pairs, rb is unused (body_b is treated as a static
     // collider with no velocity contribution). Set to zero for cleanliness.
-    c.rb = if c.body_b_is_static_terrain { [0.0; 3] } else { v_sub(c.point, b.position) };
+    c.rb = if c.body_b_is_static_terrain {
+        [0.0; 3]
+    } else {
+        v_sub(c.point, b.position)
+    };
     build_tangent_basis(c.normal, &mut c.tan1, &mut c.tan2);
 
     c.eff_mass_n = compute_eff_mass(a, b, c.normal, c.ra, c.rb);
@@ -895,9 +1112,16 @@ fn solve_velocity(
 ) {
     let is_terrain = c.body_b_is_static_terrain;
     let ghost = static_ghost_body();
-    let read_ab = |bodies: &[crate::player::cast_member::PhysXRigidBody]| -> (crate::player::cast_member::PhysXRigidBody, crate::player::cast_member::PhysXRigidBody) {
+    let read_ab = |bodies: &[crate::player::cast_member::PhysXRigidBody]| -> (
+        crate::player::cast_member::PhysXRigidBody,
+        crate::player::cast_member::PhysXRigidBody,
+    ) {
         let a = bodies[c.body_a].clone();
-        let b = if is_terrain { ghost.clone() } else { bodies[c.body_b].clone() };
+        let b = if is_terrain {
+            ghost.clone()
+        } else {
+            bodies[c.body_b].clone()
+        };
         (a, b)
     };
 
@@ -909,7 +1133,9 @@ fn solve_velocity(
     let old = c.impulse_n;
     c.impulse_n = (old + dlambda).max(0.0);
     dlambda = c.impulse_n - old;
-    apply_impulse(bodies, c.body_a, c.body_b, c.normal, c.ra, c.rb, dlambda, is_terrain);
+    apply_impulse(
+        bodies, c.body_a, c.body_b, c.normal, c.ra, c.rb, dlambda, is_terrain,
+    );
 
     // Friction (Coulomb cone, two tangent rows).
     let friction_limit = c.friction * c.impulse_n;
@@ -919,20 +1145,40 @@ fn solve_velocity(
     let dt1 = -vt1 * c.eff_mass_t1;
     let old1 = c.impulse_t1;
     c.impulse_t1 = (old1 + dt1).clamp(-friction_limit, friction_limit);
-    apply_impulse(bodies, c.body_a, c.body_b, c.tan1, c.ra, c.rb, c.impulse_t1 - old1, is_terrain);
+    apply_impulse(
+        bodies,
+        c.body_a,
+        c.body_b,
+        c.tan1,
+        c.ra,
+        c.rb,
+        c.impulse_t1 - old1,
+        is_terrain,
+    );
 
     let (a3, b3) = read_ab(bodies);
     let vt2 = contact_velocity_along(&a3, &b3, c.ra, c.rb, c.tan2);
     let dt2 = -vt2 * c.eff_mass_t2;
     let old2 = c.impulse_t2;
     c.impulse_t2 = (old2 + dt2).clamp(-friction_limit, friction_limit);
-    apply_impulse(bodies, c.body_a, c.body_b, c.tan2, c.ra, c.rb, c.impulse_t2 - old2, is_terrain);
+    apply_impulse(
+        bodies,
+        c.body_a,
+        c.body_b,
+        c.tan2,
+        c.ra,
+        c.rb,
+        c.impulse_t2 - old2,
+        is_terrain,
+    );
 }
 
 fn contact_velocity_along(
     a: &crate::player::cast_member::PhysXRigidBody,
     b: &crate::player::cast_member::PhysXRigidBody,
-    ra: [f64; 3], rb: [f64; 3], axis: [f64; 3],
+    ra: [f64; 3],
+    rb: [f64; 3],
+    axis: [f64; 3],
 ) -> f64 {
     let va = v_add(a.linear_velocity, v_cross(a.angular_velocity, ra));
     let vb = v_add(b.linear_velocity, v_cross(b.angular_velocity, rb));
@@ -942,7 +1188,9 @@ fn contact_velocity_along(
 fn compute_eff_mass(
     a: &crate::player::cast_member::PhysXRigidBody,
     b: &crate::player::cast_member::PhysXRigidBody,
-    axis: [f64; 3], ra: [f64; 3], rb: [f64; 3],
+    axis: [f64; 3],
+    ra: [f64; 3],
+    rb: [f64; 3],
 ) -> f64 {
     let inv_mass_a = inverse_mass(a);
     let inv_mass_b = inverse_mass(b);
@@ -957,16 +1205,25 @@ fn compute_eff_mass(
         let ib = mul_inv_inertia(b, rbxn);
         k += v_dot(rbxn, ib);
     }
-    if k > 0.0 { 1.0 / k } else { 0.0 }
+    if k > 0.0 {
+        1.0 / k
+    } else {
+        0.0
+    }
 }
 
 fn inverse_mass(body: &crate::player::cast_member::PhysXRigidBody) -> f64 {
-    if matches!(body.body_type, PhysXBodyType::Static) || body.pinned || body.mass <= 0.0 { 0.0 }
-    else { 1.0 / body.mass }
+    if matches!(body.body_type, PhysXBodyType::Static) || body.pinned || body.mass <= 0.0 {
+        0.0
+    } else {
+        1.0 / body.mass
+    }
 }
 
 fn inverse_inertia_diag(body: &crate::player::cast_member::PhysXRigidBody) -> [f64; 3] {
-    if inverse_mass(body) == 0.0 { return [0.0; 3]; }
+    if inverse_mass(body) == 0.0 {
+        return [0.0; 3];
+    }
     let m = body.mass;
     match body.shape {
         PhysXShapeKind::Sphere => {
@@ -992,19 +1249,28 @@ fn inverse_inertia_diag(body: &crate::player::cast_member::PhysXRigidBody) -> [f
 }
 
 pub(crate) fn mul_inv_inertia(
-    body: &crate::player::cast_member::PhysXRigidBody, v: [f64; 3],
+    body: &crate::player::cast_member::PhysXRigidBody,
+    v: [f64; 3],
 ) -> [f64; 3] {
     let q = axisangle_to_quat(body.orientation);
     let inv_diag = inverse_inertia_diag(body);
     let local = q_rotate_inv(q, v);
-    let local_scaled = [local[0] * inv_diag[0], local[1] * inv_diag[1], local[2] * inv_diag[2]];
+    let local_scaled = [
+        local[0] * inv_diag[0],
+        local[1] * inv_diag[1],
+        local[2] * inv_diag[2],
+    ];
     q_rotate(q, local_scaled)
 }
 
 fn apply_impulse(
     bodies: &mut [crate::player::cast_member::PhysXRigidBody],
-    ia: usize, ib: usize,
-    axis: [f64; 3], ra: [f64; 3], rb: [f64; 3], lambda: f64,
+    ia: usize,
+    ib: usize,
+    axis: [f64; 3],
+    ra: [f64; 3],
+    rb: [f64; 3],
+    lambda: f64,
     body_b_is_static_terrain: bool,
 ) {
     let p = v_mul(axis, lambda);
@@ -1033,13 +1299,17 @@ fn apply_impulse(
 fn run_soa_solver_step(
     state: &mut PhysXPhysicsState,
     constraints: &mut Vec<ContactConstraint>,
-    dt: f64, baumgarte: f64, _slop: f64, _rest_threshold: f64,
+    dt: f64,
+    baumgarte: f64,
+    _slop: f64,
+    _rest_threshold: f64,
     velocity_iterations: u32,
 ) {
     use super::physx_soa_solver as soa;
 
     // Split constraints: terrain pairs run on AoS; the rest go to SoA.
-    let mut soa_inputs: Vec<soa::SoaContactInputWithOffsets> = Vec::with_capacity(constraints.len());
+    let mut soa_inputs: Vec<soa::SoaContactInputWithOffsets> =
+        Vec::with_capacity(constraints.len());
     let mut terrain_constraints: Vec<usize> = Vec::new();
     for (idx, c) in constraints.iter().enumerate() {
         if c.body_b_is_static_terrain {
@@ -1049,7 +1319,8 @@ fn run_soa_solver_step(
         soa_inputs.push(soa::SoaContactInputWithOffsets {
             body_a: c.body_a as u32,
             body_b: c.body_b as u32,
-            ra: c.ra, rb: c.rb,
+            ra: c.ra,
+            rb: c.rb,
             normal: c.normal,
             penetration: c.penetration,
             friction: c.friction,
@@ -1059,21 +1330,37 @@ fn run_soa_solver_step(
 
     // Build SoA body inputs (one per state body — the SoA solver indexes
     // into this Vec by `body_a` / `body_b` u32).
-    let body_inputs: Vec<soa::SoaBodyInput> = state.bodies.iter().map(|b| {
-        let inv_mass = inverse_mass(b);
-        let inv_iner = if inv_mass > 0.0 { inverse_inertia_diag(b) } else { [0.0; 3] };
-        soa::SoaBodyInput {
-            linear_velocity: b.linear_velocity,
-            angular_velocity: b.angular_velocity,
-            inverse_mass: inv_mass,
-            inverse_inertia_diag_local: inv_iner,
-            orientation: axisangle_to_quat(b.orientation),
-        }
-    }).collect();
+    let body_inputs: Vec<soa::SoaBodyInput> = state
+        .bodies
+        .iter()
+        .map(|b| {
+            let inv_mass = inverse_mass(b);
+            let inv_iner = if inv_mass > 0.0 {
+                inverse_inertia_diag(b)
+            } else {
+                [0.0; 3]
+            };
+            soa::SoaBodyInput {
+                linear_velocity: b.linear_velocity,
+                angular_velocity: b.angular_velocity,
+                inverse_mass: inv_mass,
+                inverse_inertia_diag_local: inv_iner,
+                orientation: axisangle_to_quat(b.orientation),
+            }
+        })
+        .collect();
 
     let mut solver = soa::PxsSolverSoa::default();
     let warm = std::collections::HashMap::new(); // no warm-start cache yet
-    solver.build_with_offsets(&body_inputs, &soa_inputs, dt, baumgarte, _slop, _rest_threshold, &warm);
+    solver.build_with_offsets(
+        &body_inputs,
+        &soa_inputs,
+        dt,
+        baumgarte,
+        _slop,
+        _rest_threshold,
+        &warm,
+    );
 
     for it in 0..velocity_iterations {
         // Mirror the AoS conclude pass: last iteration drops the bias.
@@ -1115,10 +1402,18 @@ fn run_soa_solver_step(
 }
 
 fn build_tangent_basis(n: [f64; 3], t1: &mut [f64; 3], t2: &mut [f64; 3]) {
-    let axis = if n[0].abs() < 0.57735 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
+    let axis = if n[0].abs() < 0.57735 {
+        [1.0, 0.0, 0.0]
+    } else {
+        [0.0, 1.0, 0.0]
+    };
     let cross = v_cross(n, axis);
     let len = v_len_sq(cross).sqrt();
-    let normalized = if len > 1e-6 { v_mul(cross, 1.0 / len) } else { cross };
+    let normalized = if len > 1e-6 {
+        v_mul(cross, 1.0 / len)
+    } else {
+        cross
+    };
     *t1 = normalized;
     *t2 = v_cross(n, *t1);
 }
@@ -1131,11 +1426,15 @@ fn apply_spring_forces(state: &mut PhysXPhysicsState, dt: f64) {
     // Snapshot per-body data we'll need.
     let body_count = state.bodies.len();
     let constraint_count = state.constraints.len();
-    if constraint_count == 0 { return; }
+    if constraint_count == 0 {
+        return;
+    }
 
     for ci in 0..constraint_count {
         let c = &state.constraints[ci];
-        if !matches!(c.kind, PhysXConstraintKind::Spring) { continue; }
+        if !matches!(c.kind, PhysXConstraintKind::Spring) {
+            continue;
+        }
         let stiffness = c.stiffness;
         let damping = c.damping;
         let rest_length = c.rest_length;
@@ -1150,43 +1449,68 @@ fn apply_spring_forces(state: &mut PhysXPhysicsState, dt: f64) {
         let world_a = if let Some(i) = idx_a {
             let q = axisangle_to_quat(state.bodies[i].orientation);
             v_add(state.bodies[i].position, q_rotate(q, anchor_a))
-        } else { anchor_a };
+        } else {
+            anchor_a
+        };
         let world_b = if let Some(i) = idx_b {
             let q = axisangle_to_quat(state.bodies[i].orientation);
             v_add(state.bodies[i].position, q_rotate(q, anchor_b))
-        } else { anchor_b };
+        } else {
+            anchor_b
+        };
 
         let d = v_sub(world_b, world_a);
         let len_sq = v_len_sq(d);
-        if len_sq < 1e-12 { continue; }
+        if len_sq < 1e-12 {
+            continue;
+        }
         let len = len_sq.sqrt();
         let n = v_mul(d, 1.0 / len);
         let stretch = len - rest_length;
 
-        let v_a = if let Some(i) = idx_a { velocity_at(&state.bodies[i], world_a) } else { [0.0; 3] };
-        let v_b = if let Some(i) = idx_b { velocity_at(&state.bodies[i], world_b) } else { [0.0; 3] };
+        let v_a = if let Some(i) = idx_a {
+            velocity_at(&state.bodies[i], world_a)
+        } else {
+            [0.0; 3]
+        };
+        let v_b = if let Some(i) = idx_b {
+            velocity_at(&state.bodies[i], world_b)
+        } else {
+            [0.0; 3]
+        };
         let v_along = v_dot(v_sub(v_b, v_a), n);
         let f_total = -stiffness * stretch + (-damping * v_along);
         let force = v_mul(n, f_total);
 
-        if let Some(i) = idx_a { apply_force_at(&mut state.bodies[i], world_a, v_neg(force), dt); }
-        if let Some(i) = idx_b { apply_force_at(&mut state.bodies[i], world_b, force, dt); }
+        if let Some(i) = idx_a {
+            apply_force_at(&mut state.bodies[i], world_a, v_neg(force), dt);
+        }
+        if let Some(i) = idx_b {
+            apply_force_at(&mut state.bodies[i], world_b, force, dt);
+        }
 
         // Avoid the unused-warning on body_count when no springs apply.
         let _ = body_count;
     }
 }
 
-fn velocity_at(body: &crate::player::cast_member::PhysXRigidBody, world_point: [f64; 3]) -> [f64; 3] {
+fn velocity_at(
+    body: &crate::player::cast_member::PhysXRigidBody,
+    world_point: [f64; 3],
+) -> [f64; 3] {
     let r = v_sub(world_point, body.position);
     v_add(body.linear_velocity, v_cross(body.angular_velocity, r))
 }
 
 fn apply_force_at(
     body: &mut crate::player::cast_member::PhysXRigidBody,
-    world_point: [f64; 3], force: [f64; 3], dt: f64,
+    world_point: [f64; 3],
+    force: [f64; 3],
+    dt: f64,
 ) {
-    if matches!(body.body_type, PhysXBodyType::Static) || body.pinned || body.mass <= 0.0 { return; }
+    if matches!(body.body_type, PhysXBodyType::Static) || body.pinned || body.mass <= 0.0 {
+        return;
+    }
     let inv_mass = 1.0 / body.mass;
     let impulse = v_mul(force, dt);
     body.linear_velocity = v_add(body.linear_velocity, v_mul(impulse, inv_mass));
@@ -1212,7 +1536,9 @@ fn solve_linear_joints(state: &mut PhysXPhysicsState, dt: f64, baumgarte: f64) {
     let constraint_count = state.constraints.len();
     for ci in 0..constraint_count {
         let c = &state.constraints[ci];
-        if !matches!(c.kind, PhysXConstraintKind::LinearJoint) { continue; }
+        if !matches!(c.kind, PhysXConstraintKind::LinearJoint) {
+            continue;
+        }
         let body_a_id = c.body_a;
         let body_b_id = c.body_b;
         let anchor_a = c.anchor_a;
@@ -1221,7 +1547,9 @@ fn solve_linear_joints(state: &mut PhysXPhysicsState, dt: f64, baumgarte: f64) {
 
         let idx_a = body_a_id.and_then(|id| state.bodies.iter().position(|b| b.id == id));
         let idx_b = body_b_id.and_then(|id| state.bodies.iter().position(|b| b.id == id));
-        let (Some(ia), Some(ib)) = (idx_a, idx_b) else { continue; };
+        let (Some(ia), Some(ib)) = (idx_a, idx_b) else {
+            continue;
+        };
 
         let qa = axisangle_to_quat(state.bodies[ia].orientation);
         let qb = axisangle_to_quat(state.bodies[ib].orientation);

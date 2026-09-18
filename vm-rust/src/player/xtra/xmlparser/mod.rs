@@ -18,11 +18,16 @@ fn with_player_ref<T>(player: &DirPlayer, callback: impl FnOnce(&DirPlayer) -> T
     callback(player)
 }
 
-fn checked_player_datum<'a>(player: &'a DirPlayer, datum_ref: &DatumRef) -> Result<&'a Datum, ScriptError> {
-    player.allocator.try_get_datum(datum_ref).ok_or_else(|| ScriptError::new_code(
-        crate::player::ScriptErrorCode::InvalidReference,
-        "foreign or stale XmlParser argument".to_owned(),
-    ))
+fn checked_player_datum<'a>(
+    player: &'a DirPlayer,
+    datum_ref: &DatumRef,
+) -> Result<&'a Datum, ScriptError> {
+    player.allocator.try_get_datum(datum_ref).ok_or_else(|| {
+        ScriptError::new_code(
+            crate::player::ScriptErrorCode::InvalidReference,
+            "foreign or stale XmlParser argument".to_owned(),
+        )
+    })
 }
 
 /// Represents a parsed XML node
@@ -300,7 +305,11 @@ impl XmlParserXtraInstance {
     }
 
     /// makeList handler - converts parsed XML to Lingo property list
-    pub fn make_list(&self, player: &mut DirPlayer, symbols: &mut SymbolTable) -> Result<DatumRef, ScriptError> {
+    pub fn make_list(
+        &self,
+        player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
+    ) -> Result<DatumRef, ScriptError> {
         if let Some(ref root) = self.parsed_root {
             Self::node_to_prop_list(player, root, symbols)
         } else {
@@ -367,19 +376,32 @@ impl XmlParserXtraManager {
         }
     }
 
-    pub(crate) fn rebind_owner(&mut self, owner: OwnerToken) { self.owner = owner; }
+    pub(crate) fn rebind_owner(&mut self, owner: OwnerToken) {
+        self.owner = owner;
+    }
 
     pub(crate) fn reset(&mut self) {
         self.instances.clear();
         self.instance_counter = 0;
     }
 
-    pub(crate) fn create_instance_explicit(&mut self, _args: &[DatumRef]) -> Result<u32, ScriptError> {
+    pub(crate) fn create_instance_explicit(
+        &mut self,
+        _args: &[DatumRef],
+    ) -> Result<u32, ScriptError> {
         if !self.owner.is_arena_live() {
-            return Err(ScriptError::new_code(crate::player::ScriptErrorCode::Abort, "XmlParser owner was retired".to_owned()));
+            return Err(ScriptError::new_code(
+                crate::player::ScriptErrorCode::Abort,
+                "XmlParser owner was retired".to_owned(),
+            ));
         }
-        self.instance_counter = self.instance_counter.checked_add(1).ok_or_else(|| ScriptError::new("XmlParser instance id exhausted".to_owned()))?;
-        self.generation_counter = self.generation_counter.checked_add(1).ok_or_else(|| ScriptError::new("XmlParser instance generation exhausted".to_owned()))?;
+        self.instance_counter = self
+            .instance_counter
+            .checked_add(1)
+            .ok_or_else(|| ScriptError::new("XmlParser instance id exhausted".to_owned()))?;
+        self.generation_counter = self.generation_counter.checked_add(1).ok_or_else(|| {
+            ScriptError::new("XmlParser instance generation exhausted".to_owned())
+        })?;
         let mut instance = XmlParserXtraInstance::new();
         instance.generation = self.generation_counter;
         self.instances.insert(self.instance_counter, instance);
@@ -387,7 +409,9 @@ impl XmlParserXtraManager {
     }
 
     pub(crate) fn instance_generation(&self, instance_id: u32) -> Option<u64> {
-        self.instances.get(&instance_id).map(|instance| instance.generation)
+        self.instances
+            .get(&instance_id)
+            .map(|instance| instance.generation)
     }
 
     pub(crate) fn call_instance_handler_explicit(
@@ -444,7 +468,9 @@ impl XmlParserXtraManager {
                     .error
                     .clone()
                     .unwrap_or_else(|| format!("XML parsing error: {}", result));
-                with_player(player, |player| Ok(player.alloc_datum(Datum::String(message))))
+                with_player(player, |player| {
+                    Ok(player.alloc_datum(Datum::String(message)))
+                })
             }
             "makelist" => instance.make_list(player, symbols),
             "makesublist" => {
@@ -453,9 +479,9 @@ impl XmlParserXtraManager {
             }
             "geterror" => {
                 if let Some(ref error) = instance.error {
-                    with_player(player, 
-                        |player| Ok(player.alloc_datum(Datum::String(error.clone()))),
-                    )
+                    with_player(player, |player| {
+                        Ok(player.alloc_datum(Datum::String(error.clone())))
+                    })
                 } else {
                     Ok(DatumRef::Void)
                 }
@@ -608,7 +634,8 @@ impl XmlParserXtraManager {
                     let index_arg = args.get(1).ok_or_else(|| {
                         ScriptError::new("getPropRef requires an index".to_string())
                     })?;
-                    let prop_name = checked_player_datum(player, prop_arg)?.symbol_value(symbols)?;
+                    let prop_name =
+                        checked_player_datum(player, prop_arg)?.symbol_value(symbols)?;
                     let index = checked_player_datum(player, index_arg)?.int_value()?;
                     Ok::<_, ScriptError>((prop_name, index))
                 })?;

@@ -1,7 +1,11 @@
 use crate::{
     director::lingo::datum::Datum,
     player::{
-        DatumRef, DirPlayer, ScriptError, ScriptErrorCode, allocator::ScriptInstanceAllocatorTrait, reserve_player_mut, reserve_player_ref, symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable}, timeout::Timeout
+        allocator::ScriptInstanceAllocatorTrait,
+        reserve_player_mut, reserve_player_ref,
+        symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable},
+        timeout::Timeout,
+        DatumRef, DirPlayer, ScriptError, ScriptErrorCode,
     },
 };
 
@@ -34,23 +38,24 @@ fn validate_timeout_target(
 ) -> Result<DatumRef, ScriptError> {
     let target_datum = match target {
         DatumRef::Void => &Datum::Void,
-        _ => player
-            .allocator
-            .try_get_datum(target)
-            .ok_or_else(|| ScriptError::new_code(
+        _ => player.allocator.try_get_datum(target).ok_or_else(|| {
+            ScriptError::new_code(
                 ScriptErrorCode::InvalidReference,
                 format!("invalid datum reference {target}"),
-            ))?,
+            )
+        })?,
     };
     crate::player::compare::validate_direct_symbol_fields(target_datum, symbols)?;
     if let Datum::ScriptInstanceRef(instance_ref) = target_datum {
         player
             .allocator
             .get_script_instance_opt(instance_ref)
-            .ok_or_else(|| ScriptError::new_code(
-                ScriptErrorCode::InvalidReference,
-                "foreign or stale ScriptInstanceRef timeout target".to_owned(),
-            ))?;
+            .ok_or_else(|| {
+                ScriptError::new_code(
+                    ScriptErrorCode::InvalidReference,
+                    "foreign or stale ScriptInstanceRef timeout target".to_owned(),
+                )
+            })?;
     }
     Ok(target.clone())
 }
@@ -62,23 +67,24 @@ fn checked_datum<'a>(
 ) -> Result<&'a Datum, ScriptError> {
     let value = match datum {
         DatumRef::Void => &Datum::Void,
-        _ => player
-            .allocator
-            .try_get_datum(datum)
-            .ok_or_else(|| ScriptError::new_code(
+        _ => player.allocator.try_get_datum(datum).ok_or_else(|| {
+            ScriptError::new_code(
                 ScriptErrorCode::InvalidReference,
                 format!("invalid datum reference {datum}"),
-            ))?,
+            )
+        })?,
     };
     crate::player::compare::validate_direct_symbol_fields(value, symbols)?;
     if let Datum::ScriptInstanceRef(instance_ref) = value {
         player
             .allocator
             .get_script_instance_opt(instance_ref)
-            .ok_or_else(|| ScriptError::new_code(
-                ScriptErrorCode::InvalidReference,
-                "foreign or stale ScriptInstanceRef".to_owned(),
-            ))?;
+            .ok_or_else(|| {
+                ScriptError::new_code(
+                    ScriptErrorCode::InvalidReference,
+                    "foreign or stale ScriptInstanceRef".to_owned(),
+                )
+            })?;
     }
     Ok(value)
 }
@@ -139,13 +145,17 @@ impl TimeoutDatumHandlers {
         let timeout_datum = checked_datum(player, datum, symbols)?;
         let timeout_name = match timeout_datum {
             Datum::TimeoutFactory => {
-                let name = args.first().ok_or_else(|| ScriptError::new(
-                    "timeout.new() requires at least a name argument".to_owned(),
-                ))?;
+                let name = args.first().ok_or_else(|| {
+                    ScriptError::new("timeout.new() requires at least a name argument".to_owned())
+                })?;
                 checked_datum(player, name, symbols)?.string_value(symbols)?
             }
             Datum::TimeoutRef(timeout_name) => timeout_name.clone(),
-            _ => return Err(ScriptError::new("Cannot create timeout from non-timeout".to_owned())),
+            _ => {
+                return Err(ScriptError::new(
+                    "Cannot create timeout from non-timeout".to_owned(),
+                ))
+            }
         };
         let (period_arg, handler_arg, target_arg) = match timeout_datum {
             Datum::TimeoutFactory => {
@@ -173,7 +183,12 @@ impl TimeoutDatumHandlers {
                 .cast_manager
                 .find_member_ref_by_name(&timeout_name)
             {
-                if player.movie.cast_manager.get_script_by_ref(&script_ref).is_some() {
+                if player
+                    .movie
+                    .cast_manager
+                    .get_script_by_ref(&script_ref)
+                    .is_some()
+                {
                     use super::script::ScriptDatumHandlers;
                     let script_datum = player.alloc_datum(Datum::ScriptRef(script_ref));
                     match ScriptDatumHandlers::prepare_constructor(
@@ -217,33 +232,36 @@ impl TimeoutDatumHandlers {
         let timeout_handler = match checked_datum(player, &args[handler_arg], symbols)? {
             Datum::String(value) => symbols.intern(value),
             Datum::Symbol(value) => value.clone(),
-            _ => return Err(ScriptError::new(
-                "Timeout handler must be a string or symbol".to_owned(),
-            )),
+            _ => {
+                return Err(ScriptError::new(
+                    "Timeout handler must be a string or symbol".to_owned(),
+                ))
+            }
         };
         let target_ref = target_arg
             .map(|index| args[index].clone())
             .unwrap_or(DatumRef::Void);
         checked_datum(player, &target_ref, symbols)?;
         let timeout_period = timeout_period.max(0) as u32;
-        player.timeout_manager.forget_timeout(&timeout_name);
-        let mut timeout = Timeout {
+        let timeout = Timeout {
             handler: timeout_handler,
             name: timeout_name.clone(),
             period: timeout_period,
             target_ref: target_ref.clone(),
             is_scheduled: false,
+            incarnation: 0,
             next_fire_ms: 0.0,
         };
-        timeout.schedule();
-        player.timeout_manager.add_timeout(timeout);
-        Ok(TimeoutNewPlan::Complete(player.alloc_datum(Datum::timeout_instance(
-            timeout_name,
-            timeout_period as i32,
-            args[handler_arg].clone(),
-            target_ref,
-            None,
-        ))))
+        player.replace_timeout(timeout)?;
+        Ok(TimeoutNewPlan::Complete(player.alloc_datum(
+            Datum::timeout_instance(
+                timeout_name,
+                timeout_period as i32,
+                args[handler_arg].clone(),
+                target_ref,
+                None,
+            ),
+        )))
     }
 
     pub fn finish_new(
@@ -285,14 +303,18 @@ impl TimeoutDatumHandlers {
         };
         if let Some(instance) = script_instance {
             if let Some(handler_ref) = super::script_instance::ScriptInstanceUtils::get_handler(
-                Symbol::builtin(BuiltInSymbol::Destroy), &instance, player,
+                Symbol::builtin(BuiltInSymbol::Destroy),
+                &instance,
+                player,
             )? {
                 let receiver = match checked_datum(player, &instance, symbols)? {
                     Datum::ScriptInstanceRef(receiver) => receiver.clone(),
-                    _ => return Err(ScriptError::new_code(
-                        ScriptErrorCode::InvalidReference,
-                        "timeout script instance is stale".to_owned(),
-                    )),
+                    _ => {
+                        return Err(ScriptError::new_code(
+                            ScriptErrorCode::InvalidReference,
+                            "timeout script instance is stale".to_owned(),
+                        ))
+                    }
                 };
                 return Ok(TimeoutForgetPlan::Child {
                     receiver,
@@ -301,7 +323,7 @@ impl TimeoutDatumHandlers {
                 });
             }
         }
-        player.timeout_manager.forget_timeout(&timeout_name);
+        player.forget_timeout(&timeout_name);
         Ok(TimeoutForgetPlan::Complete(DatumRef::Void))
     }
 
@@ -312,7 +334,7 @@ impl TimeoutDatumHandlers {
         result: DatumRef,
     ) -> Result<DatumRef, ScriptError> {
         checked_datum(player, &result, symbols)?;
-        player.timeout_manager.forget_timeout(&timeout_name);
+        player.forget_timeout(&timeout_name);
         Ok(DatumRef::Void)
     }
 
@@ -322,7 +344,9 @@ impl TimeoutDatumHandlers {
         datum: &DatumRef,
     ) -> Result<bool, ScriptError> {
         let timeout = checked_datum(player, datum, symbols)?;
-        Ok(matches!(timeout, Datum::TimeoutInstance(instance) if instance.script_instance.is_some()))
+        Ok(
+            matches!(timeout, Datum::TimeoutInstance(instance) if instance.script_instance.is_some()),
+        )
     }
 
     fn forget(
@@ -336,7 +360,7 @@ impl TimeoutDatumHandlers {
             Datum::TimeoutInstance(ti) => ti.name.to_owned(),
             _ => return Err(ScriptError::new("Cannot forget non-timeout".to_string())),
         };
-        player.timeout_manager.forget_timeout(&timeout_name);
+        player.forget_timeout(&timeout_name);
         Ok(DatumRef::Void)
     }
 
@@ -372,23 +396,21 @@ impl TimeoutDatumHandlers {
                     ))),
                 }
             }
-            Datum::TimeoutInstance(ti) => {
-                match prop_lower {
-                    "name" => Ok(player.alloc_datum(Datum::String(ti.name.to_owned()))),
-                    "target" => validate_timeout_target(player, symbols, &ti.target),
-                    "period" => {
-                        let p = player
-                            .timeout_manager
-                            .get_timeout(&ti.name)
-                            .map_or(0, |t| t.period as i32);
-                        Ok(player.alloc_datum(Datum::Int(p)))
-                    }
-                    _ => Err(ScriptError::new(format!(
-                        "Cannot get timeout property {}",
-                        prop_name
-                    ))),
+            Datum::TimeoutInstance(ti) => match prop_lower {
+                "name" => Ok(player.alloc_datum(Datum::String(ti.name.to_owned()))),
+                "target" => validate_timeout_target(player, symbols, &ti.target),
+                "period" => {
+                    let p = player
+                        .timeout_manager
+                        .get_timeout(&ti.name)
+                        .map_or(0, |t| t.period as i32);
+                    Ok(player.alloc_datum(Datum::Int(p)))
                 }
-            }
+                _ => Err(ScriptError::new(format!(
+                    "Cannot get timeout property {}",
+                    prop_name
+                ))),
+            },
             _ => Err(ScriptError::new(
                 "Cannot get prop of non-timeout".to_string(),
             )),
@@ -406,11 +428,13 @@ impl TimeoutDatumHandlers {
         let timeout_name = match timeout_datum {
             Datum::TimeoutRef(timeout_name) => timeout_name.clone(),
             Datum::TimeoutInstance(ti) => ti.name.clone(),
-            _ => return Err(ScriptError::new(
-                "Cannot set prop of non-timeout".to_string(),
-            )),
+            _ => {
+                return Err(ScriptError::new(
+                    "Cannot set prop of non-timeout".to_string(),
+                ))
+            }
         };
-        
+
         symbols
             .lower(&prop)
             .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
@@ -446,10 +470,7 @@ impl TimeoutDatumHandlers {
             Some(BuiltInSymbol::Period) => {
                 let new_period = checked_datum(player, value, symbols)?.int_value()?;
                 let new_period = if new_period < 0 { 0 } else { new_period as u32 };
-                let timeout = player.timeout_manager.get_timeout_mut(&timeout_name);
-                if let Some(timeout) = timeout {
-                    timeout.period = new_period;
-                    timeout.schedule();
+                if player.set_timeout_period(&timeout_name, new_period)? {
                     Ok(())
                 } else {
                     Err(ScriptError::new(
@@ -468,10 +489,10 @@ impl TimeoutDatumHandlers {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_std::channel;
-    use crate::player::ownership::OwnerToken;
     use crate::player::cast_lib::CastMemberRef;
+    use crate::player::ownership::OwnerToken;
     use crate::player::script::ScriptInstance;
+    use async_std::channel;
 
     fn test_player() -> DirPlayer {
         let (tx, _rx) = channel::unbounded();
@@ -524,21 +545,29 @@ mod tests {
         let mut symbols = SymbolTable::new();
         let name = "scheduled-target".to_owned();
         let timeout_ref = player.alloc_datum(Datum::TimeoutRef(name.clone()));
-        player.timeout_manager.add_timeout(Timeout {
-            name: name.clone(),
-            period: 100,
-            handler: Symbol::builtin(BuiltInSymbol::Forget),
-            target_ref: DatumRef::Void,
-            is_scheduled: false,
-            next_fire_ms: 0.0,
-        });
-        let foreign_instance = foreign_player.allocator.alloc_script_instance(ScriptInstance {
-            instance_id: 1,
-            script: CastMemberRef { cast_lib: 1, cast_member: 1 },
-            ancestor: None,
-            properties: Default::default(),
-            begin_sprite_called: false,
-        });
+        player
+            .replace_timeout(Timeout {
+                name: name.clone(),
+                period: 100,
+                handler: Symbol::builtin(BuiltInSymbol::Forget),
+                target_ref: DatumRef::Void,
+                is_scheduled: false,
+                incarnation: 0,
+                next_fire_ms: 0.0,
+            })
+            .expect("test timeout replacement must succeed");
+        let foreign_instance = foreign_player
+            .allocator
+            .alloc_script_instance(ScriptInstance {
+                instance_id: 1,
+                script: CastMemberRef {
+                    cast_lib: 1,
+                    cast_member: 1,
+                },
+                ancestor: None,
+                properties: Default::default(),
+                begin_sprite_called: false,
+            });
         let foreign_target = player.alloc_datum(Datum::ScriptInstanceRef(foreign_instance));
 
         let error = TimeoutDatumHandlers::set_prop(
@@ -551,7 +580,11 @@ mod tests {
         .expect_err("foreign target must be rejected");
         assert_eq!(error.code, ScriptErrorCode::InvalidReference);
         assert!(matches!(
-            player.timeout_manager.get_timeout(&name).unwrap().target_ref,
+            player
+                .timeout_manager
+                .get_timeout(&name)
+                .unwrap()
+                .target_ref,
             DatumRef::Void
         ));
     }

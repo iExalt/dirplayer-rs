@@ -1,7 +1,14 @@
 use crate::{
     director::lingo::datum::Datum,
     player::{
-        HandlerExecutionResult, ScriptError, compare::datum_is_zero, datum_formatting::format_datum, datum_ref::DatumRef, handlers::datum_handlers::script_instance::ScriptInstanceUtils, scope::StackDatum, script::{get_current_handler_def, get_current_script}, symbols::symbol::Symbol
+        compare::datum_is_zero,
+        datum_formatting::format_datum,
+        datum_ref::DatumRef,
+        handlers::datum_handlers::script_instance::ScriptInstanceUtils,
+        scope::StackDatum,
+        script::{get_current_handler_def, get_current_script},
+        symbols::symbol::Symbol,
+        HandlerExecutionResult, ScriptError,
     },
 };
 
@@ -14,7 +21,10 @@ pub(crate) struct PreparedObjCall {
     pub(crate) name: Symbol,
     pub(crate) args: Vec<DatumRef>,
     pub(crate) push_return: bool,
-    pub(crate) lingo_target: Option<(crate::player::ScriptInstanceRef, crate::player::script::ScriptHandlerRef)>,
+    pub(crate) lingo_target: Option<(
+        crate::player::ScriptInstanceRef,
+        crate::player::script::ScriptHandlerRef,
+    )>,
 }
 
 /// Decode ObjCall's stack payload once while the session owns its player.
@@ -98,8 +108,10 @@ pub(crate) fn prepare_obj_call(
 }
 
 impl FlowControlBytecodeHandler {
-    pub fn ret(runtime: &mut crate::player::session::ExecutionContext,
-        ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+    pub fn ret(
+        runtime: &mut crate::player::session::ExecutionContext,
+        ctx: &BytecodeHandlerContext,
+    ) -> Result<HandlerExecutionResult, ScriptError> {
         runtime.with_player(|player| {
             let scope = player.scopes.get_mut(ctx.scope_ref()).unwrap();
             scope.return_value = DatumRef::Void;
@@ -113,17 +125,21 @@ impl FlowControlBytecodeHandler {
     /// (the loader→game command bridge); `tell sprite(<film loop>)` re-points
     /// score reads at the film loop's own playhead; other targets run on THIS
     /// player. Stack is a Vec so `tell` blocks can nest.
-    pub fn start_tell(runtime: &mut crate::player::session::ExecutionContext,
-        ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+    pub fn start_tell(
+        runtime: &mut crate::player::session::ExecutionContext,
+        ctx: &BytecodeHandlerContext,
+    ) -> Result<HandlerExecutionResult, ScriptError> {
         runtime.with_player(|player| {
             let target_ref = {
-                let (scopes, allocator, bitmap_manager) =
-                    (&mut player.scopes, &mut player.allocator, &mut player.bitmap_manager);
+                let (scopes, allocator, bitmap_manager) = (
+                    &mut player.scopes,
+                    &mut player.allocator,
+                    &mut player.bitmap_manager,
+                );
                 let scope = scopes.get_mut(ctx.scope_ref()).unwrap();
                 scope.stack.pop_ref_with(allocator, bitmap_manager)
-            }.ok_or_else(|| {
-                ScriptError::new("starttell: operand stack is empty".to_string())
-            })?;
+            }
+            .ok_or_else(|| ScriptError::new("starttell: operand stack is empty".to_string()))?;
             let target = player.get_datum(&target_ref).clone();
             // Resolve the target to the member it is showing; a sprite tells
             // through to its member, a member ref is already one.
@@ -159,8 +175,10 @@ impl FlowControlBytecodeHandler {
     }
 
     /// `end tell` — pop the current tell target.
-    pub fn end_tell(runtime: &mut crate::player::session::ExecutionContext,
-        ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+    pub fn end_tell(
+        runtime: &mut crate::player::session::ExecutionContext,
+        ctx: &BytecodeHandlerContext,
+    ) -> Result<HandlerExecutionResult, ScriptError> {
         let _ = ctx;
         runtime.with_player(|player| {
             player.tell_target_stack.pop();
@@ -287,8 +305,10 @@ impl FlowControlBytecodeHandler {
         })
     }
 
-    pub fn jmp(runtime: &mut crate::player::session::ExecutionContext,
-        ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+    pub fn jmp(
+        runtime: &mut crate::player::session::ExecutionContext,
+        ctx: &BytecodeHandlerContext,
+    ) -> Result<HandlerExecutionResult, ScriptError> {
         runtime.with_player(|player| {
             let bytecode = player.get_ctx_current_bytecode(ctx);
             let new_bytecode_index = {
@@ -302,8 +322,10 @@ impl FlowControlBytecodeHandler {
         })
     }
 
-    pub fn end_repeat(runtime: &mut crate::player::session::ExecutionContext,
-        ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+    pub fn end_repeat(
+        runtime: &mut crate::player::session::ExecutionContext,
+        ctx: &BytecodeHandlerContext,
+    ) -> Result<HandlerExecutionResult, ScriptError> {
         runtime.with_player(|player| {
             let new_index = {
                 let bytecode = player.get_ctx_current_bytecode(ctx);
@@ -323,19 +345,34 @@ impl FlowControlBytecodeHandler {
     ) -> Result<HandlerExecutionResult, ScriptError> {
         runtime.with_player_and_symbols(|player, symbols| {
             let (arg1, arg2) = {
-                let (scopes, allocator, bitmap_manager) =
-                    (&mut player.scopes, &mut player.allocator, &mut player.bitmap_manager);
+                let (scopes, allocator, bitmap_manager) = (
+                    &mut player.scopes,
+                    &mut player.allocator,
+                    &mut player.bitmap_manager,
+                );
                 let scope = scopes.get_mut(ctx.scope_ref()).unwrap();
-                let arg1 = scope.stack.pop_ref_with(allocator, bitmap_manager)
-                    .ok_or_else(|| ScriptError::new("call_javascript: stack underflow (arg1)".to_string()))?;
-                let arg2 = scope.stack.pop_ref_with(allocator, bitmap_manager)
-                    .ok_or_else(|| ScriptError::new("call_javascript: stack underflow (arg2)".to_string()))?;
+                let arg1 = scope
+                    .stack
+                    .pop_ref_with(allocator, bitmap_manager)
+                    .ok_or_else(|| {
+                        ScriptError::new("call_javascript: stack underflow (arg1)".to_string())
+                    })?;
+                let arg2 = scope
+                    .stack
+                    .pop_ref_with(allocator, bitmap_manager)
+                    .ok_or_else(|| {
+                        ScriptError::new("call_javascript: stack underflow (arg2)".to_string())
+                    })?;
                 (arg1, arg2)
             };
             let arg1_formatted = format_datum(&arg1, symbols, player)?;
             let arg2_formatted = format_datum(&arg2, symbols, player)?;
 
-            log::warn!("TODO: call_javascript with args: {}, {}", arg1_formatted, arg2_formatted);
+            log::warn!(
+                "TODO: call_javascript with args: {}, {}",
+                arg1_formatted,
+                arg2_formatted
+            );
             Ok(HandlerExecutionResult::Advance)
         })
     }

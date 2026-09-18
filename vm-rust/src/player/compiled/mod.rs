@@ -229,7 +229,8 @@ fn as_int(d: &StackDatum) -> i32 {
 /// (the PoC bench uses it to set up loop counters). Returns the top of stack.
 pub fn run(compiled: &CompiledHandler, locals_init: &[StackDatum]) -> StackDatum {
     let mut st: Vec<StackDatum> = Vec::with_capacity(32);
-    let mut locals: Vec<StackDatum> = vec![StackDatum::Void; compiled.n_locals.max(locals_init.len())];
+    let mut locals: Vec<StackDatum> =
+        vec![StackDatum::Void; compiled.n_locals.max(locals_init.len())];
     for (i, v) in locals_init.iter().enumerate() {
         locals[i] = v.clone();
     }
@@ -237,21 +238,89 @@ pub fn run(compiled: &CompiledHandler, locals_init: &[StackDatum]) -> StackDatum
     let mut pc = 0usize;
     loop {
         match &ops[pc] {
-            IrOp::PushInt(n) => { st.push(StackDatum::Int(*n)); pc += 1; }
-            IrOp::GetLocal(s) => { st.push(locals[*s as usize].clone()); pc += 1; }
-            IrOp::SetLocal(s) => { locals[*s as usize] = st.pop().unwrap(); pc += 1; }
-            IrOp::Add => { let b = st.pop().unwrap(); let a = st.pop().unwrap(); st.push(StackDatum::Int(as_int(&a) + as_int(&b))); pc += 1; }
-            IrOp::Sub => { let b = st.pop().unwrap(); let a = st.pop().unwrap(); st.push(StackDatum::Int(as_int(&a).wrapping_sub(as_int(&b)))); pc += 1; }
-            IrOp::Mul => { let b = st.pop().unwrap(); let a = st.pop().unwrap(); st.push(StackDatum::Int(as_int(&a).wrapping_mul(as_int(&b)))); pc += 1; }
-            IrOp::Lt => { let b = st.pop().unwrap(); let a = st.pop().unwrap(); st.push(StackDatum::Int((as_int(&a) < as_int(&b)) as i32)); pc += 1; }
-            IrOp::LtEq => { let b = st.pop().unwrap(); let a = st.pop().unwrap(); st.push(StackDatum::Int((as_int(&a) <= as_int(&b)) as i32)); pc += 1; }
-            IrOp::Gt => { let b = st.pop().unwrap(); let a = st.pop().unwrap(); st.push(StackDatum::Int((as_int(&a) > as_int(&b)) as i32)); pc += 1; }
-            IrOp::GtEq => { let b = st.pop().unwrap(); let a = st.pop().unwrap(); st.push(StackDatum::Int((as_int(&a) >= as_int(&b)) as i32)); pc += 1; }
-            IrOp::Eq => { let b = st.pop().unwrap(); let a = st.pop().unwrap(); st.push(StackDatum::Int((as_int(&a) == as_int(&b)) as i32)); pc += 1; }
-            IrOp::NtEq => { let b = st.pop().unwrap(); let a = st.pop().unwrap(); st.push(StackDatum::Int((as_int(&a) != as_int(&b)) as i32)); pc += 1; }
-            IrOp::JmpIfZero(t) => { let c = st.pop().unwrap(); if as_int(&c) == 0 { pc = *t; } else { pc += 1; } }
-            IrOp::Jmp(t) => { pc = *t; }
-            IrOp::Pop(n) => { for _ in 0..*n { st.pop(); } pc += 1; }
+            IrOp::PushInt(n) => {
+                st.push(StackDatum::Int(*n));
+                pc += 1;
+            }
+            IrOp::GetLocal(s) => {
+                st.push(locals[*s as usize].clone());
+                pc += 1;
+            }
+            IrOp::SetLocal(s) => {
+                locals[*s as usize] = st.pop().unwrap();
+                pc += 1;
+            }
+            IrOp::Add => {
+                let b = st.pop().unwrap();
+                let a = st.pop().unwrap();
+                st.push(StackDatum::Int(as_int(&a) + as_int(&b)));
+                pc += 1;
+            }
+            IrOp::Sub => {
+                let b = st.pop().unwrap();
+                let a = st.pop().unwrap();
+                st.push(StackDatum::Int(as_int(&a).wrapping_sub(as_int(&b))));
+                pc += 1;
+            }
+            IrOp::Mul => {
+                let b = st.pop().unwrap();
+                let a = st.pop().unwrap();
+                st.push(StackDatum::Int(as_int(&a).wrapping_mul(as_int(&b))));
+                pc += 1;
+            }
+            IrOp::Lt => {
+                let b = st.pop().unwrap();
+                let a = st.pop().unwrap();
+                st.push(StackDatum::Int((as_int(&a) < as_int(&b)) as i32));
+                pc += 1;
+            }
+            IrOp::LtEq => {
+                let b = st.pop().unwrap();
+                let a = st.pop().unwrap();
+                st.push(StackDatum::Int((as_int(&a) <= as_int(&b)) as i32));
+                pc += 1;
+            }
+            IrOp::Gt => {
+                let b = st.pop().unwrap();
+                let a = st.pop().unwrap();
+                st.push(StackDatum::Int((as_int(&a) > as_int(&b)) as i32));
+                pc += 1;
+            }
+            IrOp::GtEq => {
+                let b = st.pop().unwrap();
+                let a = st.pop().unwrap();
+                st.push(StackDatum::Int((as_int(&a) >= as_int(&b)) as i32));
+                pc += 1;
+            }
+            IrOp::Eq => {
+                let b = st.pop().unwrap();
+                let a = st.pop().unwrap();
+                st.push(StackDatum::Int((as_int(&a) == as_int(&b)) as i32));
+                pc += 1;
+            }
+            IrOp::NtEq => {
+                let b = st.pop().unwrap();
+                let a = st.pop().unwrap();
+                st.push(StackDatum::Int((as_int(&a) != as_int(&b)) as i32));
+                pc += 1;
+            }
+            IrOp::JmpIfZero(t) => {
+                let c = st.pop().unwrap();
+                if as_int(&c) == 0 {
+                    pc = *t;
+                } else {
+                    pc += 1;
+                }
+            }
+            IrOp::Jmp(t) => {
+                pc = *t;
+            }
+            IrOp::Pop(n) => {
+                for _ in 0..*n {
+                    st.pop();
+                }
+                pc += 1;
+            }
             IrOp::GetParam(_) => unreachable!("GetParam not used by the pure-int bench runner"),
             IrOp::Escape { .. } => unreachable!("the pure-int bench runner compiles no escapes"),
             IrOp::Ret => return st.pop().unwrap_or(StackDatum::Void),
@@ -332,7 +401,12 @@ fn ir_cmp(
 ) -> Result<StackDatum, ScriptError> {
     if let (StackDatum::Int(x), StackDatum::Int(y)) = (&a, &b) {
         let r = match kind {
-            0 => x < y, 1 => x <= y, 2 => x > y, 3 => x >= y, 4 => x == y, _ => x != y,
+            0 => x < y,
+            1 => x <= y,
+            2 => x > y,
+            3 => x >= y,
+            4 => x == y,
+            _ => x != y,
         };
         return Ok(StackDatum::Int(r as i32));
     }
@@ -342,9 +416,15 @@ fn ir_cmp(
     let r = player.get_datum(&br);
     let res = match kind {
         0 => datum_less_than(l, r, &player.allocator, symbols)?,
-        1 => datum_less_than(l, r, &player.allocator, symbols)? || datum_equals(l, r, &player.allocator, symbols)?,
+        1 => {
+            datum_less_than(l, r, &player.allocator, symbols)?
+                || datum_equals(l, r, &player.allocator, symbols)?
+        }
         2 => datum_greater_than(l, r, &player.allocator, symbols)?,
-        3 => datum_greater_than(l, r, &player.allocator, symbols)? || datum_equals(l, r, &player.allocator, symbols)?,
+        3 => {
+            datum_greater_than(l, r, &player.allocator, symbols)?
+                || datum_equals(l, r, &player.allocator, symbols)?
+        }
         4 => datum_equals(l, r, &player.allocator, symbols)?,
         _ => !datum_equals(l, r, &player.allocator, symbols)?,
     };
@@ -352,15 +432,18 @@ fn ir_cmp(
 }
 
 #[inline]
-fn ir_is_zero(player: &mut DirPlayer, symbols: &SymbolTable, v: &StackDatum) -> Result<bool, ScriptError> {
+fn ir_is_zero(
+    player: &mut DirPlayer,
+    symbols: &SymbolTable,
+    v: &StackDatum,
+) -> Result<bool, ScriptError> {
     match v {
         StackDatum::Int(n) => Ok(*n == 0),
         StackDatum::Void => Ok(true),
         other => {
-            let r = other.clone().into_ref_with(
-                &mut player.allocator,
-                &mut player.bitmap_manager,
-            );
+            let r = other
+                .clone()
+                .into_ref_with(&mut player.allocator, &mut player.bitmap_manager);
             datum_is_zero(player.get_datum(&r), &player.allocator, symbols)
         }
     }
@@ -530,16 +613,19 @@ fn run_handler_resumable_inner(
         };
     }
     macro_rules! st_push {
-        ($v:expr) => {
-            {{
+        ($v:expr) => {{
+            {
                 let value = $v;
                 player.scopes[scope_ref].stack.push_value(value)
-            }}
-        };
+            }
+        }};
     }
     macro_rules! st_pop {
         () => {
-            player.scopes[scope_ref].stack.pop_value().unwrap_or(StackDatum::Void)
+            player.scopes[scope_ref]
+                .stack
+                .pop_value()
+                .unwrap_or(StackDatum::Void)
         };
     }
 
@@ -568,8 +654,14 @@ fn run_handler_resumable_inner(
             _ => {}
         }
         match &ops[pc] {
-            IrOp::PushInt(n) => { st_push!(StackDatum::Int(*n)); pc += 1; }
-            IrOp::GetLocal(s) => { st_push!(lc_get!(*s)); pc += 1; }
+            IrOp::PushInt(n) => {
+                st_push!(StackDatum::Int(*n));
+                pc += 1;
+            }
+            IrOp::GetLocal(s) => {
+                st_push!(lc_get!(*s));
+                pc += 1;
+            }
             IrOp::SetLocal(s) => {
                 let raw = st_pop!();
                 let v = cow_on_assign(player, raw);
@@ -583,43 +675,89 @@ fn run_handler_resumable_inner(
                 st_push!(StackDatum::Ref(dr));
                 pc += 1;
             }
-            IrOp::Add => { let b = st_pop!(); let a = st_pop!(); st_push!(ir_add(player, symbols, a, b)?); pc += 1; }
-            IrOp::Sub => { let b = st_pop!(); let a = st_pop!(); st_push!(ir_sub(player, symbols, a, b)?); pc += 1; }
-            IrOp::Mul => { let b = st_pop!(); let a = st_pop!(); st_push!(ir_mul(player, symbols, a, b)?); pc += 1; }
-            IrOp::Lt => { let b = st_pop!(); let a = st_pop!(); st_push!(ir_cmp(player, symbols, a, b, 0)?); pc += 1; }
-            IrOp::LtEq => { let b = st_pop!(); let a = st_pop!(); st_push!(ir_cmp(player, symbols, a, b, 1)?); pc += 1; }
-            IrOp::Gt => { let b = st_pop!(); let a = st_pop!(); st_push!(ir_cmp(player, symbols, a, b, 2)?); pc += 1; }
-            IrOp::GtEq => { let b = st_pop!(); let a = st_pop!(); st_push!(ir_cmp(player, symbols, a, b, 3)?); pc += 1; }
-            IrOp::Eq => { let b = st_pop!(); let a = st_pop!(); st_push!(ir_cmp(player, symbols, a, b, 4)?); pc += 1; }
-            IrOp::NtEq => { let b = st_pop!(); let a = st_pop!(); st_push!(ir_cmp(player, symbols, a, b, 5)?); pc += 1; }
+            IrOp::Add => {
+                let b = st_pop!();
+                let a = st_pop!();
+                st_push!(ir_add(player, symbols, a, b)?);
+                pc += 1;
+            }
+            IrOp::Sub => {
+                let b = st_pop!();
+                let a = st_pop!();
+                st_push!(ir_sub(player, symbols, a, b)?);
+                pc += 1;
+            }
+            IrOp::Mul => {
+                let b = st_pop!();
+                let a = st_pop!();
+                st_push!(ir_mul(player, symbols, a, b)?);
+                pc += 1;
+            }
+            IrOp::Lt => {
+                let b = st_pop!();
+                let a = st_pop!();
+                st_push!(ir_cmp(player, symbols, a, b, 0)?);
+                pc += 1;
+            }
+            IrOp::LtEq => {
+                let b = st_pop!();
+                let a = st_pop!();
+                st_push!(ir_cmp(player, symbols, a, b, 1)?);
+                pc += 1;
+            }
+            IrOp::Gt => {
+                let b = st_pop!();
+                let a = st_pop!();
+                st_push!(ir_cmp(player, symbols, a, b, 2)?);
+                pc += 1;
+            }
+            IrOp::GtEq => {
+                let b = st_pop!();
+                let a = st_pop!();
+                st_push!(ir_cmp(player, symbols, a, b, 3)?);
+                pc += 1;
+            }
+            IrOp::Eq => {
+                let b = st_pop!();
+                let a = st_pop!();
+                st_push!(ir_cmp(player, symbols, a, b, 4)?);
+                pc += 1;
+            }
+            IrOp::NtEq => {
+                let b = st_pop!();
+                let a = st_pop!();
+                st_push!(ir_cmp(player, symbols, a, b, 5)?);
+                pc += 1;
+            }
             IrOp::JmpIfZero(t) => {
                 let c = st_pop!();
                 if ir_is_zero(player, symbols, &c)? {
                     let t = *t;
                     if t <= pc {
                         if let Some(e) = back_jump(player, scope_ref, t, &mut backjumps) {
-                            return Ok(IrRunOutcome {
-                                exit: e,
-                                backjumps,
-                            });
+                            return Ok(IrRunOutcome { exit: e, backjumps });
                         }
                     }
                     pc = t;
-                } else { pc += 1; }
+                } else {
+                    pc += 1;
+                }
             }
             IrOp::Jmp(t) => {
                 let t = *t;
                 if t <= pc {
                     if let Some(e) = back_jump(player, scope_ref, t, &mut backjumps) {
-                        return Ok(IrRunOutcome {
-                            exit: e,
-                            backjumps,
-                        });
+                        return Ok(IrRunOutcome { exit: e, backjumps });
                     }
                 }
                 pc = t;
             }
-            IrOp::Pop(n) => { for _ in 0..*n { let _ = st_pop!(); } pc += 1; }
+            IrOp::Pop(n) => {
+                for _ in 0..*n {
+                    let _ = st_pop!();
+                }
+                pc += 1;
+            }
             IrOp::Escape => unreachable!("handled before this match"),
             IrOp::Ret => {
                 // EXACTLY `FlowControlBytecodeHandler::ret`: VOID, and clear the
@@ -658,7 +796,11 @@ mod tests {
         let (tx, _rx) = async_std::channel::unbounded();
         DirPlayer::new_with_owner(
             tx,
-            OwnerToken::new(OwnerKey { session: 7, player: 3, generation: 1 }),
+            OwnerToken::new(OwnerKey {
+                session: 7,
+                player: 3,
+                generation: 1,
+            }),
         )
     }
 
@@ -678,8 +820,11 @@ mod tests {
 
     fn stack_top_int(player: &mut DirPlayer, slot: ScopeRef) -> i32 {
         let top = {
-            let (scopes, allocator, bitmap_manager) =
-                (&mut player.scopes, &mut player.allocator, &mut player.bitmap_manager);
+            let (scopes, allocator, bitmap_manager) = (
+                &mut player.scopes,
+                &mut player.allocator,
+                &mut player.bitmap_manager,
+            );
             scopes[slot]
                 .stack
                 .snapshot_refs_with(allocator, bitmap_manager)
@@ -711,12 +856,24 @@ mod tests {
         let mut player = make_player();
         let slot = player.push_scope();
         let ops = vec![
-            IrOp::PushInt(0), IrOp::SetLocal(0),
-            IrOp::PushInt(1), IrOp::SetLocal(1),
-            IrOp::GetLocal(1), IrOp::PushInt(10), IrOp::LtEq, IrOp::JmpIfZero(17),
-            IrOp::GetLocal(0), IrOp::GetLocal(1), IrOp::Add, IrOp::SetLocal(0),
-            IrOp::GetLocal(1), IrOp::PushInt(1), IrOp::Add, IrOp::SetLocal(1),
-            IrOp::Jmp(4), IrOp::GetLocal(0),
+            IrOp::PushInt(0),
+            IrOp::SetLocal(0),
+            IrOp::PushInt(1),
+            IrOp::SetLocal(1),
+            IrOp::GetLocal(1),
+            IrOp::PushInt(10),
+            IrOp::LtEq,
+            IrOp::JmpIfZero(17),
+            IrOp::GetLocal(0),
+            IrOp::GetLocal(1),
+            IrOp::Add,
+            IrOp::SetLocal(0),
+            IrOp::GetLocal(1),
+            IrOp::PushInt(1),
+            IrOp::Add,
+            IrOp::SetLocal(1),
+            IrOp::Jmp(4),
+            IrOp::GetLocal(0),
         ];
         let compiled = CompiledHandler { ops, n_locals: 2 };
         let scope_token = token(&player, slot);
@@ -868,13 +1025,30 @@ mod tests {
         use crate::player::debug::Breakpoint;
         let mut player = make_player();
         let mut compiled = CompiledHandler {
-            ops: vec![IrOp::PushInt(5), IrOp::SetLocal(0), IrOp::PushInt(6), IrOp::SetLocal(0)],
+            ops: vec![
+                IrOp::PushInt(5),
+                IrOp::SetLocal(0),
+                IrOp::PushInt(6),
+                IrOp::SetLocal(0),
+            ],
             n_locals: 1,
         };
         let bps = vec![
-            Breakpoint { script_name: "s".into(), handler_name: "h".into(), bytecode_index: 3 },
-            Breakpoint { script_name: "s".into(), handler_name: "other".into(), bytecode_index: 1 },
-            Breakpoint { script_name: "s".into(), handler_name: "h".into(), bytecode_index: 99 },
+            Breakpoint {
+                script_name: "s".into(),
+                handler_name: "h".into(),
+                bytecode_index: 3,
+            },
+            Breakpoint {
+                script_name: "s".into(),
+                handler_name: "other".into(),
+                bytecode_index: 1,
+            },
+            Breakpoint {
+                script_name: "s".into(),
+                handler_name: "h".into(),
+                bytecode_index: 99,
+            },
         ];
         apply_breakpoints(&mut compiled, &bps, "s", "h");
         assert!(matches!(compiled.ops[3], IrOp::Escape));
@@ -884,7 +1058,10 @@ mod tests {
         let symbols = make_symbols();
         assert!(matches!(
             run_handler_resumable(&compiled, &scope_token, &mut player, &symbols),
-            Ok(IrRunOutcome { exit: IrExit::Escape, backjumps: 0 })
+            Ok(IrRunOutcome {
+                exit: IrExit::Escape,
+                backjumps: 0
+            })
         ));
         assert_eq!(player.scopes[slot].bytecode_index, 3);
         player.pop_scope();
@@ -903,18 +1080,27 @@ mod tests {
                 Bytecode::new(OpCode::GetLocal, 0, 3),
             ],
             bytecode_index_map: fxhash::FxHashMap::default(),
-            argument_name_ids: vec![], local_name_ids: vec![0], global_name_ids: vec![],
+            argument_name_ids: vec![],
+            local_name_ids: vec![0],
+            global_name_ids: vec![],
             compiled_ir: std::cell::RefCell::new(None),
         };
         let compiled = compile(&handler, 1).unwrap();
-        assert_eq!(compiled.ops.len(), handler.bytecode_array.len(), "IR must be 1:1");
+        assert_eq!(
+            compiled.ops.len(),
+            handler.bytecode_array.len(),
+            "IR must be 1:1"
+        );
         assert!(matches!(compiled.ops[2], IrOp::Escape));
         let slot = player.push_scope();
         let scope_token = token(&player, slot);
         let symbols = make_symbols();
         assert!(matches!(
             run_handler_resumable(&compiled, &scope_token, &mut player, &symbols),
-            Ok(IrRunOutcome { exit: IrExit::Escape, backjumps: 0 })
+            Ok(IrRunOutcome {
+                exit: IrExit::Escape,
+                backjumps: 0
+            })
         ));
         assert!(matches!(player.scopes[slot].local(0), StackDatum::Int(5)));
         assert!(player.scopes[slot].local_is_assigned(0));
@@ -922,7 +1108,10 @@ mod tests {
         player.scopes[slot].bytecode_index = 3;
         assert!(matches!(
             run_handler_resumable(&compiled, &scope_token, &mut player, &symbols),
-            Ok(IrRunOutcome { exit: IrExit::Done, backjumps: 0 })
+            Ok(IrRunOutcome {
+                exit: IrExit::Done,
+                backjumps: 0
+            })
         ));
         assert_eq!(stack_top_int(&mut player, slot), 5);
         player.pop_scope();
@@ -945,9 +1134,18 @@ mod tests {
         let mut other = make_player();
         let foreign = other.push_scope();
         let foreign_token = token(&other, foreign);
-        let compiled = CompiledHandler { ops: vec![IrOp::PushInt(1)], n_locals: 8 };
+        let compiled = CompiledHandler {
+            ops: vec![IrOp::PushInt(1)],
+            n_locals: 8,
+        };
         let symbols = make_symbols();
-        assert_eq!(run_handler_resumable(&compiled, &foreign_token, &mut player, &symbols).err().unwrap().code, ScriptErrorCode::Abort);
+        assert_eq!(
+            run_handler_resumable(&compiled, &foreign_token, &mut player, &symbols)
+                .err()
+                .unwrap()
+                .code,
+            ScriptErrorCode::Abort
+        );
         assert_eq!(player.scopes[slot].bytecode_index, snapshot.0);
         assert_eq!(player.scopes[slot].locals.len(), snapshot.1.len());
         assert!(matches!(player.scopes[slot].local(0), StackDatum::Int(9)));
@@ -956,7 +1154,13 @@ mod tests {
         assert_eq!(player.scopes[slot].return_value, snapshot.3);
         let epoch_stale = token(&player, slot);
         player.bump_scope_invalidation_epoch();
-        assert_eq!(run_handler(&compiled, &epoch_stale, &mut player, &symbols).err().unwrap().code, ScriptErrorCode::Abort);
+        assert_eq!(
+            run_handler(&compiled, &epoch_stale, &mut player, &symbols)
+                .err()
+                .unwrap()
+                .code,
+            ScriptErrorCode::Abort
+        );
         assert_eq!(player.scopes[slot].bytecode_index, snapshot.0);
         assert!(matches!(player.scopes[slot].local(0), StackDatum::Int(9)));
         assert_eq!(stack_top_int(&mut player, slot), 11);
@@ -965,7 +1169,13 @@ mod tests {
         player.pop_scope();
         let replacement = player.push_scope();
         assert_eq!(replacement, slot);
-        assert_eq!(run_handler_resumable(&compiled, &generation_stale, &mut player, &symbols).err().unwrap().code, ScriptErrorCode::Abort);
+        assert_eq!(
+            run_handler_resumable(&compiled, &generation_stale, &mut player, &symbols)
+                .err()
+                .unwrap()
+                .code,
+            ScriptErrorCode::Abort
+        );
         assert_eq!(player.scopes[slot].bytecode_index, 0);
         assert_eq!(player.scopes[slot].locals.len(), 0);
     }
@@ -979,8 +1189,12 @@ mod tests {
         player.scopes[float_slot].args.extend([lhs, rhs]);
         let float_code = CompiledHandler {
             ops: vec![
-                IrOp::GetParam(0), IrOp::GetParam(1), IrOp::Add,
-                IrOp::SetLocal(0), IrOp::GetLocal(0), IrOp::Ret,
+                IrOp::GetParam(0),
+                IrOp::GetParam(1),
+                IrOp::Add,
+                IrOp::SetLocal(0),
+                IrOp::GetLocal(0),
+                IrOp::Ret,
             ],
             n_locals: 1,
         };
@@ -1024,7 +1238,9 @@ mod tests {
         let arithmetic_slot = player.push_scope();
         let foreign_ref = player.alloc_datum(Datum::Symbol(foreign_symbol.clone()));
         let integer_ref = player.alloc_datum(Datum::Int(1));
-        player.scopes[arithmetic_slot].args.extend([foreign_ref, integer_ref]);
+        player.scopes[arithmetic_slot]
+            .args
+            .extend([foreign_ref, integer_ref]);
         let arithmetic = CompiledHandler {
             ops: vec![IrOp::GetParam(0), IrOp::GetParam(1), IrOp::Add],
             n_locals: 0,
@@ -1036,7 +1252,9 @@ mod tests {
         let comparison_slot = player.push_scope();
         let foreign_ref = player.alloc_datum(Datum::Symbol(foreign_symbol));
         let integer_ref = player.alloc_datum(Datum::Int(1));
-        player.scopes[comparison_slot].args.extend([foreign_ref, integer_ref]);
+        player.scopes[comparison_slot]
+            .args
+            .extend([foreign_ref, integer_ref]);
         let comparison = CompiledHandler {
             ops: vec![IrOp::GetParam(0), IrOp::GetParam(1), IrOp::Eq],
             n_locals: 0,

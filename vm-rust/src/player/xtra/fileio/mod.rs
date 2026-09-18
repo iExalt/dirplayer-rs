@@ -1,27 +1,36 @@
 use fxhash::FxHashMap;
 use log::debug;
 
+use crate::player::{DirPlayer, OwnerToken};
 use crate::{
     director::lingo::datum::Datum,
     player::{symbols::symbol_table::SymbolTable, DatumRef, ScriptError},
 };
-use crate::player::{DirPlayer, OwnerToken};
 
 fn with_player<T>(player: &mut DirPlayer, callback: impl FnOnce(&mut DirPlayer) -> T) -> T {
     callback(player)
 }
 
-fn checked_player_datum<'a>(player: &'a DirPlayer, datum_ref: &DatumRef) -> Result<&'a Datum, ScriptError> {
-    player.allocator.try_get_datum(datum_ref).ok_or_else(|| ScriptError::new_code(
-        crate::player::ScriptErrorCode::InvalidReference,
-        "foreign or stale FileIO argument".to_owned(),
-    ))
+fn checked_player_datum<'a>(
+    player: &'a DirPlayer,
+    datum_ref: &DatumRef,
+) -> Result<&'a Datum, ScriptError> {
+    player.allocator.try_get_datum(datum_ref).ok_or_else(|| {
+        ScriptError::new_code(
+            crate::player::ScriptErrorCode::InvalidReference,
+            "foreign or stale FileIO argument".to_owned(),
+        )
+    })
 }
 
 /// FileIO historically reports -43 for a failed read open. Write/read-write
 /// opens still produce an empty open buffer but leave lastError at zero.
 pub(crate) fn remote_open_error(mode: i32) -> i32 {
-    if mode == 1 { -43 } else { 0 }
+    if mode == 1 {
+        -43
+    } else {
+        0
+    }
 }
 
 /// Resolve a file path from the Lingo world (which may use movie_path_override)
@@ -175,7 +184,10 @@ impl FileIoXtraManager {
         self.instance_counter = 0;
     }
 
-    pub(crate) fn create_instance_explicit(&mut self, _args: &[DatumRef]) -> Result<u32, ScriptError> {
+    pub(crate) fn create_instance_explicit(
+        &mut self,
+        _args: &[DatumRef],
+    ) -> Result<u32, ScriptError> {
         if !self.owner.is_arena_live() {
             return Err(ScriptError::new_code(
                 crate::player::ScriptErrorCode::Abort,
@@ -193,13 +205,14 @@ impl FileIoXtraManager {
         let generation = self.generation_counter;
         let mut instance = FileIoXtraInstance::new();
         instance.generation = generation;
-        self.instances
-            .insert(self.instance_counter, instance);
+        self.instances.insert(self.instance_counter, instance);
         Ok(self.instance_counter)
     }
 
     pub(crate) fn instance_generation(&self, instance_id: u32) -> Option<u64> {
-        self.instances.get(&instance_id).map(|instance| instance.generation)
+        self.instances
+            .get(&instance_id)
+            .map(|instance| instance.generation)
     }
 
     /// Prepare openFile without retaining VM arena references across the
@@ -227,7 +240,8 @@ impl FileIoXtraManager {
         }
         let file_name = checked_player_datum(
             player,
-            args.first().ok_or_else(|| ScriptError::new("openFile requires a file name".to_owned()))?,
+            args.first()
+                .ok_or_else(|| ScriptError::new("openFile requires a file name".to_owned()))?,
         )?
         .string_value(symbols)?;
         let mode = args
@@ -237,15 +251,20 @@ impl FileIoXtraManager {
             .unwrap_or(1);
         let relative_name = resolve_override_path(player, &file_name)
             .map(|(relative, _)| relative)
-            .unwrap_or_else(|| file_name.rsplit(['\\', '/']).next().unwrap_or(&file_name).to_owned());
+            .unwrap_or_else(|| {
+                file_name
+                    .rsplit(['\\', '/'])
+                    .next()
+                    .unwrap_or(&file_name)
+                    .to_owned()
+            });
         let generation = self.instance_generation(instance_id).ok_or_else(|| {
             ScriptError::new_code(
                 crate::player::ScriptErrorCode::InvalidReference,
                 format!("FileIO instance #{} not found", instance_id),
             )
         })?;
-        if self.virtual_fs.contains_key(&file_name)
-            || self.virtual_fs.contains_key(&relative_name)
+        if self.virtual_fs.contains_key(&file_name) || self.virtual_fs.contains_key(&relative_name)
         {
             return self
                 .call_instance_handler_explicit(player, symbols, instance_id, handler_name, args)
@@ -254,21 +273,17 @@ impl FileIoXtraManager {
         // Allocate the task while the invocation owns the player borrow. The
         // NetTask retains the resolved URL and the current base-path override;
         // the later pending executor must not resolve the name again.
-        let prepared = player
-            .net_manager
-            .prepare_net_thing(relative_name.clone());
+        let prepared = player.net_manager.prepare_net_thing(relative_name.clone());
         Ok(super::manager::XtraPendingOrValue::Pending(
-            super::manager::XtraPendingIntent::FileIoOpen(
-                super::manager::FileIoOpenRequest {
-                    owner: self.owner.clone(),
-                    instance_id,
-                    generation,
-                    file_name,
-                    relative_name,
-                    prepared,
-                    mode,
-                },
-            ),
+            super::manager::XtraPendingIntent::FileIoOpen(super::manager::FileIoOpenRequest {
+                owner: self.owner.clone(),
+                instance_id,
+                generation,
+                file_name,
+                relative_name,
+                prepared,
+                mode,
+            }),
         ))
     }
 
@@ -298,18 +313,36 @@ impl FileIoXtraManager {
         match handler.as_str() {
             "openfile" => {
                 let file_name = with_player(player, |player| {
-                    let arg = args.first().ok_or_else(|| ScriptError::new("openFile requires a file name".to_owned()))?;
+                    let arg = args.first().ok_or_else(|| {
+                        ScriptError::new("openFile requires a file name".to_owned())
+                    })?;
                     checked_player_datum(player, arg)?.string_value(symbols)
                 })?;
                 let mode = if args.len() > 1 {
-                    with_player(player, |player| checked_player_datum(player, &args[1])?.int_value())?
-                } else { 1 };
+                    with_player(player, |player| {
+                        checked_player_datum(player, &args[1])?.int_value()
+                    })?
+                } else {
+                    1
+                };
                 let relative_name = resolve_override_path(player, &file_name)
                     .map(|(relative, _)| relative)
-                    .unwrap_or_else(|| file_name.rsplit(['\\', '/']).next().unwrap_or(&file_name).to_owned());
-                let data = manager.virtual_fs.get(&file_name).cloned()
+                    .unwrap_or_else(|| {
+                        file_name
+                            .rsplit(['\\', '/'])
+                            .next()
+                            .unwrap_or(&file_name)
+                            .to_owned()
+                    });
+                let data = manager
+                    .virtual_fs
+                    .get(&file_name)
+                    .cloned()
                     .or_else(|| manager.virtual_fs.get(&relative_name).cloned());
-                let instance = manager.instances.get_mut(&instance_id).expect("validated FileIO instance");
+                let instance = manager
+                    .instances
+                    .get_mut(&instance_id)
+                    .expect("validated FileIO instance");
                 instance.file_name = file_name;
                 instance.position = 0;
                 instance.last_error = if data.is_some() || mode != 1 { 0 } else { -43 };
@@ -318,8 +351,9 @@ impl FileIoXtraManager {
                 with_player(player, |player| Ok(player.alloc_datum(Datum::Void)))
             }
             "createfile" => {
-                let file_name =
-                    with_player(player, |player| checked_player_datum(player, &args[0])?.string_value(symbols))?;
+                let file_name = with_player(player, |player| {
+                    checked_player_datum(player, &args[0])?.string_value(symbols)
+                })?;
                 let instance = manager.instances.get_mut(&instance_id).unwrap();
                 instance.file_name = file_name;
                 instance.data = Vec::new();
@@ -360,7 +394,9 @@ impl FileIoXtraManager {
                     String::new()
                 };
                 instance.position = instance.data.len();
-                with_player(player, |player| Ok(player.alloc_datum(Datum::String(result))))
+                with_player(player, |player| {
+                    Ok(player.alloc_datum(Datum::String(result)))
+                })
             }
             "readline" => {
                 let instance = manager.instances.get_mut(&instance_id).unwrap();
@@ -423,13 +459,17 @@ impl FileIoXtraManager {
                 }
                 let token =
                     crate::io::encoding::decode_text_auto(&instance.data[start..instance.position]);
-                with_player(player, |player| Ok(player.alloc_datum(Datum::String(token))))
+                with_player(
+                    player,
+                    |player| Ok(player.alloc_datum(Datum::String(token))),
+                )
             }
 
             // -- Write operations --
             "writestring" => {
-                let text =
-                    with_player(player, |player| checked_player_datum(player, &args[0])?.string_value(symbols))?;
+                let text = with_player(player, |player| {
+                    checked_player_datum(player, &args[0])?.string_value(symbols)
+                })?;
                 let instance = manager.instances.get_mut(&instance_id).unwrap();
                 if instance.is_open {
                     let bytes = text.as_bytes();
@@ -453,8 +493,9 @@ impl FileIoXtraManager {
                 Ok(DatumRef::Void)
             }
             "writechar" => {
-                let ch =
-                    with_player(player, |player| checked_player_datum(player, &args[0])?.string_value(symbols))?;
+                let ch = with_player(player, |player| {
+                    checked_player_datum(player, &args[0])?.string_value(symbols)
+                })?;
                 let instance = manager.instances.get_mut(&instance_id).unwrap();
                 if instance.is_open && !ch.is_empty() {
                     let byte = ch.as_bytes()[0];
@@ -494,7 +535,9 @@ impl FileIoXtraManager {
                 })
             }
             "setposition" => {
-                let pos = with_player(player, |player| checked_player_datum(player, &args[0])?.int_value())?;
+                let pos = with_player(player, |player| {
+                    checked_player_datum(player, &args[0])?.int_value()
+                })?;
                 let instance = manager.instances.get_mut(&instance_id).unwrap();
                 instance.position = (pos as usize).min(instance.data.len());
                 Ok(DatumRef::Void)
@@ -530,38 +573,45 @@ impl FileIoXtraManager {
                     -1 => "File not open",
                     _ => "Unknown error",
                 };
-                with_player(player, |player| Ok(player.alloc_datum(Datum::String(msg.to_string()))))
+                with_player(player, |player| {
+                    Ok(player.alloc_datum(Datum::String(msg.to_string())))
+                })
             }
-            "version" => {
-                with_player(player, 
-                    |player| Ok(player.alloc_datum(Datum::String("1.5".to_string()))),
-                )
-            }
+            "version" => with_player(player, |player| {
+                Ok(player.alloc_datum(Datum::String("1.5".to_string())))
+            }),
             "setfiltermask" => {
-                let mask =
-                    with_player(player, |player| checked_player_datum(player, &args[0])?.string_value(symbols))?;
+                let mask = with_player(player, |player| {
+                    checked_player_datum(player, &args[0])?.string_value(symbols)
+                })?;
                 let instance = manager.instances.get_mut(&instance_id).unwrap();
                 instance.filter_mask = mask;
                 Ok(DatumRef::Void)
             }
             "setnewlineconversion" => {
-                let mode = with_player(player, |player| checked_player_datum(player, &args[0])?.int_value())?;
+                let mode = with_player(player, |player| {
+                    checked_player_datum(player, &args[0])?.int_value()
+                })?;
                 let instance = manager.instances.get_mut(&instance_id).unwrap();
                 instance.newline_conversion = mode;
                 Ok(DatumRef::Void)
             }
-            "getosdirectory" => {
-                with_player(player, |player| Ok(player.alloc_datum(Datum::String("/".to_string()))))
-            }
+            "getosdirectory" => with_player(player, |player| {
+                Ok(player.alloc_datum(Datum::String("/".to_string())))
+            }),
             "getfinderinfo" | "setfinderinfo" => {
                 // Finder info is Mac-specific, return empty/no-op
-                with_player(player, |player| Ok(player.alloc_datum(Datum::String(String::new()))))
+                with_player(player, |player| {
+                    Ok(player.alloc_datum(Datum::String(String::new())))
+                })
             }
 
             // -- Dialog stubs (sync fallback) --
             "displayopen" | "displaysave" => {
                 debug!("FileIO.{}(): sync fallback, returning empty", handler_name);
-                with_player(player, |player| Ok(player.alloc_datum(Datum::String(String::new()))))
+                with_player(player, |player| {
+                    Ok(player.alloc_datum(Datum::String(String::new())))
+                })
             }
 
             // -- put interface --
@@ -595,7 +645,9 @@ impl FileIoXtraManager {
                     "displaySave string title, string name -- show save file dialog",
                 ]
                 .join("\n");
-                with_player(player, |player| Ok(player.alloc_datum(Datum::String(interface_str))))
+                with_player(player, |player| {
+                    Ok(player.alloc_datum(Datum::String(interface_str)))
+                })
             }
 
             _ => Err(ScriptError::new(format!(

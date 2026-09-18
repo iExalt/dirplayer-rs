@@ -1,5 +1,5 @@
 use fxhash::FxHashMap;
-use log::{warn, debug};
+use log::{debug, warn};
 use std::cell::Cell;
 use std::rc::Rc;
 use wasm_bindgen::JsCast;
@@ -222,10 +222,10 @@ impl FontManager {
                     let member_name_canon = Self::canonical_font_name(&member.name);
                     let exact_match = font_data.font_info.name.to_lowercase() == font_name_lc
                         || member.name.to_lowercase() == font_name_lc;
-                    let member_canon_match = !font_name_canon.is_empty()
-                        && member_name_canon == font_name_canon;
-                    let info_canon_match = !font_name_canon.is_empty()
-                        && info_name_canon == font_name_canon;
+                    let member_canon_match =
+                        !font_name_canon.is_empty() && member_name_canon == font_name_canon;
+                    let info_canon_match =
+                        !font_name_canon.is_empty() && info_name_canon == font_name_canon;
                     let tier: Option<u8> = if exact_match {
                         Some(0)
                     } else if member_canon_match {
@@ -250,12 +250,16 @@ impl FontManager {
         let winner = best;
         for cast_lib in &cast_manager.casts {
             for (&member_id, member) in cast_lib.members.iter() {
-                if winner.map_or(true, |(cl, mid, _)| cl != cast_lib.number || mid != member_id) {
+                if winner.map_or(true, |(cl, mid, _)| {
+                    cl != cast_lib.number || mid != member_id
+                }) {
                     continue;
                 }
                 if let CastMemberType::Font(font_data) = &member.member_type {
                     if let Some(ref parsed) = font_data.pfr_parsed {
-                        use crate::director::chunks::pfr1::{rasterizer, parse_pfr1_font_with_target};
+                        use crate::director::chunks::pfr1::{
+                            parse_pfr1_font_with_target, rasterizer,
+                        };
 
                         // Match FontinatorFINAL's working approach: parse with
                         // target_em_px = outline_resolution rather than 0 or
@@ -300,8 +304,8 @@ impl FontManager {
                         // look bolder than Shockwave's reference render.
                         let font_info_lc = font_data.font_info.name.to_ascii_lowercase();
                         let member_name_lc = member.name.to_ascii_lowercase();
-                        let thin_stem_boost = font_info_lc.contains("italic")
-                            || member_name_lc.contains("italic");
+                        let thin_stem_boost =
+                            font_info_lc.contains("italic") || member_name_lc.contains("italic");
                         let rasterized = rasterizer::rasterize_pfr1_font_with_options(
                             &parsed_for_size,
                             requested_size as usize,
@@ -322,7 +326,8 @@ impl FontManager {
                         );
 
                         let data_len = rasterized.bitmap_data.len().min(bitmap.data.len());
-                        bitmap.data[..data_len].copy_from_slice(&rasterized.bitmap_data[..data_len]);
+                        bitmap.data[..data_len]
+                            .copy_from_slice(&rasterized.bitmap_data[..data_len]);
 
                         for i in (0..data_len).step_by(4) {
                             let a = bitmap.data[i + 3];
@@ -357,15 +362,23 @@ impl FontManager {
                         };
 
                         let rc_font = Rc::new(font);
-                        let cache_key = Self::cache_key(&format!("{}_{}_{}", font_name, requested_size, style.unwrap_or(0)));
+                        let cache_key = Self::cache_key(&format!(
+                            "{}_{}_{}",
+                            font_name,
+                            requested_size,
+                            style.unwrap_or(0)
+                        ));
                         self.font_cache.insert(cache_key, Rc::clone(&rc_font));
-                        self.font_cache.insert(Self::cache_key(font_name), Rc::clone(&rc_font));
-                        self.font_cache.insert(Self::cache_key(&member.name), Rc::clone(&rc_font));
+                        self.font_cache
+                            .insert(Self::cache_key(font_name), Rc::clone(&rc_font));
+                        self.font_cache
+                            .insert(Self::cache_key(&member.name), Rc::clone(&rc_font));
 
                         let font_ref = self.font_counter;
                         self.font_counter += 1;
                         self.fonts.insert(font_ref, Rc::clone(&rc_font));
-                        self.font_by_id.insert(font_data.font_info.font_id, font_ref);
+                        self.font_by_id
+                            .insert(font_data.font_info.font_id, font_ref);
 
                         return Some(rc_font);
                     }
@@ -384,7 +397,9 @@ impl FontManager {
         // Fallback: try default embedded PFR fonts
         if requested_size > 0 {
             let font_name_canon = Self::canonical_font_name(font_name);
-            let matched_key = self.default_pfr_data.keys()
+            let matched_key = self
+                .default_pfr_data
+                .keys()
                 .find(|k| {
                     k.eq_ignore_ascii_case(font_name)
                         || Self::canonical_font_name(k) == font_name_canon
@@ -392,7 +407,7 @@ impl FontManager {
                 .cloned();
             if let Some(key) = matched_key {
                 if let Some(pfr_bytes) = self.default_pfr_data.get(&key) {
-                    use crate::director::chunks::pfr1::{rasterizer, parse_pfr1_font_with_target};
+                    use crate::director::chunks::pfr1::{parse_pfr1_font_with_target, rasterizer};
 
                     // Match the cast-member PFR re-parse path above:
                     // parse with target_em_px = outline_resolution so hinting
@@ -403,13 +418,18 @@ impl FontManager {
                         Ok(p) => Some(p),
                         Err(_) => None,
                     };
-                    let parse_target = parsed_for_res.as_ref()
+                    let parse_target = parsed_for_res
+                        .as_ref()
                         .map(|p| p.physical_font.outline_resolution as i32)
                         .filter(|&v| v > 0)
                         .unwrap_or(0);
                     match parse_pfr1_font_with_target(pfr_bytes, parse_target) {
                         Ok(parsed) => {
-                            let rasterized = rasterizer::rasterize_pfr1_font(&parsed, requested_size as usize, 0);
+                            let rasterized = rasterizer::rasterize_pfr1_font(
+                                &parsed,
+                                requested_size as usize,
+                                0,
+                            );
 
                             let bitmap_width = rasterized.bitmap_width as u16;
                             let bitmap_height = rasterized.bitmap_height as u16;
@@ -424,7 +444,8 @@ impl FontManager {
                             );
 
                             let data_len = rasterized.bitmap_data.len().min(bitmap.data.len());
-                            bitmap.data[..data_len].copy_from_slice(&rasterized.bitmap_data[..data_len]);
+                            bitmap.data[..data_len]
+                                .copy_from_slice(&rasterized.bitmap_data[..data_len]);
 
                             for i in (0..data_len).step_by(4) {
                                 let a = bitmap.data[i + 3];
@@ -459,10 +480,17 @@ impl FontManager {
                             };
 
                             let rc_font = Rc::new(font);
-                            let cache_key = Self::cache_key(&format!("{}_{}_{}", font_name, requested_size, style.unwrap_or(0)));
+                            let cache_key = Self::cache_key(&format!(
+                                "{}_{}_{}",
+                                font_name,
+                                requested_size,
+                                style.unwrap_or(0)
+                            ));
                             self.font_cache.insert(cache_key, Rc::clone(&rc_font));
-                            self.font_cache.insert(Self::cache_key(font_name), Rc::clone(&rc_font));
-                            self.font_cache.insert(Self::cache_key(&key), Rc::clone(&rc_font));
+                            self.font_cache
+                                .insert(Self::cache_key(font_name), Rc::clone(&rc_font));
+                            self.font_cache
+                                .insert(Self::cache_key(&key), Rc::clone(&rc_font));
 
                             let font_ref = self.font_counter;
                             self.font_counter += 1;
@@ -476,10 +504,7 @@ impl FontManager {
                             return Some(rc_font);
                         }
                         Err(e) => {
-                            debug!(
-                                "Failed to parse default PFR font '{}': {}",
-                                key, e
-                            );
+                            debug!("Failed to parse default PFR font '{}': {}", key, e);
                         }
                     }
                 }
@@ -566,7 +591,12 @@ impl FontManager {
         size: Option<u16>,
         style: Option<u8>,
     ) -> Option<Rc<BitmapFont>> {
-        let cache_key = Self::cache_key(&format!("{}_{}_{}", font_name, size.unwrap_or(0), style.unwrap_or(0)));
+        let cache_key = Self::cache_key(&format!(
+            "{}_{}_{}",
+            font_name,
+            size.unwrap_or(0),
+            style.unwrap_or(0)
+        ));
 
         for cast_lib in &cast_manager.casts {
             for member in cast_lib.members.values() {
@@ -577,8 +607,7 @@ impl FontManager {
                     let info_name_canon = Self::canonical_font_name(&font_data.font_info.name);
                     let member_name_canon = Self::canonical_font_name(&member.name);
 
-                    let name_matches =
-                        font_data.font_info.name.to_lowercase() == font_name_lc
+                    let name_matches = font_data.font_info.name.to_lowercase() == font_name_lc
                         || member.name.to_lowercase() == font_name_lc
                         || (!font_name_canon.is_empty()
                             && (info_name_canon == font_name_canon
@@ -598,8 +627,7 @@ impl FontManager {
                         // Check if this font has a bitmap_ref from PFR parsing
                         if let Some(bitmap_ref) = font_data.bitmap_ref {
                             web_sys::console::log_1(
-                                &format!("Found PFR font with bitmap_ref: {}", bitmap_ref)
-                                    .into(),
+                                &format!("Found PFR font with bitmap_ref: {}", bitmap_ref).into(),
                             );
 
                             let font = BitmapFont {
@@ -641,8 +669,10 @@ impl FontManager {
                             if font_data.font_info.name != member.name
                                 && font_data.font_info.name != font_name
                             {
-                                self.font_cache
-                                    .insert(Self::cache_key(&font_data.font_info.name), Rc::clone(&rc_font));
+                                self.font_cache.insert(
+                                    Self::cache_key(&font_data.font_info.name),
+                                    Rc::clone(&rc_font),
+                                );
                             }
 
                             let font_ref = self.font_counter;
@@ -673,8 +703,7 @@ impl FontManager {
                                 .insert(cache_key.clone(), Rc::clone(&rc_font));
                             let name_key = Self::cache_key(font_name);
                             if !self.font_cache.contains_key(&name_key) {
-                                self.font_cache
-                                    .insert(name_key, Rc::clone(&rc_font));
+                                self.font_cache.insert(name_key, Rc::clone(&rc_font));
                             }
 
                             let font_ref = self.font_counter;
@@ -800,7 +829,7 @@ impl FontManager {
         size: u16,
         bitmap_manager: &mut crate::player::bitmap::manager::BitmapManager,
     ) -> Option<Rc<BitmapFont>> {
-        use crate::director::chunks::pfr1::{rasterizer, parse_pfr1_font_with_target};
+        use crate::director::chunks::pfr1::{parse_pfr1_font_with_target, rasterizer};
 
         let parsed_for_size = match parse_pfr1_font_with_target(pfr_data, size as i32) {
             Ok(p) => p,
@@ -813,7 +842,11 @@ impl FontManager {
         let bitmap_height = rasterized.bitmap_height as u16;
 
         let mut bitmap = Bitmap::new(
-            bitmap_width, bitmap_height, 32, 32, 0,
+            bitmap_width,
+            bitmap_height,
+            32,
+            32,
+            0,
             PaletteRef::BuiltIn(get_system_default_palette()),
         );
 
@@ -877,7 +910,10 @@ async fn fetch_system_font_bitmap(path: &str) -> Option<Bitmap> {
             } else {
                 match result.dyn_into::<web_sys::Response>() {
                     Ok(r) => r,
-                    Err(e) => bail!("System font: fetch result is neither Blob nor Response: {:?}", e),
+                    Err(e) => bail!(
+                        "System font: fetch result is neither Blob nor Response: {:?}",
+                        e
+                    ),
                 }
             };
 
@@ -964,15 +1000,14 @@ async fn fetch_system_font_bitmap(path: &str) -> Option<Bitmap> {
 
             // getImageData throws a SecurityError on a tainted canvas. Keep
             // this failure on the same warning-and-fallback path.
-            let image_data = match context.get_image_data(
-                0.0,
-                0.0,
-                image_width as f64,
-                image_height as f64,
-            ) {
-                Ok(d) => d,
-                Err(e) => bail!("System font: getImageData failed (tainted canvas / CORS?): {:?}", e),
-            };
+            let image_data =
+                match context.get_image_data(0.0, 0.0, image_width as f64, image_height as f64) {
+                    Ok(d) => d,
+                    Err(e) => bail!(
+                        "System font: getImageData failed (tainted canvas / CORS?): {:?}",
+                        e
+                    ),
+                };
 
             let bitmap = Bitmap {
                 width: image_data.width() as u16,
@@ -1026,10 +1061,16 @@ fn install_system_font(player: &mut DirPlayer, bitmap: Bitmap) {
     let rc_font = Rc::new(font.clone());
     let font_ref = player.font_manager.font_counter;
     player.font_manager.font_counter += 1;
-    player.font_manager.fonts.insert(font_ref, Rc::clone(&rc_font));
+    player
+        .font_manager
+        .fonts
+        .insert(font_ref, Rc::clone(&rc_font));
     player.font_manager.system_font = Some(rc_font);
     // Add to font_cache where rendering code looks for it.
-    player.font_manager.font_cache.insert("system".to_string(), font.into());
+    player
+        .font_manager
+        .font_cache
+        .insert("system".to_string(), font.into());
     debug!("System font loaded successfully");
 }
 
@@ -1131,8 +1172,12 @@ mod owned_system_font_tests {
         let (tx2, _rx2) = channel::unbounded();
         assert!(session.add_player(1, tx1));
         assert!(session.add_player(2, tx2));
-        let owner1 = session.with_player(1, |context| context.player.owner.clone()).unwrap();
-        let owner2 = session.with_player(2, |context| context.player.owner.clone()).unwrap();
+        let owner1 = session
+            .with_player(1, |context| context.player.owner.clone())
+            .unwrap();
+        let owner2 = session
+            .with_player(2, |context| context.player.owner.clone())
+            .unwrap();
         let handle = session.into_handle();
 
         install_system_font_if_owner(&handle, 1, &owner1, test_bitmap()).unwrap();
@@ -1280,11 +1325,7 @@ pub fn pfr_strike_vertical_metrics(
 /// so all four agree: Habbo's window Text-Wrapper bakes with
 /// `pimage.copyPixels(member.image, dst, src = member.rect)`, and any
 /// disagreement there shows up as a vertical stretch, not a clip.
-pub fn pfr_auto_line_height(
-    font: &BitmapFont,
-    font_bitmap: Option<&Bitmap>,
-    nominal: u16,
-) -> u16 {
+pub fn pfr_auto_line_height(font: &BitmapFont, font_bitmap: Option<&Bitmap>, nominal: u16) -> u16 {
     let cell_h = if font.char_widths.is_some() {
         font.char_height.saturating_sub(1)
     } else {
@@ -1326,7 +1367,11 @@ pub fn pfr_outline_auto_line_height(
     }
     let m = &parsed.physical_font.metrics;
     let lh = (((m.ascender - m.descender) as f64) * (font_size as f64 / res)).round();
-    if lh >= 1.0 { Some(lh as u16) } else { None }
+    if lh >= 1.0 {
+        Some(lh as u16)
+    } else {
+        None
+    }
 }
 
 /// `pfr_outline_auto_line_height` for the font a text member names, resolved the
@@ -1675,7 +1720,12 @@ pub fn bitmap_font_copy_char_tight(
     dest.copy_pixels_with_params(
         palettes,
         font_bitmap,
-        IntRect::from(dest_x + min_x, dest_y + min_y, dest_x + min_x + w, dest_y + min_y + h),
+        IntRect::from(
+            dest_x + min_x,
+            dest_y + min_y,
+            dest_x + min_x + w,
+            dest_y + min_y + h,
+        ),
         IntRect::from(src_x, src_y, src_x + w, src_y + h),
         draw_params,
     )
@@ -1733,12 +1783,7 @@ pub fn bitmap_font_copy_char_italic(
                 dest_x + shift + w,
                 dest_y + row + 1,
             ),
-            IntRect::from(
-                src_x,
-                src_y + row,
-                src_x + w,
-                src_y + row + 1,
-            ),
+            IntRect::from(src_x, src_y + row, src_x + w, src_y + row + 1),
             draw_params,
         );
     }
@@ -1804,7 +1849,14 @@ pub fn bitmap_font_copy_char_tight_italic(
 
     if max_x < min_x || max_y < min_y {
         bitmap_font_copy_char_italic(
-            font, font_bitmap, char_num, dest, dest_x, dest_y, palettes, draw_params,
+            font,
+            font_bitmap,
+            char_num,
+            dest,
+            dest_x,
+            dest_y,
+            palettes,
+            draw_params,
         );
         return;
     }
@@ -1829,12 +1881,7 @@ pub fn bitmap_font_copy_char_tight_italic(
                 dest_x + min_x + shift + w,
                 dest_y + min_y + row + 1,
             ),
-            IntRect::from(
-                src_x,
-                src_y_top + row,
-                src_x + w,
-                src_y_top + row + 1,
-            ),
+            IntRect::from(src_x, src_y_top + row, src_x + w, src_y_top + row + 1),
             draw_params,
         );
     }
@@ -1883,15 +1930,18 @@ pub fn measure_text(
     } else {
         font.char_height
     };
-    let line_spacing = if line_spacing > 0
-        && (line_spacing as u32) > (natural_lh_for_guard as u32 * 5 / 2)
-    {
-        0
-    } else {
-        line_spacing
-    };
+    let line_spacing =
+        if line_spacing > 0 && (line_spacing as u32) > (natural_lh_for_guard as u32 * 5 / 2) {
+            0
+        } else {
+            line_spacing
+        };
     // fixedLineSpace overrides line step between lines; topSpacing + bottomSpacing added on top.
-    let effective_lh = if line_spacing > 0 { line_spacing as i16 } else { line_height as i16 };
+    let effective_lh = if line_spacing > 0 {
+        line_spacing as i16
+    } else {
+        line_height as i16
+    };
     // First line height: when an explicit line_spacing (member's
     // fixedLineSpace) is set, trust it verbatim — that's the authored
     // per-line stride and Director uses it as the first-line extent too.
@@ -1917,7 +1967,8 @@ pub fn measure_text(
     // leaving the field stuck at whatever the last successful scroll
     // position was. Clamp via i32 arithmetic and saturate at the bottom.
     let mut height = ((top_spacing as i32) + (first_line_h as i32)).max(0) as u16;
-    let line_step = ((effective_lh as i32) + (bottom_spacing as i32) + (top_spacing.max(0) as i32)).max(1) as u16;
+    let line_step = ((effective_lh as i32) + (bottom_spacing as i32) + (top_spacing.max(0) as i32))
+        .max(1) as u16;
     let mut index = 0;
     let mut last_was_newline = false;
     for c in text.chars() {
@@ -1992,24 +2043,26 @@ pub fn measure_text_wrapped(
     } else {
         font.char_height
     };
-    let line_spacing = if line_spacing > 0
-        && (line_spacing as u32) > (natural_lh_for_guard as u32 * 5 / 2)
-    {
-        0
+    let line_spacing =
+        if line_spacing > 0 && (line_spacing as u32) > (natural_lh_for_guard as u32 * 5 / 2) {
+            0
+        } else {
+            line_spacing
+        };
+    let effective_lh = if line_spacing > 0 {
+        line_spacing as i16
     } else {
-        line_spacing
+        effective_line_h as i16
     };
-    let effective_lh = if line_spacing > 0 { line_spacing as i16 } else { effective_line_h as i16 };
     // Mirror the i32-clamped formula in measure_text — negative top_spacing
     // (used by the field renderer for scrollTop) would otherwise underflow
     // here and break paged-field rendering past ~font_size px.
-    let line_step = ((effective_lh as i32) + (bottom_spacing as i32) + (top_spacing.max(0) as i32)).max(1) as u16;
+    let line_step = ((effective_lh as i32) + (bottom_spacing as i32) + (top_spacing.max(0) as i32))
+        .max(1) as u16;
 
     // Per-character advance including char_spacing — matches the renderer at
     // text.rs's flush_line loop which does `x += adv + char_spacing` for every char.
-    let char_adv = |c: char| -> i32 {
-        font.get_char_advance(c as u8) as i32 + char_spacing
-    };
+    let char_adv = |c: char| -> i32 { font.get_char_advance(c as u8) as i32 + char_spacing };
 
     // Split into explicit lines first
     let raw_lines: Vec<&str> = text.split(|c: char| c == '\r' || c == '\n').collect();
@@ -2092,11 +2145,14 @@ pub fn get_text_char_pos(text: &str, params: &DrawTextParams, char_index: usize)
     let mut y = params.top_spacing;
     let mut line_width: i16 = 0;
     let mut line_index = 0;
-    let eff_lh = if params.font.font_size > 0 { params.font.font_size } else { params.font.char_height };
+    let eff_lh = if params.font.font_size > 0 {
+        params.font.font_size
+    } else {
+        params.font.char_height
+    };
     // Match the renderer's line_step (no +1) — see comment in
     // get_text_index_at_pos for the line-by-line drift it causes.
-    let line_step = params.line_height.unwrap_or(eff_lh) as i16
-        + params.line_spacing as i16;
+    let line_step = params.line_height.unwrap_or(eff_lh) as i16 + params.line_spacing as i16;
     let wrap_w = params.member_width.unwrap_or(0) as i32;
     let wrap_enabled = wrap_w > 0;
 
@@ -2142,9 +2198,7 @@ pub fn get_text_char_pos(text: &str, params: &DrawTextParams, char_index: usize)
             let cw = char_adv_i32(c, char_idx_pre);
             char_idx_pre += 1;
             if line_w + cw > wrap_w && byte_pos > line_start_byte {
-                if let Some(sp_after) = last_space_after_byte
-                    .filter(|&sp| sp > line_start_byte)
-                {
+                if let Some(sp_after) = last_space_after_byte.filter(|&sp| sp > line_start_byte) {
                     wrap_starts.push(sp_after);
                     line_start_byte = sp_after;
                     last_space_after_byte = None;
@@ -2204,20 +2258,18 @@ pub fn get_text_char_pos(text: &str, params: &DrawTextParams, char_index: usize)
             // Honor per_char_advances if provided (caller pre-computed
             // run-aware widths), otherwise fall back to font lookup
             // with the same space-min clamp the renderer uses.
-            let char_advance: i16 = if let Some(v) = params
-                .per_char_advances
-                .and_then(|v| v.get(line_index))
-            {
-                (*v as i16).max(0)
-            } else {
-                let raw_adv = params.font.get_char_advance(c as u8) as i16;
-                let clamped_adv = if c == ' ' {
-                    raw_adv.max(params.min_space_advance.unwrap_or(0))
+            let char_advance: i16 =
+                if let Some(v) = params.per_char_advances.and_then(|v| v.get(line_index)) {
+                    (*v as i16).max(0)
                 } else {
-                    raw_adv
+                    let raw_adv = params.font.get_char_advance(c as u8) as i16;
+                    let clamped_adv = if c == ' ' {
+                        raw_adv.max(params.min_space_advance.unwrap_or(0))
+                    } else {
+                        raw_adv
+                    };
+                    clamped_adv + params.char_spacing
                 };
-                clamped_adv + params.char_spacing
-            };
             if line_index == char_index {
                 return (line_width, y);
             }
@@ -2233,7 +2285,11 @@ pub fn get_text_char_pos(text: &str, params: &DrawTextParams, char_index: usize)
 }
 
 pub fn get_text_index_at_pos(text: &str, params: &DrawTextParams, x: i32, y: i32) -> usize {
-    let eff_lh = if params.font.font_size > 0 { params.font.font_size } else { params.font.char_height };
+    let eff_lh = if params.font.font_size > 0 {
+        params.font.font_size
+    } else {
+        params.font.char_height
+    };
     let line_h = params.line_height.unwrap_or(eff_lh) as i32;
     // line_step must match the renderer's per-line vertical advance
     // (measure_text_wrapped uses `effective_lh + line_spacing` with no
@@ -2301,9 +2357,7 @@ pub fn get_text_index_at_pos(text: &str, params: &DrawTextParams, x: i32, y: i32
             let cw = char_adv(c, char_idx_pre);
             char_idx_pre += 1;
             if line_w + cw > wrap_w && byte_pos > line_start_byte {
-                if let Some(sp_after) = last_space_after_byte
-                    .filter(|&sp| sp > line_start_byte)
-                {
+                if let Some(sp_after) = last_space_after_byte.filter(|&sp| sp > line_start_byte) {
                     wrap_starts.push(sp_after);
                     line_start_byte = sp_after;
                     last_space_after_byte = None;
@@ -2400,5 +2454,9 @@ pub fn get_text_index_at_pos(text: &str, params: &DrawTextParams, x: i32, y: i32
     // (text.chars().count() - 1, clamped to 0) so the caller can read
     // `member.char[y..y+8]` without overflowing past text.length.
     let total = text.chars().count();
-    if total == 0 { 0 } else { total - 1 }
+    if total == 0 {
+        0
+    } else {
+        total - 1
+    }
 }

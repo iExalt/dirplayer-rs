@@ -1,4 +1,3 @@
-use log::{debug, error};
 use super::{
     bytecode::handler_manager::BytecodeHandlerContext,
     scope::ScopeRef,
@@ -9,6 +8,7 @@ use super::{
 use crate::director::lingo::datum::Datum;
 use crate::player::bytecode::string::PutType;
 use crate::player::cast_member::CastMemberType;
+use log::{debug, error};
 use web_sys::console;
 
 fn validate_symbol<'a>(symbol: &Symbol, symbols: &'a SymbolTable) -> Result<&'a str, ScriptError> {
@@ -23,15 +23,18 @@ mod tests {
     use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
     use crate::{
-        director::{chunks::{handler::HandlerDef, script::ScriptChunk}, enums::ScriptType},
+        director::{
+            chunks::{handler::HandlerDef, script::ScriptChunk},
+            enums::ScriptType,
+        },
         player::{
             bytecode::handler_manager::{BytecodeHandlerContext, HandlerCode},
             cast_lib::CastMemberRef,
             ownership::{OwnerKey, OwnerToken},
+            scope::ScopeRef,
             script::Script,
             symbols::{symbol::Symbol, symbol_table::SymbolTable},
-            scope::ScopeRef,
-            ScopeToken, DirPlayer,
+            DirPlayer, ScopeToken,
         },
     };
 
@@ -39,7 +42,11 @@ mod tests {
         let (tx, _rx) = async_std::channel::unbounded();
         DirPlayer::new_with_owner(
             tx,
-            OwnerToken::new(OwnerKey { session: 31, player: 8, generation: 1 }),
+            OwnerToken::new(OwnerKey {
+                session: 31,
+                player: 8,
+                generation: 1,
+            }),
         )
     }
 
@@ -54,7 +61,10 @@ mod tests {
             compiled_ir: RefCell::new(None),
         });
         let script = Rc::new(Script {
-            member_ref: CastMemberRef { cast_lib: 0, cast_member: 0 },
+            member_ref: CastMemberRef {
+                cast_lib: 0,
+                cast_member: 0,
+            },
             name: String::new(),
             chunk: ScriptChunk {
                 script_number: 0,
@@ -114,7 +124,10 @@ mod tests {
     }
 }
 
-pub(crate) fn validate_direct_identifier(datum: &Datum, symbols: &SymbolTable) -> Result<(), ScriptError> {
+pub(crate) fn validate_direct_identifier(
+    datum: &Datum,
+    symbols: &SymbolTable,
+) -> Result<(), ScriptError> {
     if let Datum::Symbol(symbol) = datum {
         validate_symbol(symbol, symbols)?;
     }
@@ -128,15 +141,33 @@ pub fn read_context_var_args(
 ) -> (DatumRef, Option<DatumRef>) {
     let cast_id = if var_type == 0x6 && player.movie.dir_version >= 500 {
         // field cast ID
-        let (scopes, allocator, bitmap_manager) =
-            (&mut player.scopes, &mut player.allocator, &mut player.bitmap_manager);
-        Some(scopes.get_mut(scope_ref).unwrap().stack.pop_ref_with(allocator, bitmap_manager).unwrap())
+        let (scopes, allocator, bitmap_manager) = (
+            &mut player.scopes,
+            &mut player.allocator,
+            &mut player.bitmap_manager,
+        );
+        Some(
+            scopes
+                .get_mut(scope_ref)
+                .unwrap()
+                .stack
+                .pop_ref_with(allocator, bitmap_manager)
+                .unwrap(),
+        )
     } else {
         None
     };
-    let (scopes, allocator, bitmap_manager) =
-        (&mut player.scopes, &mut player.allocator, &mut player.bitmap_manager);
-    let id = scopes.get_mut(scope_ref).unwrap().stack.pop_ref_with(allocator, bitmap_manager).unwrap();
+    let (scopes, allocator, bitmap_manager) = (
+        &mut player.scopes,
+        &mut player.allocator,
+        &mut player.bitmap_manager,
+    );
+    let id = scopes
+        .get_mut(scope_ref)
+        .unwrap()
+        .stack
+        .pop_ref_with(allocator, bitmap_manager)
+        .unwrap();
     (id, cast_id)
 }
 
@@ -193,9 +224,16 @@ pub fn player_get_context_var(
                 script_get_prop(player, symbols, &instance_ref, prop_name)
             } else {
                 // Static property on script
-                let script_rc = player.movie.cast_manager.get_script_by_ref(&script_ref).unwrap();
+                let script_rc = player
+                    .movie
+                    .cast_manager
+                    .get_script_by_ref(&script_ref)
+                    .unwrap();
                 let properties = script_rc.properties.borrow();
-                Ok(properties.get(&prop_name).unwrap_or(&DatumRef::Void).clone())
+                Ok(properties
+                    .get(&prop_name)
+                    .unwrap_or(&DatumRef::Void)
+                    .clone())
             }
         }
         0x4 => {
@@ -222,7 +260,12 @@ pub fn player_get_context_var(
                         .is_some_and(|candidate| candidate == name)
                 }) {
                     Some(slot) => slot,
-                    None => return Err(ScriptError::new(format!("Local variable '{}' not found", name_text))),
+                    None => {
+                        return Err(ScriptError::new(format!(
+                            "Local variable '{}' not found",
+                            name_text
+                        )))
+                    }
                 }
             } else {
                 (id.int_value()? / variable_multiplier as i32) as usize
@@ -306,7 +349,11 @@ pub fn player_set_context_var(
             } else {
                 let scope = player.scopes.get(ctx.scope_ref()).unwrap();
                 let script_ref = scope.script_ref.clone();
-                let script_rc = player.movie.cast_manager.get_script_by_ref(&script_ref).unwrap();
+                let script_rc = player
+                    .movie
+                    .cast_manager
+                    .get_script_by_ref(&script_ref)
+                    .unwrap();
                 let mut properties = script_rc.properties.borrow_mut();
                 properties.insert(prop_name, value_ref.clone());
                 Ok(())
@@ -332,13 +379,21 @@ pub fn player_set_context_var(
                         .is_some_and(|candidate| candidate == name)
                 }) {
                     Some(slot) => slot,
-                    None => return Err(ScriptError::new(format!("Local variable '{}' not found", name_text))),
+                    None => {
+                        return Err(ScriptError::new(format!(
+                            "Local variable '{}' not found",
+                            name_text
+                        )))
+                    }
                 }
             } else {
                 (id_datum.int_value()? / variable_multiplier as i32) as usize
             };
             let scope = player.scopes.get_mut(ctx.scope_ref()).unwrap();
-            scope.set_local(slot, crate::player::scope::StackDatum::Ref(value_ref.clone()));
+            scope.set_local(
+                slot,
+                crate::player::scope::StackDatum::Ref(value_ref.clone()),
+            );
             crate::player::interp_stats::record_ctxvar_local(true);
             Ok(())
         }
@@ -430,7 +485,10 @@ pub fn player_set_context_var(
                         Ok(())
                     }
                     other => {
-                        debug!("Member exists but is not a Field, Text, or Button: {:?}", other);
+                        debug!(
+                            "Member exists but is not a Field, Text, or Button: {:?}",
+                            other
+                        );
                         Err(ScriptError::new(
                             "Cast member exists but is not a Field, Text, or Button".to_string(),
                         ))

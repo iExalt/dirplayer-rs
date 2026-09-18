@@ -32,7 +32,15 @@ impl FilmLoopMemberHandlers {
         let rect_height = rect_bottom - rect_top;
 
         match prop {
-            "rect" => Ok(Datum::Rect([rect_left as f64, rect_top as f64, rect_right as f64, rect_bottom as f64], 0)),
+            "rect" => Ok(Datum::Rect(
+                [
+                    rect_left as f64,
+                    rect_top as f64,
+                    rect_right as f64,
+                    rect_bottom as f64,
+                ],
+                0,
+            )),
             "width" => Ok(Datum::Int(rect_width)),
             "height" => Ok(Datum::Int(rect_height)),
             _ => Err(ScriptError::new(format!(

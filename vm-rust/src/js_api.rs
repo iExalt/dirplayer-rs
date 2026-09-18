@@ -40,6 +40,23 @@ use crate::{
     rendering::RENDERER_LOCK,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeoutHostOperation {
+    Schedule,
+    Clear,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TimeoutHostDispatch {
+    Published,
+    Unsupported {
+        operation: TimeoutHostOperation,
+        owner_key: String,
+        timeout_name: String,
+        incarnation: u64,
+    },
+}
+
 #[derive(Clone)]
 pub struct ScoreSpriteSpan {
     pub channel_number: u16,
@@ -303,9 +320,19 @@ extern "C" {
     #[wasm_bindgen(catch)]
     pub fn onDebugMessageOwned(owner_key: &str, message: &str) -> Result<(), JsValue>;
     pub fn onDebugContent(content: js_sys::Object);
-    pub fn onScheduleTimeout(timeout_name: &str, interval: u32);
-    pub fn onClearTimeout(timeout_name: &str);
-    pub fn onClearTimeouts();
+    #[wasm_bindgen(catch)]
+    pub fn onScheduleTimeoutOwned(
+        owner_key: &str,
+        timeout_name: &str,
+        interval: u32,
+        incarnation: f64,
+    ) -> Result<(), JsValue>;
+    #[wasm_bindgen(catch)]
+    pub fn onClearTimeoutOwned(
+        owner_key: &str,
+        timeout_name: &str,
+        incarnation: f64,
+    ) -> Result<(), JsValue>;
     #[wasm_bindgen(catch)]
     pub fn onDatumSnapshot(datum_id: DatumId, data: js_sys::Object) -> Result<(), JsValue>;
     #[wasm_bindgen(catch)]
@@ -323,7 +350,31 @@ extern "C" {
     pub fn onFlashMemberUnloadedAtGeneration(sprite_num: i32, generation: f64, owner_key: &str);
     pub fn onFlashMemberResized(sprite_num: i32, generation: f64, width: u32, height: u32, owner_key: &str);
     pub fn onFlashResetAll(owner_key: &str);
+    #[wasm_bindgen(js_name = "dirplayer_registerLingoCallbackOwned", catch)]
+    pub fn registerLingoCallbackOwned(
+        owner_key: &str,
+        sprite_num: i32,
+        generation: f64,
+        movie_clip_path: &str,
+        method_name: &str,
+        lingo_cast_lib: i32,
+        lingo_cast_member: i32,
+        lingo_handler: &str,
+        flash_cast_lib: i32,
+        flash_cast_member: i32,
+    ) -> Result<JsValue, JsValue>;
     pub fn onStageSizeChanged(width: u32, height: u32, center: bool);
+    #[wasm_bindgen(catch)]
+    pub fn registerNestedBrowserOwner(
+        parent_owner_key: &str,
+        child_owner_key: &str,
+        capability: &JsValue,
+    ) -> Result<(), JsValue>;
+    #[wasm_bindgen(catch)]
+    pub fn retireNestedBrowserOwner(
+        parent_owner_key: &str,
+        child_owner_key: &str,
+    ) -> Result<(), JsValue>;
 }
 
 pub struct JsApi {}
@@ -351,15 +402,24 @@ impl JsApi {
         let snapshot = concrete_datum_to_js_bridge(&datum, symbols, player, 0);
         onScriptInstanceSnapshot(script_ref.map(|script_ref| *script_ref).unwrap_or(0), snapshot);
     }
-    pub fn dispatch_schedule_timeout(timeout_name: &str, interval: u32) {
-        onScheduleTimeout(timeout_name, interval);
+    pub fn dispatch_schedule_timeout(
+        owner_key: &str,
+        timeout_name: &str,
+        interval: u32,
+        incarnation: u64,
+    ) -> Result<TimeoutHostDispatch, ScriptError> {
+        onScheduleTimeoutOwned(owner_key, timeout_name, interval, incarnation as f64)
+            .map_err(|_| ScriptError::new("browser timeout schedule callback failed".to_owned()))?;
+        Ok(TimeoutHostDispatch::Published)
     }
-    pub fn dispatch_clear_timeout(timeout_name: &str) {
-        onClearTimeout(timeout_name);
-    }
-    #[allow(dead_code)]
-    pub fn dispatch_clear_timeouts() {
-        onClearTimeouts();
+    pub fn dispatch_clear_timeout(
+        owner_key: &str,
+        timeout_name: &str,
+        incarnation: u64,
+    ) -> Result<TimeoutHostDispatch, ScriptError> {
+        onClearTimeoutOwned(owner_key, timeout_name, incarnation as f64)
+            .map_err(|_| ScriptError::new("browser timeout clear callback failed".to_owned()))?;
+        Ok(TimeoutHostDispatch::Published)
     }
     pub fn dispatch_flash_member_loaded(sprite_num: i32, cast_lib: i32, cast_member: i32, swf_data: &[u8], width: u32, height: u32, paused_at_start: bool, asserted_frame: i32, owner_key: &str) {
         onFlashMemberLoaded(sprite_num, cast_lib, cast_member, swf_data, width, height, paused_at_start, asserted_frame, owner_key);
@@ -382,6 +442,51 @@ impl JsApi {
     /// per-sprite unload path only fires for sprites the new frame changed.
     pub fn dispatch_flash_reset_all(owner_key: &str) {
         onFlashResetAll(owner_key);
+    }
+    pub fn register_flash_lingo_callback(
+        owner_key: &str,
+        sprite_num: i16,
+        generation: u64,
+        movie_clip_path: &str,
+        method_name: &str,
+        lingo_cast_lib: i32,
+        lingo_cast_member: i32,
+        lingo_handler: &str,
+        flash_cast_lib: i32,
+        flash_cast_member: i32,
+    ) -> Result<(), ScriptError> {
+        let result = registerLingoCallbackOwned(
+            owner_key,
+            sprite_num as i32,
+            generation as f64,
+            movie_clip_path,
+            method_name,
+            lingo_cast_lib,
+            lingo_cast_member,
+            lingo_handler,
+            flash_cast_lib,
+            flash_cast_member,
+        )
+        .map_err(|error| ScriptError::new(format!("Flash callback registration failed: {error:?}")))?;
+        if result.as_bool() != Some(true) {
+            return Err(ScriptError::new("Flash callback registration was not acknowledged".to_owned()));
+        }
+        Ok(())
+    }
+    pub fn register_nested_browser_owner(
+        parent_owner_key: &str,
+        child_owner_key: &str,
+        capability: &JsValue,
+    ) -> Result<(), ScriptError> {
+        registerNestedBrowserOwner(parent_owner_key, child_owner_key, capability)
+            .map_err(|error| ScriptError::new(format!("nested browser owner registration failed: {error:?}")))
+    }
+    pub fn retire_nested_browser_owner(
+        parent_owner_key: &str,
+        child_owner_key: &str,
+    ) -> Result<(), ScriptError> {
+        retireNestedBrowserOwner(parent_owner_key, child_owner_key)
+            .map_err(|error| ScriptError::new(format!("nested browser owner retirement failed: {error:?}")))
     }
     pub fn dispatch_stage_size_changed(width: u32, height: u32, center: bool) {
         // Only the host player (id 0) owns the frontend stage. A nested `#movie`
@@ -2738,6 +2843,13 @@ impl JsApi {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl JsApi {
+    pub fn retire_nested_browser_owner(
+        _parent_owner_key: &str,
+        _child_owner_key: &str,
+    ) -> Result<(), ScriptError> {
+        Ok(())
+    }
+
     fn native_host_event_overflow(capacity: usize) -> JsValue {
         // JsValue has no native string payload. Keep the Result error signal
         // for callers while avoiding wasm-bindgen's native panic path; the
@@ -3928,10 +4040,31 @@ impl JsApi {
     }
     pub fn dispatch_datum_snapshot(_: &DatumRef, _: &SymbolTable, _: &DirPlayer) {}
     pub fn dispatch_script_instance_snapshot(_: Option<ScriptInstanceRef>, _: &SymbolTable, _: &DirPlayer) {}
-    pub fn dispatch_schedule_timeout(_: &str, _: u32) {}
-    pub fn dispatch_clear_timeout(_: &str) {}
-    #[allow(dead_code)]
-    pub fn dispatch_clear_timeouts() {}
+    pub fn dispatch_schedule_timeout(
+        owner_key: &str,
+        timeout_name: &str,
+        _: u32,
+        incarnation: u64,
+    ) -> Result<TimeoutHostDispatch, ScriptError> {
+        Ok(TimeoutHostDispatch::Unsupported {
+            operation: TimeoutHostOperation::Schedule,
+            owner_key: owner_key.to_owned(),
+            timeout_name: timeout_name.to_owned(),
+            incarnation,
+        })
+    }
+    pub fn dispatch_clear_timeout(
+        owner_key: &str,
+        timeout_name: &str,
+        incarnation: u64,
+    ) -> Result<TimeoutHostDispatch, ScriptError> {
+        Ok(TimeoutHostDispatch::Unsupported {
+            operation: TimeoutHostOperation::Clear,
+            owner_key: owner_key.to_owned(),
+            timeout_name: timeout_name.to_owned(),
+            incarnation,
+        })
+    }
     pub fn dispatch_movie_loaded(_: &DirectorFile) {}
     pub fn dispatch_movie_load_failed(_: &str, _: &str) {}
     pub fn dispatch_flash_member_loaded(_: i32, _: i32, _: i32, _: &[u8], _: u32, _: u32, _: bool, _: i32, _: &str) {}
@@ -3940,6 +4073,20 @@ impl JsApi {
     pub fn dispatch_flash_member_unloaded_at_generation(_: i32, _: u64, _: &str) -> Result<(), ScriptError> { Err(ScriptError::new("Flash host unload is unavailable on native".to_owned())) }
     pub fn dispatch_flash_member_resized(_: i32, _: u64, _: u32, _: u32, _: &str) -> Result<(), ScriptError> { Err(ScriptError::new("Flash host resize is unavailable on native".to_owned())) }
     pub fn dispatch_flash_reset_all(_: &str) {}
+    pub fn register_flash_lingo_callback(
+        _: &str,
+        _: i16,
+        _: u64,
+        _: &str,
+        _: &str,
+        _: i32,
+        _: i32,
+        _: &str,
+        _: i32,
+        _: i32,
+    ) -> Result<(), ScriptError> {
+        Err(ScriptError::new("Flash host is unavailable on native".to_owned()))
+    }
     pub fn dispatch_stage_size_changed(_: u32, _: u32, _: bool) {}
     pub fn dispatch_cast_name_changed(_: u32) {}
     pub fn dispatch_cast_list_changed() {}

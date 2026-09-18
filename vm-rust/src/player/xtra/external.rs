@@ -31,18 +31,15 @@ use std::{
 
 use futures::channel::oneshot;
 
-use crate::director::lingo::datum::{Datum, DatumType, XtraInstanceId, datum_bool};
+use crate::director::lingo::datum::{datum_bool, Datum, DatumType, XtraInstanceId};
 use crate::player::{
-    DatumRef, DirPlayer, ScriptError,
-    ownership::OwnerToken,
-    symbols::symbol::Symbol,
-    symbols::symbol_table::SymbolTable,
+    ownership::OwnerToken, symbols::symbol::Symbol, symbols::symbol_table::SymbolTable, DatumRef,
+    DirPlayer, ScriptError,
 };
 
-use xtra_sdk::Datum as XDatum;
 use xtra_sdk::scene3d::{FrameData as SceneFrameData, MeshData as SceneMeshData};
 use xtra_sdk::wire;
-
+use xtra_sdk::Datum as XDatum;
 
 /// Discriminator for the single `dx_host_call` extern that every plugin
 /// imports. Must match `HostOp` in `dirplayer-xtra/src/host_env.rs` and
@@ -124,10 +121,17 @@ pub(crate) enum ExternalXtraOperation {
         fallback_name: Symbol,
         fallback_args: Vec<DatumRef>,
     },
-    Static { handler: String },
-    Instance { instance_id: XtraInstanceId, handler: String },
+    Static {
+        handler: String,
+    },
+    Instance {
+        instance_id: XtraInstanceId,
+        handler: String,
+    },
     Create,
-    Destroy { instance_id: XtraInstanceId },
+    Destroy {
+        instance_id: XtraInstanceId,
+    },
 }
 
 /// The operation that was suspended while an on-demand xtra was loading.
@@ -275,9 +279,11 @@ impl ExternalXtraState {
                 ));
             }
         }
-        if self.completed_receivers.values().any(|retained| {
-            retained.name == key && !retained.owner.same_identity(&owner)
-        }) {
+        if self
+            .completed_receivers
+            .values()
+            .any(|retained| retained.name == key && !retained.owner.same_identity(&owner))
+        {
             return Err(ScriptError::new_code(
                 crate::player::ScriptErrorCode::InvalidReference,
                 "external Xtra load owner does not match completed state".to_owned(),
@@ -285,8 +291,7 @@ impl ExternalXtraState {
         }
         if request_id == 0
             || self.pending_loads.values().any(|entry| {
-                entry.waiters.contains_key(&request_id)
-                    || entry.receivers.contains_key(&request_id)
+                entry.waiters.contains_key(&request_id) || entry.receivers.contains_key(&request_id)
             })
             || self.completed_receivers.contains_key(&request_id)
             || self.continuations.contains_key(&request_id)
@@ -297,13 +302,16 @@ impl ExternalXtraState {
         }
         let (tx, rx) = oneshot::channel::<Result<(), ScriptError>>();
         self.next_request_id = next_request_id;
-        let entry = self.pending_loads.entry(key.clone()).or_insert_with(|| PendingLoad {
-            owner: owner.clone(),
-            attempt_id: request_id,
-            waiters: HashMap::new(),
-            receivers: HashMap::new(),
-            cancelled: HashMap::new(),
-        });
+        let entry = self
+            .pending_loads
+            .entry(key.clone())
+            .or_insert_with(|| PendingLoad {
+                owner: owner.clone(),
+                attempt_id: request_id,
+                waiters: HashMap::new(),
+                receivers: HashMap::new(),
+                cancelled: HashMap::new(),
+            });
         let first = entry.waiters.is_empty();
         let attempt_id = entry.attempt_id;
         let cancelled = std::rc::Rc::new(Cell::new(false));
@@ -347,9 +355,10 @@ impl ExternalXtraState {
         if !entry.owner.same_identity(&request.owner)
             || !entry.owner.is_arena_live()
             || !entry.waiters.contains_key(&request.request_id)
-            || !entry.cancelled.get(&request.request_id).is_some_and(|token| {
-                std::rc::Rc::ptr_eq(token, &request.cancelled) && !token.get()
-            })
+            || !entry
+                .cancelled
+                .get(&request.request_id)
+                .is_some_and(|token| std::rc::Rc::ptr_eq(token, &request.cancelled) && !token.get())
         {
             return Err(ScriptError::new(
                 "external Xtra load request has no live waiter".to_owned(),
@@ -383,25 +392,30 @@ impl ExternalXtraState {
             return;
         }
         let key = name.to_lowercase();
-        let owner_matches = self
-            .pending_loads
-            .get(&key)
-            .is_some_and(|entry| {
-                entry.owner.same_identity(owner)
-                    && owner.is_arena_live()
-                    && entry.attempt_id == request_id
-            });
+        let owner_matches = self.pending_loads.get(&key).is_some_and(|entry| {
+            entry.owner.same_identity(owner)
+                && owner.is_arena_live()
+                && entry.attempt_id == request_id
+        });
         if !owner_matches {
             return;
         }
-        let Some(entry) = self.pending_loads.remove(&key) else { return };
+        let Some(entry) = self.pending_loads.remove(&key) else {
+            return;
+        };
         let live_request = entry.cancelled.iter().any(|(id, token)| {
             !token.get() && (entry.waiters.contains_key(id) || entry.receivers.contains_key(id))
         });
         if success && live_request {
             self.registered.insert(key.clone());
         }
-        let PendingLoad { owner, waiters, receivers, cancelled, .. } = entry;
+        let PendingLoad {
+            owner,
+            waiters,
+            receivers,
+            cancelled,
+            ..
+        } = entry;
         for (request_id, tx) in waiters {
             if cancelled.get(&request_id).is_some_and(|token| token.get()) {
                 let _ = tx.send(Err(ScriptError::new(
@@ -434,10 +448,7 @@ impl ExternalXtraState {
                     owner: owner.clone(),
                     name: key.clone(),
                     receiver,
-                    cancelled: cancelled
-                        .get(&request_id)
-                        .expect("receiver token")
-                        .clone(),
+                    cancelled: cancelled.get(&request_id).expect("receiver token").clone(),
                 },
             );
             if !success {
@@ -450,10 +461,7 @@ impl ExternalXtraState {
     /// waiter owns the transport attempt, but a surviving same-name waiter
     /// must still be completed by that attempt. The request token makes a
     /// dropped waiter reject late completion even when this state is borrowed.
-    pub(crate) fn cancel_load_request(
-        &mut self,
-        request: &ExternalXtraLoadRequest,
-    ) -> bool {
+    pub(crate) fn cancel_load_request(&mut self, request: &ExternalXtraLoadRequest) -> bool {
         if request.state_id != self.state_id || !request.owner.is_arena_live() {
             return false;
         }
@@ -462,9 +470,10 @@ impl ExternalXtraState {
         let mut remove_pending_entry = false;
         if let Some(entry) = self.pending_loads.get_mut(&request.name) {
             let matches = entry.owner.same_identity(&request.owner)
-                && entry.cancelled.get(&request.request_id).is_some_and(|token| {
-                    std::rc::Rc::ptr_eq(token, &request.cancelled)
-                });
+                && entry
+                    .cancelled
+                    .get(&request.request_id)
+                    .is_some_and(|token| std::rc::Rc::ptr_eq(token, &request.cancelled));
             if matches {
                 removed |= entry.waiters.remove(&request.request_id).is_some();
                 removed |= entry.receivers.remove(&request.request_id).is_some();
@@ -475,13 +484,13 @@ impl ExternalXtraState {
         if remove_pending_entry {
             self.pending_loads.remove(&request.name);
         }
-        let continuation_matches = self
-            .continuations
-            .get(&request.request_id)
-            .is_some_and(|continuation| {
-                continuation.owner.same_identity(&request.owner)
-                    && std::rc::Rc::ptr_eq(&continuation.cancelled, &request.cancelled)
-            });
+        let continuation_matches =
+            self.continuations
+                .get(&request.request_id)
+                .is_some_and(|continuation| {
+                    continuation.owner.same_identity(&request.owner)
+                        && std::rc::Rc::ptr_eq(&continuation.cancelled, &request.cancelled)
+                });
         if continuation_matches {
             self.continuations.remove(&request.request_id);
             removed = true;
@@ -510,7 +519,8 @@ impl ExternalXtraState {
     }
 
     pub(crate) fn cancel_pending_loads(&mut self) {
-        let drained: Vec<PendingLoad> = self.pending_loads.drain().map(|(_, entry)| entry).collect();
+        let drained: Vec<PendingLoad> =
+            self.pending_loads.drain().map(|(_, entry)| entry).collect();
         for entry in drained {
             let mut request_ids: HashSet<u64> = entry.waiters.keys().copied().collect();
             request_ids.extend(entry.receivers.keys().copied());
@@ -590,11 +600,11 @@ impl ExternalXtraState {
         }
         let continuation = self.continuations.remove(&request.request_id)?.continuation;
         let (xtra_name, args, operation) = match continuation {
-            ExternalXtraContinuation::Static { xtra_name, handler, args } => (
+            ExternalXtraContinuation::Static {
                 xtra_name,
+                handler,
                 args,
-                ExternalXtraOperation::Static { handler },
-            ),
+            } => (xtra_name, args, ExternalXtraOperation::Static { handler }),
             ExternalXtraContinuation::Instance {
                 xtra_name,
                 instance_id,
@@ -603,13 +613,14 @@ impl ExternalXtraState {
             } => (
                 xtra_name,
                 args,
-                ExternalXtraOperation::Instance { instance_id, handler },
+                ExternalXtraOperation::Instance {
+                    instance_id,
+                    handler,
+                },
             ),
-            ExternalXtraContinuation::Create { xtra_name, args } => (
-                xtra_name,
-                args,
-                ExternalXtraOperation::Create,
-            ),
+            ExternalXtraContinuation::Create { xtra_name, args } => {
+                (xtra_name, args, ExternalXtraOperation::Create)
+            }
         };
         Some(ExternalXtraRequest {
             owner: request.owner.clone(),
@@ -636,10 +647,7 @@ impl ExternalXtraState {
 /// Read the external registry from the owning player. The registry is not a
 /// process-wide capability: a reset or replacement player starts with its
 /// own set of loaded plugins.
-pub(crate) fn is_registered_for_player(
-    player: &DirPlayer,
-    name: &str,
-) -> bool {
+pub(crate) fn is_registered_for_player(player: &DirPlayer, name: &str) -> bool {
     player.xtra_manager_state.external.is_registered(name)
 }
 
@@ -712,9 +720,11 @@ pub async fn request_xtra_load(
             &request.attempt_capability(),
         );
     }
-    receiver
-        .await
-        .unwrap_or_else(|_| Err(ScriptError::new("external Xtra load waiter cancelled".to_owned())))
+    receiver.await.unwrap_or_else(|_| {
+        Err(ScriptError::new(
+            "external Xtra load waiter cancelled".to_owned(),
+        ))
+    })
 }
 
 /// Prepare a known external static call while the owning player and symbol
@@ -834,17 +844,28 @@ pub(crate) fn prepare_nested_host_request(
     op_id: u32,
     args: &[XDatum],
 ) -> Result<ExternalXtraRequest, String> {
-        let op = HostOp::from_u32(op_id).ok_or_else(|| format!("unknown host op_id {}", op_id))?;
-        let (xtra_name, operation, wire_args) = match op {
+    let op = HostOp::from_u32(op_id).ok_or_else(|| format!("unknown host op_id {}", op_id))?;
+    let (xtra_name, operation, wire_args) = match op {
         HostOp::CreateXtraInstance => {
-            let (Some(XDatum::String(name)), Some(XDatum::List(values))) = (args.first(), args.get(1)) else {
+            let (Some(XDatum::String(name)), Some(XDatum::List(values))) =
+                (args.first(), args.get(1))
+            else {
                 return Err("create_xtra_instance: expected (String, List)".to_owned());
             };
-            (name.clone(), ExternalXtraOperation::Create, wire::encode_args(values))
+            (
+                name.clone(),
+                ExternalXtraOperation::Create,
+                wire::encode_args(values),
+            )
         }
         HostOp::CallXtraHandler => {
-            let (Some(XDatum::String(name)), Some(XDatum::Int(id)), Some(XDatum::String(handler)), Some(XDatum::List(values))) =
-                (args.first(), args.get(1), args.get(2), args.get(3)) else {
+            let (
+                Some(XDatum::String(name)),
+                Some(XDatum::Int(id)),
+                Some(XDatum::String(handler)),
+                Some(XDatum::List(values)),
+            ) = (args.first(), args.get(1), args.get(2), args.get(3))
+            else {
                 return Err("call_xtra_handler: expected (String, Int, String, List)".to_owned());
             };
             if *id < 0 {
@@ -860,7 +881,8 @@ pub(crate) fn prepare_nested_host_request(
             )
         }
         HostOp::DestroyXtraInstance => {
-            let (Some(XDatum::String(name)), Some(XDatum::Int(id))) = (args.first(), args.get(1)) else {
+            let (Some(XDatum::String(name)), Some(XDatum::Int(id))) = (args.first(), args.get(1))
+            else {
                 return Err("destroy_xtra_instance: expected (String, Int)".to_owned());
             };
             if *id < 0 {
@@ -868,7 +890,9 @@ pub(crate) fn prepare_nested_host_request(
             }
             (
                 name.clone(),
-                ExternalXtraOperation::Destroy { instance_id: *id as XtraInstanceId },
+                ExternalXtraOperation::Destroy {
+                    instance_id: *id as XtraInstanceId,
+                },
                 wire::encode_args(&[]),
             )
         }
@@ -885,7 +909,6 @@ pub(crate) fn prepare_nested_host_request(
         args: wire_args,
     })
 }
-
 
 /// Prepare a continuation-backed load request. The caller must invoke this
 /// while holding the owning player borrow; no host code runs here.
@@ -918,12 +941,16 @@ pub(crate) fn execute_request(
 ) -> Result<Option<ExternalXtraResponse>, ScriptError> {
     ensure_request_owner_live(request)?;
     match &request.operation {
-        ExternalXtraOperation::ProbeStatic { handler, candidates, .. } => {
+        ExternalXtraOperation::ProbeStatic {
+            handler,
+            candidates,
+            ..
+        } => {
             for candidate in candidates {
                 ensure_request_owner_live(request)?;
-                if js_bridge::externalXtraHasStaticHandler(
-                    candidate, handler, &request.owner_key,
-                ) == 0 {
+                if js_bridge::externalXtraHasStaticHandler(candidate, handler, &request.owner_key)
+                    == 0
+                {
                     ensure_request_owner_live(request)?;
                     continue;
                 }
@@ -942,29 +969,42 @@ pub(crate) fn execute_request(
         ExternalXtraOperation::Static { handler } => {
             ensure_request_owner_live(request)?;
             let result = js_bridge::dispatchExternalXtraStaticHandler(
-                &request.xtra_name, handler, &request.args, &request.owner_key,
+                &request.xtra_name,
+                handler,
+                &request.args,
+                &request.owner_key,
             );
             ensure_request_owner_live(request)?;
-            let result = result.ok_or_else(|| ScriptError::new(format!(
-                "External xtra '{}' static dispatch returned None",
-                request.xtra_name
-            )))?;
+            let result = result.ok_or_else(|| {
+                ScriptError::new(format!(
+                    "External xtra '{}' static dispatch returned None",
+                    request.xtra_name
+                ))
+            })?;
             Ok(Some(ExternalXtraResponse {
                 xtra_name: request.xtra_name.clone(),
                 bytes: result,
             }))
         }
-        ExternalXtraOperation::Instance { instance_id, handler } => {
+        ExternalXtraOperation::Instance {
+            instance_id,
+            handler,
+        } => {
             ensure_request_owner_live(request)?;
             let result = js_bridge::dispatchExternalXtraInstanceHandler(
-                &request.xtra_name, *instance_id as u32, handler,
-                &request.args, &request.owner_key,
+                &request.xtra_name,
+                *instance_id as u32,
+                handler,
+                &request.args,
+                &request.owner_key,
             );
             ensure_request_owner_live(request)?;
-            let result = result.ok_or_else(|| ScriptError::new(format!(
-                "External xtra '{}' instance dispatch returned None",
-                request.xtra_name
-            )))?;
+            let result = result.ok_or_else(|| {
+                ScriptError::new(format!(
+                    "External xtra '{}' instance dispatch returned None",
+                    request.xtra_name
+                ))
+            })?;
             Ok(Some(ExternalXtraResponse {
                 xtra_name: request.xtra_name.clone(),
                 bytes: result,
@@ -973,13 +1013,17 @@ pub(crate) fn execute_request(
         ExternalXtraOperation::Create => {
             ensure_request_owner_live(request)?;
             let result = js_bridge::createExternalXtraInstance(
-                &request.xtra_name, &request.args, &request.owner_key,
+                &request.xtra_name,
+                &request.args,
+                &request.owner_key,
             );
             ensure_request_owner_live(request)?;
-            let result = result.ok_or_else(|| ScriptError::new(format!(
-                "External xtra '{}' create dispatch returned None",
-                request.xtra_name
-            )))?;
+            let result = result.ok_or_else(|| {
+                ScriptError::new(format!(
+                    "External xtra '{}' create dispatch returned None",
+                    request.xtra_name
+                ))
+            })?;
             Ok(Some(ExternalXtraResponse {
                 xtra_name: request.xtra_name.clone(),
                 bytes: result,
@@ -988,7 +1032,9 @@ pub(crate) fn execute_request(
         ExternalXtraOperation::Destroy { instance_id } => {
             ensure_request_owner_live(request)?;
             js_bridge::destroyExternalXtraInstance(
-                &request.xtra_name, *instance_id as u32, &request.owner_key,
+                &request.xtra_name,
+                *instance_id as u32,
+                &request.owner_key,
             );
             ensure_request_owner_live(request)?;
             Ok(Some(ExternalXtraResponse {
@@ -1034,7 +1080,11 @@ pub(crate) fn finish_request(
         ExternalXtraOperation::Destroy { .. } => "destroy",
     };
     decode_return_to_datum_ref(
-        &response.bytes, &response.xtra_name, handler, player, symbols,
+        &response.bytes,
+        &response.xtra_name,
+        handler,
+        player,
+        symbols,
     )
 }
 
@@ -1076,19 +1126,12 @@ mod js_bridge {
         ) -> Option<Vec<u8>>;
 
         /// Calls the plugin's `__xtra_destroy_instance`. No return value.
-        pub fn destroyExternalXtraInstance(
-            xtra_name: &str,
-            instance_id: u32,
-            owner_key: &str,
-        );
+        pub fn destroyExternalXtraInstance(xtra_name: &str, instance_id: u32, owner_key: &str);
 
         /// Returns `1` if the plugin reports the handler as a static
         /// handler. `0` otherwise. Mirrors `__xtra_has_static_handler`.
-        pub fn externalXtraHasStaticHandler(
-            xtra_name: &str,
-            handler: &str,
-            owner_key: &str,
-        ) -> u32;
+        pub fn externalXtraHasStaticHandler(xtra_name: &str, handler: &str, owner_key: &str)
+            -> u32;
 
         /// Fetch a plugin .wasm from `url`, instantiate it, and register
         /// the xtra. Resolves with the registered xtra name. Used by the
@@ -1118,14 +1161,29 @@ mod js_bridge {
     // Native-target stubs for `cargo check` / unit tests. The wasm32
     // build is the only target that actually loads plugins.
     pub fn dispatchExternalXtraStaticHandler(
-        _: &str, _: &str, _: &[u8], _: &str,
-    ) -> Option<Vec<u8>> { None }
+        _: &str,
+        _: &str,
+        _: &[u8],
+        _: &str,
+    ) -> Option<Vec<u8>> {
+        None
+    }
     pub fn dispatchExternalXtraInstanceHandler(
-        _: &str, _: u32, _: &str, _: &[u8], _: &str,
-    ) -> Option<Vec<u8>> { None }
-    pub fn createExternalXtraInstance(_: &str, _: &[u8], _: &str) -> Option<Vec<u8>> { None }
+        _: &str,
+        _: u32,
+        _: &str,
+        _: &[u8],
+        _: &str,
+    ) -> Option<Vec<u8>> {
+        None
+    }
+    pub fn createExternalXtraInstance(_: &str, _: &[u8], _: &str) -> Option<Vec<u8>> {
+        None
+    }
     pub fn destroyExternalXtraInstance(_: &str, _: u32, _: &str) {}
-    pub fn externalXtraHasStaticHandler(_: &str, _: &str, _: &str) -> u32 { 0 }
+    pub fn externalXtraHasStaticHandler(_: &str, _: &str, _: &str) -> u32 {
+        0
+    }
     pub fn onRequestXtraLoad(_: &str, _: &str, _: &str) {}
     pub fn disposeExternalXtraHost(_: &str) {}
 }
@@ -1163,7 +1221,8 @@ pub async fn load_for_test(url: &str) -> Result<String, String> {
         Err(e) => Err(format!(
             "loadExternalXtra({}): {}",
             url,
-            e.as_string().unwrap_or_else(|| String::from("(opaque JsValue error)"))
+            e.as_string()
+                .unwrap_or_else(|| String::from("(opaque JsValue error)"))
         )),
     }
 }
@@ -1191,10 +1250,7 @@ pub fn host_call_dispatch(
     let op = match HostOp::from_u32(op_id) {
         Some(o) => o,
         None => {
-            return wire::encode_error(&format!(
-                "unknown host op_id {}",
-                op_id
-            ));
+            return wire::encode_error(&format!("unknown host op_id {}", op_id));
         }
     };
     let args = match wire::decode_args(args_bytes) {
@@ -1277,9 +1333,7 @@ pub fn host_call_dispatch(
             let _ = (key, val);
             wire::encode_error("storage_set: no localStorage available")
         }
-        HostOp::CreateXtraInstance
-        | HostOp::CallXtraHandler
-        | HostOp::DestroyXtraInstance => {
+        HostOp::CreateXtraInstance | HostOp::CallXtraHandler | HostOp::DestroyXtraInstance => {
             // This lower-level entrypoint is called while its caller owns a
             // VM borrow.  Executing JavaScript here would permit nested Xtra
             // re-entry with that borrow still live.  The owner-bound browser
@@ -1309,14 +1363,20 @@ pub fn host_call_dispatch(
                 (Some(XDatum::Int(s)), Some(XDatum::Int(m)), Some(XDatum::ByteArray(b))) => {
                     (*s, *m as u32, b)
                 }
-                _ => return wire::encode_error("scene3d_upload_mesh: expected (Int, Int, ByteArray)"),
+                _ => {
+                    return wire::encode_error(
+                        "scene3d_upload_mesh: expected (Int, Int, ByteArray)",
+                    )
+                }
             };
             match SceneMeshData::from_bytes(bytes) {
                 Ok(data) => {
                     player.scene3d_store.upload_mesh(scene_id, mesh_id, data);
                     Vec::new()
                 }
-                Err(e) => wire::encode_error(&format!("scene3d_upload_mesh: bad MeshData: {:?}", e)),
+                Err(e) => {
+                    wire::encode_error(&format!("scene3d_upload_mesh: bad MeshData: {:?}", e))
+                }
             }
         }
         HostOp::Scene3dDropMesh => {
@@ -1329,11 +1389,18 @@ pub fn host_call_dispatch(
         }
         HostOp::Scene3dUploadTexture => {
             let (scene_id, name, w, h, rgba) = match (
-                args.first(), args.get(1), args.get(2), args.get(3), args.get(4),
+                args.first(),
+                args.get(1),
+                args.get(2),
+                args.get(3),
+                args.get(4),
             ) {
                 (
-                    Some(XDatum::Int(s)), Some(XDatum::String(n)),
-                    Some(XDatum::Int(w)), Some(XDatum::Int(h)), Some(XDatum::ByteArray(b)),
+                    Some(XDatum::Int(s)),
+                    Some(XDatum::String(n)),
+                    Some(XDatum::Int(w)),
+                    Some(XDatum::Int(h)),
+                    Some(XDatum::ByteArray(b)),
                 ) => (*s, n.clone(), *w as u32, *h as u32, b.clone()),
                 _ => {
                     return wire::encode_error(
@@ -1341,7 +1408,9 @@ pub fn host_call_dispatch(
                     );
                 }
             };
-            player.scene3d_store.upload_texture(scene_id, &name, w, h, rgba);
+            player
+                .scene3d_store
+                .upload_texture(scene_id, &name, w, h, rgba);
             Vec::new()
         }
         HostOp::Scene3dSubmitFrame => {
@@ -1352,10 +1421,14 @@ pub fn host_call_dispatch(
             match SceneFrameData::from_bytes(bytes) {
                 Ok(frame) => {
                     let movie_frame = player.movie.current_frame as i32;
-                    player.scene3d_store.submit_frame(scene_id, frame, movie_frame);
+                    player
+                        .scene3d_store
+                        .submit_frame(scene_id, frame, movie_frame);
                     Vec::new()
                 }
-                Err(e) => wire::encode_error(&format!("scene3d_submit_frame: bad FrameData: {:?}", e)),
+                Err(e) => {
+                    wire::encode_error(&format!("scene3d_submit_frame: bad FrameData: {:?}", e))
+                }
             }
         }
         HostOp::Scene3dDestroy => {
@@ -1412,7 +1485,11 @@ pub fn host_call_dispatch(
             }
         }
         HostOp::StageInfo => {
-            let (w, h, frame) = (player.movie.rect.width(), player.movie.rect.height(), player.movie.current_frame as i32);
+            let (w, h, frame) = (
+                player.movie.rect.width(),
+                player.movie.rect.height(),
+                player.movie.current_frame as i32,
+            );
             wire::encode_return(&XDatum::List(vec![
                 XDatum::Int(w),
                 XDatum::Int(h),
@@ -1471,17 +1548,25 @@ pub(crate) fn encode_args_from_player(
 /// Director represents booleans as `Datum::Int(0)` / `Datum::Int(1)`
 /// (there is no separate Bool variant on the host), so we forward Ints
 /// as-is. Plugins that want bool semantics can compare to `Int(0)`.
-fn host_datum_to_xdatum(d: &Datum, player: &DirPlayer, symbols: &SymbolTable) -> Result<XDatum, ScriptError> {
-    let invalid_symbol = || ScriptError::new_code(
-        crate::player::ScriptErrorCode::InvalidReference,
-        "foreign or stale symbol in external Xtra argument".to_owned(),
-    );
+fn host_datum_to_xdatum(
+    d: &Datum,
+    player: &DirPlayer,
+    symbols: &SymbolTable,
+) -> Result<XDatum, ScriptError> {
+    let invalid_symbol = || {
+        ScriptError::new_code(
+            crate::player::ScriptErrorCode::InvalidReference,
+            "foreign or stale symbol in external Xtra argument".to_owned(),
+        )
+    };
     match d {
         Datum::Void => Ok(XDatum::Void),
         Datum::Int(i) => Ok(XDatum::Int(*i)),
         Datum::Float(f) => Ok(XDatum::Float(*f)),
         Datum::String(s) => Ok(XDatum::String(s.clone())),
-        Datum::Symbol(s) => Ok(XDatum::Symbol(symbols.display(s).map_err(|_| invalid_symbol())?.to_owned())),
+        Datum::Symbol(s) => Ok(XDatum::Symbol(
+            symbols.display(s).map_err(|_| invalid_symbol())?.to_owned(),
+        )),
         // Container variants recurse, resolving each child DatumRef through
         // the player's datum arena. Groove passes/returns lists, prop-lists,
         // points and rects, so these must survive the boundary intact.
@@ -1565,9 +1650,7 @@ fn xdatum_to_host_datum(d: &XDatum, player: &mut DirPlayer, symbols: &mut Symbol
         // bytes via `c as u8`. Plugins that round-trip raw bytes hand
         // them back to other plugins through `host_env::call_xtra_handler`
         // using ByteArray directly.
-        XDatum::ByteArray(b) => {
-            Datum::String(b.iter().map(|&byte| byte as char).collect())
-        }
+        XDatum::ByteArray(b) => Datum::String(b.iter().map(|&byte| byte as char).collect()),
         _ => Datum::Void,
     }
 }
@@ -1701,7 +1784,9 @@ mod tests {
             "ExampleXtra",
             true,
         );
-        let request = state.take_load_continuation(&load).expect("original continuation");
+        let request = state
+            .take_load_continuation(&load)
+            .expect("original continuation");
         assert_eq!(request.xtra_name, "ExampleXtra");
         assert_eq!(request.args, vec![1]);
     }
@@ -1907,7 +1992,9 @@ mod tests {
             )
             .unwrap();
         assert_ne!(request.request_id, second.request_id);
-        let mut receiver = state.take_load_waiter(&request).expect("completed receiver");
+        let mut receiver = state
+            .take_load_waiter(&request)
+            .expect("completed receiver");
         assert!(matches!(receiver.try_recv(), Ok(Some(Ok(())))));
     }
 
@@ -1993,7 +2080,9 @@ mod tests {
         assert_eq!(request.xtra_name, "Nested");
         assert!(matches!(request.operation, ExternalXtraOperation::Create));
         let encoded = wire::decode_args(&request.args).unwrap();
-        assert!(matches!(encoded.as_slice(), [XDatum::Int(7), XDatum::String(value)] if value == "payload"));
+        assert!(
+            matches!(encoded.as_slice(), [XDatum::Int(7), XDatum::String(value)] if value == "payload")
+        );
         assert!(request.owner.same_identity(&owner));
 
         let call = prepare_nested_host_request(

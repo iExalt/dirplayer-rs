@@ -1,30 +1,68 @@
-use crate::{director::lingo::datum::Datum, player::{DirPlayer, ScriptError, cast_lib::CastMemberRef, cast_member::{CastMemberType, Media}, symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable}}};
-
+use crate::{
+    director::lingo::datum::Datum,
+    player::{
+        cast_lib::CastMemberRef,
+        cast_member::{CastMemberType, Media},
+        symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable},
+        DirPlayer, ScriptError,
+    },
+};
 
 pub struct PaletteMemberHandlers;
 
 impl PaletteMemberHandlers {
-    pub fn get_prop(player: &mut DirPlayer, symbols: &SymbolTable, member_ref: &CastMemberRef, prop_name: Symbol) -> Result<Datum, ScriptError> {
-        let prop_name_display = symbols.display(&prop_name).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+    pub fn get_prop(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        member_ref: &CastMemberRef,
+        prop_name: Symbol,
+    ) -> Result<Datum, ScriptError> {
+        let prop_name_display = symbols
+            .display(&prop_name)
+            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
         match prop_name.into_builtin() {
             Some(BuiltInSymbol::Media) => {
-                let palette_member = player.movie.cast_manager.find_member_by_ref(member_ref).unwrap();
+                let palette_member = player
+                    .movie
+                    .cast_manager
+                    .find_member_by_ref(member_ref)
+                    .unwrap();
                 let palette = match &palette_member.member_type {
                     CastMemberType::Palette(palette) => palette.clone(),
-                    _ => return Err(ScriptError::new(format!("Member with ref {:?} is not a palette", member_ref))),
+                    _ => {
+                        return Err(ScriptError::new(format!(
+                            "Member with ref {:?} is not a palette",
+                            member_ref
+                        )))
+                    }
                 };
                 Ok(Datum::media(Media::Palette(palette)))
             }
-            _ => Err(ScriptError::new(format!("Cannot get property '{}' for palette member", prop_name_display))),
+            _ => Err(ScriptError::new(format!(
+                "Cannot get property '{}' for palette member",
+                prop_name_display
+            ))),
         }
     }
 
-    pub fn set_prop(player: &mut DirPlayer, symbols: &mut SymbolTable, member_ref: &CastMemberRef, prop_name: Symbol, value: Datum) -> Result<(), ScriptError> {
-        let prop_name_display = symbols.display(&prop_name).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+    pub fn set_prop(
+        player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
+        member_ref: &CastMemberRef,
+        prop_name: Symbol,
+        value: Datum,
+    ) -> Result<(), ScriptError> {
+        let prop_name_display = symbols
+            .display(&prop_name)
+            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
         match prop_name.into_builtin() {
             Some(BuiltInSymbol::Media) => {
                 crate::player::compare::validate_direct_symbol_fields(&value, symbols)?;
-                let palette_member = player.movie.cast_manager.find_mut_member_by_ref(member_ref).unwrap();
+                let palette_member = player
+                    .movie
+                    .cast_manager
+                    .find_mut_member_by_ref(member_ref)
+                    .unwrap();
                 match &mut palette_member.member_type {
                     CastMemberType::Palette(palette) => {
                         // `Media` is boxed inside Datum; deref the owned Box, then
@@ -37,11 +75,19 @@ impl PaletteMemberHandlers {
                             _ => return Err(ScriptError::new("Value for 'media' property of a palette member must be a palette media".to_string())),
                         }
                     }
-                    _ => return Err(ScriptError::new(format!("Member with ref {:?} is not a palette", member_ref))),
+                    _ => {
+                        return Err(ScriptError::new(format!(
+                            "Member with ref {:?} is not a palette",
+                            member_ref
+                        )))
+                    }
                 };
                 Ok(())
             }
-            _ => Err(ScriptError::new(format!("Cannot set property '{}' for palette member", prop_name_display))),
+            _ => Err(ScriptError::new(format!(
+                "Cannot set property '{}' for palette member",
+                prop_name_display
+            ))),
         }
     }
 }

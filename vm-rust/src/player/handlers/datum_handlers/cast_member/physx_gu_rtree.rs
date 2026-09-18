@@ -17,8 +17,14 @@ pub struct LeafTriangles {
 }
 
 impl LeafTriangles {
-    #[inline] pub fn nb_triangles(self) -> u32 { ((self.data >> 1) & 15) + 1 }
-    #[inline] pub fn triangle_index(self) -> u32 { self.data >> 5 }
+    #[inline]
+    pub fn nb_triangles(self) -> u32 {
+        ((self.data >> 1) & 15) + 1
+    }
+    #[inline]
+    pub fn triangle_index(self) -> u32 {
+        self.data >> 5
+    }
     pub fn encode(nb: u32, index: u32) -> u32 {
         debug_assert!((1..=16).contains(&nb));
         debug_assert!(index < (1u32 << 27));
@@ -29,15 +35,23 @@ impl LeafTriangles {
 /// Source: GuRTree.h:68-78 — per-node temp/build struct.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RTreeNodeQ {
-    pub minx: f32, pub miny: f32, pub minz: f32,
-    pub maxx: f32, pub maxy: f32, pub maxz: f32,
+    pub minx: f32,
+    pub miny: f32,
+    pub minz: f32,
+    pub maxx: f32,
+    pub maxy: f32,
+    pub maxz: f32,
     pub ptr: u32,
 }
 
 impl RTreeNodeQ {
     pub fn set_empty(&mut self) {
-        self.minx = RTreePage::MX; self.miny = RTreePage::MX; self.minz = RTreePage::MX;
-        self.maxx = RTreePage::MN; self.maxy = RTreePage::MN; self.maxz = RTreePage::MN;
+        self.minx = RTreePage::MX;
+        self.miny = RTreePage::MX;
+        self.minz = RTreePage::MX;
+        self.maxx = RTreePage::MN;
+        self.maxy = RTreePage::MN;
+        self.maxz = RTreePage::MN;
     }
     pub fn grow(&mut self, other: &RTreeNodeQ) {
         self.minx = self.minx.min(other.minx);
@@ -52,8 +66,12 @@ impl RTreeNodeQ {
 /// Source: GuRTree.h:84-116. SoA 4-children page.
 #[derive(Clone, Debug)]
 pub struct RTreePage {
-    pub minx: [f32; 4], pub miny: [f32; 4], pub minz: [f32; 4],
-    pub maxx: [f32; 4], pub maxy: [f32; 4], pub maxz: [f32; 4],
+    pub minx: [f32; 4],
+    pub miny: [f32; 4],
+    pub minz: [f32; 4],
+    pub maxx: [f32; 4],
+    pub maxy: [f32; 4],
+    pub maxz: [f32; 4],
     pub ptrs: [u32; 4],
 }
 
@@ -64,30 +82,48 @@ impl RTreePage {
 
     pub fn new_empty() -> Self {
         let mut p = Self {
-            minx: [Self::MX; 4], miny: [Self::MX; 4], minz: [Self::MX; 4],
-            maxx: [Self::MN; 4], maxy: [Self::MN; 4], maxz: [Self::MN; 4],
+            minx: [Self::MX; 4],
+            miny: [Self::MX; 4],
+            minz: [Self::MX; 4],
+            maxx: [Self::MN; 4],
+            maxy: [Self::MN; 4],
+            maxz: [Self::MN; 4],
             ptrs: [0; 4],
         };
         p.set_empty(0);
         p
     }
 
-    pub fn is_empty(&self, i: usize) -> bool { self.minx[i] > self.maxx[i] }
-    pub fn is_leaf(&self, i: usize) -> bool { (self.ptrs[i] & 1) != 0 }
+    pub fn is_empty(&self, i: usize) -> bool {
+        self.minx[i] > self.maxx[i]
+    }
+    pub fn is_leaf(&self, i: usize) -> bool {
+        (self.ptrs[i] & 1) != 0
+    }
 
     pub fn clear_node(&mut self, i: usize) {
-        self.minx[i] = Self::MX; self.miny[i] = Self::MX; self.minz[i] = Self::MX;
-        self.maxx[i] = Self::MN; self.maxy[i] = Self::MN; self.maxz[i] = Self::MN;
+        self.minx[i] = Self::MX;
+        self.miny[i] = Self::MX;
+        self.minz[i] = Self::MX;
+        self.maxx[i] = Self::MN;
+        self.maxy[i] = Self::MN;
+        self.maxz[i] = Self::MN;
         self.ptrs[i] = 0;
     }
 
     pub fn set_empty(&mut self, start: usize) {
-        for i in start..Self::N { self.clear_node(i); }
+        for i in start..Self::N {
+            self.clear_node(i);
+        }
     }
 
     pub fn set_node(&mut self, i: usize, n: &RTreeNodeQ) {
-        self.minx[i] = n.minx; self.miny[i] = n.miny; self.minz[i] = n.minz;
-        self.maxx[i] = n.maxx; self.maxy[i] = n.maxy; self.maxz[i] = n.maxz;
+        self.minx[i] = n.minx;
+        self.miny[i] = n.miny;
+        self.minz[i] = n.minz;
+        self.maxx[i] = n.maxx;
+        self.maxy[i] = n.maxy;
+        self.maxz[i] = n.maxz;
         self.ptrs[i] = n.ptr;
     }
 
@@ -95,11 +131,25 @@ impl RTreePage {
         let (mut mnx, mut mny, mut mnz) = (Self::MX, Self::MX, Self::MX);
         let (mut mxx, mut mxy, mut mxz) = (Self::MN, Self::MN, Self::MN);
         for j in 0..Self::N {
-            if self.is_empty(j) { continue; }
-            mnx = mnx.min(self.minx[j]); mny = mny.min(self.miny[j]); mnz = mnz.min(self.minz[j]);
-            mxx = mxx.max(self.maxx[j]); mxy = mxy.max(self.maxy[j]); mxz = mxz.max(self.maxz[j]);
+            if self.is_empty(j) {
+                continue;
+            }
+            mnx = mnx.min(self.minx[j]);
+            mny = mny.min(self.miny[j]);
+            mnz = mnz.min(self.minz[j]);
+            mxx = mxx.max(self.maxx[j]);
+            mxy = mxy.max(self.maxy[j]);
+            mxz = mxz.max(self.maxz[j]);
         }
-        RTreeNodeQ { minx: mnx, miny: mny, minz: mnz, maxx: mxx, maxy: mxy, maxz: mxz, ptr: 0 }
+        RTreeNodeQ {
+            minx: mnx,
+            miny: mny,
+            minz: mnz,
+            maxx: mxx,
+            maxy: mxy,
+            maxz: mxz,
+            ptr: 0,
+        }
     }
 }
 
@@ -119,9 +169,13 @@ pub struct RTree {
 impl Default for RTree {
     fn default() -> Self {
         Self {
-            bounds_min: [0.0; 3], bounds_max: [0.0; 3],
-            num_root_pages: 0, num_levels: 0, total_nodes: 0,
-            pages: Vec::new(), tri_indices: Vec::new(),
+            bounds_min: [0.0; 3],
+            bounds_max: [0.0; 3],
+            num_root_pages: 0,
+            num_levels: 0,
+            total_nodes: 0,
+            pages: Vec::new(),
+            tri_indices: Vec::new(),
         }
     }
 }
@@ -140,8 +194,15 @@ pub trait RTreeRaycastCallback {
 
 impl RTree {
     /// Source: GuRTreeQueries.cpp:84-171 — `traverseAABB` (scalar).
-    pub fn traverse_aabb<C: RTreeAabbCallback + ?Sized>(&self, box_min: [f32; 3], box_max: [f32; 3], cb: &mut C) {
-        if self.pages.is_empty() || self.num_root_pages == 0 { return; }
+    pub fn traverse_aabb<C: RTreeAabbCallback + ?Sized>(
+        &self,
+        box_min: [f32; 3],
+        box_max: [f32; 3],
+        cb: &mut C,
+    ) {
+        if self.pages.is_empty() || self.num_root_pages == 0 {
+            return;
+        }
         let mut stack = Vec::with_capacity(128);
         for j in (0..self.num_root_pages).rev() {
             stack.push(j);
@@ -149,15 +210,23 @@ impl RTree {
         while let Some(page_idx) = stack.pop() {
             let page = &self.pages[page_idx as usize];
             for i in 0..RTreePage::N {
-                if page.is_empty(i) { continue; }
-                if box_min[0] > page.maxx[i] || box_max[0] < page.minx[i]
-                || box_min[1] > page.maxy[i] || box_max[1] < page.miny[i]
-                || box_min[2] > page.maxz[i] || box_max[2] < page.minz[i] {
+                if page.is_empty(i) {
+                    continue;
+                }
+                if box_min[0] > page.maxx[i]
+                    || box_max[0] < page.minx[i]
+                    || box_min[1] > page.maxy[i]
+                    || box_max[1] < page.miny[i]
+                    || box_min[2] > page.maxz[i]
+                    || box_max[2] < page.minz[i]
+                {
                     continue;
                 }
                 if page.is_leaf(i) {
                     let leaf = page.ptrs[i] & !1u32;
-                    if !cb.process(leaf) { return; }
+                    if !cb.process(leaf) {
+                        return;
+                    }
                 } else {
                     stack.push(page.ptrs[i] >> 1);
                 }
@@ -175,7 +244,9 @@ impl RTree {
         cb: &mut C,
         aabb_inflate: [f32; 3],
     ) {
-        if self.pages.is_empty() || self.num_root_pages == 0 { return; }
+        if self.pages.is_empty() || self.num_root_pages == 0 {
+            return;
+        }
         const EPS_FLOAT: f32 = 1e-6;
         let ix = safe_inv_dir(ray_dir[0], EPS_FLOAT);
         let iy = safe_inv_dir(ray_dir[1], EPS_FLOAT);
@@ -189,14 +260,20 @@ impl RTree {
             if (top & 1) != 0 {
                 let leaf_encoded = top - 1;
                 let mut new_max_t = max_t;
-                if !cb.process(leaf_encoded, &mut new_max_t) { return; }
-                if new_max_t < max_t { max_t = new_max_t; }
+                if !cb.process(leaf_encoded, &mut new_max_t) {
+                    return;
+                }
+                if new_max_t < max_t {
+                    max_t = new_max_t;
+                }
                 continue;
             }
             let page_idx = top >> 1;
             let page = &self.pages[page_idx as usize];
             for i in 0..RTreePage::N {
-                if page.is_empty(i) { continue; }
+                if page.is_empty(i) {
+                    continue;
+                }
                 let minx = page.minx[i] - aabb_inflate[0];
                 let miny = page.miny[i] - aabb_inflate[1];
                 let minz = page.minz[i] - aabb_inflate[2];
@@ -212,9 +289,11 @@ impl RTree {
                 let tz1 = (maxz - ray_origin[2]) * iz;
 
                 let tnear = tx0.min(tx1).max(ty0.min(ty1)).max(tz0.min(tz1));
-                let tfar  = tx0.max(tx1).min(ty0.max(ty1)).min(tz0.max(tz1));
+                let tfar = tx0.max(tx1).min(ty0.max(ty1)).min(tz0.max(tz1));
 
-                if tfar < EPS_FLOAT || tnear > max_t || tnear > tfar { continue; }
+                if tfar < EPS_FLOAT || tnear > max_t || tnear > tfar {
+                    continue;
+                }
 
                 stack.push(page.ptrs[i]); // includes leaf bit verbatim
             }
@@ -225,7 +304,9 @@ impl RTree {
 #[inline]
 fn safe_inv_dir(d: f32, eps: f32) -> f32 {
     let mut a = d.abs();
-    if a < eps { a = eps; }
+    if a < eps {
+        a = eps;
+    }
     let signed = if d < 0.0 { -a } else { a };
     1.0 / signed
 }
@@ -242,7 +323,9 @@ impl RTreeBuilder {
     pub fn build(triangles: &[u32], vertices: &[[f32; 3]]) -> RTree {
         let tri_count = triangles.len() / 3;
         let mut tree = RTree::default();
-        if tri_count == 0 { return tree; }
+        if tri_count == 0 {
+            return tree;
+        }
 
         let mut tri_aabbs = vec![RTreeNodeQ::default(); tri_count];
         let mut tri_cx = vec![0f32; tri_count];
@@ -273,7 +356,9 @@ impl RTreeBuilder {
         let mut max_levels: u32 = 0;
 
         let mut root_child_nodes = [RTreeNodeQ::default(); 4];
-        for k in 0..4 { root_child_nodes[k].set_empty(); }
+        for k in 0..4 {
+            root_child_nodes[k].set_empty();
+        }
 
         let root_parts = tri_count.min(Self::N);
         let root_base = tri_count / root_parts;
@@ -281,11 +366,22 @@ impl RTreeBuilder {
         let mut cursor = 0;
         for k in 0..root_parts {
             let part_count = root_base + if k < root_rem { 1 } else { 0 };
-            if part_count == 0 { break; }
+            if part_count == 0 {
+                break;
+            }
             Self::recurse(
-                &mut pages, &mut max_levels,
-                &tri_aabbs, &tri_cx, &tri_cy, &tri_cz, &mut work,
-                cursor, part_count, 1, &mut root_child_nodes, k,
+                &mut pages,
+                &mut max_levels,
+                &tri_aabbs,
+                &tri_cx,
+                &tri_cy,
+                &tri_cz,
+                &mut work,
+                cursor,
+                part_count,
+                1,
+                &mut root_child_nodes,
+                k,
             );
             cursor += part_count;
         }
@@ -308,17 +404,23 @@ impl RTreeBuilder {
         pages: &mut Vec<RTreePage>,
         max_levels: &mut u32,
         tri_aabbs: &[RTreeNodeQ],
-        tri_cx: &[f32], tri_cy: &[f32], tri_cz: &[f32],
+        tri_cx: &[f32],
+        tri_cy: &[f32],
+        tri_cz: &[f32],
         work: &mut [u32],
-        span_start: usize, span_count: usize,
+        span_start: usize,
+        span_count: usize,
         level: u32,
         aabbs_out: &mut [RTreeNodeQ; 4],
         out_index: usize,
     ) {
-        if level > *max_levels { *max_levels = level; }
+        if level > *max_levels {
+            *max_levels = level;
+        }
 
         // Bounds of the span.
-        let mut bnd = RTreeNodeQ::default(); bnd.set_empty();
+        let mut bnd = RTreeNodeQ::default();
+        bnd.set_empty();
         for i in 0..span_count {
             bnd.grow(&tri_aabbs[work[span_start + i] as usize]);
         }
@@ -335,14 +437,41 @@ impl RTreeBuilder {
             let (mut mxx, mut mxy, mut mxz) = (f32::MIN, f32::MIN, f32::MIN);
             for i in 0..span_count {
                 let idx = work[span_start + i] as usize;
-                if tri_cx[idx] < mnx { mnx = tri_cx[idx]; } if tri_cx[idx] > mxx { mxx = tri_cx[idx]; }
-                if tri_cy[idx] < mny { mny = tri_cy[idx]; } if tri_cy[idx] > mxy { mxy = tri_cy[idx]; }
-                if tri_cz[idx] < mnz { mnz = tri_cz[idx]; } if tri_cz[idx] > mxz { mxz = tri_cz[idx]; }
+                if tri_cx[idx] < mnx {
+                    mnx = tri_cx[idx];
+                }
+                if tri_cx[idx] > mxx {
+                    mxx = tri_cx[idx];
+                }
+                if tri_cy[idx] < mny {
+                    mny = tri_cy[idx];
+                }
+                if tri_cy[idx] > mxy {
+                    mxy = tri_cy[idx];
+                }
+                if tri_cz[idx] < mnz {
+                    mnz = tri_cz[idx];
+                }
+                if tri_cz[idx] > mxz {
+                    mxz = tri_cz[idx];
+                }
             }
-            let ex = mxx - mnx; let ey = mxy - mny; let ez = mxz - mnz;
-            if ex >= ey && ex >= ez { 0 } else if ey >= ez { 1 } else { 2 }
+            let ex = mxx - mnx;
+            let ey = mxy - mny;
+            let ez = mxz - mnz;
+            if ex >= ey && ex >= ez {
+                0
+            } else if ey >= ez {
+                1
+            } else {
+                2
+            }
         };
-        let cents: &[f32] = match axis { 0 => tri_cx, 1 => tri_cy, _ => tri_cz };
+        let cents: &[f32] = match axis {
+            0 => tri_cx,
+            1 => tri_cy,
+            _ => tri_cz,
+        };
 
         // Sort the span by centroid on that axis (extract key, sort, write back).
         let mut sub: Vec<(f32, u32)> = (0..span_count)
@@ -361,16 +490,29 @@ impl RTreeBuilder {
         pages.push(RTreePage::new_empty());
 
         let mut child_nodes = [RTreeNodeQ::default(); 4];
-        for k in 0..4 { child_nodes[k].set_empty(); }
+        for k in 0..4 {
+            child_nodes[k].set_empty();
+        }
 
         let mut cursor = span_start;
         for k in 0..n_parts {
             let part_count = base_part + if k < remainder { 1 } else { 0 };
-            if part_count == 0 { break; }
+            if part_count == 0 {
+                break;
+            }
             Self::recurse(
-                pages, max_levels,
-                tri_aabbs, tri_cx, tri_cy, tri_cz, work,
-                cursor, part_count, level + 1, &mut child_nodes, k,
+                pages,
+                max_levels,
+                tri_aabbs,
+                tri_cx,
+                tri_cy,
+                tri_cz,
+                work,
+                cursor,
+                part_count,
+                level + 1,
+                &mut child_nodes,
+                k,
             );
             cursor += part_count;
         }

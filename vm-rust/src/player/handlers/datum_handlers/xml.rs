@@ -2,11 +2,14 @@ use std::collections::VecDeque;
 
 use crate::{
     director::lingo::datum::Datum,
-    player::{DatumRef, DirPlayer, ScriptError, symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable}},
+    player::{
+        symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable},
+        DatumRef, DirPlayer, ScriptError,
+    },
 };
+use log::{debug, error, warn};
 use std::collections::HashMap;
 use std::io::Cursor;
-use log::{debug, error, warn};
 use xml::attribute::OwnedAttribute;
 use xml::reader::{EventReader, XmlEvent};
 
@@ -432,12 +435,16 @@ impl XmlDatumHandlers {
     ) -> Result<DatumRef, ScriptError> {
         match handler_name.into_builtin() {
             Some(BuiltInSymbol::ParseXML) => Self::parse_xml(player, datum, args),
-            Some(BuiltInSymbol::CreateElement) => Self::create_element(player, datum, args, symbols),
+            Some(BuiltInSymbol::CreateElement) => {
+                Self::create_element(player, datum, args, symbols)
+            }
             Some(BuiltInSymbol::AppendChild) => Self::append_child(player, datum, args),
             Some(BuiltInSymbol::ToString) => Self::to_string(player, datum, args),
             _ => Err(ScriptError::new(format!(
                 "No handler {} for XML object",
-                symbols.display(&handler_name).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
+                symbols
+                    .display(&handler_name)
+                    .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
             ))),
         }
     }
@@ -476,7 +483,11 @@ impl XmlDatumHandlers {
         Self::set_xml_property(player, symbols, xml_id, prop, value)
     }
 
-    fn parse_xml(player: &mut DirPlayer, datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    fn parse_xml(
+        player: &mut DirPlayer,
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
         if args.is_empty() {
             return Err(ScriptError::new(
                 "parseXML requires XML string argument".to_string(),
@@ -582,7 +593,12 @@ impl XmlDatumHandlers {
         }
     }
 
-    fn create_element(player: &mut DirPlayer, datum: &DatumRef, args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+    fn create_element(
+        player: &mut DirPlayer,
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+        symbols: &SymbolTable,
+    ) -> Result<DatumRef, ScriptError> {
         if args.is_empty() {
             return Err(ScriptError::new(
                 "createElement requires element name argument".to_string(),
@@ -603,7 +619,8 @@ impl XmlDatumHandlers {
             // Get the element name from arguments
             let element_name = match player.get_datum(&args[0]) {
                 Datum::String(s) => s.clone(),
-                Datum::Symbol(s) => symbols.display(s)
+                Datum::Symbol(s) => symbols
+                    .display(s)
                     .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
                     .to_owned(),
                 _ => {
@@ -649,7 +666,11 @@ impl XmlDatumHandlers {
         }
     }
 
-    fn append_child(player: &mut DirPlayer, datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    fn append_child(
+        player: &mut DirPlayer,
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
         if args.is_empty() {
             return Err(ScriptError::new(
                 "appendChild requires child node argument".to_string(),
@@ -771,7 +792,11 @@ impl XmlDatumHandlers {
         Ok(doc_id)
     }
 
-    fn to_string(player: &mut DirPlayer, datum: &DatumRef, _args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    fn to_string(
+        player: &mut DirPlayer,
+        datum: &DatumRef,
+        _args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
         {
             let xml_id = match player.get_datum(datum) {
                 Datum::XmlRef(id) => *id,
@@ -883,9 +908,11 @@ impl XmlDatumHandlers {
             if let Some(node) = player.xml_nodes.get(&node_id) {
                 let value = node
                     .attributes
-                    .get(symbols
-                        .lower(&prop)
-                        .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?)
+                    .get(
+                        symbols
+                            .lower(&prop)
+                            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?,
+                    )
                     .cloned()
                     .unwrap_or_default();
                 return Ok(player.alloc_datum(Datum::String(value)));
@@ -1046,7 +1073,9 @@ impl XmlDatumHandlers {
                     .display(&prop)
                     .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
                     .to_owned();
-                Err(ScriptError::new(format!("Unknown XML property: {prop_name}")))
+                Err(ScriptError::new(format!(
+                    "Unknown XML property: {prop_name}"
+                )))
             }
         }
     }

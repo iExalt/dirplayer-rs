@@ -1,15 +1,13 @@
-mod config;
 mod conditions;
+mod config;
 mod snapshots;
 
-pub use config::{TestConfig, MovieConfig, TestSection};
 pub use conditions::{
-    SpriteQuery, SpriteCheck, StepCondition,
-    SpriteConditionBuilder, DatumConditionBuilder,
-    StepUntilBuilder,
-    sprite, datum,
+    datum, sprite, DatumConditionBuilder, SpriteCheck, SpriteConditionBuilder, SpriteQuery,
+    StepCondition, StepUntilBuilder,
 };
-pub use snapshots::{SnapshotOutput, SnapshotContext, emit_snapshot};
+pub use config::{MovieConfig, TestConfig, TestSection};
+pub use snapshots::{emit_snapshot, SnapshotContext, SnapshotOutput};
 
 /// Emit a human-readable test-action message.
 /// Native: printed to stdout with a `[test]` prefix.
@@ -20,10 +18,15 @@ pub fn log_test_action(msg: &str) {
     {
         web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(msg));
         if let Some(window) = web_sys::window() {
-            if let Ok(f) = js_sys::Reflect::get(&window, &wasm_bindgen::JsValue::from_str("__testLog")) {
+            if let Ok(f) =
+                js_sys::Reflect::get(&window, &wasm_bindgen::JsValue::from_str("__testLog"))
+            {
                 if f.is_function() {
                     if let Ok(f) = wasm_bindgen::JsCast::dyn_into::<js_sys::Function>(f) {
-                        let _ = f.call1(&wasm_bindgen::JsValue::NULL, &wasm_bindgen::JsValue::from_str(msg));
+                        let _ = f.call1(
+                            &wasm_bindgen::JsValue::NULL,
+                            &wasm_bindgen::JsValue::from_str(msg),
+                        );
                     }
                 }
             }
@@ -55,7 +58,10 @@ impl LogHandle {
         {
             web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(msg));
             if let Some(window) = web_sys::window() {
-                if let Ok(f) = js_sys::Reflect::get(&window, &wasm_bindgen::JsValue::from_str("__testLogUpdate")) {
+                if let Ok(f) = js_sys::Reflect::get(
+                    &window,
+                    &wasm_bindgen::JsValue::from_str("__testLogUpdate"),
+                ) {
                     if f.is_function() {
                         if let Ok(f) = wasm_bindgen::JsCast::dyn_into::<js_sys::Function>(f) {
                             let _ = f.call2(
@@ -102,7 +108,9 @@ pub fn log_test_action_live(msg: &str) -> LogHandle {
     {
         web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(msg));
         if let Some(window) = web_sys::window() {
-            if let Ok(f) = js_sys::Reflect::get(&window, &wasm_bindgen::JsValue::from_str("__testLogLive")) {
+            if let Ok(f) =
+                js_sys::Reflect::get(&window, &wasm_bindgen::JsValue::from_str("__testLogLive"))
+            {
                 if f.is_function() {
                     if let Ok(f) = wasm_bindgen::JsCast::dyn_into::<js_sys::Function>(f) {
                         let _ = f.call2(
@@ -127,22 +135,17 @@ pub fn log_test_action_live(msg: &str) -> LogHandle {
 }
 
 use crate::director::static_datum::{static_datum_from_datum_ref, StaticDatum};
-use crate::player::{
-    commands::PlayerVMCommand,
-    datum_ref::DatumRef,
-    ScriptError,
-};
 use crate::player::ownership::OwnerToken;
-use crate::player::session::{ExecutionContext, PlayerId, RuntimeSession, RuntimeSessionHandle};
+use crate::player::session::{
+    allocate_session_id, ExecutionContext, PlayerId, RuntimeSession, RuntimeSessionHandle,
+};
 use crate::player::symbols::symbol_table::SymbolOwner;
 use crate::player::PlayerVMExecutionItem;
+use crate::player::{commands::PlayerVMCommand, datum_ref::DatumRef, ScriptError};
 use async_std::channel::Sender;
 use manual_future::ManualFuture;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 const DEFAULT_TIMEOUT_SECS: f64 = 30.0;
-
-static TEST_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Explicit owner and context used by a native or browser test harness.
 ///
@@ -159,23 +162,38 @@ pub struct HarnessRuntime {
 impl HarnessRuntime {
     pub(crate) fn new(command_tx: Sender<PlayerVMExecutionItem>) -> Self {
         let owner = SymbolOwner {
-            session: TEST_SESSION_ID.fetch_add(1, Ordering::Relaxed),
+            session: allocate_session_id().expect("shared session id namespace exhausted"),
             generation: 1,
         };
         let session = RuntimeSession::new(owner).into_handle();
         let player_id = 1;
-        assert!(session.borrow_mut().add_player(player_id, command_tx.clone()));
+        assert!(session
+            .borrow_mut()
+            .add_player(player_id, command_tx.clone()));
         let player_owner = session
             .borrow_mut()
             .with_player(player_id, |context| context.player.owner.clone())
             .expect("new harness player must exist");
-        Self { session, player_id, owner: player_owner, command_tx }
+        Self {
+            session,
+            player_id,
+            owner: player_owner,
+            command_tx,
+        }
     }
 
-    pub(crate) fn session(&self) -> RuntimeSessionHandle { self.session.clone() }
-    pub(crate) fn player_id(&self) -> PlayerId { self.player_id }
-    pub(crate) fn owner(&self) -> &OwnerToken { &self.owner }
-    pub(crate) fn command_tx(&self) -> Sender<PlayerVMExecutionItem> { self.command_tx.clone() }
+    pub(crate) fn session(&self) -> RuntimeSessionHandle {
+        self.session.clone()
+    }
+    pub(crate) fn player_id(&self) -> PlayerId {
+        self.player_id
+    }
+    pub(crate) fn owner(&self) -> &OwnerToken {
+        &self.owner
+    }
+    pub(crate) fn command_tx(&self) -> Sender<PlayerVMExecutionItem> {
+        self.command_tx.clone()
+    }
 
     /// Retire the currently captured player at an explicit harness lifecycle
     /// boundary. Closing the channel wakes the command loop even while sender
@@ -198,7 +216,9 @@ impl HarnessRuntime {
         if !session.add_player(self.player_id, command_tx.clone()) {
             return false;
         }
-        let Some(owner) = session.with_player(self.player_id, |context| context.player.owner.clone()) else {
+        let Some(owner) =
+            session.with_player(self.player_id, |context| context.player.owner.clone())
+        else {
             let _ = session.remove_player(self.player_id);
             let teardowns = session.take_host_teardowns();
             drop(session);
@@ -217,7 +237,10 @@ impl HarnessRuntime {
         }
         let (future, completer) = ManualFuture::new();
         self.command_tx
-            .send(PlayerVMExecutionItem { command, completer: Some(completer) })
+            .send(PlayerVMExecutionItem {
+                command,
+                completer: Some(completer),
+            })
             .await
             .map_err(|_| ScriptError::new("harness command loop stopped".to_owned()))?;
         future.await
@@ -231,32 +254,41 @@ impl HarnessRuntime {
         self.install_player(command_tx)
     }
 
-    pub(crate) fn with_context<R>(
-        &self,
-        f: impl FnOnce(ExecutionContext<'_>) -> R,
-    ) -> Option<R> {
+    pub(crate) fn with_context<R>(&self, f: impl FnOnce(ExecutionContext<'_>) -> R) -> Option<R> {
         let owner = self.owner.clone();
-        self.session.borrow_mut().with_player(self.player_id, |context| {
-            if !owner.is_arena_live() || !owner.same_identity(&context.player.owner) {
-                return None;
-            }
-            Some(f(context))
-        }).flatten()
+        self.session
+            .borrow_mut()
+            .with_player(self.player_id, |context| {
+                if !owner.is_arena_live() || !owner.same_identity(&context.player.owner) {
+                    return None;
+                }
+                Some(f(context))
+            })
+            .flatten()
     }
 
     pub(crate) fn owner_valid(&self) -> bool {
         self.with_context(|context| {
             self.owner.same_identity(&context.player.owner) && self.owner.is_arena_live()
-        }).unwrap_or(false)
+        })
+        .unwrap_or(false)
     }
 }
 
 /// Get current time in milliseconds (works on both native and wasm).
 pub fn now_ms() -> f64 {
     #[cfg(target_arch = "wasm32")]
-    { js_sys::Date::now() }
+    {
+        js_sys::Date::now()
+    }
     #[cfg(not(target_arch = "wasm32"))]
-    { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64() * 1000.0 }
+    {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64()
+            * 1000.0
+    }
 }
 
 /// Platform-specific operations implemented by each test harness.
@@ -314,7 +346,9 @@ pub trait TestHarness {
     async fn eval_datum(&self, command: &str) -> Result<StaticDatum, ScriptError> {
         let result = self.eval(command).await?;
         self.harness_runtime()
-            .with_context(|context| static_datum_from_datum_ref(context.player, context.symbols, &result))
+            .with_context(|context| {
+                static_datum_from_datum_ref(context.player, context.symbols, &result)
+            })
             .unwrap_or_else(|| Err(ScriptError::new("harness player was replaced".to_owned())))
     }
 
@@ -351,7 +385,9 @@ pub trait TestHarness {
                     }
                     SpriteQuery::MemberName(name) => {
                         if let Some(member_ref) = &sprite.member {
-                            if let Some(member) = player.movie.cast_manager.find_member_by_ref(member_ref) {
+                            if let Some(member) =
+                                player.movie.cast_manager.find_member_by_ref(member_ref)
+                            {
                                 if member.name.eq_ignore_ascii_case(name) {
                                     return Some(sprite.number);
                                 }
@@ -361,7 +397,9 @@ pub trait TestHarness {
                     SpriteQuery::MemberPrefix(prefix) => {
                         let prefix_lower = prefix.to_ascii_lowercase();
                         if let Some(member_ref) = &sprite.member {
-                            if let Some(member) = player.movie.cast_manager.find_member_by_ref(member_ref) {
+                            if let Some(member) =
+                                player.movie.cast_manager.find_member_by_ref(member_ref)
+                            {
                                 if member.name.to_ascii_lowercase().starts_with(&prefix_lower) {
                                     return Some(sprite.number);
                                 }
@@ -375,21 +413,29 @@ pub trait TestHarness {
     }
 
     async fn sprite_visibility(&self, sprite_num: usize) -> f64 {
-        let (stage_w, stage_h) = self.harness_runtime().with_context(|context| {
-            let player = context.player;
-            (player.movie.rect.width(), player.movie.rect.height())
-        }).unwrap_or((0, 0));
-        let sprite_rect = self.eval_datum(&format!("sprite({}).rect", sprite_num)).await.unwrap_or(StaticDatum::Void);
+        let (stage_w, stage_h) = self
+            .harness_runtime()
+            .with_context(|context| {
+                let player = context.player;
+                (player.movie.rect.width(), player.movie.rect.height())
+            })
+            .unwrap_or((0, 0));
+        let sprite_rect = self
+            .eval_datum(&format!("sprite({}).rect", sprite_num))
+            .await
+            .unwrap_or(StaticDatum::Void);
         match sprite_rect {
             StaticDatum::IntRect(left, top, right, bottom) => {
                 let sprite_area = (right - left) as f64 * (bottom - top) as f64;
-                if sprite_area <= 0.0 { return 0.0; }
+                if sprite_area <= 0.0 {
+                    return 0.0;
+                }
                 let ix_left = left.max(0);
                 let ix_top = top.max(0);
                 let ix_right = right.min(stage_w);
                 let ix_bottom = bottom.min(stage_h);
-                let visible_area = (ix_right - ix_left).max(0) as f64
-                    * (ix_bottom - ix_top).max(0) as f64;
+                let visible_area =
+                    (ix_right - ix_left).max(0) as f64 * (ix_bottom - ix_top).max(0) as f64;
                 visible_area / sprite_area
             }
             _ => 0.0,
@@ -417,14 +463,20 @@ pub trait TestHarness {
             player.mouse_loc = (x, y);
             player.movie.mouse_down = true;
         });
-        let _ = self.harness_runtime().dispatch(PlayerVMCommand::MouseDown((x, y))).await;
+        let _ = self
+            .harness_runtime()
+            .dispatch(PlayerVMCommand::MouseDown((x, y)))
+            .await;
         self.step_frame().await;
         self.harness_runtime().with_context(|context| {
             let player = context.player;
             player.mouse_loc = (x, y);
             player.movie.mouse_down = false;
         });
-        let _ = self.harness_runtime().dispatch(PlayerVMCommand::MouseUp((x, y))).await;
+        let _ = self
+            .harness_runtime()
+            .dispatch(PlayerVMCommand::MouseUp((x, y)))
+            .await;
     }
 
     async fn mouse_down(&mut self, x: i32, y: i32) {
@@ -433,7 +485,10 @@ pub trait TestHarness {
             player.mouse_loc = (x, y);
             player.movie.mouse_down = true;
         });
-        let _ = self.harness_runtime().dispatch(PlayerVMCommand::MouseDown((x, y))).await;
+        let _ = self
+            .harness_runtime()
+            .dispatch(PlayerVMCommand::MouseDown((x, y)))
+            .await;
     }
 
     async fn mouse_up(&mut self, x: i32, y: i32) {
@@ -442,7 +497,10 @@ pub trait TestHarness {
             player.mouse_loc = (x, y);
             player.movie.mouse_down = false;
         });
-        let _ = self.harness_runtime().dispatch(PlayerVMCommand::MouseUp((x, y))).await;
+        let _ = self
+            .harness_runtime()
+            .dispatch(PlayerVMCommand::MouseUp((x, y)))
+            .await;
     }
 
     async fn mouse_move(&mut self, x: i32, y: i32) {
@@ -450,7 +508,10 @@ pub trait TestHarness {
             let player = context.player;
             player.mouse_loc = (x, y);
         });
-        let _ = self.harness_runtime().dispatch(PlayerVMCommand::MouseMove((x, y))).await;
+        let _ = self
+            .harness_runtime()
+            .dispatch(PlayerVMCommand::MouseMove((x, y)))
+            .await;
     }
 
     async fn key_down(&mut self, key: &str, code: u16) {
@@ -458,7 +519,10 @@ pub trait TestHarness {
             let player = context.player;
             player.keyboard_manager.key_down(key.to_string(), code);
         });
-        let _ = self.harness_runtime().dispatch(PlayerVMCommand::KeyDown(key.to_string(), code)).await;
+        let _ = self
+            .harness_runtime()
+            .dispatch(PlayerVMCommand::KeyDown(key.to_string(), code))
+            .await;
     }
 
     async fn key_up(&mut self, key: &str, code: u16) {
@@ -466,7 +530,10 @@ pub trait TestHarness {
             let player = context.player;
             player.keyboard_manager.key_up(key, code);
         });
-        let _ = self.harness_runtime().dispatch(PlayerVMCommand::KeyUp(key.to_string(), code)).await;
+        let _ = self
+            .harness_runtime()
+            .dispatch(PlayerVMCommand::KeyUp(key.to_string(), code))
+            .await;
     }
 
     async fn key_press(&mut self, key: &str, code: u16) {
@@ -477,7 +544,10 @@ pub trait TestHarness {
     }
 
     async fn type_text(&mut self, text: &str) {
-        log_test_action(&format!("Type: {:?}", text.chars().map(|_| '*').collect::<String>()));
+        log_test_action(&format!(
+            "Type: {:?}",
+            text.chars().map(|_| '*').collect::<String>()
+        ));
         for ch in text.chars() {
             self.key_press(&ch.to_string(), ch as u16).await;
         }
@@ -485,10 +555,15 @@ pub trait TestHarness {
 
     /// Get a sprite's rect as (left, top, right, bottom).
     async fn sprite_rect(&self, sprite_num: usize) -> Result<(i32, i32, i32, i32), String> {
-        let rect = self.eval_datum(&format!("sprite({}).rect", sprite_num)).await?;
+        let rect = self
+            .eval_datum(&format!("sprite({}).rect", sprite_num))
+            .await?;
         match rect {
             StaticDatum::IntRect(l, t, r, b) => Ok((l, t, r, b)),
-            _ => Err(format!("sprite({}).rect returned {:?}, expected IntRect", sprite_num, rect)),
+            _ => Err(format!(
+                "sprite({}).rect returned {:?}, expected IntRect",
+                sprite_num, rect
+            )),
         }
     }
 
@@ -499,9 +574,13 @@ pub trait TestHarness {
     /// let snap = player.snapshot_sprite(sprite().member("avatar")).await?;
     /// snapshots.verify("avatar", snap)?;
     /// ```
-    async fn snapshot_sprite(&self, query: impl Into<SpriteQuery>) -> Result<SnapshotOutput, String> {
+    async fn snapshot_sprite(
+        &self,
+        query: impl Into<SpriteQuery>,
+    ) -> Result<SnapshotOutput, String> {
         let query = query.into();
-        let sprite_num = self.find_sprite(&query)
+        let sprite_num = self
+            .find_sprite(&query)
             .ok_or_else(|| format!("No sprite with {} found", query))?;
         let (l, t, r, b) = self.sprite_rect(sprite_num).await?;
         Ok(self.snapshot_stage().crop(l, t, r, b))
@@ -514,7 +593,10 @@ pub trait TestHarness {
     /// let snap = player.snapshot_sprite_isolated(sprite().member("avatar")).await?;
     /// snapshots.verify("avatar_only", snap)?;
     /// ```
-    async fn snapshot_sprite_isolated(&self, query: impl Into<SpriteQuery>) -> Result<SnapshotOutput, String> {
+    async fn snapshot_sprite_isolated(
+        &self,
+        query: impl Into<SpriteQuery>,
+    ) -> Result<SnapshotOutput, String> {
         // Default: fall back to the crop approach. Browser harness overrides
         // this with a true isolated render.
         self.snapshot_sprite(query).await
@@ -530,7 +612,8 @@ pub trait TestHarness {
     async fn click_sprite(&mut self, query: impl Into<SpriteQuery>) -> Result<(), String> {
         let query = query.into();
         log_test_action(&format!("Click sprite: {}", query));
-        let sprite_num = self.find_sprite(&query)
+        let sprite_num = self
+            .find_sprite(&query)
             .ok_or_else(|| format!("No sprite with {} found", query))?;
         let (l, t, r, b) = self.sprite_rect(sprite_num).await?;
         self.click((l + r) / 2, (t + b) / 2).await;
@@ -542,10 +625,16 @@ pub trait TestHarness {
     /// ```ignore
     /// player.click_sprite_at(sprite().member("roomlist"), 100, 9).await?;
     /// ```
-    async fn click_sprite_at(&mut self, query: impl Into<SpriteQuery>, dx: i32, dy: i32) -> Result<(), String> {
+    async fn click_sprite_at(
+        &mut self,
+        query: impl Into<SpriteQuery>,
+        dx: i32,
+        dy: i32,
+    ) -> Result<(), String> {
         let query = query.into();
         log_test_action(&format!("Click sprite {} at ({:+}, {:+})", query, dx, dy));
-        let sprite_num = self.find_sprite(&query)
+        let sprite_num = self
+            .find_sprite(&query)
             .ok_or_else(|| format!("No sprite with {} found", query))?;
         let (l, t, _, _) = self.sprite_rect(sprite_num).await?;
         self.click(l + dx, t + dy).await;

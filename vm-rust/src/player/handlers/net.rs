@@ -1,9 +1,12 @@
-use std::collections::VecDeque;
 use crate::{
     director::lingo::datum::{datum_bool, Datum},
-    player::{net_task::NetTaskState, symbols::symbol_table::SymbolTable, DatumRef, DirPlayer, ScriptError},
+    player::{
+        net_task::NetTaskState, symbols::symbol_table::SymbolTable, DatumRef, DirPlayer,
+        ScriptError,
+    },
 };
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+use std::collections::VecDeque;
 
 pub struct NetHandlers {}
 
@@ -14,26 +17,38 @@ impl NetHandlers {
     /// 4242 ("Download stopped by netAbort") so `netDone(id)` returns TRUE and
     /// `netError(id)` reports it — the movie stops polling. An unknown id/URL is a
     /// no-op. Returns VOID.
-    pub fn net_abort(player: &mut DirPlayer, symbols: &SymbolTable, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn net_abort(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
         let (id_opt, url_opt) = if let Some(dr) = args.first() {
             let d = player.get_datum(dr);
-            (d.int_value().ok().map(|v| v as u32), d.string_value(symbols).ok())
+            (
+                d.int_value().ok().map(|v| v as u32),
+                d.string_value(symbols).ok(),
+            )
         } else {
             (None, None)
         };
-        let task_id = id_opt.or_else(|| {
-            url_opt.and_then(|u| player.net_manager.find_task_by_url(&u))
-        });
+        let task_id =
+            id_opt.or_else(|| url_opt.and_then(|u| player.net_manager.find_task_by_url(&u)));
         if let Some(id) = task_id {
             if let Some(mut shared) = player.net_manager.shared_state.try_lock() {
                 // "If the data transmission is complete, this command has no
                 // effect." — only terminate a task that is still in progress.
-                let in_progress =
-                    shared.task_states.get(&id).map_or(false, |s| s.result.is_none());
+                let in_progress = shared
+                    .task_states
+                    .get(&id)
+                    .map_or(false, |s| s.result.is_none());
                 if in_progress {
                     shared.update_task_state(
                         id,
-                        NetTaskState { result: Some(Err(4242)), bytes_loaded: 0, bytes_total: 0 },
+                        NetTaskState {
+                            result: Some(Err(4242)),
+                            bytes_loaded: 0,
+                            bytes_total: 0,
+                        },
                     );
                 }
             }
@@ -41,7 +56,11 @@ impl NetHandlers {
         Ok(DatumRef::Void)
     }
 
-    pub fn net_done(player: &mut DirPlayer, symbols: &SymbolTable, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn net_done(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
         let task_id = if let Some(task_id_ref) = &args.get(0) {
             let task_id_datum = player.get_datum(task_id_ref);
             Some(task_id_datum.int_value()? as u32)
@@ -61,13 +80,21 @@ impl NetHandlers {
         Ok(player.alloc_datum(datum_bool(is_done)))
     }
 
-    pub fn preload_net_thing(player: &mut DirPlayer, symbols: &SymbolTable, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn preload_net_thing(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
         let url = player.get_datum(&args[0]).string_value(symbols)?;
         let task_id = player.net_manager.preload_net_thing(url);
         Ok(player.alloc_datum(Datum::Int(task_id as i32)))
     }
 
-    pub fn get_net_text(player: &mut DirPlayer, symbols: &SymbolTable, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn get_net_text(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
         let url = player.get_datum(&args[0]).string_value(symbols)?;
 
         // TODO should the task be tagged as a text task?
@@ -76,7 +103,11 @@ impl NetHandlers {
         Ok(player.alloc_datum(Datum::Int(task_id as i32)))
     }
 
-    pub fn get_stream_status(player: &mut DirPlayer, symbols: &SymbolTable, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn get_stream_status(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
         // Support: no args (last task), int task ID, or URL string.
         // Resolve to Option<task_id> first so the datum borrow is released
         // before we (mutably) alloc the result — and so an unknown URL can
@@ -142,11 +173,15 @@ impl NetHandlers {
             }
         };
 
-        let task = player.net_manager.get_task(task_id)
+        let task = player
+            .net_manager
+            .get_task(task_id)
             .ok_or_else(|| ScriptError::new(format!("Network task {} not found", task_id)))?;
         let url = task.url.to_owned();
 
-        let task_state = player.net_manager.get_task_state(Some(task_id))
+        let task_state = player
+            .net_manager
+            .get_task_state(Some(task_id))
             .ok_or_else(|| ScriptError::new(format!("Network task state {} not found", task_id)))?;
 
         let (state, error, bytes_so_far, bytes_total) = match &task_state.result {
@@ -154,9 +189,7 @@ impl NetHandlers {
                 let len = bytes.len() as i32;
                 ("Complete", "OK", len, len)
             }
-            Some(Err(_code)) => {
-                ("Error", "Error", 0i32, 0i32)
-            }
+            Some(Err(_code)) => ("Error", "Error", 0i32, 0i32),
             None => {
                 if task_state.bytes_loaded > 0 {
                     // If the server (or a CORS proxy) didn't advertise a
@@ -168,7 +201,12 @@ impl NetHandlers {
                     // Accurate mid-load % still needs Content-Length (which
                     // the proxy now preserves); this is the graceful floor.
                     let total = task_state.bytes_total.max(task_state.bytes_loaded);
-                    ("InProgress", "", task_state.bytes_loaded as i32, total as i32)
+                    (
+                        "InProgress",
+                        "",
+                        task_state.bytes_loaded as i32,
+                        total as i32,
+                    )
                 } else {
                     ("Connecting", "", 0i32, 0i32)
                 }
@@ -210,7 +248,11 @@ impl NetHandlers {
     /// return and treat it as a no-op (logged at debug for diagnostics — movies
     /// like SpongeBob "JellyFishin'" call it once per download-progress tick to
     /// surface "Download N% Complete").
-    pub fn net_status(player: &mut DirPlayer, symbols: &SymbolTable, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn net_status(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
         if let Some(msg_ref) = args.get(0) {
             if let Ok(msg) = player.get_datum(msg_ref).string_value(symbols) {
                 log::debug!("netStatus: {}", msg);
@@ -219,10 +261,15 @@ impl NetHandlers {
         Ok(DatumRef::Void)
     }
 
-    pub fn net_error(player: &mut DirPlayer, symbols: &SymbolTable, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn net_error(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
         let task_id = args
             .get(0)
-            .and_then(|datum_ref| player.get_datum(datum_ref).int_value().ok()).map(|id| id as u32);
+            .and_then(|datum_ref| player.get_datum(datum_ref).int_value().ok())
+            .map(|id| id as u32);
         // Director 11.5: netError returns an empty string when no background
         // loading operation has started for this id (or it is still in
         // progress), "OK" on success, else an error code. An unknown id must
@@ -232,8 +279,8 @@ impl NetHandlers {
         let error = match player.net_manager.get_task_state(task_id) {
             None => Datum::String("".to_owned()),
             Some(task_state) => {
-                let is_ok = task_state.is_done()
-                    && task_state.result.as_ref().is_some_and(|r| r.is_ok());
+                let is_ok =
+                    task_state.is_done() && task_state.result.as_ref().is_some_and(|r| r.is_ok());
                 if is_ok {
                     Datum::String("OK".to_owned())
                 } else if let Some(Err(error)) = task_state.result.as_ref() {
@@ -261,10 +308,15 @@ impl NetHandlers {
         Ok(player.alloc_datum(error))
     }
 
-    pub fn net_text_result(player: &mut DirPlayer, symbols: &SymbolTable, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn net_text_result(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
         let task_id = args
             .get(0)
-            .and_then(|datum_ref| player.get_datum(datum_ref).int_value().ok()).map(|id| id as u32);
+            .and_then(|datum_ref| player.get_datum(datum_ref).int_value().ok())
+            .map(|id| id as u32);
         // netTextResult returns the downloaded text, or an empty string if
         // the operation failed, is in progress, or the id is unknown (Director
         // does not raise on a bad id).
@@ -285,7 +337,11 @@ impl NetHandlers {
         Ok(player.alloc_datum(text))
     }
 
-    pub fn post_net_text(player: &mut DirPlayer, symbols: &SymbolTable, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn post_net_text(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
         if args.is_empty() {
             return Err(ScriptError::new(
                 "postNetText requires at least 1 argument (url)".to_string(),
@@ -326,8 +382,7 @@ impl NetHandlers {
                         let key = player.get_datum(key_ref).string_value(symbols)?;
                         let value = player.get_datum(value_ref).string_value(symbols)?;
                         // URL encode the key and value using percent_encoding
-                        let encoded_key =
-                            utf8_percent_encode(&key, NON_ALPHANUMERIC).to_string();
+                        let encoded_key = utf8_percent_encode(&key, NON_ALPHANUMERIC).to_string();
                         let encoded_value =
                             utf8_percent_encode(&value, NON_ALPHANUMERIC).to_string();
                         form_parts.push(format!("{}={}", encoded_key, encoded_value));

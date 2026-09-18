@@ -1,7 +1,10 @@
 //! Native Havok physics engine — complete port from C# reference implementation.
 //! Reverse-engineered from PPC/x86 decompilation of Havok Xtra 10.1.
 
-use crate::player::{cast_member::HavokPhysicsState, symbols::{builtin::BuiltInSymbol, symbol::Symbol}};
+use crate::player::{
+    cast_member::HavokPhysicsState,
+    symbols::{builtin::BuiltInSymbol, symbol::Symbol},
+};
 
 // ============================================================
 // TYPE ALIASES
@@ -15,8 +18,15 @@ pub type Mat3 = [f64; 9];
 /// True if body `body_idx`, placed at (`pos`, `orient`), overlaps any static mesh or other
 /// body beyond `tolerance`. Used by `attemptMoveTo` to reject a blocked move. Temporarily
 /// moves the body to test the pose, then restores it.
-pub fn body_blocked_at(state: &mut HavokPhysicsState, body_idx: usize, pos: V3, orient: Quat) -> bool {
-    if body_idx >= state.rigid_bodies.len() { return false; }
+pub fn body_blocked_at(
+    state: &mut HavokPhysicsState,
+    body_idx: usize,
+    pos: V3,
+    orient: Quat,
+) -> bool {
+    if body_idx >= state.rigid_bodies.len() {
+        return false;
+    }
     let saved_pos = state.rigid_bodies[body_idx].position;
     let saved_orient = state.rigid_bodies[body_idx].orientation;
     state.rigid_bodies[body_idx].position = pos;
@@ -25,8 +35,12 @@ pub fn body_blocked_at(state: &mut HavokPhysicsState, body_idx: usize, pos: V3, 
     let involves = |c: &CollisionContact| c.body_a == body_idx || c.body_b == Some(body_idx);
     let blocked = {
         let s: &HavokPhysicsState = state;
-        detect_all_collisions(s).iter().any(|c| involves(c) && c.depth > tol)
-            || detect_body_body_collisions(s).iter().any(|c| involves(c) && c.depth > tol)
+        detect_all_collisions(s)
+            .iter()
+            .any(|c| involves(c) && c.depth > tol)
+            || detect_body_body_collisions(s)
+                .iter()
+                .any(|c| involves(c) && c.depth > tol)
     };
     state.rigid_bodies[body_idx].position = saved_pos;
     state.rigid_bodies[body_idx].orientation = saved_orient;
@@ -40,18 +54,50 @@ pub const MAT3_ZERO: Mat3 = [0.0; 9];
 // ============================================================
 // Vec3 math helpers (f64)
 // ============================================================
-#[inline] pub fn v3_add(a: V3, b: V3) -> V3 { [a[0]+b[0], a[1]+b[1], a[2]+b[2]] }
-#[inline] pub fn v3_sub(a: V3, b: V3) -> V3 { [a[0]-b[0], a[1]-b[1], a[2]-b[2]] }
-#[inline] pub fn v3_scale(a: V3, s: f64) -> V3 { [a[0]*s, a[1]*s, a[2]*s] }
-#[inline] pub fn v3_neg(a: V3) -> V3 { [-a[0], -a[1], -a[2]] }
-#[inline] pub fn v3_dot(a: V3, b: V3) -> f64 { a[0]*b[0] + a[1]*b[1] + a[2]*b[2] }
-#[inline] pub fn v3_cross(a: V3, b: V3) -> V3 {
-    [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]
+#[inline]
+pub fn v3_add(a: V3, b: V3) -> V3 {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
 }
-#[inline] pub fn v3_len_sq(a: V3) -> f64 { v3_dot(a, a) }
-#[inline] pub fn v3_len(a: V3) -> f64 { v3_len_sq(a).sqrt() }
-#[inline] pub fn v3_normalized(a: V3) -> V3 {
-    let l = v3_len(a); if l > 1e-10 { v3_scale(a, 1.0/l) } else { [0.0;3] }
+#[inline]
+pub fn v3_sub(a: V3, b: V3) -> V3 {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+#[inline]
+pub fn v3_scale(a: V3, s: f64) -> V3 {
+    [a[0] * s, a[1] * s, a[2] * s]
+}
+#[inline]
+pub fn v3_neg(a: V3) -> V3 {
+    [-a[0], -a[1], -a[2]]
+}
+#[inline]
+pub fn v3_dot(a: V3, b: V3) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+#[inline]
+pub fn v3_cross(a: V3, b: V3) -> V3 {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+#[inline]
+pub fn v3_len_sq(a: V3) -> f64 {
+    v3_dot(a, a)
+}
+#[inline]
+pub fn v3_len(a: V3) -> f64 {
+    v3_len_sq(a).sqrt()
+}
+#[inline]
+pub fn v3_normalized(a: V3) -> V3 {
+    let l = v3_len(a);
+    if l > 1e-10 {
+        v3_scale(a, 1.0 / l)
+    } else {
+        [0.0; 3]
+    }
 }
 
 // ============================================================
@@ -64,35 +110,39 @@ pub const MAT3_ZERO: Mat3 = [0.0; 9];
 #[inline]
 pub fn quat_mul(a: Quat, b: Quat) -> Quat {
     [
-        a[0]*b[0] - a[1]*b[1] - a[2]*b[2] - a[3]*b[3],
-        a[0]*b[1] + a[1]*b[0] + a[2]*b[3] - a[3]*b[2],
-        a[0]*b[2] - a[1]*b[3] + a[2]*b[0] + a[3]*b[1],
-        a[0]*b[3] + a[1]*b[2] - a[2]*b[1] + a[3]*b[0],
+        a[0] * b[0] - a[1] * b[1] - a[2] * b[2] - a[3] * b[3],
+        a[0] * b[1] + a[1] * b[0] + a[2] * b[3] - a[3] * b[2],
+        a[0] * b[2] - a[1] * b[3] + a[2] * b[0] + a[3] * b[1],
+        a[0] * b[3] + a[1] * b[2] - a[2] * b[1] + a[3] * b[0],
     ]
 }
 
 #[inline]
-pub fn quat_conjugate(q: Quat) -> Quat { [q[0], -q[1], -q[2], -q[3]] }
+pub fn quat_conjugate(q: Quat) -> Quat {
+    [q[0], -q[1], -q[2], -q[3]]
+}
 
 pub fn quat_normalize(q: Quat) -> Quat {
-    let len = (q[0]*q[0] + q[1]*q[1] + q[2]*q[2] + q[3]*q[3]).sqrt();
-    if len < 1e-10 { return QUAT_IDENTITY; }
+    let len = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
+    if len < 1e-10 {
+        return QUAT_IDENTITY;
+    }
     let inv = 1.0 / len;
-    [q[0]*inv, q[1]*inv, q[2]*inv, q[3]*inv]
+    [q[0] * inv, q[1] * inv, q[2] * inv, q[3] * inv]
 }
 
 /// Rotate vector by quaternion: result = q * v * q_conjugate.
 /// From PPC: getRotatedPos (0x4c640), optimized form.
 pub fn quat_rotate_v(q: Quat, v: V3) -> V3 {
-    let ww2m1 = 2.0*q[0]*q[0] - 1.0;
-    let dot = q[1]*v[0] + q[2]*v[1] + q[3]*v[2];
-    let cx = q[2]*v[2] - q[3]*v[1];
-    let cy = q[3]*v[0] - q[1]*v[2];
-    let cz = q[1]*v[1] - q[2]*v[0];
+    let ww2m1 = 2.0 * q[0] * q[0] - 1.0;
+    let dot = q[1] * v[0] + q[2] * v[1] + q[3] * v[2];
+    let cx = q[2] * v[2] - q[3] * v[1];
+    let cy = q[3] * v[0] - q[1] * v[2];
+    let cz = q[1] * v[1] - q[2] * v[0];
     [
-        ww2m1*v[0] + 2.0*(dot*q[1] + q[0]*cx),
-        ww2m1*v[1] + 2.0*(dot*q[2] + q[0]*cy),
-        ww2m1*v[2] + 2.0*(dot*q[3] + q[0]*cz),
+        ww2m1 * v[0] + 2.0 * (dot * q[1] + q[0] * cx),
+        ww2m1 * v[1] + 2.0 * (dot * q[2] + q[0] * cy),
+        ww2m1 * v[2] + 2.0 * (dot * q[3] + q[0] * cz),
     ]
 }
 
@@ -101,7 +151,7 @@ pub fn quat_from_axis_angle(axis: V3, angle: f64) -> Quat {
     let half = angle * 0.5;
     let s = half.sin();
     let n = v3_normalized(axis);
-    [half.cos(), n[0]*s, n[1]*s, n[2]*s]
+    [half.cos(), n[0] * s, n[1] * s, n[2] * s]
 }
 
 /// Convert quaternion to axis-angle. Returns (axis, angle_radians).
@@ -109,24 +159,36 @@ pub fn quat_from_axis_angle(axis: V3, angle: f64) -> Quat {
 pub fn quat_to_axis_angle(q: Quat) -> (V3, f64) {
     let w_clamped = q[0].clamp(-1.0, 1.0);
     let angle = 2.0 * w_clamped.acos();
-    let sin_half = (1.0 - q[0]*q[0]).sqrt();
+    let sin_half = (1.0 - q[0] * q[0]).sqrt();
     if sin_half < 0.001 {
         ([0.0, 0.0, 1.0], angle)
     } else {
-        ([q[1]/sin_half, q[2]/sin_half, q[3]/sin_half], angle)
+        ([q[1] / sin_half, q[2] / sin_half, q[3] / sin_half], angle)
     }
 }
 
 /// Convert quaternion to 3x3 rotation matrix (row-major).
 /// From PPC: setRotation__Q25Havok9TransformFRCQ25Havok10Quaternion (0x9a940)
 pub fn quat_to_mat3(q: Quat) -> Mat3 {
-    let xx = 2.0*q[1]*q[1]; let yy = 2.0*q[2]*q[2]; let zz = 2.0*q[3]*q[3];
-    let xy = 2.0*q[1]*q[2]; let xz = 2.0*q[1]*q[3]; let yz = 2.0*q[2]*q[3];
-    let wx = 2.0*q[0]*q[1]; let wy = 2.0*q[0]*q[2]; let wz = 2.0*q[0]*q[3];
+    let xx = 2.0 * q[1] * q[1];
+    let yy = 2.0 * q[2] * q[2];
+    let zz = 2.0 * q[3] * q[3];
+    let xy = 2.0 * q[1] * q[2];
+    let xz = 2.0 * q[1] * q[3];
+    let yz = 2.0 * q[2] * q[3];
+    let wx = 2.0 * q[0] * q[1];
+    let wy = 2.0 * q[0] * q[2];
+    let wz = 2.0 * q[0] * q[3];
     [
-        1.0-yy-zz, xy-wz,     xz+wy,
-        xy+wz,     1.0-xx-zz, yz-wx,
-        xz-wy,     yz+wx,     1.0-xx-yy,
+        1.0 - yy - zz,
+        xy - wz,
+        xz + wy,
+        xy + wz,
+        1.0 - xx - zz,
+        yz - wx,
+        xz - wy,
+        yz + wx,
+        1.0 - xx - yy,
     ]
 }
 
@@ -136,16 +198,36 @@ pub fn quat_from_mat3(m: Mat3) -> Quat {
     let trace = m[0] + m[4] + m[8];
     if trace > 0.0 {
         let s = (trace + 1.0).sqrt() * 2.0;
-        [0.25*s, (m[7]-m[5])/s, (m[2]-m[6])/s, (m[3]-m[1])/s]
+        [
+            0.25 * s,
+            (m[7] - m[5]) / s,
+            (m[2] - m[6]) / s,
+            (m[3] - m[1]) / s,
+        ]
     } else if m[0] > m[4] && m[0] > m[8] {
         let s = (1.0 + m[0] - m[4] - m[8]).sqrt() * 2.0;
-        [(m[7]-m[5])/s, 0.25*s, (m[1]+m[3])/s, (m[2]+m[6])/s]
+        [
+            (m[7] - m[5]) / s,
+            0.25 * s,
+            (m[1] + m[3]) / s,
+            (m[2] + m[6]) / s,
+        ]
     } else if m[4] > m[8] {
         let s = (1.0 + m[4] - m[0] - m[8]).sqrt() * 2.0;
-        [(m[2]-m[6])/s, (m[1]+m[3])/s, 0.25*s, (m[5]+m[7])/s]
+        [
+            (m[2] - m[6]) / s,
+            (m[1] + m[3]) / s,
+            0.25 * s,
+            (m[5] + m[7]) / s,
+        ]
     } else {
         let s = (1.0 + m[8] - m[0] - m[4]).sqrt() * 2.0;
-        [(m[3]-m[1])/s, (m[2]+m[6])/s, (m[5]+m[7])/s, 0.25*s]
+        [
+            (m[3] - m[1]) / s,
+            (m[2] + m[6]) / s,
+            (m[5] + m[7]) / s,
+            0.25 * s,
+        ]
     }
 }
 
@@ -163,44 +245,79 @@ pub fn quat_from_axis_angle_degrees(axis: V3, angle_deg: f64) -> Quat {
 #[inline]
 pub fn mat3_transform(m: Mat3, v: V3) -> V3 {
     [
-        m[0]*v[0] + m[1]*v[1] + m[2]*v[2],
-        m[3]*v[0] + m[4]*v[1] + m[5]*v[2],
-        m[6]*v[0] + m[7]*v[1] + m[8]*v[2],
+        m[0] * v[0] + m[1] * v[1] + m[2] * v[2],
+        m[3] * v[0] + m[4] * v[1] + m[5] * v[2],
+        m[6] * v[0] + m[7] * v[1] + m[8] * v[2],
     ]
 }
 
 /// Matrix * matrix
 pub fn mat3_mul(a: Mat3, b: Mat3) -> Mat3 {
     [
-        a[0]*b[0]+a[1]*b[3]+a[2]*b[6], a[0]*b[1]+a[1]*b[4]+a[2]*b[7], a[0]*b[2]+a[1]*b[5]+a[2]*b[8],
-        a[3]*b[0]+a[4]*b[3]+a[5]*b[6], a[3]*b[1]+a[4]*b[4]+a[5]*b[7], a[3]*b[2]+a[4]*b[5]+a[5]*b[8],
-        a[6]*b[0]+a[7]*b[3]+a[8]*b[6], a[6]*b[1]+a[7]*b[4]+a[8]*b[7], a[6]*b[2]+a[7]*b[5]+a[8]*b[8],
+        a[0] * b[0] + a[1] * b[3] + a[2] * b[6],
+        a[0] * b[1] + a[1] * b[4] + a[2] * b[7],
+        a[0] * b[2] + a[1] * b[5] + a[2] * b[8],
+        a[3] * b[0] + a[4] * b[3] + a[5] * b[6],
+        a[3] * b[1] + a[4] * b[4] + a[5] * b[7],
+        a[3] * b[2] + a[4] * b[5] + a[5] * b[8],
+        a[6] * b[0] + a[7] * b[3] + a[8] * b[6],
+        a[6] * b[1] + a[7] * b[4] + a[8] * b[7],
+        a[6] * b[2] + a[7] * b[5] + a[8] * b[8],
     ]
 }
 
 /// Matrix inverse (3x3 Cramer's rule).
 /// From PPC: makeInverse__Q25Havok7Matrix3Fv
 pub fn mat3_inverse(m: Mat3) -> Mat3 {
-    let det = m[0]*(m[4]*m[8]-m[5]*m[7]) - m[1]*(m[3]*m[8]-m[5]*m[6]) + m[2]*(m[3]*m[7]-m[4]*m[6]);
-    if det.abs() < 1e-20 { return MAT3_IDENTITY; }
+    let det = m[0] * (m[4] * m[8] - m[5] * m[7]) - m[1] * (m[3] * m[8] - m[5] * m[6])
+        + m[2] * (m[3] * m[7] - m[4] * m[6]);
+    if det.abs() < 1e-20 {
+        return MAT3_IDENTITY;
+    }
     let inv_det = 1.0 / det;
     [
-        (m[4]*m[8]-m[5]*m[7])*inv_det, (m[2]*m[7]-m[1]*m[8])*inv_det, (m[1]*m[5]-m[2]*m[4])*inv_det,
-        (m[5]*m[6]-m[3]*m[8])*inv_det, (m[0]*m[8]-m[2]*m[6])*inv_det, (m[2]*m[3]-m[0]*m[5])*inv_det,
-        (m[3]*m[7]-m[4]*m[6])*inv_det, (m[1]*m[6]-m[0]*m[7])*inv_det, (m[0]*m[4]-m[1]*m[3])*inv_det,
+        (m[4] * m[8] - m[5] * m[7]) * inv_det,
+        (m[2] * m[7] - m[1] * m[8]) * inv_det,
+        (m[1] * m[5] - m[2] * m[4]) * inv_det,
+        (m[5] * m[6] - m[3] * m[8]) * inv_det,
+        (m[0] * m[8] - m[2] * m[6]) * inv_det,
+        (m[2] * m[3] - m[0] * m[5]) * inv_det,
+        (m[3] * m[7] - m[4] * m[6]) * inv_det,
+        (m[1] * m[6] - m[0] * m[7]) * inv_det,
+        (m[0] * m[4] - m[1] * m[3]) * inv_det,
     ]
 }
 
 pub fn mat3_transpose(m: Mat3) -> Mat3 {
-    [m[0],m[3],m[6], m[1],m[4],m[7], m[2],m[5],m[8]]
+    [m[0], m[3], m[6], m[1], m[4], m[7], m[2], m[5], m[8]]
 }
 
 pub fn mat3_scale_f(m: Mat3, s: f64) -> Mat3 {
-    [m[0]*s,m[1]*s,m[2]*s, m[3]*s,m[4]*s,m[5]*s, m[6]*s,m[7]*s,m[8]*s]
+    [
+        m[0] * s,
+        m[1] * s,
+        m[2] * s,
+        m[3] * s,
+        m[4] * s,
+        m[5] * s,
+        m[6] * s,
+        m[7] * s,
+        m[8] * s,
+    ]
 }
 
 pub fn mat3_add(a: Mat3, b: Mat3) -> Mat3 {
-    [a[0]+b[0],a[1]+b[1],a[2]+b[2], a[3]+b[3],a[4]+b[4],a[5]+b[5], a[6]+b[6],a[7]+b[7],a[8]+b[8]]
+    [
+        a[0] + b[0],
+        a[1] + b[1],
+        a[2] + b[2],
+        a[3] + b[3],
+        a[4] + b[4],
+        a[5] + b[5],
+        a[6] + b[6],
+        a[7] + b[7],
+        a[8] + b[8],
+    ]
 }
 
 // ============================================================
@@ -211,7 +328,17 @@ pub fn mat3_add(a: Mat3, b: Mat3) -> Mat3 {
 /// Box inertia: I_xx = m/12*(dy²+dz²), I_yy = m/12*(dx²+dz²), I_zz = m/12*(dx²+dy²)
 pub fn box_inertia(mass: f64, dx: f64, dy: f64, dz: f64) -> Mat3 {
     let f = mass / 12.0;
-    [f*(dy*dy+dz*dz), 0.0, 0.0, 0.0, f*(dx*dx+dz*dz), 0.0, 0.0, 0.0, f*(dx*dx+dy*dy)]
+    [
+        f * (dy * dy + dz * dz),
+        0.0,
+        0.0,
+        0.0,
+        f * (dx * dx + dz * dz),
+        0.0,
+        0.0,
+        0.0,
+        f * (dx * dx + dy * dy),
+    ]
 }
 
 /// Sphere inertia: I_diag = 2/5 * m * r²
@@ -222,12 +349,22 @@ pub fn sphere_inertia(mass: f64, radius: f64) -> Mat3 {
 
 /// Parallel-axis theorem: shift inertia by offset from center of mass.
 pub fn parallel_axis(inertia: Mat3, mass: f64, offset: V3) -> Mat3 {
-    let dx = offset[0]; let dy = offset[1]; let dz = offset[2];
-    let dx2 = dx*dx; let dy2 = dy*dy; let dz2 = dz*dz;
+    let dx = offset[0];
+    let dy = offset[1];
+    let dz = offset[2];
+    let dx2 = dx * dx;
+    let dy2 = dy * dy;
+    let dz2 = dz * dz;
     [
-        inertia[0]+mass*(dy2+dz2), inertia[1]-mass*dx*dy, inertia[2]-mass*dx*dz,
-        inertia[3]-mass*dx*dy, inertia[4]+mass*(dx2+dz2), inertia[5]-mass*dy*dz,
-        inertia[6]-mass*dx*dz, inertia[7]-mass*dy*dz, inertia[8]+mass*(dx2+dy2),
+        inertia[0] + mass * (dy2 + dz2),
+        inertia[1] - mass * dx * dy,
+        inertia[2] - mass * dx * dz,
+        inertia[3] - mass * dx * dy,
+        inertia[4] + mass * (dx2 + dz2),
+        inertia[5] - mass * dy * dz,
+        inertia[6] - mass * dx * dz,
+        inertia[7] - mass * dy * dz,
+        inertia[8] + mass * (dx2 + dy2),
     ]
 }
 
@@ -266,9 +403,15 @@ pub fn box_unit_inertia(half_extents: [f64; 3]) -> [f64; 9] {
     let dz = 2.0 * half_extents[2];
     let f = 1.0 / 12.0;
     [
-        f*(dy*dy + dz*dz), 0.0, 0.0,
-        0.0, f*(dx*dx + dz*dz), 0.0,
-        0.0, 0.0, f*(dx*dx + dy*dy),
+        f * (dy * dy + dz * dz),
+        0.0,
+        0.0,
+        0.0,
+        f * (dx * dx + dz * dz),
+        0.0,
+        0.0,
+        0.0,
+        f * (dx * dx + dy * dy),
     ]
 }
 
@@ -301,8 +444,12 @@ pub fn compute_polyhedron_unit_inertia(
     let mut mx = [f64::MIN; 3];
     for p in positions {
         for i in 0..3 {
-            if p[i] < mn[i] { mn[i] = p[i]; }
-            if p[i] > mx[i] { mx[i] = p[i]; }
+            if p[i] < mn[i] {
+                mn[i] = p[i];
+            }
+            if p[i] > mx[i] {
+                mx[i] = p[i];
+            }
         }
     }
     let offset = [
@@ -331,9 +478,15 @@ pub fn compute_polyhedron_unit_inertia(
     // `InertiaComputation.PolyhedronInertia` has the same latent bug — it is
     // never exercised by `Program.cs`, which hardcodes `UnitInertiaTensor`.
     let mut vol = 0.0f64;
-    let mut fx = 0.0f64; let mut fy = 0.0f64; let mut fz = 0.0f64;
-    let mut sxx = 0.0f64; let mut syy = 0.0f64; let mut szz = 0.0f64;
-    let mut sxy = 0.0f64; let mut sxz = 0.0f64; let mut syz = 0.0f64;
+    let mut fx = 0.0f64;
+    let mut fy = 0.0f64;
+    let mut fz = 0.0f64;
+    let mut sxx = 0.0f64;
+    let mut syy = 0.0f64;
+    let mut szz = 0.0f64;
+    let mut sxy = 0.0f64;
+    let mut sxz = 0.0f64;
+    let mut syz = 0.0f64;
 
     for face in faces {
         let i0 = face[0] as usize;
@@ -342,16 +495,27 @@ pub fn compute_polyhedron_unit_inertia(
         if i0 >= positions.len() || i1 >= positions.len() || i2 >= positions.len() {
             continue;
         }
-        let a = [positions[i0][0]-offset[0], positions[i0][1]-offset[1], positions[i0][2]-offset[2]];
-        let b = [positions[i1][0]-offset[0], positions[i1][1]-offset[1], positions[i1][2]-offset[2]];
-        let c = [positions[i2][0]-offset[0], positions[i2][1]-offset[1], positions[i2][2]-offset[2]];
+        let a = [
+            positions[i0][0] - offset[0],
+            positions[i0][1] - offset[1],
+            positions[i0][2] - offset[2],
+        ];
+        let b = [
+            positions[i1][0] - offset[0],
+            positions[i1][1] - offset[1],
+            positions[i1][2] - offset[2],
+        ];
+        let c = [
+            positions[i2][0] - offset[0],
+            positions[i2][1] - offset[1],
+            positions[i2][2] - offset[2],
+        ];
 
         // Signed tetrahedron volume: (1/6) * a · (b × c)
-        let v_tet = (
-            a[0] * (b[1]*c[2] - b[2]*c[1])
-          + a[1] * (b[2]*c[0] - b[0]*c[2])
-          + a[2] * (b[0]*c[1] - b[1]*c[0])
-        ) / 6.0;
+        let v_tet = (a[0] * (b[1] * c[2] - b[2] * c[1])
+            + a[1] * (b[2] * c[0] - b[0] * c[2])
+            + a[2] * (b[0] * c[1] - b[1] * c[0]))
+            / 6.0;
         vol += v_tet;
 
         // First moment contribution: V_tet * centroid, with origin vertex contributing 0.
@@ -362,25 +526,46 @@ pub fn compute_polyhedron_unit_inertia(
         fy += v_tet * cy4;
         fz += v_tet * cz4;
 
-        let ax=a[0]; let ay=a[1]; let az=a[2];
-        let bx=b[0]; let by=b[1]; let bz=b[2];
-        let cx=c[0]; let cy=c[1]; let cz=c[2];
+        let ax = a[0];
+        let ay = a[1];
+        let az = a[2];
+        let bx = b[0];
+        let by = b[1];
+        let bz = b[2];
+        let cx = c[0];
+        let cy = c[1];
+        let cz = c[2];
 
         // Second moments — diagonal (∫x² dV, etc.), coefficient V_tet / 10.
-        let xx_p = ax*ax + bx*bx + cx*cx + ax*bx + ax*cx + bx*cx;
-        let yy_p = ay*ay + by*by + cy*cy + ay*by + ay*cy + by*cy;
-        let zz_p = az*az + bz*bz + cz*cz + az*bz + az*cz + bz*cz;
+        let xx_p = ax * ax + bx * bx + cx * cx + ax * bx + ax * cx + bx * cx;
+        let yy_p = ay * ay + by * by + cy * cy + ay * by + ay * cy + by * cy;
+        let zz_p = az * az + bz * bz + cz * cz + az * bz + az * cz + bz * cz;
         sxx += v_tet * xx_p * 0.1;
         syy += v_tet * yy_p * 0.1;
         szz += v_tet * zz_p * 0.1;
 
         // Products of inertia — ∫xy dV, etc., coefficient V_tet / 20.
-        let xy_p = 2.0*(ax*ay + bx*by + cx*cy)
-                 + ax*by + bx*ay + ax*cy + cx*ay + bx*cy + cx*by;
-        let xz_p = 2.0*(ax*az + bx*bz + cx*cz)
-                 + ax*bz + bx*az + ax*cz + cx*az + bx*cz + cx*bz;
-        let yz_p = 2.0*(ay*az + by*bz + cy*cz)
-                 + ay*bz + by*az + ay*cz + cy*az + by*cz + cy*bz;
+        let xy_p = 2.0 * (ax * ay + bx * by + cx * cy)
+            + ax * by
+            + bx * ay
+            + ax * cy
+            + cx * ay
+            + bx * cy
+            + cx * by;
+        let xz_p = 2.0 * (ax * az + bx * bz + cx * cz)
+            + ax * bz
+            + bx * az
+            + ax * cz
+            + cx * az
+            + bx * cz
+            + cx * bz;
+        let yz_p = 2.0 * (ay * az + by * bz + cy * cz)
+            + ay * bz
+            + by * az
+            + ay * cz
+            + cy * az
+            + by * cz
+            + cy * bz;
         sxy += v_tet * xy_p * 0.05;
         sxz += v_tet * xz_p * 0.05;
         syz += v_tet * yz_p * 0.05;
@@ -394,9 +579,9 @@ pub fn compute_polyhedron_unit_inertia(
     // so the signs stay consistent. This also lets us keep vol positive below.
     let sign = if vol > 0.0 { 1.0 } else { -1.0 };
     let vol = vol_abs;
-    let (fx, fy, fz) = (fx*sign, fy*sign, fz*sign);
-    let (sxx, syy, szz) = (sxx*sign, syy*sign, szz*sign);
-    let (sxy, sxz, syz) = (sxy*sign, sxz*sign, syz*sign);
+    let (fx, fy, fz) = (fx * sign, fy * sign, fz * sign);
+    let (sxx, syy, szz) = (sxx * sign, syy * sign, szz * sign);
+    let (sxy, sxz, syz) = (sxy * sign, sxz * sign, syz * sign);
 
     // COM in the centered frame (small, so parallel-axis is numerically stable).
     let cm_x = fx / vol;
@@ -415,9 +600,9 @@ pub fn compute_polyhedron_unit_inertia(
     let mut iyz = -syz * inv_vol;
 
     // Parallel-axis shift from the centered origin to the mesh COM.
-    ixx -= cm_y*cm_y + cm_z*cm_z;
-    iyy -= cm_x*cm_x + cm_z*cm_z;
-    izz -= cm_x*cm_x + cm_y*cm_y;
+    ixx -= cm_y * cm_y + cm_z * cm_z;
+    iyy -= cm_x * cm_x + cm_z * cm_z;
+    izz -= cm_x * cm_x + cm_y * cm_y;
     ixy += cm_x * cm_y;
     ixz += cm_x * cm_z;
     iyz += cm_y * cm_z;
@@ -425,11 +610,7 @@ pub fn compute_polyhedron_unit_inertia(
     // Return COM back in the caller's coordinate frame.
     let com = [cm_x + offset[0], cm_y + offset[1], cm_z + offset[2]];
 
-    let unit_inertia = [
-        ixx, ixy, ixz,
-        ixy, iyy, iyz,
-        ixz, iyz, izz,
-    ];
+    let unit_inertia = [ixx, ixy, ixz, ixy, iyy, iyz, ixz, iyz, izz];
     Some((unit_inertia, com, vol))
 }
 
@@ -449,11 +630,15 @@ pub struct CollisionMesh {
 
 impl CollisionMesh {
     pub fn compute_aabb(&mut self) {
-        let (mut mn, mut mx) = ([f64::MAX;3], [f64::MIN;3]);
+        let (mut mn, mut mx) = ([f64::MAX; 3], [f64::MIN; 3]);
         for v in &self.vertices {
-            for i in 0..3 { mn[i] = mn[i].min(v[i]); mx[i] = mx[i].max(v[i]); }
+            for i in 0..3 {
+                mn[i] = mn[i].min(v[i]);
+                mx[i] = mx[i].max(v[i]);
+            }
         }
-        self.aabb_min = mn; self.aabb_max = mx;
+        self.aabb_min = mn;
+        self.aabb_max = mx;
     }
 }
 
@@ -494,15 +679,23 @@ pub struct CollisionContact {
 pub fn find_ground_z(meshes: &[CollisionMesh], x: f64, y: f64, max_z: f64) -> Option<f64> {
     let mut best: Option<f64> = None;
     for mesh in meshes {
-        if x < mesh.aabb_min[0] || x > mesh.aabb_max[0] { continue; }
-        if y < mesh.aabb_min[1] || y > mesh.aabb_max[1] { continue; }
+        if x < mesh.aabb_min[0] || x > mesh.aabb_max[0] {
+            continue;
+        }
+        if y < mesh.aabb_min[1] || y > mesh.aabb_max[1] {
+            continue;
+        }
         for tri in &mesh.triangles {
             let v0 = mesh.vertices[tri[0] as usize];
             let v1 = mesh.vertices[tri[1] as usize];
             let v2 = mesh.vertices[tri[2] as usize];
-            if !pt_in_tri_xy(x, y, v0, v1, v2) { continue; }
+            if !pt_in_tri_xy(x, y, v0, v1, v2) {
+                continue;
+            }
             let z = interp_z(x, y, v0, v1, v2);
-            if z < max_z { best = Some(best.map_or(z, |b: f64| b.max(z))); }
+            if z < max_z {
+                best = Some(best.map_or(z, |b: f64| b.max(z)));
+            }
         }
     }
     best
@@ -513,7 +706,11 @@ pub fn find_ground_z(meshes: &[CollisionMesh], x: f64, y: f64, max_z: f64) -> Op
 /// (closing) speed at a contact point for the collision callback's 5th argument.
 #[inline]
 pub fn body_point_velocity(rb: &crate::player::cast_member::HavokRigidBody, point: V3) -> V3 {
-    let r = [point[0] - rb.position[0], point[1] - rb.position[1], point[2] - rb.position[2]];
+    let r = [
+        point[0] - rb.position[0],
+        point[1] - rb.position[1],
+        point[2] - rb.position[2],
+    ];
     let w = rb.angular_velocity;
     [
         rb.linear_velocity[0] + w[1] * r[2] - w[2] * r[1],
@@ -527,7 +724,12 @@ pub fn body_point_velocity(rb: &crate::player::cast_member::HavokRigidBody, poin
 /// `tolerance` expands the effective collision distance so Havok detects
 /// contacts before actual surface penetration (matching the Xtra behaviour).
 pub fn detect_body_contacts(
-    meshes: &[CollisionMesh], pos: V3, half_extents: V3, body_idx: usize, tolerance: f64, passive: bool,
+    meshes: &[CollisionMesh],
+    pos: V3,
+    half_extents: V3,
+    body_idx: usize,
+    tolerance: f64,
+    passive: bool,
     bodies: &[crate::player::cast_member::HavokRigidBody],
 ) -> Vec<CollisionContact> {
     // Broad-phase cull uses the largest half-extent. NON-passive scenes (the
@@ -554,28 +756,40 @@ pub fn detect_body_contacts(
                 _ => continue,
             }
         }
-        if pos[0]+max_r < mesh.aabb_min[0] || pos[0]-max_r > mesh.aabb_max[0] { continue; }
-        if pos[1]+max_r < mesh.aabb_min[1] || pos[1]-max_r > mesh.aabb_max[1] { continue; }
-        if pos[2]+max_r < mesh.aabb_min[2] || pos[2]-max_r > mesh.aabb_max[2] { continue; }
+        if pos[0] + max_r < mesh.aabb_min[0] || pos[0] - max_r > mesh.aabb_max[0] {
+            continue;
+        }
+        if pos[1] + max_r < mesh.aabb_min[1] || pos[1] - max_r > mesh.aabb_max[1] {
+            continue;
+        }
+        if pos[2] + max_r < mesh.aabb_min[2] || pos[2] - max_r > mesh.aabb_max[2] {
+            continue;
+        }
         for tri in &mesh.triangles {
             let v0 = mesh.vertices[tri[0] as usize];
             let v1 = mesh.vertices[tri[1] as usize];
             let v2 = mesh.vertices[tri[2] as usize];
             let normal = v3_normalized(v3_cross(v3_sub(v1, v0), v3_sub(v2, v0)));
-            if v3_len_sq(normal) < 1e-10 { continue; }
+            if v3_len_sq(normal) < 1e-10 {
+                continue;
+            }
             // Passive: exact box support along the triangle normal. Non-passive:
             // original isotropic sphere radius.
             let eff_radius = if passive {
-                half_extents[0]*normal[0].abs()
-              + half_extents[1]*normal[1].abs()
-              + half_extents[2]*normal[2].abs()
-              + tolerance
+                half_extents[0] * normal[0].abs()
+                    + half_extents[1] * normal[1].abs()
+                    + half_extents[2] * normal[2].abs()
+                    + tolerance
             } else {
                 max_r
             };
             let dist = v3_dot(v3_sub(pos, v0), normal);
-            if dist.abs() > eff_radius { continue; }
-            if dist < -eff_radius * 2.0 { continue; }
+            if dist.abs() > eff_radius {
+                continue;
+            }
+            if dist < -eff_radius * 2.0 {
+                continue;
+            }
             let proj = v3_sub(pos, v3_scale(normal, dist));
             if pt_in_tri_3d(proj, v0, v1, v2) {
                 let depth = eff_radius - dist;
@@ -584,7 +798,7 @@ pub fn detect_body_contacts(
                     // resolver cancels the normal velocity. The mesh's owner (if
                     // any) is pinned here, so body_b's velocity is zero.
                     let va = body_point_velocity(&bodies[body_idx], proj);
-                    let nrv = (va[0]*normal[0] + va[1]*normal[1] + va[2]*normal[2]).abs();
+                    let nrv = (va[0] * normal[0] + va[1] * normal[1] + va[2] * normal[2]).abs();
                     contacts.push(CollisionContact {
                         body_a: body_idx,
                         body_b: mesh.body_index,
@@ -618,10 +832,14 @@ pub fn detect_body_contacts(
                     let depth = eff_radius - d;
                     // Keep the surface normal (oriented toward the body) so a flat
                     // seam pushes the car straight up, not sideways toward the edge.
-                    let n = if v3_dot(to_pos, normal) >= 0.0 { normal } else { v3_scale(normal, -1.0) };
+                    let n = if v3_dot(to_pos, normal) >= 0.0 {
+                        normal
+                    } else {
+                        v3_scale(normal, -1.0)
+                    };
                     if depth > -margin && n[2] > 0.85 {
                         let va = body_point_velocity(&bodies[body_idx], closest);
-                        let nrv = (va[0]*n[0] + va[1]*n[1] + va[2]*n[2]).abs();
+                        let nrv = (va[0] * n[0] + va[1] * n[1] + va[2] * n[2]).abs();
                         contacts.push(CollisionContact {
                             body_a: body_idx,
                             body_b: mesh.body_index,
@@ -649,15 +867,27 @@ pub fn detect_body_contacts(
 /// band and projects onto the face, emit a contact there. Only the single deepest
 /// contact per body is kept by the caller.
 fn detect_hull_contacts(
-    meshes: &[CollisionMesh], hull_world: &[V3], body_idx: usize, tolerance: f64,
+    meshes: &[CollisionMesh],
+    hull_world: &[V3],
+    body_idx: usize,
+    tolerance: f64,
     bodies: &[crate::player::cast_member::HavokRigidBody],
 ) -> Vec<CollisionContact> {
     let mut contacts = Vec::new();
-    if hull_world.is_empty() { return contacts; }
+    if hull_world.is_empty() {
+        return contacts;
+    }
     // Hull AABB for broad-phase culling.
     let (mut hmn, mut hmx) = ([f64::MAX; 3], [f64::MIN; 3]);
     for v in hull_world {
-        for i in 0..3 { if v[i] < hmn[i] { hmn[i] = v[i]; } if v[i] > hmx[i] { hmx[i] = v[i]; } }
+        for i in 0..3 {
+            if v[i] < hmn[i] {
+                hmn[i] = v[i];
+            }
+            if v[i] > hmx[i] {
+                hmx[i] = v[i];
+            }
+        }
     }
     // Deepest penetration we still treat as a real contact. Must scale with the
     // HULL size, not `tolerance`: when the car flips and slams the ground, the
@@ -665,7 +895,7 @@ fn detect_hull_contacts(
     // that contact and let the body fall through. The box path used
     // `-eff_radius*2` (≈ box size) for the same reason. Larger than the hull is a
     // clear back-face artifact (a vertex poked through thin road to the underside).
-    let hull_span = (hmx[0]-hmn[0]).max(hmx[1]-hmn[1]).max(hmx[2]-hmn[2]);
+    let hull_span = (hmx[0] - hmn[0]).max(hmx[1] - hmn[1]).max(hmx[2] - hmn[2]);
     let deep_reject = -(hull_span * 2.0 + tolerance);
     // Hull centre, used to orient each triangle normal toward the body. Road meshes
     // have inconsistent triangle winding (worse on a curved loop), so the raw
@@ -673,7 +903,11 @@ fn detect_hull_contacts(
     // via `dist.abs()`, and this does the same for the support test. Without it the
     // support picked the wrong-side vertex, no backstop contact fired, and the car
     // tunnelled through the road on the way down.
-    let hc = [(hmn[0]+hmx[0])*0.5, (hmn[1]+hmx[1])*0.5, (hmn[2]+hmx[2])*0.5];
+    let hc = [
+        (hmn[0] + hmx[0]) * 0.5,
+        (hmn[1] + hmx[1]) * 0.5,
+        (hmn[2] + hmx[2]) * 0.5,
+    ];
     for (mesh_idx, mesh) in meshes.iter().enumerate() {
         // Static scenery only: an unowned mesh, or one owned by a pinned body.
         // (A movable body's own baked mesh is skipped — it's the hull's source.)
@@ -686,9 +920,15 @@ fn detect_hull_contacts(
                 _ => continue,
             }
         }
-        if hmx[0] + tolerance < mesh.aabb_min[0] || hmn[0] - tolerance > mesh.aabb_max[0] { continue; }
-        if hmx[1] + tolerance < mesh.aabb_min[1] || hmn[1] - tolerance > mesh.aabb_max[1] { continue; }
-        if hmx[2] + tolerance < mesh.aabb_min[2] || hmn[2] - tolerance > mesh.aabb_max[2] { continue; }
+        if hmx[0] + tolerance < mesh.aabb_min[0] || hmn[0] - tolerance > mesh.aabb_max[0] {
+            continue;
+        }
+        if hmx[1] + tolerance < mesh.aabb_min[1] || hmn[1] - tolerance > mesh.aabb_max[1] {
+            continue;
+        }
+        if hmx[2] + tolerance < mesh.aabb_min[2] || hmn[2] - tolerance > mesh.aabb_max[2] {
+            continue;
+        }
         for tri in &mesh.triangles {
             let v0 = mesh.vertices[tri[0] as usize];
             let v1 = mesh.vertices[tri[1] as usize];
@@ -697,13 +937,29 @@ fn detect_hull_contacts(
             // the (small) hull's AABB. The chassis touches only a handful of the road's
             // thousands of triangles, so this cull turns the O(tris × hull_verts) inner
             // loop into O(tris + near_tris × hull_verts) and removes the driving lag.
-            let tmn = [v0[0].min(v1[0]).min(v2[0]), v0[1].min(v1[1]).min(v2[1]), v0[2].min(v1[2]).min(v2[2])];
-            let tmx = [v0[0].max(v1[0]).max(v2[0]), v0[1].max(v1[1]).max(v2[1]), v0[2].max(v1[2]).max(v2[2])];
-            if tmx[0] + tolerance < hmn[0] || tmn[0] - tolerance > hmx[0]
-                || tmx[1] + tolerance < hmn[1] || tmn[1] - tolerance > hmx[1]
-                || tmx[2] + tolerance < hmn[2] || tmn[2] - tolerance > hmx[2] { continue; }
+            let tmn = [
+                v0[0].min(v1[0]).min(v2[0]),
+                v0[1].min(v1[1]).min(v2[1]),
+                v0[2].min(v1[2]).min(v2[2]),
+            ];
+            let tmx = [
+                v0[0].max(v1[0]).max(v2[0]),
+                v0[1].max(v1[1]).max(v2[1]),
+                v0[2].max(v1[2]).max(v2[2]),
+            ];
+            if tmx[0] + tolerance < hmn[0]
+                || tmn[0] - tolerance > hmx[0]
+                || tmx[1] + tolerance < hmn[1]
+                || tmn[1] - tolerance > hmx[1]
+                || tmx[2] + tolerance < hmn[2]
+                || tmn[2] - tolerance > hmx[2]
+            {
+                continue;
+            }
             let mut normal = v3_normalized(v3_cross(v3_sub(v1, v0), v3_sub(v2, v0)));
-            if v3_len_sq(normal) < 1e-10 { continue; }
+            if v3_len_sq(normal) < 1e-10 {
+                continue;
+            }
             // Orient the normal toward the hull, so the support test is independent of
             // triangle winding (see `hc`).
             if v3_dot(v3_sub(hc, v0), normal) < 0.0 {
@@ -714,17 +970,24 @@ fn detect_hull_contacts(
             let mut best_pt = [0.0; 3];
             for &w in hull_world {
                 let d = v3_dot(v3_sub(w, v0), normal);
-                if d < best_dist { best_dist = d; best_pt = w; }
+                if d < best_dist {
+                    best_dist = d;
+                    best_pt = w;
+                }
             }
             // Touching within `tolerance`; reject only clearly-through-the-backface
             // hits (deeper than the hull itself — see `deep_reject`).
-            if best_dist > tolerance { continue; }
-            if best_dist < deep_reject { continue; }
+            if best_dist > tolerance {
+                continue;
+            }
+            if best_dist < deep_reject {
+                continue;
+            }
             let proj = v3_sub(best_pt, v3_scale(normal, best_dist));
             if pt_in_tri_3d(proj, v0, v1, v2) {
                 let depth = tolerance - best_dist;
                 let va = body_point_velocity(&bodies[body_idx], best_pt);
-                let nrv = (va[0]*normal[0] + va[1]*normal[1] + va[2]*normal[2]).abs();
+                let nrv = (va[0] * normal[0] + va[1] * normal[1] + va[2] * normal[2]).abs();
                 contacts.push(CollisionContact {
                     body_a: body_idx,
                     body_b: mesh.body_index,
@@ -751,21 +1014,34 @@ fn segment_segment_closest(p0: V3, p1: V3, q0: V3, q1: V3) -> (V3, V3) {
     let f = v3_dot(d2, r);
     let (s, t);
     if a <= 1e-10 && e <= 1e-10 {
-        s = 0.0; t = 0.0;
+        s = 0.0;
+        t = 0.0;
     } else if a <= 1e-10 {
-        s = 0.0; t = (f / e).clamp(0.0, 1.0);
+        s = 0.0;
+        t = (f / e).clamp(0.0, 1.0);
     } else {
         let c = v3_dot(d1, r);
         if e <= 1e-10 {
-            t = 0.0; s = (-c / a).clamp(0.0, 1.0);
+            t = 0.0;
+            s = (-c / a).clamp(0.0, 1.0);
         } else {
             let b = v3_dot(d1, d2);
             let denom = a * e - b * b;
-            let mut ss = if denom != 0.0 { ((b*f - c*e) / denom).clamp(0.0, 1.0) } else { 0.0 };
+            let mut ss = if denom != 0.0 {
+                ((b * f - c * e) / denom).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
             let mut tt = (b * ss + f) / e;
-            if tt < 0.0 { tt = 0.0; ss = (-c / a).clamp(0.0, 1.0); }
-            else if tt > 1.0 { tt = 1.0; ss = ((b - c) / a).clamp(0.0, 1.0); }
-            s = ss; t = tt;
+            if tt < 0.0 {
+                tt = 0.0;
+                ss = (-c / a).clamp(0.0, 1.0);
+            } else if tt > 1.0 {
+                tt = 1.0;
+                ss = ((b - c) / a).clamp(0.0, 1.0);
+            }
+            s = ss;
+            t = tt;
         }
     }
     (v3_add(p0, v3_scale(d1, s)), v3_add(q0, v3_scale(d2, t)))
@@ -774,10 +1050,7 @@ fn segment_segment_closest(p0: V3, p1: V3, q0: V3, q1: V3) -> (V3, V3) {
 /// Triangle-triangle closest points.
 /// From C# CollisionDetection.cs — TriangleTriangleDistance
 /// Tests 9 edge-edge pairs + 2 face projections.
-pub fn triangle_triangle_closest(
-    a0: V3, a1: V3, a2: V3,
-    b0: V3, b1: V3, b2: V3,
-) -> (V3, V3, f64) {
+pub fn triangle_triangle_closest(a0: V3, a1: V3, a2: V3, b0: V3, b1: V3, b2: V3) -> (V3, V3, f64) {
     let mut best_sq = f64::MAX;
     let mut closest_a = a0;
     let mut closest_b = b0;
@@ -788,9 +1061,14 @@ pub fn triangle_triangle_closest(
         let i1 = (i + 1) % 3;
         for j in 0..3 {
             let j1 = (j + 1) % 3;
-            let (pa, pb) = segment_segment_closest(a_verts[i], a_verts[i1], b_verts[j], b_verts[j1]);
+            let (pa, pb) =
+                segment_segment_closest(a_verts[i], a_verts[i1], b_verts[j], b_verts[j1]);
             let d_sq = v3_len_sq(v3_sub(pa, pb));
-            if d_sq < best_sq { best_sq = d_sq; closest_a = pa; closest_b = pb; }
+            if d_sq < best_sq {
+                best_sq = d_sq;
+                closest_a = pa;
+                closest_b = pb;
+            }
         }
     }
     // Face A → project B verts
@@ -802,7 +1080,11 @@ pub fn triangle_triangle_closest(
             let proj = v3_sub(bv, v3_scale(na, d / area_sq_a));
             if pt_in_tri_3d(proj, a0, a1, a2) {
                 let d_sq = v3_len_sq(v3_sub(proj, bv));
-                if d_sq < best_sq { best_sq = d_sq; closest_a = proj; closest_b = bv; }
+                if d_sq < best_sq {
+                    best_sq = d_sq;
+                    closest_a = proj;
+                    closest_b = bv;
+                }
             }
         }
     }
@@ -815,7 +1097,11 @@ pub fn triangle_triangle_closest(
             let proj = v3_sub(av, v3_scale(nb, d / area_sq_b));
             if pt_in_tri_3d(proj, b0, b1, b2) {
                 let d_sq = v3_len_sq(v3_sub(av, proj));
-                if d_sq < best_sq { best_sq = d_sq; closest_a = av; closest_b = proj; }
+                if d_sq < best_sq {
+                    best_sq = d_sq;
+                    closest_a = av;
+                    closest_b = proj;
+                }
             }
         }
     }
@@ -827,12 +1113,12 @@ pub fn triangle_triangle_closest(
 // ============================================================
 
 fn pt_in_tri_xy(px: f64, py: f64, v0: V3, v1: V3, v2: V3) -> bool {
-    let d00 = (v1[0]-v0[0])*(v1[0]-v0[0]) + (v1[1]-v0[1])*(v1[1]-v0[1]);
-    let d01 = (v1[0]-v0[0])*(v2[0]-v0[0]) + (v1[1]-v0[1])*(v2[1]-v0[1]);
-    let d02 = (v1[0]-v0[0])*(px-v0[0]) + (v1[1]-v0[1])*(py-v0[1]);
-    let d11 = (v2[0]-v0[0])*(v2[0]-v0[0]) + (v2[1]-v0[1])*(v2[1]-v0[1]);
-    let d12 = (v2[0]-v0[0])*(px-v0[0]) + (v2[1]-v0[1])*(py-v0[1]);
-    let denom = d00*d11 - d01*d01;
+    let d00 = (v1[0] - v0[0]) * (v1[0] - v0[0]) + (v1[1] - v0[1]) * (v1[1] - v0[1]);
+    let d01 = (v1[0] - v0[0]) * (v2[0] - v0[0]) + (v1[1] - v0[1]) * (v2[1] - v0[1]);
+    let d02 = (v1[0] - v0[0]) * (px - v0[0]) + (v1[1] - v0[1]) * (py - v0[1]);
+    let d11 = (v2[0] - v0[0]) * (v2[0] - v0[0]) + (v2[1] - v0[1]) * (v2[1] - v0[1]);
+    let d12 = (v2[0] - v0[0]) * (px - v0[0]) + (v2[1] - v0[1]) * (py - v0[1]);
+    let denom = d00 * d11 - d01 * d01;
     // Reject a triangle whose XY projection is degenerate (a line). `denom` is
     // |e0|²|e1|²·sin²θ — the FOURTH power of the mesh's units — so an absolute
     // epsilon means nothing at scene scale: a wall triangle projecting to a line
@@ -843,21 +1129,30 @@ fn pt_in_tri_xy(px: f64, py: f64, v0: V3, v1: V3, v2: V3) -> bool {
     // accepted 427 units away in y, and its extrapolated z won. Compare against
     // sin²θ instead, which is scale-free (and still rejects duplicate vertices,
     // where d00 or d11 is 0).
-    if !(denom > 1e-12 * d00 * d11) { return false; }
-    let u = (d11*d02 - d01*d12) / denom;
-    let v = (d00*d12 - d01*d02) / denom;
+    if !(denom > 1e-12 * d00 * d11) {
+        return false;
+    }
+    let u = (d11 * d02 - d01 * d12) / denom;
+    let v = (d00 * d12 - d01 * d02) / denom;
     u >= -1e-6 && v >= -1e-6 && (u + v) <= 1.0 + 1e-6
 }
 
 fn pt_in_tri_3d(p: V3, v0: V3, v1: V3, v2: V3) -> bool {
-    let e0 = v3_sub(v1, v0); let e1 = v3_sub(v2, v0); let e2 = v3_sub(p, v0);
-    let d00 = v3_dot(e0, e0); let d01 = v3_dot(e0, e1); let d02 = v3_dot(e0, e2);
-    let d11 = v3_dot(e1, e1); let d12 = v3_dot(e1, e2);
-    let denom = d00*d11 - d01*d01;
+    let e0 = v3_sub(v1, v0);
+    let e1 = v3_sub(v2, v0);
+    let e2 = v3_sub(p, v0);
+    let d00 = v3_dot(e0, e0);
+    let d01 = v3_dot(e0, e1);
+    let d02 = v3_dot(e0, e2);
+    let d11 = v3_dot(e1, e1);
+    let d12 = v3_dot(e1, e2);
+    let denom = d00 * d11 - d01 * d01;
     // Scale-free degeneracy test — see the note in `pt_in_tri_xy`.
-    if !(denom > 1e-12 * d00 * d11) { return false; }
-    let u = (d11*d02 - d01*d12) / denom;
-    let v = (d00*d12 - d01*d02) / denom;
+    if !(denom > 1e-12 * d00 * d11) {
+        return false;
+    }
+    let u = (d11 * d02 - d01 * d12) / denom;
+    let v = (d00 * d12 - d01 * d02) / denom;
     u >= -0.01 && v >= -0.01 && (u + v) <= 1.01
 }
 
@@ -871,27 +1166,36 @@ fn closest_pt_on_tri(p: V3, a: V3, b: V3, c: V3) -> V3 {
     let ap = v3_sub(p, a);
     let d1 = v3_dot(ab, ap);
     let d2 = v3_dot(ac, ap);
-    if d1 <= 0.0 && d2 <= 0.0 { return a; }            // vertex region A
+    if d1 <= 0.0 && d2 <= 0.0 {
+        return a;
+    } // vertex region A
     let bp = v3_sub(p, b);
     let d3 = v3_dot(ab, bp);
     let d4 = v3_dot(ac, bp);
-    if d3 >= 0.0 && d4 <= d3 { return b; }             // vertex region B
-    let vc = d1*d4 - d3*d2;
-    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {           // edge region AB
+    if d3 >= 0.0 && d4 <= d3 {
+        return b;
+    } // vertex region B
+    let vc = d1 * d4 - d3 * d2;
+    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+        // edge region AB
         let v = d1 / (d1 - d3);
         return v3_add(a, v3_scale(ab, v));
     }
     let cp = v3_sub(p, c);
     let d5 = v3_dot(ab, cp);
     let d6 = v3_dot(ac, cp);
-    if d6 >= 0.0 && d5 <= d6 { return c; }             // vertex region C
-    let vb = d5*d2 - d1*d6;
-    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {           // edge region AC
+    if d6 >= 0.0 && d5 <= d6 {
+        return c;
+    } // vertex region C
+    let vb = d5 * d2 - d1 * d6;
+    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+        // edge region AC
         let w = d2 / (d2 - d6);
         return v3_add(a, v3_scale(ac, w));
     }
-    let va = d3*d6 - d5*d4;
-    if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {   // edge region BC
+    let va = d3 * d6 - d5 * d4;
+    if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
+        // edge region BC
         let w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
         return v3_add(b, v3_scale(v3_sub(c, b), w));
     }
@@ -903,16 +1207,18 @@ fn closest_pt_on_tri(p: V3, a: V3, b: V3, c: V3) -> V3 {
 }
 
 fn interp_z(px: f64, py: f64, v0: V3, v1: V3, v2: V3) -> f64 {
-    let d00 = (v1[0]-v0[0])*(v1[0]-v0[0]) + (v1[1]-v0[1])*(v1[1]-v0[1]);
-    let d01 = (v1[0]-v0[0])*(v2[0]-v0[0]) + (v1[1]-v0[1])*(v2[1]-v0[1]);
-    let d02 = (v1[0]-v0[0])*(px-v0[0]) + (v1[1]-v0[1])*(py-v0[1]);
-    let d11 = (v2[0]-v0[0])*(v2[0]-v0[0]) + (v2[1]-v0[1])*(v2[1]-v0[1]);
-    let d12 = (v2[0]-v0[0])*(px-v0[0]) + (v2[1]-v0[1])*(py-v0[1]);
-    let denom = d00*d11 - d01*d01;
+    let d00 = (v1[0] - v0[0]) * (v1[0] - v0[0]) + (v1[1] - v0[1]) * (v1[1] - v0[1]);
+    let d01 = (v1[0] - v0[0]) * (v2[0] - v0[0]) + (v1[1] - v0[1]) * (v2[1] - v0[1]);
+    let d02 = (v1[0] - v0[0]) * (px - v0[0]) + (v1[1] - v0[1]) * (py - v0[1]);
+    let d11 = (v2[0] - v0[0]) * (v2[0] - v0[0]) + (v2[1] - v0[1]) * (v2[1] - v0[1]);
+    let d12 = (v2[0] - v0[0]) * (px - v0[0]) + (v2[1] - v0[1]) * (py - v0[1]);
+    let denom = d00 * d11 - d01 * d01;
     // Scale-free degeneracy test — see the note in `pt_in_tri_xy`.
-    if !(denom > 1e-12 * d00 * d11) { return v0[2]; }
-    let u = (d11*d02 - d01*d12) / denom;
-    let v = (d00*d12 - d01*d02) / denom;
+    if !(denom > 1e-12 * d00 * d11) {
+        return v0[2];
+    }
+    let u = (d11 * d02 - d01 * d12) / denom;
+    let v = (d00 * d12 - d01 * d02) / denom;
     (1.0 - u - v) * v0[2] + u * v1[2] + v * v2[2]
 }
 
@@ -939,7 +1245,9 @@ const REST_VEL_THRESHOLD: f64 = 10.0;
 /// Resolve collision contacts using iterative impulses.
 /// From PPC: resolveWithImpulses (0x5AAB0)
 fn resolve_contacts(state: &mut HavokPhysicsState, contacts: &[CollisionContact]) {
-    if contacts.is_empty() { return; }
+    if contacts.is_empty() {
+        return;
+    }
 
     let tolerance = state.tolerance;
 
@@ -971,10 +1279,14 @@ fn resolve_contacts(state: &mut HavokPhysicsState, contacts: &[CollisionContact]
 
             // Check convergence
             let vn = compute_normal_rel_velocity(state, contact);
-            if vn < 0.0 { all_converged = false; }
+            if vn < 0.0 {
+                all_converged = false;
+            }
         }
 
-        if all_converged { break; }
+        if all_converged {
+            break;
+        }
     }
 }
 
@@ -983,16 +1295,24 @@ fn resolve_contacts(state: &mut HavokPhysicsState, contacts: &[CollisionContact]
 fn resolve_single_contact(state: &HavokPhysicsState, contact: &CollisionContact) -> V3 {
     let rel_vel = compute_rel_velocity(state, contact);
     let vn = v3_dot(rel_vel, contact.normal);
-    if vn >= 0.0 { return [0.0; 3]; }
+    if vn >= 0.0 {
+        return [0.0; 3];
+    }
 
     let rb_a = &state.rigid_bodies[contact.body_a];
     let (friction, restitution) = if let Some(b_idx) = contact.body_b {
         let rb_b = &state.rigid_bodies[b_idx];
         // Product restitution and friction (matches Director's observed behaviour
         // for the Properties demo: Ball2 bounce ratio ~0.70 with rest=0.75 * 1.0)
-        ((rb_a.friction * rb_b.friction), (rb_a.restitution * rb_b.restitution))
+        (
+            (rb_a.friction * rb_b.friction),
+            (rb_a.restitution * rb_b.restitution),
+        )
     } else {
-        ((rb_a.friction * GROUND_FRICTION), (rb_a.restitution * GROUND_RESTITUTION))
+        (
+            (rb_a.friction * GROUND_FRICTION),
+            (rb_a.restitution * GROUND_RESTITUTION),
+        )
     };
 
     // Havok's bisection collision resolver loses a small amount of kinetic
@@ -1007,7 +1327,9 @@ fn resolve_single_contact(state: &HavokPhysicsState, contact: &CollisionContact)
     let eff_restitution = if is_resting { 0.0 } else { restitution };
     let target_vn = -eff_restitution * vn;
     let eff_inv_mass = compute_effective_inverse_mass(state, contact);
-    if eff_inv_mass < 1e-10 { return [0.0; 3]; }
+    if eff_inv_mass < 1e-10 {
+        return [0.0; 3];
+    }
 
     let normal_impulse_mag = (target_vn - vn) / eff_inv_mass;
     let mut impulse = v3_scale(contact.normal, normal_impulse_mag);
@@ -1037,7 +1359,9 @@ fn resolve_single_contact(state: &HavokPhysicsState, contact: &CollisionContact)
 /// Apply impulse to both bodies. Body A gets +impulse, Body B gets -impulse.
 /// From PPC: applyImpulsePair (0x5B540)
 fn apply_impulse_pair(state: &mut HavokPhysicsState, impulse: V3, contact: &CollisionContact) {
-    if v3_len_sq(impulse) < 1e-20 { return; }
+    if v3_len_sq(impulse) < 1e-20 {
+        return;
+    }
 
     // Body A
     {
@@ -1066,14 +1390,24 @@ fn apply_impulse_pair(state: &mut HavokPhysicsState, impulse: V3, contact: &Coll
 
 /// Apply penetration-correction driving impulse.
 /// From PPC: applyDrivingImpulse (0x5AD90)
-fn apply_driving_impulse(state: &mut HavokPhysicsState, contact: &CollisionContact, driving_scale: f64) {
-    if driving_scale <= 0.0 { return; }
+fn apply_driving_impulse(
+    state: &mut HavokPhysicsState,
+    contact: &CollisionContact,
+    driving_scale: f64,
+) {
+    if driving_scale <= 0.0 {
+        return;
+    }
     let scaled_factor = 2.0 * driving_scale;
     let t = (scaled_factor - contact.depth) / scaled_factor;
-    if t <= 0.0 || t >= 1.0 { return; }
+    if t <= 0.0 || t >= 1.0 {
+        return;
+    }
     let correction = driving_scale / 4.0;
     let vn = compute_normal_rel_velocity(state, contact);
-    if vn <= 0.0 { return; }
+    if vn <= 0.0 {
+        return;
+    }
     let driving_mag = t * t * correction;
     let driving_impulse = v3_scale(contact.normal, driving_mag);
 
@@ -1084,7 +1418,10 @@ fn apply_driving_impulse(state: &mut HavokPhysicsState, contact: &CollisionConta
             let scaled = v3_scale(driving_impulse, rb.mass);
             rb.linear_velocity = v3_add(rb.linear_velocity, v3_scale(scaled, rb.inverse_mass));
             let r = v3_sub(contact.point, rb.position);
-            rb.angular_velocity = v3_add(rb.angular_velocity, mat3_transform(world_inv_inertia(rb), v3_cross(r, scaled)));
+            rb.angular_velocity = v3_add(
+                rb.angular_velocity,
+                mat3_transform(world_inv_inertia(rb), v3_cross(r, scaled)),
+            );
         }
     }
     // Body B
@@ -1094,7 +1431,10 @@ fn apply_driving_impulse(state: &mut HavokPhysicsState, contact: &CollisionConta
             let neg_scaled = v3_neg(v3_scale(driving_impulse, rb.mass));
             rb.linear_velocity = v3_add(rb.linear_velocity, v3_scale(neg_scaled, rb.inverse_mass));
             let r = v3_sub(contact.point, rb.position);
-            rb.angular_velocity = v3_add(rb.angular_velocity, mat3_transform(world_inv_inertia(rb), v3_cross(r, neg_scaled)));
+            rb.angular_velocity = v3_add(
+                rb.angular_velocity,
+                mat3_transform(world_inv_inertia(rb), v3_cross(r, neg_scaled)),
+            );
         }
     }
 }
@@ -1103,12 +1443,18 @@ fn apply_driving_impulse(state: &mut HavokPhysicsState, contact: &CollisionConta
 fn compute_rel_velocity(state: &HavokPhysicsState, contact: &CollisionContact) -> V3 {
     let vel_a = if !state.rigid_bodies[contact.body_a].pinned {
         get_point_velocity(&state.rigid_bodies[contact.body_a], contact.point)
-    } else { [0.0; 3] };
+    } else {
+        [0.0; 3]
+    };
     let vel_b = if let Some(b_idx) = contact.body_b {
         if !state.rigid_bodies[b_idx].pinned {
             get_point_velocity(&state.rigid_bodies[b_idx], contact.point)
-        } else { [0.0; 3] }
-    } else { [0.0; 3] };
+        } else {
+            [0.0; 3]
+        }
+    } else {
+        [0.0; 3]
+    };
     v3_sub(vel_a, vel_b)
 }
 
@@ -1178,14 +1524,22 @@ fn get_point_velocity(rb: &crate::player::cast_member::HavokRigidBody, world_poi
 fn apply_drag(state: &mut HavokPhysicsState) {
     let linear_drag = state.drag_params[0];
     let angular_drag = state.drag_params[1];
-    if linear_drag == 0.0 && angular_drag == 0.0 { return; }
+    if linear_drag == 0.0 && angular_drag == 0.0 {
+        return;
+    }
     for rb in &mut state.rigid_bodies {
-        if rb.pinned || !rb.active || rb.inverse_mass <= 0.0 { continue; }
+        if rb.pinned || !rb.active || rb.inverse_mass <= 0.0 {
+            continue;
+        }
         if linear_drag != 0.0 {
-            for i in 0..3 { rb.force[i] -= linear_drag * rb.linear_velocity[i]; }
+            for i in 0..3 {
+                rb.force[i] -= linear_drag * rb.linear_velocity[i];
+            }
         }
         if angular_drag != 0.0 {
-            for i in 0..3 { rb.torque[i] -= angular_drag * rb.angular_velocity[i]; }
+            for i in 0..3 {
+                rb.torque[i] -= angular_drag * rb.angular_velocity[i];
+            }
         }
     }
 }
@@ -1194,8 +1548,12 @@ fn apply_drag(state: &mut HavokPhysicsState) {
 fn apply_gravity(state: &mut HavokPhysicsState) {
     let g = state.gravity;
     for rb in &mut state.rigid_bodies {
-        if rb.pinned || !rb.active || rb.inverse_mass <= 0.0 { continue; }
-        for i in 0..3 { rb.force[i] += g[i] * rb.mass; }
+        if rb.pinned || !rb.active || rb.inverse_mass <= 0.0 {
+            continue;
+        }
+        for i in 0..3 {
+            rb.force[i] += g[i] * rb.mass;
+        }
     }
 }
 
@@ -1204,8 +1562,13 @@ fn apply_gravity(state: &mut HavokPhysicsState) {
 fn apply_springs(state: &mut HavokPhysicsState, _dt: f64) {
     for si in 0..state.springs.len() {
         let spring = &state.springs[si];
-        if spring.elasticity == 0.0 { continue; }
-        let rb_a_name = match &spring.rigid_body_a { Some(n) => n.clone(), None => continue };
+        if spring.elasticity == 0.0 {
+            continue;
+        }
+        let rb_a_name = match &spring.rigid_body_a {
+            Some(n) => n.clone(),
+            None => continue,
+        };
         let rb_b_name = spring.rigid_body_b.clone();
         let point_a_local = spring.point_a;
         let point_b_local = spring.point_b;
@@ -1215,8 +1578,13 @@ fn apply_springs(state: &mut HavokPhysicsState, _dt: f64) {
         let on_compression = spring.on_compression;
         let on_extension = spring.on_extension;
 
-        let idx_a = match find_body_idx(state, rb_a_name) { Some(i) => i, None => continue };
-        let idx_b = rb_b_name.as_ref().and_then(|n| find_body_idx(state, n.clone()));
+        let idx_a = match find_body_idx(state, rb_a_name) {
+            Some(i) => i,
+            None => continue,
+        };
+        let idx_b = rb_b_name
+            .as_ref()
+            .and_then(|n| find_body_idx(state, n.clone()));
 
         // Transform points to world space
         let world_a = body_transform_point(&state.rigid_bodies[idx_a], point_a_local);
@@ -1228,21 +1596,30 @@ fn apply_springs(state: &mut HavokPhysicsState, _dt: f64) {
 
         let delta = v3_sub(world_b, world_a);
         let distance = v3_len(delta);
-        if distance < 1e-10 { continue; }
+        if distance < 1e-10 {
+            continue;
+        }
         let direction = v3_scale(delta, 1.0 / distance);
 
-        if !on_compression && distance < rest_length { continue; }
-        if !on_extension && distance > rest_length { continue; }
+        if !on_compression && distance < rest_length {
+            continue;
+        }
+        if !on_extension && distance > rest_length {
+            continue;
+        }
 
         // Velocities at attachment points
         let vel_a = get_point_velocity(&state.rigid_bodies[idx_a], world_a);
         let vel_b = if let Some(ib) = idx_b {
             get_point_velocity(&state.rigid_bodies[ib], world_b)
-        } else { [0.0; 3] };
+        } else {
+            [0.0; 3]
+        };
         let rel_vel = v3_sub(vel_a, vel_b);
 
         // Hooke's law + damping
-        let force_mag = elasticity * (distance - rest_length) - damping * v3_dot(rel_vel, direction);
+        let force_mag =
+            elasticity * (distance - rest_length) - damping * v3_dot(rel_vel, direction);
         let force = v3_scale(direction, force_mag);
 
         // Apply to body A
@@ -1274,26 +1651,42 @@ fn apply_linear_dashpots(state: &mut HavokPhysicsState, dt: f64) {
     let post_damping = 0.001;
     for di in 0..state.linear_dashpots.len() {
         let dashpot = &state.linear_dashpots[di];
-        if dashpot.strength == 0.0 { continue; }
-        let rb_a_name = match &dashpot.rigid_body_a { Some(n) => n.clone(), None => continue };
+        if dashpot.strength == 0.0 {
+            continue;
+        }
+        let rb_a_name = match &dashpot.rigid_body_a {
+            Some(n) => n.clone(),
+            None => continue,
+        };
         let rb_b_name = dashpot.rigid_body_b.clone();
         let point_a_local = dashpot.point_a;
         let point_b_local = dashpot.point_b;
         let strength = dashpot.strength;
         let damping_coeff = dashpot.damping;
 
-        let idx_a = match find_body_idx(state, rb_a_name) { Some(i) => i, None => continue };
-        let idx_b = rb_b_name.as_ref().and_then(|n| find_body_idx(state, n.clone()));
+        let idx_a = match find_body_idx(state, rb_a_name) {
+            Some(i) => i,
+            None => continue,
+        };
+        let idx_b = rb_b_name
+            .as_ref()
+            .and_then(|n| find_body_idx(state, n.clone()));
 
         let world_a = body_transform_point(&state.rigid_bodies[idx_a], point_a_local);
         let (world_b, vel_b) = if let Some(ib) = idx_b {
-            (body_transform_point(&state.rigid_bodies[ib], point_b_local), state.rigid_bodies[ib].linear_velocity)
+            (
+                body_transform_point(&state.rigid_bodies[ib], point_b_local),
+                state.rigid_bodies[ib].linear_velocity,
+            )
         } else {
             (point_b_local, [0.0; 3])
         };
 
         let pos_diff = v3_scale(v3_sub(world_a, world_b), time_scale * strength);
-        let vel_diff = v3_scale(v3_sub(state.rigid_bodies[idx_a].linear_velocity, vel_b), time_scale * damping_coeff);
+        let vel_diff = v3_scale(
+            v3_sub(state.rigid_bodies[idx_a].linear_velocity, vel_b),
+            time_scale * damping_coeff,
+        );
         let force = v3_add(pos_diff, vel_diff);
 
         // Apply -force to body A (impulse-like, through inv mass)
@@ -1306,7 +1699,10 @@ fn apply_linear_dashpots(state: &mut HavokPhysicsState, dt: f64) {
                 rb.linear_velocity = v3_add(rb.linear_velocity, v3_scale(impulse, rb.inverse_mass));
                 let r = v3_sub(world_a, rb.position);
                 let t = v3_cross(r, impulse);
-                rb.angular_velocity = v3_add(rb.angular_velocity, mat3_transform(world_inv_inertia(rb), t));
+                rb.angular_velocity = v3_add(
+                    rb.angular_velocity,
+                    mat3_transform(world_inv_inertia(rb), t),
+                );
                 // Post damping: vel *= (1 - 0.001)
                 let factor = 1.0 - post_damping;
                 rb.linear_velocity = v3_scale(rb.linear_velocity, factor);
@@ -1321,7 +1717,10 @@ fn apply_linear_dashpots(state: &mut HavokPhysicsState, dt: f64) {
                 rb.linear_velocity = v3_add(rb.linear_velocity, v3_scale(impulse, rb.inverse_mass));
                 let r = v3_sub(world_b, rb.position);
                 let t = v3_cross(r, impulse);
-                rb.angular_velocity = v3_add(rb.angular_velocity, mat3_transform(world_inv_inertia(rb), t));
+                rb.angular_velocity = v3_add(
+                    rb.angular_velocity,
+                    mat3_transform(world_inv_inertia(rb), t),
+                );
                 let factor = 1.0 - post_damping;
                 rb.linear_velocity = v3_scale(rb.linear_velocity, factor);
                 rb.angular_velocity = v3_scale(rb.angular_velocity, factor);
@@ -1336,16 +1735,26 @@ fn apply_angular_dashpots(state: &mut HavokPhysicsState, dt: f64) {
     let time_scale = dt * 200.0;
     for di in 0..state.angular_dashpots.len() {
         let dashpot = &state.angular_dashpots[di];
-        if dashpot.strength == 0.0 { continue; }
-        let rb_a_name = match &dashpot.rigid_body_a { Some(n) => n.clone(), None => continue };
+        if dashpot.strength == 0.0 {
+            continue;
+        }
+        let rb_a_name = match &dashpot.rigid_body_a {
+            Some(n) => n.clone(),
+            None => continue,
+        };
         let rb_b_name = dashpot.rigid_body_b.clone();
         let target_axis = dashpot.rotation_axis;
         let target_angle = dashpot.rotation_angle;
         let strength = dashpot.strength;
         let damping_coeff = dashpot.damping;
 
-        let idx_a = match find_body_idx(state, rb_a_name) { Some(i) => i, None => continue };
-        let idx_b = rb_b_name.as_ref().and_then(|n| find_body_idx(state, n.clone()));
+        let idx_a = match find_body_idx(state, rb_a_name) {
+            Some(i) => i,
+            None => continue,
+        };
+        let idx_b = rb_b_name
+            .as_ref()
+            .and_then(|n| find_body_idx(state, n.clone()));
 
         // Target quaternion from axis-angle degrees
         let target_quat = quat_from_axis_angle_degrees(target_axis, target_angle);
@@ -1353,15 +1762,28 @@ fn apply_angular_dashpots(state: &mut HavokPhysicsState, dt: f64) {
         let (error_quat, ang_vel_diff);
         if let Some(ib) = idx_b {
             let desired = quat_mul(state.rigid_bodies[ib].orientation, target_quat);
-            error_quat = quat_mul(quat_conjugate(desired), state.rigid_bodies[idx_a].orientation);
-            ang_vel_diff = v3_sub(state.rigid_bodies[idx_a].angular_velocity, state.rigid_bodies[ib].angular_velocity);
+            error_quat = quat_mul(
+                quat_conjugate(desired),
+                state.rigid_bodies[idx_a].orientation,
+            );
+            ang_vel_diff = v3_sub(
+                state.rigid_bodies[idx_a].angular_velocity,
+                state.rigid_bodies[ib].angular_velocity,
+            );
         } else {
-            error_quat = quat_mul(quat_conjugate(state.rigid_bodies[idx_a].orientation), target_quat);
+            error_quat = quat_mul(
+                quat_conjugate(state.rigid_bodies[idx_a].orientation),
+                target_quat,
+            );
             ang_vel_diff = state.rigid_bodies[idx_a].angular_velocity;
         };
 
         let (axis, angle) = quat_to_axis_angle(error_quat);
-        let axis_angle = if angle.abs() <= 0.001 { [0.0; 3] } else { v3_scale(axis, angle) };
+        let axis_angle = if angle.abs() <= 0.001 {
+            [0.0; 3]
+        } else {
+            v3_scale(axis, angle)
+        };
 
         let strength_contrib = v3_scale(axis_angle, time_scale * strength);
         let damp_contrib = v3_scale(ang_vel_diff, time_scale * damping_coeff);
@@ -1372,14 +1794,20 @@ fn apply_angular_dashpots(state: &mut HavokPhysicsState, dt: f64) {
             let rb = &mut state.rigid_bodies[idx_a];
             if !rb.pinned {
                 let neg = v3_neg(total_torque);
-                rb.angular_velocity = v3_add(rb.angular_velocity, mat3_transform(world_inv_inertia(rb), neg));
+                rb.angular_velocity = v3_add(
+                    rb.angular_velocity,
+                    mat3_transform(world_inv_inertia(rb), neg),
+                );
             }
         }
         // Apply +torque to body B
         if let Some(ib) = idx_b {
             let rb = &mut state.rigid_bodies[ib];
             if !rb.pinned {
-                rb.angular_velocity = v3_add(rb.angular_velocity, mat3_transform(world_inv_inertia(rb), total_torque));
+                rb.angular_velocity = v3_add(
+                    rb.angular_velocity,
+                    mat3_transform(world_inv_inertia(rb), total_torque),
+                );
             }
         }
     }
@@ -1397,10 +1825,14 @@ fn apply_angular_dashpots(state: &mut HavokPhysicsState, dt: f64) {
 ///   lin_vel += force * invMass * dt
 ///   omega += I_inv * torque * dt
 fn integrate_body(rb: &mut crate::player::cast_member::HavokRigidBody, dt: f64) {
-    if rb.pinned || !rb.active || rb.inverse_mass <= 0.0 { return; }
+    if rb.pinned || !rb.active || rb.inverse_mass <= 0.0 {
+        return;
+    }
 
     // Phase 1: Position: pos += vel * dt
-    for i in 0..3 { rb.position[i] += rb.linear_velocity[i] * dt; }
+    for i in 0..3 {
+        rb.position[i] += rb.linear_velocity[i] * dt;
+    }
 
     // Phase 2: Quaternion integration with Baumgarte drift-correction.
     //
@@ -1422,7 +1854,7 @@ fn integrate_body(rb: &mut crate::player::cast_member::HavokRigidBody, dt: f64) 
     let omega_q: Quat = [0.0, ox, oy, oz];
     let qdot = quat_mul(omega_q, rb.orientation);
     let q = rb.orientation;
-    let q_norm_sq = q[0]*q[0] + q[1]*q[1] + q[2]*q[2] + q[3]*q[3];
+    let q_norm_sq = q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3];
     let drift_k: f64 = 1.0;
     let drift = drift_k * (1.0 - q_norm_sq);
     rb.orientation = quat_normalize([
@@ -1440,12 +1872,16 @@ fn integrate_body(rb: &mut crate::player::cast_member::HavokRigidBody, dt: f64) 
 
     // Phase 3: Linear velocity: vel += (F/m) * dt
     if rb.inverse_mass > 0.0 {
-        for i in 0..3 { rb.linear_velocity[i] += rb.force[i] * rb.inverse_mass * dt; }
+        for i in 0..3 {
+            rb.linear_velocity[i] += rb.force[i] * rb.inverse_mass * dt;
+        }
     }
 
     // Phase 4: Angular velocity: omega += I_inv * torque * dt
     let ang_accel = mat3_transform(rb.inverse_inertia_tensor, rb.torque);
-    for i in 0..3 { rb.angular_velocity[i] += ang_accel[i] * dt; }
+    for i in 0..3 {
+        rb.angular_velocity[i] += ang_accel[i] * dt;
+    }
 }
 
 /// Save body state for rollback (bisection).
@@ -1555,22 +1991,28 @@ pub fn step_native(state: &mut HavokPhysicsState, time_increment: f64, num_sub_s
     // use, N²=49 and 6N=42 are only 17% apart — and the two prior experiments
     // both tested force_scale=N (=7), which is 6× too strong, hence "way worse"
     // / uncontrollable. 6N matches Director at N=1, 7 AND 20, not just at 7.
-    let force_scale: f64 = 6.0 * n_subs as f64;         // 42 at N=7 (was 49)
-    // Torque is left on the OLD N² basis deliberately: the probe measured only
-    // the linear response (angV stayed 0), so there is no measurement of
-    // Director's torque law to justify moving it. These keep their previous
-    // absolute values (434 / 158.76 at N=7) so this change isolates linear force.
-    let n_sq = (n_subs * n_subs) as f64;                // 49 at N=7
-    let torque_scale_pitch_roll: f64 = n_sq * (62.0 / 7.0);  // 434
-    let torque_scale_yaw: f64 = n_sq * 3.24;                  // 158.76
-    let saved_forces: Vec<([f64;3],[f64;3])> = state.rigid_bodies.iter()
-        .map(|rb| (rb.force, rb.torque)).collect();
+    let force_scale: f64 = 6.0 * n_subs as f64; // 42 at N=7 (was 49)
+                                                // Torque is left on the OLD N² basis deliberately: the probe measured only
+                                                // the linear response (angV stayed 0), so there is no measurement of
+                                                // Director's torque law to justify moving it. These keep their previous
+                                                // absolute values (434 / 158.76 at N=7) so this change isolates linear force.
+    let n_sq = (n_subs * n_subs) as f64; // 49 at N=7
+    let torque_scale_pitch_roll: f64 = n_sq * (62.0 / 7.0); // 434
+    let torque_scale_yaw: f64 = n_sq * 3.24; // 158.76
+    let saved_forces: Vec<([f64; 3], [f64; 3])> = state
+        .rigid_bodies
+        .iter()
+        .map(|rb| (rb.force, rb.torque))
+        .collect();
     // Step-callback forces (registerStepCallback, e.g. age-of-speed gravity) are
     // per-sub-step and applied at FULL strength — no force_scale — because the
     // callback in real Havok fires once per sub-step. dirplayer fires it once but
     // re-applies here every sub-step, which is equivalent for a constant force.
-    let saved_step: Vec<([f64;3],[f64;3])> = state.rigid_bodies.iter()
-        .map(|rb| (rb.step_force, rb.step_torque)).collect();
+    let saved_step: Vec<([f64; 3], [f64; 3])> = state
+        .rigid_bodies
+        .iter()
+        .map(|rb| (rb.step_force, rb.step_torque))
+        .collect();
 
     for _sub in 0..n_subs {
         // Reset forces to game values each substep (gravity/drag added in
@@ -1590,14 +2032,14 @@ pub fn step_native(state: &mut HavokPhysicsState, time_increment: f64, num_sub_s
                     (force_scale, force_scale, force_scale)
                 };
                 rb.force = [
-                    saved_forces[i].0[0]/fs + saved_step[i].0[0],
-                    saved_forces[i].0[1]/fs + saved_step[i].0[1],
-                    saved_forces[i].0[2]/fs + saved_step[i].0[2],
+                    saved_forces[i].0[0] / fs + saved_step[i].0[0],
+                    saved_forces[i].0[1] / fs + saved_step[i].0[1],
+                    saved_forces[i].0[2] / fs + saved_step[i].0[2],
                 ];
                 rb.torque = [
-                    saved_forces[i].1[0]/tsp + saved_step[i].1[0],   // world X ≈ body pitch
-                    saved_forces[i].1[1]/tsp + saved_step[i].1[1],   // world Y ≈ body roll
-                    saved_forces[i].1[2]/tsy + saved_step[i].1[2],   // world Z ≈ body yaw
+                    saved_forces[i].1[0] / tsp + saved_step[i].1[0], // world X ≈ body pitch
+                    saved_forces[i].1[1] / tsp + saved_step[i].1[1], // world Y ≈ body roll
+                    saved_forces[i].1[2] / tsy + saved_step[i].1[2], // world Z ≈ body yaw
                 ];
             }
         }
@@ -1648,7 +2090,9 @@ pub fn step_native(state: &mut HavokPhysicsState, time_increment: f64, num_sub_s
     const ANGULAR_DRIFT_DAMP: f64 = 0.1; //0.05;
     let ang_factor = 1.0 - ANGULAR_DRIFT_DAMP;
     for rb in &mut state.rigid_bodies {
-        if rb.pinned || !rb.active { continue; }
+        if rb.pinned || !rb.active {
+            continue;
+        }
         rb.angular_velocity[0] *= ang_factor;
         rb.angular_velocity[1] *= ang_factor;
         rb.angular_velocity[2] *= ang_factor;
@@ -1670,9 +2114,13 @@ pub fn step_native(state: &mut HavokPhysicsState, time_increment: f64, num_sub_s
     // unwired; this is a velocity-based equivalent of its settle test.
     {
         const SLEEP_DELAY: f64 = 0.5;
-        let inv_s = if state.scale.abs() > 1e-10 { 1.0 / state.scale } else { 1.0 };
+        let inv_s = if state.scale.abs() > 1e-10 {
+            1.0 / state.scale
+        } else {
+            1.0
+        };
         let lin_thr2 = (0.1 * inv_s) * (0.1 * inv_s); // ~0.1 m/s, in display units
-        let ang_thr2 = 0.05 * 0.05;                   // ~0.05 rad/s
+        let ang_thr2 = 0.05 * 0.05; // ~0.05 rad/s
         for rb in &mut state.rigid_bodies {
             if !rb.active || rb.pinned || rb.driven || rb.inverse_mass <= 0.0 {
                 rb.lingo_disturbed = false;
@@ -1680,8 +2128,8 @@ pub fn step_native(state: &mut HavokPhysicsState, time_increment: f64, num_sub_s
             }
             let lv = rb.linear_velocity;
             let av = rb.angular_velocity;
-            let lin2 = lv[0]*lv[0] + lv[1]*lv[1] + lv[2]*lv[2];
-            let ang2 = av[0]*av[0] + av[1]*av[1] + av[2]*av[2];
+            let lin2 = lv[0] * lv[0] + lv[1] * lv[1] + lv[2] * lv[2];
+            let ang2 = av[0] * av[0] + av[1] * av[1] + av[2] * av[2];
             if rb.lingo_disturbed || lin2 > lin_thr2 || ang2 > ang_thr2 {
                 rb.sleep_countdown = SLEEP_DELAY;
             } else {
@@ -1755,7 +2203,11 @@ fn step_single(state: &mut HavokPhysicsState, dt: f64) {
         let contacts = detect_all_collisions(state);
         let has_collisions = !contacts.is_empty();
 
-        if !passive && has_collisions && remaining > MIN_BISECTION_DT && retries < MAX_BISECTION_RETRIES {
+        if !passive
+            && has_collisions
+            && remaining > MIN_BISECTION_DT
+            && retries < MAX_BISECTION_RETRIES
+        {
             // Collision detected — rollback and bisect
             for rb in &mut state.rigid_bodies {
                 if !rb.pinned && rb.active {
@@ -1763,7 +2215,9 @@ fn step_single(state: &mut HavokPhysicsState, dt: f64) {
                 }
             }
             remaining *= 0.5;
-            if remaining < MIN_BISECTION_DT { remaining = MIN_BISECTION_DT; }
+            if remaining < MIN_BISECTION_DT {
+                remaining = MIN_BISECTION_DT;
+            }
             retries += 1;
         } else {
             if has_collisions {
@@ -1775,14 +2229,19 @@ fn step_single(state: &mut HavokPhysicsState, dt: f64) {
                 // trigger a global bisection rollback including bodies that are
                 // already bouncing away).
                 for c in &contacts {
-                    if c.depth <= 0.0 { continue; }
+                    if c.depth <= 0.0 {
+                        continue;
+                    }
 
                     // Is body_b another DYNAMIC body (box-vs-box)? Then split the
                     // depenetration and the relative normal-velocity removal
                     // between the two by inverse mass, so a stack settles without
                     // either box being shoved through its neighbour or the floor.
                     let b_dynamic = match c.body_b {
-                        Some(j) => !state.rigid_bodies[j].pinned && state.rigid_bodies[j].inverse_mass > 0.0,
+                        Some(j) => {
+                            !state.rigid_bodies[j].pinned
+                                && state.rigid_bodies[j].inverse_mass > 0.0
+                        }
                         None => false,
                     };
 
@@ -1795,34 +2254,40 @@ fn step_single(state: &mut HavokPhysicsState, dt: f64) {
                         let ia = state.rigid_bodies[c.body_a].inverse_mass;
                         let ib = state.rigid_bodies[j].inverse_mass;
                         let isum = ia + ib;
-                        if isum <= 0.0 { continue; }
+                        if isum <= 0.0 {
+                            continue;
+                        }
                         let fa = ia / isum;
                         let fb = ib / isum;
                         for k in 0..3 {
                             state.rigid_bodies[c.body_a].position[k] += c.normal[k] * c.depth * fa;
-                            state.rigid_bodies[j].position[k]        -= c.normal[k] * c.depth * fb;
+                            state.rigid_bodies[j].position[k] -= c.normal[k] * c.depth * fb;
                         }
                         let va = state.rigid_bodies[c.body_a].linear_velocity;
                         let vb = state.rigid_bodies[j].linear_velocity;
-                        let rvn = (va[0]-vb[0])*c.normal[0] + (va[1]-vb[1])*c.normal[1] + (va[2]-vb[2])*c.normal[2];
+                        let rvn = (va[0] - vb[0]) * c.normal[0]
+                            + (va[1] - vb[1]) * c.normal[1]
+                            + (va[2] - vb[2]) * c.normal[2];
                         if rvn < 0.0 {
                             for k in 0..3 {
-                                state.rigid_bodies[c.body_a].linear_velocity[k] -= rvn * fa * c.normal[k];
-                                state.rigid_bodies[j].linear_velocity[k]        += rvn * fb * c.normal[k];
+                                state.rigid_bodies[c.body_a].linear_velocity[k] -=
+                                    rvn * fa * c.normal[k];
+                                state.rigid_bodies[j].linear_velocity[k] += rvn * fb * c.normal[k];
                             }
                         }
                         continue;
                     }
 
                     // Static / fixed-body contact: push body_a out fully.
-                    let ground_friction = c.body_b
+                    let ground_friction = c
+                        .body_b
                         .map(|idx| state.rigid_bodies[idx].friction)
                         .unwrap_or(0.5);
                     let rb = &mut state.rigid_bodies[c.body_a];
                     if !rb.pinned && rb.inverse_mass > 0.0 {
                         let vn = rb.linear_velocity[0] * c.normal[0]
-                               + rb.linear_velocity[1] * c.normal[1]
-                               + rb.linear_velocity[2] * c.normal[2];
+                            + rb.linear_velocity[1] * c.normal[1]
+                            + rb.linear_velocity[2] * c.normal[2];
                         let push = c.depth;
                         rb.position[0] += c.normal[0] * push;
                         rb.position[1] += c.normal[1] * push;
@@ -1848,14 +2313,19 @@ fn step_single(state: &mut HavokPhysicsState, dt: f64) {
                         // Resting contact only for a body resting on another
                         // body's OWNED static mesh (SuperSonic car on terrain).
                         if c.body_b.is_some() && vn.abs() < 10.0 {
-                            if let Some(m) = state.collision_meshes.iter().find(|m| m.body_index == c.body_b) {
-                                rb.resting_normal = Some(crate::player::cast_member::RestingContact {
-                                    normal: c.normal,
-                                    plane_point: c.point,
-                                    ground_friction,
-                                    aabb_min: m.aabb_min,
-                                    aabb_max: m.aabb_max,
-                                });
+                            if let Some(m) = state
+                                .collision_meshes
+                                .iter()
+                                .find(|m| m.body_index == c.body_b)
+                            {
+                                rb.resting_normal =
+                                    Some(crate::player::cast_member::RestingContact {
+                                        normal: c.normal,
+                                        plane_point: c.point,
+                                        ground_friction,
+                                        aabb_min: m.aabb_min,
+                                        aabb_max: m.aabb_max,
+                                    });
                             }
                         }
                     }
@@ -1871,19 +2341,24 @@ fn step_single(state: &mut HavokPhysicsState, dt: f64) {
                     // e.g. "GraficaStradaZona01") so Lingo callbacks that classify
                     // the ground by name (cd[2] contains "strada"/"marciapiede"/…)
                     // work. Only when neither is known do we emit "ground".
-                    let body_b_name = c.body_b
+                    let body_b_name = c
+                        .body_b
                         .map(|i| state.rigid_bodies[i].name.clone())
-                        .or_else(|| c.mesh_index
-                            .and_then(|mi| state.collision_meshes.get(mi))
-                            .map(|m| m.name.clone()))
+                        .or_else(|| {
+                            c.mesh_index
+                                .and_then(|mi| state.collision_meshes.get(mi))
+                                .map(|m| m.name.clone())
+                        })
                         .unwrap_or_else(|| BuiltInSymbol::Ground.into());
-                    state.collision_list_cache.push(crate::player::cast_member::HavokCollisionInfo {
-                        body_a: body_a_name,
-                        body_b: body_b_name,
-                        point: c.point,
-                        normal: c.normal,
-                        normal_rel_vel: c.normal_rel_vel,
-                    });
+                    state.collision_list_cache.push(
+                        crate::player::cast_member::HavokCollisionInfo {
+                            body_a: body_a_name,
+                            body_b: body_b_name,
+                            point: c.point,
+                            normal: c.normal,
+                            normal_rel_vel: c.normal_rel_vel,
+                        },
+                    );
                 }
             }
             break;
@@ -1896,7 +2371,9 @@ fn step_single(state: &mut HavokPhysicsState, dt: f64) {
 /// anchor, removing radial velocity so it swings under gravity instead of
 /// falling. Position-based so it's stable for a light body like the lamp.
 fn apply_cables(state: &mut HavokPhysicsState) {
-    if state.cable_constraints.is_empty() { return; }
+    if state.cable_constraints.is_empty() {
+        return;
+    }
     let cables = state.cable_constraints.clone();
     for cable in &cables {
         // Stale index: the owning body was deleted without the constraint being
@@ -1906,12 +2383,19 @@ fn apply_cables(state: &mut HavokPhysicsState) {
             Some(rb) => rb,
             None => continue,
         };
-        if rb.pinned || !rb.active || rb.inverse_mass <= 0.0 { continue; }
+        if rb.pinned || !rb.active || rb.inverse_mass <= 0.0 {
+            continue;
+        }
 
-        let attach_world = v3_add(rb.position, quat_rotate_v(rb.orientation, cable.attach_local));
+        let attach_world = v3_add(
+            rb.position,
+            quat_rotate_v(rb.orientation, cable.attach_local),
+        );
         let d = v3_sub(attach_world, cable.anchor);
         let dist = v3_len(d);
-        if dist < 1e-6 { continue; }
+        if dist < 1e-6 {
+            continue;
+        }
         let dir = v3_scale(d, 1.0 / dist);
 
         // Pull the body so its attach point sits exactly `length` from anchor.
@@ -1929,13 +2413,20 @@ fn apply_cables(state: &mut HavokPhysicsState) {
 /// This constraint only activates when the body penetrates below the mesh surface,
 /// acting as a hard floor to prevent fall-through.
 fn apply_ground_constraints(state: &mut HavokPhysicsState) {
-    if !state.use_ground_constraint { return; }
-    if state.collision_meshes.is_empty() && state.ground_z <= -1e10 { return; }
+    if !state.use_ground_constraint {
+        return;
+    }
+    if state.collision_meshes.is_empty() && state.ground_z <= -1e10 {
+        return;
+    }
 
     let half_z = state.ground_body_half_z;
 
     for bi in 0..state.rigid_bodies.len() {
-        if state.rigid_bodies[bi].pinned || !state.rigid_bodies[bi].active || state.rigid_bodies[bi].inverse_mass <= 0.0 {
+        if state.rigid_bodies[bi].pinned
+            || !state.rigid_bodies[bi].active
+            || state.rigid_bodies[bi].inverse_mass <= 0.0
+        {
             continue;
         }
         let pos = state.rigid_bodies[bi].position;
@@ -1953,7 +2444,9 @@ fn apply_ground_constraints(state: &mut HavokPhysicsState) {
             // clamp legitimately rescues (a body sunk through the surface it was
             // resting on) is below that by definition.
             let search_ceiling = pos[2] + half_z;
-            if let Some(ground_z) = find_ground_z(&state.collision_meshes, pos[0], pos[1], search_ceiling) {
+            if let Some(ground_z) =
+                find_ground_z(&state.collision_meshes, pos[0], pos[1], search_ceiling)
+            {
                 let body_bottom = pos[2] - half_z;
                 // Safety net: only clamp if body penetrates MORE than 5 units below ground.
                 // Normal suspension is handled by the game's Lingo spring forces.
@@ -1998,8 +2491,11 @@ fn apply_ground_constraints(state: &mut HavokPhysicsState) {
             if body_bottom < state.ground_z + 0.5 {
                 state.rigid_bodies[bi].position[2] = state.ground_z + half_z;
                 let vz = state.rigid_bodies[bi].linear_velocity[2];
-                if vz > 0.0 { state.rigid_bodies[bi].linear_velocity[2] = 0.0; }
-                else if vz < -0.01 { state.rigid_bodies[bi].linear_velocity[2] *= -0.05; }
+                if vz > 0.0 {
+                    state.rigid_bodies[bi].linear_velocity[2] = 0.0;
+                } else if vz < -0.01 {
+                    state.rigid_bodies[bi].linear_velocity[2] *= -0.05;
+                }
             }
         }
     }
@@ -2016,8 +2512,12 @@ fn apply_surface_contacts(state: &mut HavokPhysicsState, dt: f64) {
             Some(rc) => rc.clone(),
             None => continue,
         };
-        if state.rigid_bodies[bi].pinned || !state.rigid_bodies[bi].active
-            || state.rigid_bodies[bi].inverse_mass <= 0.0 { continue; }
+        if state.rigid_bodies[bi].pinned
+            || !state.rigid_bodies[bi].active
+            || state.rigid_bodies[bi].inverse_mass <= 0.0
+        {
+            continue;
+        }
 
         let he = state.rigid_bodies[bi].inertia_half_extents;
         let body_radius = he[0].max(he[1]).max(he[2]);
@@ -2026,8 +2526,11 @@ fn apply_surface_contacts(state: &mut HavokPhysicsState, dt: f64) {
         let n = rc.normal;
 
         // Check if ball is still within the mesh AABB (on the platform)
-        if pos[0] < rc.aabb_min[0] || pos[0] > rc.aabb_max[0]
-            || pos[1] < rc.aabb_min[1] || pos[1] > rc.aabb_max[1] {
+        if pos[0] < rc.aabb_min[0]
+            || pos[0] > rc.aabb_max[0]
+            || pos[1] < rc.aabb_min[1]
+            || pos[1] > rc.aabb_max[1]
+        {
             // Left the platform edge — free fall
             state.rigid_bodies[bi].resting_normal = None;
             continue;
@@ -2042,20 +2545,24 @@ fn apply_surface_contacts(state: &mut HavokPhysicsState, dt: f64) {
         let rb = &mut state.rigid_bodies[bi];
         if n[2].abs() > 0.01 {
             let target_z = rc.plane_point[2]
-                + (eff_radius - (rb.position[0]-rc.plane_point[0])*n[0]
-                              - (rb.position[1]-rc.plane_point[1])*n[1]) / n[2];
+                + (eff_radius
+                    - (rb.position[0] - rc.plane_point[0]) * n[0]
+                    - (rb.position[1] - rc.plane_point[1]) * n[1])
+                    / n[2];
             rb.position[2] = target_z;
         }
 
         // Cancel normal velocity
-        let vn = rb.linear_velocity[0]*n[0] + rb.linear_velocity[1]*n[1] + rb.linear_velocity[2]*n[2];
+        let vn = rb.linear_velocity[0] * n[0]
+            + rb.linear_velocity[1] * n[1]
+            + rb.linear_velocity[2] * n[2];
         if vn < 0.0 {
             rb.linear_velocity[0] -= vn * n[0];
             rb.linear_velocity[1] -= vn * n[1];
             rb.linear_velocity[2] -= vn * n[2];
         }
         // Cancel normal force
-        let fn_ = rb.force[0]*n[0] + rb.force[1]*n[1] + rb.force[2]*n[2];
+        let fn_ = rb.force[0] * n[0] + rb.force[1] * n[1] + rb.force[2] * n[2];
         if fn_ < 0.0 {
             rb.force[0] -= fn_ * n[0];
             rb.force[1] -= fn_ * n[1];
@@ -2064,35 +2571,39 @@ fn apply_surface_contacts(state: &mut HavokPhysicsState, dt: f64) {
 
         // Tangential velocity
         let tv = [
-            rb.linear_velocity[0] - vn.max(0.0)*n[0],
-            rb.linear_velocity[1] - vn.max(0.0)*n[1],
-            rb.linear_velocity[2] - vn.max(0.0)*n[2],
+            rb.linear_velocity[0] - vn.max(0.0) * n[0],
+            rb.linear_velocity[1] - vn.max(0.0) * n[1],
+            rb.linear_velocity[2] - vn.max(0.0) * n[2],
         ];
         let t_speed = v3_len(tv);
 
         // Sliding friction with rolling cap
-        let g_n = g[0]*n[0] + g[1]*n[1] + g[2]*n[2];
-        let g_tan = v3_len([g[0]-g_n*n[0], g[1]-g_n*n[1], g[2]-g_n*n[2]]);
+        let g_n = g[0] * n[0] + g[1] * n[1] + g[2] * n[2];
+        let g_tan = v3_len([g[0] - g_n * n[0], g[1] - g_n * n[1], g[2] - g_n * n[2]]);
         let mu = rb.friction * rc.ground_friction;
         if mu > 0.0 && t_speed > 1e-6 {
-            let max_rolling = (2.0/7.0) * g_tan;
+            let max_rolling = (2.0 / 7.0) * g_tan;
             let eff_friction = (mu * g_n.abs()).min(max_rolling);
             let friction_decel = eff_friction * dt;
-            let factor = if friction_decel >= t_speed { 0.0 } else { 1.0 - friction_decel / t_speed };
-            rb.linear_velocity[0] = n[0]*vn.max(0.0) + tv[0]*factor;
-            rb.linear_velocity[1] = n[1]*vn.max(0.0) + tv[1]*factor;
-            rb.linear_velocity[2] = n[2]*vn.max(0.0) + tv[2]*factor;
+            let factor = if friction_decel >= t_speed {
+                0.0
+            } else {
+                1.0 - friction_decel / t_speed
+            };
+            rb.linear_velocity[0] = n[0] * vn.max(0.0) + tv[0] * factor;
+            rb.linear_velocity[1] = n[1] * vn.max(0.0) + tv[1] * factor;
+            rb.linear_velocity[2] = n[2] * vn.max(0.0) + tv[2] * factor;
         }
 
         // Rolling angular velocity for ALL resting balls: ω = v/r
         if t_speed > 1e-6 && body_radius > 0.01 {
             let cur_tv = [
-                rb.linear_velocity[0] - vn.max(0.0)*n[0],
-                rb.linear_velocity[1] - vn.max(0.0)*n[1],
-                rb.linear_velocity[2] - vn.max(0.0)*n[2],
+                rb.linear_velocity[0] - vn.max(0.0) * n[0],
+                rb.linear_velocity[1] - vn.max(0.0) * n[1],
+                rb.linear_velocity[2] - vn.max(0.0) * n[2],
             ];
             let cur_speed = v3_len(cur_tv);
-            let vd = [tv[0]/t_speed, tv[1]/t_speed, tv[2]/t_speed];
+            let vd = [tv[0] / t_speed, tv[1] / t_speed, tv[2] / t_speed];
             rb.angular_velocity = v3_scale(v3_cross(n, vd), cur_speed / body_radius);
         }
     }
@@ -2107,14 +2618,20 @@ fn detect_body_body_collisions(state: &HavokPhysicsState) -> Vec<CollisionContac
     let n = state.rigid_bodies.len();
     for i in 0..n {
         let a = &state.rigid_bodies[i];
-        if a.pinned || a.inverse_mass <= 0.0 || a.driven { continue; }
+        if a.pinned || a.inverse_mass <= 0.0 || a.driven {
+            continue;
+        }
         let ca = v3_add(a.position, quat_rotate_v(a.orientation, a.center_of_mass));
-        for j in (i+1)..n {
+        for j in (i + 1)..n {
             let b = &state.rigid_bodies[j];
-            if b.pinned || b.inverse_mass <= 0.0 || b.driven { continue; }
+            if b.pinned || b.inverse_mass <= 0.0 || b.driven {
+                continue;
+            }
             // At least one body must be awake — two sleeping bodies in resting
             // contact must NOT interact, or the whole stack would wake itself.
-            if !a.active && !b.active { continue; }
+            if !a.active && !b.active {
+                continue;
+            }
             let cb = v3_add(b.position, quat_rotate_v(b.orientation, b.center_of_mass));
 
             // Per-axis overlap of the two AABBs (half-extents summed).
@@ -2125,20 +2642,35 @@ fn detect_body_body_collisions(state: &HavokPhysicsState) -> Vec<CollisionContac
                 let sum = a.inertia_half_extents[k] + b.inertia_half_extents[k];
                 let d = ca[k] - cb[k];
                 let ov = sum - d.abs();
-                if ov <= -CONTACT_MARGIN { sep = true; break; }
-                if ov < min_overlap { min_overlap = ov; axis = k; }
+                if ov <= -CONTACT_MARGIN {
+                    sep = true;
+                    break;
+                }
+                if ov < min_overlap {
+                    min_overlap = ov;
+                    axis = k;
+                }
             }
-            if sep { continue; }
+            if sep {
+                continue;
+            }
 
             // Normal points from B toward A along the least-penetrated axis.
             let mut normal = [0.0; 3];
-            normal[axis] = if ca[axis] - cb[axis] >= 0.0 { 1.0 } else { -1.0 };
+            normal[axis] = if ca[axis] - cb[axis] >= 0.0 {
+                1.0
+            } else {
+                -1.0
+            };
             let point = v3_scale(v3_add(ca, cb), 0.5);
             // Closing speed between the two bodies at the contact point, captured
             // before resolution (impact speed for the collision callback).
             let va = body_point_velocity(a, point);
             let vb = body_point_velocity(b, point);
-            let nrv = ((va[0]-vb[0])*normal[0] + (va[1]-vb[1])*normal[1] + (va[2]-vb[2])*normal[2]).abs();
+            let nrv = ((va[0] - vb[0]) * normal[0]
+                + (va[1] - vb[1]) * normal[1]
+                + (va[2] - vb[2]) * normal[2])
+                .abs();
             out.push(CollisionContact {
                 body_a: i,
                 body_b: Some(j),
@@ -2155,7 +2687,9 @@ fn detect_body_body_collisions(state: &HavokPhysicsState) -> Vec<CollisionContac
 
 /// Detect all transient collisions (body vs static mesh walls/obstacles).
 fn detect_all_collisions(state: &HavokPhysicsState) -> Vec<CollisionContact> {
-    if state.collision_meshes.is_empty() { return Vec::new(); }
+    if state.collision_meshes.is_empty() {
+        return Vec::new();
+    }
 
     let mut all_contacts = Vec::new();
 
@@ -2171,9 +2705,13 @@ fn detect_all_collisions(state: &HavokPhysicsState) -> Vec<CollisionContact> {
 
     for bi in 0..state.rigid_bodies.len() {
         let rb = &state.rigid_bodies[bi];
-        if rb.pinned || !rb.active || rb.inverse_mass <= 0.0 { continue; }
+        if rb.pinned || !rb.active || rb.inverse_mass <= 0.0 {
+            continue;
+        }
         // Skip bodies in resting contact — handled by apply_surface_contacts
-        if rb.resting_normal.is_some() { continue; }
+        if rb.resting_normal.is_some() {
+            continue;
+        }
 
         // Per-body decision: a DRIVEN body (the SuperSonic / car-demo car, which
         // receives hover/drive forces) keeps the original collision path it was
@@ -2187,21 +2725,40 @@ fn detect_all_collisions(state: &HavokPhysicsState) -> Vec<CollisionContact> {
         // ram a rising loop wall the real hull clears. Everything else keeps the
         // box-support narrow phase it was tuned against.
         let contacts = if rb.received_force && !rb.collision_hull_local.is_empty() {
-            let hull_world: Vec<V3> = rb.collision_hull_local.iter()
+            let hull_world: Vec<V3> = rb
+                .collision_hull_local
+                .iter()
                 .map(|l| v3_add(rb.position, quat_rotate_v(rb.orientation, *l)))
                 .collect();
-            detect_hull_contacts(&state.collision_meshes, &hull_world, bi, state.tolerance, &state.rigid_bodies)
+            detect_hull_contacts(
+                &state.collision_meshes,
+                &hull_world,
+                bi,
+                state.tolerance,
+                &state.rigid_bodies,
+            )
         } else {
             // Use the body's actual half-extents (box support) for collision.
             let he = rb.inertia_half_extents;
             // Box-stacking objects test against the COM-offset box centre (so boxes
             // rest flush). Driven bodies keep the original origin-centred test.
             let center = if body_passive {
-                v3_add(rb.position, quat_rotate_v(rb.orientation, rb.center_of_mass))
+                v3_add(
+                    rb.position,
+                    quat_rotate_v(rb.orientation, rb.center_of_mass),
+                )
             } else {
                 rb.position
             };
-            detect_body_contacts(&state.collision_meshes, center, he, bi, state.tolerance, body_passive, &state.rigid_bodies)
+            detect_body_contacts(
+                &state.collision_meshes,
+                center,
+                he,
+                bi,
+                state.tolerance,
+                body_passive,
+                &state.rigid_bodies,
+            )
         };
         // Keep only the deepest contact per body to avoid duplicate impulses
         // from coplanar triangles (e.g. two triangles forming a box face).
@@ -2227,7 +2784,9 @@ fn detect_all_collisions(state: &HavokPhysicsState) -> Vec<CollisionContact> {
             // normal.z ~ 0.995. Discarding those left the hull with no floor, so the
             // car sank through the loop instead of resting on the track.
             let frictionless = rb.friction.abs() < 1e-6;
-            if c.normal[2] > 0.7 && c.body_b.is_none() && !body_passive && !frictionless { continue; }
+            if c.normal[2] > 0.7 && c.body_b.is_none() && !body_passive && !frictionless {
+                continue;
+            }
             if best.as_ref().map_or(true, |b| c.depth > b.depth) {
                 best = Some(c);
             }
@@ -2289,9 +2848,9 @@ pub fn build_sync_transform(pos: V3, orientation: Quat, com_local: V3, scale: V3
     let m = quat_to_mat3(orientation);
 
     // R * com_local
-    let rx = m[0]*com_local[0] + m[1]*com_local[1] + m[2]*com_local[2];
-    let ry = m[3]*com_local[0] + m[4]*com_local[1] + m[5]*com_local[2];
-    let rz = m[6]*com_local[0] + m[7]*com_local[1] + m[8]*com_local[2];
+    let rx = m[0] * com_local[0] + m[1] * com_local[1] + m[2] * com_local[2];
+    let ry = m[3] * com_local[0] + m[4] * com_local[1] + m[5] * com_local[2];
+    let rz = m[6] * com_local[0] + m[7] * com_local[1] + m[8] * com_local[2];
 
     // translation = pos + com_local - R*com_local
     let tx = pos[0] + com_local[0] - rx;
@@ -2303,9 +2862,21 @@ pub fn build_sync_transform(pos: V3, orientation: Quat, com_local: V3, scale: V3
     // from this transform).
     let (s0, s1, s2) = (scale[0], scale[1], scale[2]);
     [
-        (m[0]*s0) as f32, (m[3]*s0) as f32, (m[6]*s0) as f32, 0.0,
-        (m[1]*s1) as f32, (m[4]*s1) as f32, (m[7]*s1) as f32, 0.0,
-        (m[2]*s2) as f32, (m[5]*s2) as f32, (m[8]*s2) as f32, 0.0,
-        tx as f32, ty as f32, tz as f32, 1.0,
+        (m[0] * s0) as f32,
+        (m[3] * s0) as f32,
+        (m[6] * s0) as f32,
+        0.0,
+        (m[1] * s1) as f32,
+        (m[4] * s1) as f32,
+        (m[7] * s1) as f32,
+        0.0,
+        (m[2] * s2) as f32,
+        (m[5] * s2) as f32,
+        (m[8] * s2) as f32,
+        0.0,
+        tx as f32,
+        ty as f32,
+        tz as f32,
+        1.0,
     ]
 }

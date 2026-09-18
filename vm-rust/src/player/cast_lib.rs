@@ -8,7 +8,7 @@ use crate::{
         cast::CastDef,
         chunks::sound::SoundChunk,
         enums::{BitmapInfo, ScriptType, SoundInfo},
-        file::{DirectorFile, read_director_file_bytes},
+        file::{read_director_file_bytes, DirectorFile},
         lingo::{datum::Datum, script::ScriptContext},
     },
     player::{
@@ -19,7 +19,6 @@ use crate::{
 };
 
 use super::{
-    ScriptError,
     allocator::DatumAllocator,
     bitmap::{
         bitmap::{Bitmap, BuiltInPalette, PaletteRef},
@@ -30,12 +29,13 @@ use super::{
         PaletteMember, SoundMember, TextMember, VectorShapeMember,
     },
     datum_ref::DatumRef,
-    host_events::HostEvent,
     handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers,
+    host_events::HostEvent,
     net_manager::resolve_preload_url,
     ownership::{OwnerKey, OwnerToken},
     reserve_player_mut,
     script::Script,
+    ScriptError,
 };
 
 pub type CastLibNumber = u32;
@@ -99,11 +99,7 @@ impl CastLoadRequest {
 
     /// Build a completion without exposing or allowing replacement of the
     /// authoritative owner, cast, cache, or capability metadata.
-    pub fn complete(
-        &self,
-        resolved_url: String,
-        bytes: Result<Vec<u8>, String>,
-    ) -> CastLoadResult {
+    pub fn complete(&self, resolved_url: String, bytes: Result<Vec<u8>, String>) -> CastLoadResult {
         CastLoadResult {
             capability: self.capability.clone(),
             resolved_url,
@@ -276,17 +272,25 @@ impl CastLib {
                         "stale or foreign Director player".to_owned(),
                     ));
                 }
-                let index = if cast_lib == 0 { 0 } else { cast_lib as usize - 1 };
+                let index = if cast_lib == 0 {
+                    0
+                } else {
+                    cast_lib as usize - 1
+                };
                 let cast = context
                     .player
                     .movie
                     .cast_manager
                     .casts
                     .get_mut(index)
-                    .ok_or_else(|| crate::player::ScriptError::new(format!("Cast not found: {}", cast_lib)))?;
+                    .ok_or_else(|| {
+                        crate::player::ScriptError::new(format!("Cast not found: {}", cast_lib))
+                    })?;
                 Ok(cast.take_js_registrations())
             })
-            .ok_or_else(|| crate::player::ScriptError::new("Director player was removed".to_owned()))??;
+            .ok_or_else(|| {
+                crate::player::ScriptError::new("Director player was removed".to_owned())
+            })??;
         let mut remaining = registrations.into_iter();
         while let Some(registration) = remaining.next() {
             let result = crate::player::js_lingo_loader::register_js_script(
@@ -302,7 +306,11 @@ impl CastLib {
                     if !owner.is_arena_live() || !owner.same_identity(&context.player.owner) {
                         return false;
                     }
-                    let index = if cast_lib == 0 { 0 } else { cast_lib as usize - 1 };
+                    let index = if cast_lib == 0 {
+                        0
+                    } else {
+                        cast_lib as usize - 1
+                    };
                     let Some(cast) = context.player.movie.cast_manager.casts.get_mut(index) else {
                         return false;
                     };
@@ -413,8 +421,8 @@ impl CastLib {
         let capability = Arc::new(CastLoadCapability);
         self.pending_load = Some(capability.clone());
         self.state = CastLibState::Loading;
-        let resolved_url = resolve_preload_url(&self.file_name, base_path, override_base_path)
-            .to_string();
+        let resolved_url =
+            resolve_preload_url(&self.file_name, base_path, override_base_path).to_string();
         PropertyLoadPreparation::Request(CastLoadRequest {
             owner,
             cast_number: self.number,
@@ -449,7 +457,13 @@ impl CastLib {
             return false;
         }
         self.pending_load = None;
-        self.load_from_dir_file(&file, request.source_path(), bitmap_manager, symbols, outbox);
+        self.load_from_dir_file(
+            &file,
+            request.source_path(),
+            bitmap_manager,
+            symbols,
+            outbox,
+        );
         true
     }
 
@@ -664,7 +678,7 @@ impl CastLib {
             outbox.push(CastNotification::CastMemberListChanged(self.number));
         } else {
             self.pending_notifications
-            .push(CastNotification::CastMemberListChanged(self.number));
+                .push(CastNotification::CastMemberListChanged(self.number));
         }
     }
 
@@ -683,7 +697,7 @@ impl CastLib {
                 outbox.push(CastNotification::CastNameChanged(self.number));
             } else {
                 self.pending_notifications
-                .push(CastNotification::CastNameChanged(self.number));
+                    .push(CastNotification::CastNameChanged(self.number));
             }
         }
     }
@@ -874,7 +888,7 @@ impl CastLib {
             outbox.push(CastNotification::CastMemberListChanged(self.number));
         } else {
             self.pending_notifications
-            .push(CastNotification::CastMemberListChanged(self.number));
+                .push(CastNotification::CastMemberListChanged(self.number));
         }
         unsafe {
             let player_mut = &mut crate::player::player_mut();
@@ -1221,7 +1235,6 @@ impl CastMemberRef {
     }
 }
 
-
 #[cfg(test)]
 mod name_index_tests {
     use super::*;
@@ -1350,24 +1363,19 @@ mod name_index_tests {
 
         let mut manager = super::super::cast_manager::CastManager::empty();
         let mut first = empty_cast();
-        first.scripts.insert(
-            2,
-            script(2, "first", Symbol::builtin(BuiltInSymbol::New)),
-        );
+        first
+            .scripts
+            .insert(2, script(2, "first", Symbol::builtin(BuiltInSymbol::New)));
         let mut second = empty_cast();
         second.number = 2;
-        second.scripts.insert(
-            3,
-            script(3, "second", Symbol::builtin(BuiltInSymbol::New)),
-        );
+        second
+            .scripts
+            .insert(3, script(3, "second", Symbol::builtin(BuiltInSymbol::New)));
         manager.casts.push(first);
         manager.casts.push(second);
 
         let handler = Symbol::builtin(BuiltInSymbol::New);
-        assert_eq!(
-            manager.movie_handler_ref(handler).unwrap().0.cast_member,
-            2
-        );
+        assert_eq!(manager.movie_handler_ref(handler).unwrap().0.cast_member, 2);
     }
 
     #[test]
@@ -1425,9 +1433,7 @@ mod name_index_tests {
         };
         let mut cast = pending_external_cast(1);
         let base_path = Url::parse("file:///tmp/").unwrap();
-        let request = cast
-            .prepare_load(owner, Some(&base_path), None)
-            .unwrap();
+        let request = cast.prepare_load(owner, Some(&base_path), None).unwrap();
         let stale_before_restart = request.complete(
             "file:///external-1.cct".to_owned(),
             Err("canceled".to_owned()),
@@ -1449,17 +1455,13 @@ mod name_index_tests {
             &mut outbox,
         ));
 
-        let replacement = cast
-            .prepare_load(owner, Some(&base_path), None)
-            .unwrap();
+        let replacement = cast.prepare_load(owner, Some(&base_path), None).unwrap();
         assert!(!std::sync::Arc::ptr_eq(
             request.capability(),
             replacement.capability()
         ));
-        let stale_after_restart = request.complete(
-            "file:///external-1.cct".to_owned(),
-            Err("stale".to_owned()),
-        );
+        let stale_after_restart =
+            request.complete("file:///external-1.cct".to_owned(), Err("stale".to_owned()));
         assert!(!cast.apply_load_result(
             &replacement,
             stale_after_restart,

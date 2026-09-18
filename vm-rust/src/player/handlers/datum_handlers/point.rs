@@ -1,10 +1,10 @@
 use crate::{
-    director::lingo::datum::{Datum, datum_bool},
+    director::lingo::datum::{datum_bool, Datum},
     player::{
         compare::validate_direct_symbol_fields,
         session::ExecutionContext,
-        DatumRef, DirPlayer, ScriptError,
         symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable},
+        DatumRef, DirPlayer, ScriptError,
     },
 };
 
@@ -26,25 +26,25 @@ impl PointDatumHandlers {
                 .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
 
             match handler_name_lower {
-            "getat" => Self::get_at(player, symbols, &datum, args),
-            "setat" => Self::set_at(player, symbols, &datum, args),
-            "inside" => Self::inside(player, symbols, &datum, args),
-            "duplicate" => Self::duplicate(player, symbols, &datum),
-            // A point is addressable like a two-element linear list —
-            // `point[1]` / `point[2]` read and write it, and `duplicate()`
-            // already works — so `count` answers 2. Generic list helpers get
-            // handed points all the time: Merlin's Revenge routes a sprite
-            // location through `ListInteger(alist)`, which does
-            // `alist.duplicate().count()` before rounding each element, and
-            // erroring here killed the handler that positions map tiles.
-            "count" => {
-                let value = checked_datum(player, &datum, symbols)?;
-                value.to_point_inline()?;
-                Ok(player.alloc_datum(Datum::Int(2)))
-            }
-            _ => Err(ScriptError::new(format!(
-                "no handler {handler_name_display} for point"
-            ))),
+                "getat" => Self::get_at(player, symbols, &datum, args),
+                "setat" => Self::set_at(player, symbols, &datum, args),
+                "inside" => Self::inside(player, symbols, &datum, args),
+                "duplicate" => Self::duplicate(player, symbols, &datum),
+                // A point is addressable like a two-element linear list —
+                // `point[1]` / `point[2]` read and write it, and `duplicate()`
+                // already works — so `count` answers 2. Generic list helpers get
+                // handed points all the time: Merlin's Revenge routes a sprite
+                // location through `ListInteger(alist)`, which does
+                // `alist.duplicate().count()` before rounding each element, and
+                // erroring here killed the handler that positions map tiles.
+                "count" => {
+                    let value = checked_datum(player, &datum, symbols)?;
+                    value.to_point_inline()?;
+                    Ok(player.alloc_datum(Datum::Int(2)))
+                }
+                _ => Err(ScriptError::new(format!(
+                    "no handler {handler_name_display} for point"
+                ))),
             }
         })
     }
@@ -123,7 +123,9 @@ impl PointDatumHandlers {
         args: &[DatumRef],
     ) -> Result<DatumRef, ScriptError> {
         if args.len() < 2 {
-            return Err(ScriptError::new("setAt requires an index and value".to_string()));
+            return Err(ScriptError::new(
+                "setAt requires an index and value".to_string(),
+            ));
         }
         {
             let value = checked_datum(player, datum, symbols)?;
@@ -178,16 +180,25 @@ impl PointDatumHandlers {
             .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
 
         match prop_lower {
-            "loch" => Ok(Datum::inline_component_to_datum(vals[0], Datum::inline_is_float(flags, 0))),
-            "locv" => Ok(Datum::inline_component_to_datum(vals[1], Datum::inline_is_float(flags, 1))),
-            "ilk"  => Ok(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Point))),
+            "loch" => Ok(Datum::inline_component_to_datum(
+                vals[0],
+                Datum::inline_is_float(flags, 0),
+            )),
+            "locv" => Ok(Datum::inline_component_to_datum(
+                vals[1],
+                Datum::inline_is_float(flags, 1),
+            )),
+            "ilk" => Ok(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Point))),
             // `(expr).float` is the property form of `float(expr)` (Director 11.5
             // Scripting Dictionary, "float()": Usage `(expression).float`).
             // Director returns a point unchanged from float() — verified:
             //   p = point(-342, 159); put float(p * p) -- point(116964, 25281)
             // so both surfaces must agree. See TypeHandlers::float.
             "float" => Ok(datum.clone()),
-            _ => Err(ScriptError::new(format!("Cannot get point property {}", prop_name))),
+            _ => Err(ScriptError::new(format!(
+                "Cannot get point property {}",
+                prop_name
+            ))),
         }
     }
 
@@ -210,7 +221,12 @@ impl PointDatumHandlers {
         {
             "loch" => 0usize,
             "locv" => 1usize,
-            _ => return Err(ScriptError::new(format!("Cannot set point property {}", prop_name))),
+            _ => {
+                return Err(ScriptError::new(format!(
+                    "Cannot set point property {}",
+                    prop_name
+                )))
+            }
         };
 
         let (vals, flags) = player

@@ -90,6 +90,8 @@ const routeFlashPlayOwned = (ownerKey, spriteNum) =>
   vmCallbacksByOwner.get(ownerKey)?.onFlashPlayOwned?.(spriteNum);
 const routeFlashLocalConnectionSendOwned = (ownerKey, name, method, argsJson) =>
   vmCallbacksByOwner.get(ownerKey)?.onFlashLocalConnectionSendOwned?.(name, method, argsJson) ?? false;
+const routeFlashRegisterLingoCallbackOwned = (ownerKey, ...args) =>
+  vmCallbacksByOwner.get(ownerKey)?.onFlashRegisterLingoCallback?.(...args) ?? false;
 
 // Generation-aware Flash routes are installed by FlashPlayerManager. These
 // wrappers deliberately call only the exact owner route and return a typed
@@ -107,6 +109,10 @@ export function dirplayer_ruffleGetVariableOwnedForBinding(ownerKey, spriteNum, 
 
 export function dirplayer_ruffleGetVariableOwnedAtGeneration(ownerKey, spriteNum, generation, path, returnAsObject = false) {
   return invokeOwnedFlashGenerationRoute('dirplayer_ruffleGetVariableOwnedAtGeneration', [ownerKey, spriteNum, generation, path, returnAsObject]);
+}
+
+export function dirplayer_ruffleGetSpriteVariableOwnedAtGeneration(ownerKey, spriteNum, generation, path) {
+  return invokeOwnedFlashGenerationRoute('dirplayer_ruffleGetSpriteVariableOwnedAtGeneration', [ownerKey, spriteNum, generation, path]);
 }
 
 export function dirplayer_isFlashInstanceReadyOwned(ownerKey, spriteNum, generation) {
@@ -128,6 +134,9 @@ if (typeof globalThis.window !== 'undefined') {
   }
   if (typeof win.dirplayer_localConnectionSendOwned !== 'function') {
     win.dirplayer_localConnectionSendOwned = routeFlashLocalConnectionSendOwned;
+  }
+  if (typeof win.dirplayer_registerLingoCallbackOwned !== 'function') {
+    win.dirplayer_registerLingoCallbackOwned = routeFlashRegisterLingoCallbackOwned;
   }
 }
 
@@ -158,11 +167,21 @@ export function onScriptInstanceSnapshotOwned(ownerKey, instanceId, snapshot) {
   return dispatchVmCallback(ownerKey, 'onScriptInstanceSnapshot', instanceId, snapshot);
 }
 
-export function registerVmCallbacks(callbacks, ownerKey) {
-  vmCallbacks = callbacks;
-  if (ownerKey) {
-    vmCallbacksByOwner.set(ownerKey, callbacks);
-    flushPreparedFlashActions(callbacks, ownerKey);
+export function registerVmCallbacks(callbacks, ownerKey, setAsDefault = true) {
+  const previousDefault = vmCallbacks;
+  if (setAsDefault) vmCallbacks = callbacks;
+  if (ownerKey) vmCallbacksByOwner.set(ownerKey, callbacks);
+  try {
+    if (ownerKey) flushPreparedFlashActions(callbacks, ownerKey);
+  } catch (error) {
+    // Flush can synchronously re-enter teardown and throw after the exact
+    // owner map entry has been published. Roll back only this callback table;
+    // a reentrant replacement must remain installed.
+    if (vmCallbacks === callbacks) vmCallbacks = previousDefault;
+    if (ownerKey && vmCallbacksByOwner.get(ownerKey) === callbacks) {
+      vmCallbacksByOwner.delete(ownerKey);
+    }
+    throw error;
   }
   // Registration is capability-scoped: a provider may dispose its callbacks
   // without clearing a newer provider's registration.
@@ -172,6 +191,45 @@ export function registerVmCallbacks(callbacks, ownerKey) {
       vmCallbacksByOwner.delete(ownerKey);
     }
   };
+}
+
+// Rust calls these through the package bridge. The app installs the concrete
+// per-host controller on window so browser fixtures and production share the
+// same exact parent/child validation path.
+export function registerNestedBrowserOwner(parentOwnerKey, childOwnerKey, capability) {
+  const register = globalThis.window?.dirplayer_registerNestedBrowserOwner;
+  if (typeof register !== 'function') {
+    throw new Error('nested browser owner registration bridge is unavailable');
+  }
+  register(parentOwnerKey, childOwnerKey, capability);
+}
+
+export function retireNestedBrowserOwner(parentOwnerKey, childOwnerKey) {
+  const retire = globalThis.window?.dirplayer_retireNestedBrowserOwner;
+  if (typeof retire !== 'function') {
+    throw new Error('nested browser owner retirement bridge is unavailable');
+  }
+  retire(parentOwnerKey, childOwnerKey);
+}
+
+export function registerLingoCallbackOwned(ownerKey, ...args) {
+  const register = globalThis.window?.dirplayer_registerLingoCallbackOwned;
+  if (typeof register !== 'function') return false;
+  return register(ownerKey, ...args) === true;
+}
+
+// Keep the wasm-bindgen import name explicit while the stable page route stays
+// owner-qualified and capability-backed.
+export function dirplayer_registerLingoCallbackOwned(ownerKey, ...args) {
+  return registerLingoCallbackOwned(ownerKey, ...args);
+}
+
+/** Forward Ruffle's encoded callback wire without decoding or selecting a
+ * current owner. The stable browser route performs exact owner validation. */
+export function triggerLingoCallbackOnScriptRuffle(...args) {
+  const trigger = globalThis.window?.dirplayer_triggerLingoCallbackOnScriptRuffle
+    ?? globalThis.window?.dirplayer_triggerLingoCallbackOnScript;
+  return typeof trigger === 'function' ? trigger(...args) === true : false;
 }
 
 // Legacy no-owner waiters remain separate from handle-owned waiters.
@@ -317,16 +375,12 @@ export function onDebugContent(content) {
   vmCallbacks.onDebugContent(content)
 }
 
-export function onScheduleTimeout(name, period) {
-  vmCallbacks.onScheduleTimeout(name, period)
+export function onScheduleTimeoutOwned(ownerKey, name, period, incarnation) {
+  dispatchVmCallback(ownerKey, 'onScheduleTimeoutOwned', name, period, incarnation, ownerKey)
 }
 
-export function onClearTimeout(name) {
-  vmCallbacks.onClearTimeout(name)
-}
-
-export function onClearAllTimeouts() {
-  vmCallbacks.onClearAllTimeouts()
+export function onClearTimeoutOwned(ownerKey, name, incarnation) {
+  dispatchVmCallback(ownerKey, 'onClearTimeoutOwned', name, incarnation, ownerKey)
 }
 
 export function onDatumSnapshot(datumRef, snapshot) {

@@ -1,0 +1,18 @@
+     = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+     |
+1902 |         let _ = session.borrow_mut().with_player(2, |context| {
+     |         +++++++
+
+For more information about this error, try `rustc --explain E0133`.
+warning: `vm-rust` (lib test) generated 955 warnings (run `cargo fix --lib -p vm-rust --tests` to apply 635 suggestions)
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.62s
+     Running unittests src/lib.rs (/private/tmp/dirplayer-parser-review-build/target/debug/deps/vm_rust-6c8ff607dfc83df9)
+owned nested D5 mount: frame_pair=Some((1, 1)) root_member=Some(CastMemberRef { cast_lib: 1, cast_member: 91 }) root_entered=true child_id=2 child_owner=OwnerKey { session: 79, player: 2, generation: 1 } child_member=None child_entered=true route=LocalOwned generation=None
+
+thread 'player::nested::tests::owned_nested_start_mounts_d5_channel_one_in_child_context' (22055553) panicked at src/player/nested.rs:1277:9:
+assertion `left == right` failed
+  left: None
+ right: Some(CastMemberRef { cast_lib: 1, cast_member: 1 })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+error: test failed, to rerun pass `--lib`

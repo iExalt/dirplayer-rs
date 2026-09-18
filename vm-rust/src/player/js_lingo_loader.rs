@@ -20,14 +20,14 @@ use std::collections::{HashMap, HashSet};
 use std::rc::{Rc, Weak};
 
 use crate::director::lingo::datum::Datum;
-use crate::player::cast_lib::CastMemberRef;
 use crate::player::allocator::DatumAllocatorTrait;
+use crate::player::cast_lib::CastMemberRef;
+use crate::player::compare::validate_direct_symbol_fields;
 use crate::player::datum_ref::DatumRef;
 use crate::player::js_lingo::host_bridge::{JsHostBridge, StubBridge};
+use crate::player::js_lingo::interpreter::JsRuntime;
 use crate::player::js_lingo::value::{JsError, JsObjectRef, JsValue};
 use crate::player::js_lingo::{decode_script, disasm::disassemble, JsScriptIR};
-use crate::player::js_lingo::interpreter::JsRuntime;
-use crate::player::compare::validate_direct_symbol_fields;
 use crate::player::script::Script;
 use crate::player::symbols::{builtin::BuiltInSymbol, symbol::Symbol};
 
@@ -66,7 +66,10 @@ impl Eq for JsObjectHandle {}
 /// process-global authorities.
 #[derive(Default)]
 pub(crate) struct JsRuntimeRegistry {
-    runtimes: HashMap<(crate::player::session::PlayerId, CastMemberRef), (crate::player::ownership::OwnerToken, Rc<RefCell<JsRuntime>>)>,
+    runtimes: HashMap<
+        (crate::player::session::PlayerId, CastMemberRef),
+        (crate::player::ownership::OwnerToken, Rc<RefCell<JsRuntime>>),
+    >,
     objects: HashMap<u32, JsObjectEntry>,
     next_object_id: u32,
 }
@@ -86,7 +89,8 @@ impl JsRuntimeRegistry {
         member_ref: CastMemberRef,
         runtime: Rc<RefCell<JsRuntime>>,
     ) {
-        self.runtimes.insert((player_id, member_ref), (owner, runtime));
+        self.runtimes
+            .insert((player_id, member_ref), (owner, runtime));
     }
 
     pub(crate) fn runtime(
@@ -125,12 +129,15 @@ impl JsRuntimeRegistry {
             return Err(JsError::new("JS object handle allocator collision"));
         }
         self.next_object_id = id;
-        self.objects.insert(id, JsObjectEntry {
-            player_id,
-            owner: owner.clone(),
-            runtime: runtime.clone(),
-            object: object.clone(),
-        });
+        self.objects.insert(
+            id,
+            JsObjectEntry {
+                player_id,
+                owner: owner.clone(),
+                runtime: runtime.clone(),
+                object: object.clone(),
+            },
+        );
         Ok(JsObjectHandle::new(id, owner.clone()))
     }
 
@@ -162,9 +169,8 @@ impl JsRuntimeRegistry {
         self.runtimes.retain(|(id, _), (entry_owner, _)| {
             !(*id == player_id && entry_owner.same_identity(owner))
         });
-        self.objects.retain(|_, entry| {
-            !(entry.player_id == player_id && entry.owner.same_identity(owner))
-        });
+        self.objects
+            .retain(|_, entry| !(entry.player_id == player_id && entry.owner.same_identity(owner)));
         if self.objects.is_empty() {
             self.next_object_id = 0;
         }
@@ -195,7 +201,10 @@ fn object_has_callable(obj: &JsObjectRef) -> bool {
     for _ in 0..32 {
         let Some(o) = current else { return false };
         let b = o.borrow();
-        if b.props.iter().any(|(_, v)| matches!(v, JsValue::Function(_) | JsValue::Native(_))) {
+        if b.props
+            .iter()
+            .any(|(_, v)| matches!(v, JsValue::Function(_) | JsValue::Native(_)))
+        {
             return true;
         }
         current = b.proto.clone();
@@ -219,7 +228,12 @@ fn resolve_js_object_prop(obj: &JsObjectRef, name: &str) -> Option<JsValue> {
         if let Some(v) = b.get_own(name) {
             return Some(v.clone());
         }
-        if let Some((_, v)) = b.props.iter().rev().find(|(k, _)| k.eq_ignore_ascii_case(name)) {
+        if let Some((_, v)) = b
+            .props
+            .iter()
+            .rev()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+        {
             return Some(v.clone());
         }
         current = b.proto.clone();
@@ -278,11 +292,14 @@ fn validate_datum_for_js(
             continue;
         }
         if !active.insert(id) {
-            return Err(owner_error("cyclic Director datum cannot cross the JS boundary"));
+            return Err(owner_error(
+                "cyclic Director datum cannot cross the JS boundary",
+            ));
         }
-        let datum = player.allocator.try_get_datum(&reference).ok_or_else(|| {
-            owner_error("foreign or stale JS conversion datum")
-        })?;
+        let datum = player
+            .allocator
+            .try_get_datum(&reference)
+            .ok_or_else(|| owner_error("foreign or stale JS conversion datum"))?;
         validate_direct_symbol_fields(datum, symbols)?;
         pending.push((false, DatumRef::Void, id));
         match datum {
@@ -339,10 +356,12 @@ pub(crate) fn invoke_js_object_method_explicit(
         .ok_or_else(|| owner_error("stale or foreign JS object"))?;
     let callee = resolve_js_object_prop(&object, name)
         .filter(|value| matches!(value, JsValue::Function(_) | JsValue::Native(_)))
-        .ok_or_else(|| crate::player::ScriptError::new_code(
-            crate::player::ScriptErrorCode::HandlerNotFound,
-            format!("No handler {} for JS object datum", name),
-        ))?;
+        .ok_or_else(|| {
+            crate::player::ScriptError::new_code(
+                crate::player::ScriptErrorCode::HandlerNotFound,
+                format!("No handler {} for JS object datum", name),
+            )
+        })?;
     let runtime_for_conversion = runtime.clone();
     let js_args = session
         .borrow_mut()
@@ -370,11 +389,21 @@ pub(crate) fn invoke_js_object_method_explicit(
                 active_objects: HashSet::new(),
             };
             args.iter()
-                .map(|arg| datum_ref_to_js_value_with_context(context.player, context.symbols, &mut conversion, arg).map_err(js_error))
+                .map(|arg| {
+                    datum_ref_to_js_value_with_context(
+                        context.player,
+                        context.symbols,
+                        &mut conversion,
+                        arg,
+                    )
+                    .map_err(js_error)
+                })
                 .collect::<Result<Vec<_>, _>>()
         })
         .ok_or_else(|| owner_error("stale or foreign Director player"))??;
-    let invocation = runtime.borrow().invoke(&callee, js_args, JsValue::Object(object));
+    let invocation = runtime
+        .borrow()
+        .invoke(&callee, js_args, JsValue::Object(object));
     let runtime_for_conversion = runtime.clone();
     session
         .borrow_mut()
@@ -395,7 +424,13 @@ pub(crate) fn invoke_js_object_method_explicit(
                 active_arrays: HashSet::new(),
                 active_objects: HashSet::new(),
             };
-            js_value_to_datum_ref_with_context(context.player, context.symbols, &mut conversion, &result).map_err(js_error)
+            js_value_to_datum_ref_with_context(
+                context.player,
+                context.symbols,
+                &mut conversion,
+                &result,
+            )
+            .map_err(js_error)
         })
         .ok_or_else(|| owner_error("stale or foreign Director player"))?
 }
@@ -434,7 +469,13 @@ pub(crate) fn get_js_object_prop_explicit(
                 active_arrays: HashSet::new(),
                 active_objects: HashSet::new(),
             };
-            js_value_to_datum_ref_with_context(context.player, context.symbols, &mut conversion, &value).map_err(js_error)
+            js_value_to_datum_ref_with_context(
+                context.player,
+                context.symbols,
+                &mut conversion,
+                &value,
+            )
+            .map_err(js_error)
         })
         .ok_or_else(|| owner_error("stale or foreign Director player"))?
 }
@@ -459,7 +500,14 @@ pub(crate) fn set_js_object_prop_explicit(
             if !owner.is_arena_live() || !owner.same_identity(&context.player.owner) {
                 return Err(owner_error("stale or foreign Director player"));
             }
-            validate_datum_for_js(context.player, context.symbols, registry, player_id, owner, value_ref)?;
+            validate_datum_for_js(
+                context.player,
+                context.symbols,
+                registry,
+                player_id,
+                owner,
+                value_ref,
+            )?;
             let mut conversion = JsConversionContext {
                 registry,
                 runtime: &runtime_for_conversion,
@@ -469,7 +517,13 @@ pub(crate) fn set_js_object_prop_explicit(
                 active_arrays: HashSet::new(),
                 active_objects: HashSet::new(),
             };
-            datum_ref_to_js_value_with_context(context.player, context.symbols, &mut conversion, value_ref).map_err(js_error)
+            datum_ref_to_js_value_with_context(
+                context.player,
+                context.symbols,
+                &mut conversion,
+                value_ref,
+            )
+            .map_err(js_error)
         })
         .ok_or_else(|| owner_error("stale or foreign Director player"))??;
     session
@@ -493,10 +547,14 @@ pub(crate) fn set_js_object_prop_explicit(
 /// Detects whether a Script is JS-Lingo, sets up the runtime, and emits
 /// a disassembly to the log for diagnostics.
 pub fn diagnose_js_script(script: &Script) -> Option<JsScriptRegistration> {
-    let Some(payload) = extract_js_payload(script) else { return None; };
+    let Some(payload) = extract_js_payload(script) else {
+        return None;
+    };
     log::info!(
         "[js-lingo] {}:{} loading JSScript ({} bytes)",
-        script.member_ref.cast_lib, script.member_ref.cast_member, payload.len()
+        script.member_ref.cast_lib,
+        script.member_ref.cast_member,
+        payload.len()
     );
     match decode_script(payload) {
         Ok(ir) => {
@@ -531,9 +589,12 @@ pub fn register_js_script(
     owner: crate::player::ownership::OwnerToken,
     registration: JsScriptRegistration,
 ) -> Result<(), JsError> {
-    let valid_before = session.borrow_mut().with_player(player_id, |context| {
-        context.player.owner.is_arena_live() && owner.same_identity(&context.player.owner)
-    }).unwrap_or(false);
+    let valid_before = session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            context.player.owner.is_arena_live() && owner.same_identity(&context.player.owner)
+        })
+        .unwrap_or(false);
     if !valid_before {
         return Err(JsError::new("stale or foreign Director player"));
     }
@@ -548,11 +609,16 @@ pub fn register_js_script(
     runtime.borrow().install_director_globals();
     let ir = Rc::new(registration.ir);
     runtime.borrow_mut().run_program(&ir)?;
-    let valid_after = session.borrow_mut().with_player(player_id, |context| {
-        context.player.owner.is_arena_live() && owner.same_identity(&context.player.owner)
-    }).unwrap_or(false);
+    let valid_after = session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            context.player.owner.is_arena_live() && owner.same_identity(&context.player.owner)
+        })
+        .unwrap_or(false);
     if !valid_after {
-        return Err(JsError::new("Director player was reset during JS initialization"));
+        return Err(JsError::new(
+            "Director player was reset during JS initialization",
+        ));
     }
     let member_ref = registration.member_ref;
     session.borrow_mut().js_lingo_registry_mut().insert_runtime(
@@ -589,7 +655,9 @@ pub fn try_invoke_js_handler_explicit(
 ) -> Option<Result<DatumRef, String>> {
     let runtime = {
         let session_ref = session.borrow();
-        session_ref.js_lingo_registry().runtime(player_id, owner, script_member_ref)
+        session_ref
+            .js_lingo_registry()
+            .runtime(player_id, owner, script_member_ref)
     }?;
     let callee = {
         let runtime_ref = runtime.borrow();
@@ -600,41 +668,62 @@ pub fn try_invoke_js_handler_explicit(
         return None;
     }
     let runtime_for_conversion = runtime.clone();
-    let mut js_args = match session.borrow_mut().with_player_js(player_id, |mut context, registry| {
-        if !context.player.owner.is_arena_live() || !owner.same_identity(&context.player.owner) {
-            return Err(JsError::new("stale or foreign Director player"));
-        }
-        for datum in args {
-            validate_datum_for_js(
-                context.player,
-                context.symbols,
-                registry,
-                player_id,
-                owner,
-                datum,
-            ).map_err(|error| JsError::new(error.message))?;
-        }
-        let mut conversion = JsConversionContext {
-            registry,
-            runtime: &runtime_for_conversion,
-            session: Rc::downgrade(session),
-            player_id,
-            owner: owner.clone(),
-            active_arrays: HashSet::new(),
-            active_objects: HashSet::new(),
+    let mut js_args =
+        match session
+            .borrow_mut()
+            .with_player_js(player_id, |mut context, registry| {
+                if !context.player.owner.is_arena_live()
+                    || !owner.same_identity(&context.player.owner)
+                {
+                    return Err(JsError::new("stale or foreign Director player"));
+                }
+                for datum in args {
+                    validate_datum_for_js(
+                        context.player,
+                        context.symbols,
+                        registry,
+                        player_id,
+                        owner,
+                        datum,
+                    )
+                    .map_err(|error| JsError::new(error.message))?;
+                }
+                let mut conversion = JsConversionContext {
+                    registry,
+                    runtime: &runtime_for_conversion,
+                    session: Rc::downgrade(session),
+                    player_id,
+                    owner: owner.clone(),
+                    active_arrays: HashSet::new(),
+                    active_objects: HashSet::new(),
+                };
+                args.iter()
+                    .map(|datum| {
+                        datum_ref_to_js_value_with_context(
+                            context.player,
+                            context.symbols,
+                            &mut conversion,
+                            datum,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            }) {
+            Some(Ok(values)) => values,
+            Some(Err(error)) => return Some(Err(error.message)),
+            None => return Some(Err("stale or foreign Director player".to_owned())),
         };
-        args.iter()
-            .map(|datum| datum_ref_to_js_value_with_context(context.player, context.symbols, &mut conversion, datum))
-            .collect::<Result<Vec<_>, _>>()
-    }) {
-        Some(Ok(values)) => values,
-        Some(Err(error)) => return Some(Err(error.message)),
-        None => return Some(Err("stale or foreign Director player".to_owned())),
-    };
     if let JsValue::Function(function) = &callee {
-        let first_arg_is_me = function.atom.bindings.iter()
+        let first_arg_is_me = function
+            .atom
+            .bindings
+            .iter()
             .find(|binding| binding.kind == super::js_lingo::xdr::JsBindingKind::Argument)
-            .map(|binding| matches!(binding.name.to_lowercase().as_str(), "me" | "mee" | "self" | "_me" | "this_" | "_self"))
+            .map(|binding| {
+                matches!(
+                    binding.name.to_lowercase().as_str(),
+                    "me" | "mee" | "self" | "_me" | "this_" | "_self"
+                )
+            })
             .unwrap_or(false);
         if first_arg_is_me {
             js_args.insert(0, JsValue::Undefined);
@@ -651,29 +740,45 @@ pub fn try_invoke_js_handler_explicit(
     );
     let invocation = runtime.borrow().invoke(&callee, js_args, this_value);
     let runtime_for_conversion = runtime.clone();
-    Some(match session.borrow_mut().with_player_js(player_id, |mut context, registry| {
-        if !context.player.owner.is_arena_live() || !owner.same_identity(&context.player.owner) {
-            return Err(JsError::new("stale or foreign Director player"));
-        }
-        if registry.runtime(player_id, owner, script_member_ref).is_none() {
-            return Err(JsError::new("stale or foreign script runtime"));
-        }
-        let result = invocation.as_ref().map_err(|error| JsError::new(error.message.clone()))?;
-        let mut conversion = JsConversionContext {
-            registry,
-            runtime: &runtime_for_conversion,
-            session: Rc::downgrade(session),
-            player_id,
-            owner: owner.clone(),
-            active_arrays: HashSet::new(),
-            active_objects: HashSet::new(),
-        };
-        js_value_to_datum_ref_with_context(context.player, context.symbols, &mut conversion, result)
-    }) {
-        Some(Ok(value)) => Ok(value),
-        Some(Err(error)) => Err(error.message),
-        None => Err("stale or foreign Director player".to_owned()),
-    })
+    Some(
+        match session
+            .borrow_mut()
+            .with_player_js(player_id, |mut context, registry| {
+                if !context.player.owner.is_arena_live()
+                    || !owner.same_identity(&context.player.owner)
+                {
+                    return Err(JsError::new("stale or foreign Director player"));
+                }
+                if registry
+                    .runtime(player_id, owner, script_member_ref)
+                    .is_none()
+                {
+                    return Err(JsError::new("stale or foreign script runtime"));
+                }
+                let result = invocation
+                    .as_ref()
+                    .map_err(|error| JsError::new(error.message.clone()))?;
+                let mut conversion = JsConversionContext {
+                    registry,
+                    runtime: &runtime_for_conversion,
+                    session: Rc::downgrade(session),
+                    player_id,
+                    owner: owner.clone(),
+                    active_arrays: HashSet::new(),
+                    active_objects: HashSet::new(),
+                };
+                js_value_to_datum_ref_with_context(
+                    context.player,
+                    context.symbols,
+                    &mut conversion,
+                    result,
+                )
+            }) {
+            Some(Ok(value)) => Ok(value),
+            Some(Err(error)) => Err(error.message),
+            None => Err("stale or foreign Director player".to_owned()),
+        },
+    )
 }
 
 /// Test whether an owner-bound JS runtime contains a callable handler without
@@ -712,11 +817,10 @@ pub(crate) fn execute_setup_callback(
     let player_id = request.player_id;
     let owner = request.owner.clone();
     let parent_scope = request.expectation.parent_scope();
-    if !session.borrow().validate_setup_action(
-        &request.ticket,
-        &owner,
-        parent_scope.as_ref(),
-    ) {
+    if !session
+        .borrow()
+        .validate_setup_action(&request.ticket, &owner, parent_scope.as_ref())
+    {
         return crate::player::driver::ActionCompletion::InternalError(
             crate::player::ScriptError::new_code(
                 crate::player::ScriptErrorCode::InvalidReference,
@@ -773,12 +877,11 @@ pub(crate) fn execute_setup_callback(
     };
     match result {
         Ok(value) => crate::player::driver::ActionCompletion::InternalResult(value),
-        Err(message) => crate::player::driver::ActionCompletion::InternalError(
-            crate::player::ScriptError::new(format!(
-                "JS handler {} threw: {}",
-                request.handler_name, message
-            )),
-        ),
+        Err(message) => {
+            crate::player::driver::ActionCompletion::InternalError(crate::player::ScriptError::new(
+                format!("JS handler {} threw: {}", request.handler_name, message),
+            ))
+        }
     }
 }
 
@@ -792,20 +895,32 @@ struct PlayerBridge {
 }
 
 impl PlayerBridge {
-    fn with_context<R>(&self, f: impl FnOnce(&mut crate::player::session::ExecutionContext<'_>, &mut JsRuntimeRegistry) -> R) -> Option<R> {
+    fn with_context<R>(
+        &self,
+        f: impl FnOnce(&mut crate::player::session::ExecutionContext<'_>, &mut JsRuntimeRegistry) -> R,
+    ) -> Option<R> {
         let session = self.session.upgrade()?;
         let mut session = session.borrow_mut();
         let owner = self.owner.clone();
         session.with_player_js(self.player_id, |mut context, registry| {
-            if !context.player.owner.is_arena_live() || !owner.same_identity(&context.player.owner) {
+            if !context.player.owner.is_arena_live() || !owner.same_identity(&context.player.owner)
+            {
                 return None;
             }
             Some(f(&mut context, registry))
         })?
     }
 
-    fn args(&self, context: &mut crate::player::session::ExecutionContext<'_>, registry: &mut JsRuntimeRegistry, args: &[JsValue]) -> Result<Vec<DatumRef>, JsError> {
-        let runtime = self.runtime.upgrade().ok_or_else(|| JsError::new("Director JS runtime disposed"))?;
+    fn args(
+        &self,
+        context: &mut crate::player::session::ExecutionContext<'_>,
+        registry: &mut JsRuntimeRegistry,
+        args: &[JsValue],
+    ) -> Result<Vec<DatumRef>, JsError> {
+        let runtime = self
+            .runtime
+            .upgrade()
+            .ok_or_else(|| JsError::new("Director JS runtime disposed"))?;
         let mut conversion = JsConversionContext {
             registry,
             runtime: &runtime,
@@ -815,11 +930,28 @@ impl PlayerBridge {
             active_arrays: HashSet::new(),
             active_objects: HashSet::new(),
         };
-        args.iter().map(|value| js_value_to_datum_ref_with_context(context.player, context.symbols, &mut conversion, value)).collect()
+        args.iter()
+            .map(|value| {
+                js_value_to_datum_ref_with_context(
+                    context.player,
+                    context.symbols,
+                    &mut conversion,
+                    value,
+                )
+            })
+            .collect()
     }
 
-    fn value(&self, context: &mut crate::player::session::ExecutionContext<'_>, registry: &mut JsRuntimeRegistry, datum: &DatumRef) -> Result<JsValue, JsError> {
-        let runtime = self.runtime.upgrade().ok_or_else(|| JsError::new("Director JS runtime disposed"))?;
+    fn value(
+        &self,
+        context: &mut crate::player::session::ExecutionContext<'_>,
+        registry: &mut JsRuntimeRegistry,
+        datum: &DatumRef,
+    ) -> Result<JsValue, JsError> {
+        let runtime = self
+            .runtime
+            .upgrade()
+            .ok_or_else(|| JsError::new("Director JS runtime disposed"))?;
         let mut conversion = JsConversionContext {
             registry,
             runtime: &runtime,
@@ -835,7 +967,11 @@ impl PlayerBridge {
 
 impl JsHostBridge for PlayerBridge {
     fn trace(&mut self, args: &[JsValue]) {
-        let line = args.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(" ");
+        let line = args
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
         log::info!("[js-trace] {}", line);
     }
     fn sprite(&mut self, channel: i32) -> JsValue {
@@ -843,7 +979,9 @@ impl JsHostBridge for PlayerBridge {
         // get_property / set_property in the interpreter round-trip through
         // sprite_get_prop / sprite_set_prop, so `sprite(3).locH = 100`
         // actually moves the sprite on stage.
-        JsValue::DirectorRef(crate::player::js_lingo::value::DirectorRefKind::Sprite(channel as i16))
+        JsValue::DirectorRef(crate::player::js_lingo::value::DirectorRefKind::Sprite(
+            channel as i16,
+        ))
     }
     fn member(&mut self, args: &[JsValue]) -> JsValue {
         // member(memberNameOrNum {, castNameOrNum}). The Lingo VM's
@@ -855,7 +993,9 @@ impl JsHostBridge for PlayerBridge {
             let datum_args = self.args(context, registry, args)?;
             let symbol = context.symbols.intern("member");
             match crate::player::handlers::manager::BuiltInHandlerManager::call_handler(
-                context, symbol, &datum_args,
+                context,
+                symbol,
+                &datum_args,
             ) {
                 Ok(dref) => Ok(self.value(context, registry, &dref)?),
                 Err(_) => Ok(JsValue::Undefined),
@@ -871,21 +1011,29 @@ impl JsHostBridge for PlayerBridge {
     /// is the same registry Lingo uses for `gotoNetPage`, `getNetText`,
     /// `puppetTempo`, `count`, `script`, etc.
     fn call_global(&mut self, name: &str, args: &[JsValue]) -> Result<JsValue, JsError> {
-        let result = self.with_context(|context, registry| -> Result<JsValue, JsError> {
-            let datum_args = self.args(context, registry, args)?;
-            let symbol = context.symbols.intern(name);
-            match crate::player::handlers::manager::BuiltInHandlerManager::call_handler(
-                context, symbol, &datum_args,
-            ) {
-                Ok(dref) => Ok(self.value(context, registry, &dref)?),
-                Err(e) => Err(JsError::new(e.message)),
-            }
-        }).ok_or_else(|| JsError::new("stale or foreign Director player"))?
+        let result = self
+            .with_context(|context, registry| -> Result<JsValue, JsError> {
+                let datum_args = self.args(context, registry, args)?;
+                let symbol = context.symbols.intern(name);
+                match crate::player::handlers::manager::BuiltInHandlerManager::call_handler(
+                    context,
+                    symbol,
+                    &datum_args,
+                ) {
+                    Ok(dref) => Ok(self.value(context, registry, &dref)?),
+                    Err(e) => Err(JsError::new(e.message)),
+                }
+            })
+            .ok_or_else(|| JsError::new("stale or foreign Director player"))?
             .map_err(|e| JsError::new(format!("{}: {}", name, e.message)))?;
         Ok(result)
     }
 
-    fn director_ref_get_property(&mut self, kind: &crate::player::js_lingo::value::DirectorRefKind, name: &str) -> JsValue {
+    fn director_ref_get_property(
+        &mut self,
+        kind: &crate::player::js_lingo::value::DirectorRefKind,
+        name: &str,
+    ) -> JsValue {
         self.with_context(|context, registry| {
             let property = context.symbols.intern(name);
             let result = match kind {
@@ -904,7 +1052,12 @@ impl JsHostBridge for PlayerBridge {
         }).unwrap_or(JsValue::Undefined)
     }
 
-    fn director_ref_set_property(&mut self, kind: &crate::player::js_lingo::value::DirectorRefKind, name: &str, value: JsValue) -> Result<(), JsError> {
+    fn director_ref_set_property(
+        &mut self,
+        kind: &crate::player::js_lingo::value::DirectorRefKind,
+        name: &str,
+        value: JsValue,
+    ) -> Result<(), JsError> {
         self.with_context(|context, registry| {
             let property = context.symbols.intern(name);
             let runtime = self.runtime.upgrade().ok_or_else(|| JsError::new("Director JS runtime disposed"))?;
@@ -951,12 +1104,21 @@ fn datum_ref_to_js_value_plain(
         Datum::Int(i) => Ok(JsValue::Int(i)),
         Datum::Float(f) => Ok(JsValue::Number(f)),
         Datum::String(s) => Ok(JsValue::String(Rc::new(s))),
-        Datum::Symbol(s) => Ok(JsValue::String(Rc::new(symbols.display(&s)
-            .map_err(|_| JsError::new("foreign or stale symbol"))?.to_owned()))),
+        Datum::Symbol(s) => Ok(JsValue::String(Rc::new(
+            symbols
+                .display(&s)
+                .map_err(|_| JsError::new("foreign or stale symbol"))?
+                .to_owned(),
+        ))),
         Datum::Void | Datum::Null => Ok(JsValue::Undefined),
         Datum::List(_, items, _) => {
-            let arr: Vec<JsValue> = items.iter().map(|r| datum_ref_to_js_value_plain(player, symbols, r)).collect::<Result<_, _>>()?;
-            Ok(JsValue::Array(Rc::new(RefCell::new(crate::player::js_lingo::value::JsArray { items: arr }))))
+            let arr: Vec<JsValue> = items
+                .iter()
+                .map(|r| datum_ref_to_js_value_plain(player, symbols, r))
+                .collect::<Result<_, _>>()?;
+            Ok(JsValue::Array(Rc::new(RefCell::new(
+                crate::player::js_lingo::value::JsArray { items: arr },
+            ))))
         }
         Datum::PropList(pairs, _) => {
             let mut obj = crate::player::js_lingo::value::JsObject::new();
@@ -970,7 +1132,9 @@ fn datum_ref_to_js_value_plain(
         Datum::ScriptRef(member_ref) => Ok(script_ref_to_js_proxy(member_ref)),
         // Round-trip a live handle back to the very same JS object, so
         // identity survives a Lingo→JS→Lingo hop
-        Datum::JsObjectRef(_) => Err(JsError::new("JS object conversion requires an owner-bound runtime")),
+        Datum::JsObjectRef(_) => Err(JsError::new(
+            "JS object conversion requires an owner-bound runtime",
+        )),
         // Live Director-owned references. Property reads/writes round-trip
         // through datum_handlers via get_property / set_property in the
         // interpreter, so `sprite(3).locH = 100` actually moves the sprite
@@ -1021,7 +1185,9 @@ fn script_ref_to_js_proxy_with_session(
 ) -> JsValue {
     let runtime = session.upgrade().and_then(|handle| {
         let session_ref = handle.borrow();
-        session_ref.js_lingo_registry().runtime(player_id, &owner, &member_ref)
+        session_ref
+            .js_lingo_registry()
+            .runtime(player_id, &owner, &member_ref)
     });
     let Some(runtime) = runtime else {
         return script_ref_to_js_proxy(member_ref);
@@ -1047,10 +1213,14 @@ fn script_ref_to_js_proxy_with_runtime(
     let handler_names: Vec<String> = {
         let rt = runtime.borrow();
         let global = rt.global.borrow();
-        global.props.iter().filter_map(|(key, value)| match value {
-            JsValue::Function(_) | JsValue::Native(_) => Some(key.clone()),
-            _ => None,
-        }).collect()
+        global
+            .props
+            .iter()
+            .filter_map(|(key, value)| match value {
+                JsValue::Function(_) | JsValue::Native(_) => Some(key.clone()),
+                _ => None,
+            })
+            .collect()
     };
     for name in handler_names {
         let session_ref = session.clone();
@@ -1059,9 +1229,16 @@ fn script_ref_to_js_proxy_with_runtime(
         let target_owner = owner.clone();
         let native = NativeFn {
             name: "<script_method>",
-            call: Box::new(move |args| invoke_script_method_explicit(
-                &session_ref, player_id, &target_owner, &target, &target_name, args,
-            )),
+            call: Box::new(move |args| {
+                invoke_script_method_explicit(
+                    &session_ref,
+                    player_id,
+                    &target_owner,
+                    &target,
+                    &target_name,
+                    args,
+                )
+            }),
         };
         obj.set_own(&name, JsValue::Native(Rc::new(native)));
     }
@@ -1076,64 +1253,92 @@ fn invoke_script_method_explicit(
     handler_name: &str,
     args: &[JsValue],
 ) -> Result<JsValue, JsError> {
-    let session = session.upgrade().ok_or_else(|| JsError::new("Director session disposed"))?;
+    let session = session
+        .upgrade()
+        .ok_or_else(|| JsError::new("Director session disposed"))?;
     let runtime = {
         let session_ref = session.borrow();
-        session_ref.js_lingo_registry().runtime(player_id, owner, member_ref)
+        session_ref
+            .js_lingo_registry()
+            .runtime(player_id, owner, member_ref)
             .ok_or_else(|| JsError::new("stale or foreign script runtime"))?
     };
     let callee = {
         let runtime_ref = runtime.borrow();
         let global = runtime_ref.global.borrow();
-        global.get_own(handler_name).cloned()
+        global
+            .get_own(handler_name)
+            .cloned()
             .ok_or_else(|| JsError::new(format!("script handler {handler_name} not found")))?
     };
     if !matches!(callee, JsValue::Function(_) | JsValue::Native(_)) {
-        return Err(JsError::new(format!("script handler {handler_name} is not callable")));
+        return Err(JsError::new(format!(
+            "script handler {handler_name} is not callable"
+        )));
     }
     let js_args = {
         let mut session_ref = session.borrow_mut();
         let runtime_for_conversion = runtime.clone();
-        session_ref.with_player_js(player_id, |mut context, registry| {
-            if !context.player.owner.is_arena_live() || !owner.same_identity(&context.player.owner) {
-                return Err(JsError::new("stale or foreign Director player"));
-            }
-            let mut conversion = JsConversionContext {
-                registry,
-                runtime: &runtime_for_conversion,
-                session: Rc::downgrade(&session),
-                player_id,
-                owner: owner.clone(),
-                active_arrays: HashSet::new(),
-                active_objects: HashSet::new(),
-            };
-            args.iter()
-                .map(|value| js_value_to_datum_ref_with_context(context.player, context.symbols, &mut conversion, value))
-                .collect::<Result<Vec<_>, _>>()
-        }).ok_or_else(|| JsError::new("stale or foreign Director player"))??
+        session_ref
+            .with_player_js(player_id, |mut context, registry| {
+                if !context.player.owner.is_arena_live()
+                    || !owner.same_identity(&context.player.owner)
+                {
+                    return Err(JsError::new("stale or foreign Director player"));
+                }
+                let mut conversion = JsConversionContext {
+                    registry,
+                    runtime: &runtime_for_conversion,
+                    session: Rc::downgrade(&session),
+                    player_id,
+                    owner: owner.clone(),
+                    active_arrays: HashSet::new(),
+                    active_objects: HashSet::new(),
+                };
+                args.iter()
+                    .map(|value| {
+                        js_value_to_datum_ref_with_context(
+                            context.player,
+                            context.symbols,
+                            &mut conversion,
+                            value,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .ok_or_else(|| JsError::new("stale or foreign Director player"))??
     };
     let js_args = {
         let mut converted = Vec::with_capacity(js_args.len());
         let mut session_ref = session.borrow_mut();
         let runtime_for_conversion = runtime.clone();
-        session_ref.with_player_js(player_id, |mut context, registry| {
-            if !context.player.owner.is_arena_live() || !owner.same_identity(&context.player.owner) {
-                return Err(JsError::new("stale or foreign Director player"));
-            }
-            let mut conversion = JsConversionContext {
-                registry,
-                runtime: &runtime_for_conversion,
-                session: Rc::downgrade(&session),
-                player_id,
-                owner: owner.clone(),
-                active_arrays: HashSet::new(),
-                active_objects: HashSet::new(),
-            };
-            for datum in js_args {
-                converted.push(datum_ref_to_js_value_with_context(context.player, context.symbols, &mut conversion, &datum)?);
-            }
-            Ok::<_, JsError>(converted)
-        }).ok_or_else(|| JsError::new("stale or foreign Director player"))??
+        session_ref
+            .with_player_js(player_id, |mut context, registry| {
+                if !context.player.owner.is_arena_live()
+                    || !owner.same_identity(&context.player.owner)
+                {
+                    return Err(JsError::new("stale or foreign Director player"));
+                }
+                let mut conversion = JsConversionContext {
+                    registry,
+                    runtime: &runtime_for_conversion,
+                    session: Rc::downgrade(&session),
+                    player_id,
+                    owner: owner.clone(),
+                    active_arrays: HashSet::new(),
+                    active_objects: HashSet::new(),
+                };
+                for datum in js_args {
+                    converted.push(datum_ref_to_js_value_with_context(
+                        context.player,
+                        context.symbols,
+                        &mut conversion,
+                        &datum,
+                    )?);
+                }
+                Ok::<_, JsError>(converted)
+            })
+            .ok_or_else(|| JsError::new("stale or foreign Director player"))??
     };
     let this_value = script_ref_to_js_proxy_with_session(
         member_ref.clone(),
@@ -1145,16 +1350,45 @@ fn invoke_script_method_explicit(
     let datum = {
         let mut session_ref = session.borrow_mut();
         let runtime_for_conversion = runtime.clone();
-        session_ref.with_player_js(player_id, |mut context, registry| {
-            if !context.player.owner.is_arena_live() || !owner.same_identity(&context.player.owner) {
+        session_ref
+            .with_player_js(player_id, |mut context, registry| {
+                if !context.player.owner.is_arena_live()
+                    || !owner.same_identity(&context.player.owner)
+                {
+                    return Err(JsError::new("stale or foreign Director player"));
+                }
+                if registry.runtime(player_id, owner, member_ref).is_none() {
+                    return Err(JsError::new("stale or foreign script runtime"));
+                }
+                let result = invocation
+                    .as_ref()
+                    .map_err(|error| JsError::new(error.message.clone()))?;
+                let mut conversion = JsConversionContext {
+                    registry,
+                    runtime: &runtime_for_conversion,
+                    session: Rc::downgrade(&session),
+                    player_id,
+                    owner: owner.clone(),
+                    active_arrays: HashSet::new(),
+                    active_objects: HashSet::new(),
+                };
+                js_value_to_datum_ref_with_context(
+                    context.player,
+                    context.symbols,
+                    &mut conversion,
+                    result,
+                )
+            })
+            .ok_or_else(|| JsError::new("stale or foreign Director player"))??
+    };
+    let mut session_ref = session.borrow_mut();
+    let runtime_for_conversion = runtime.clone();
+    session_ref
+        .with_player_js(player_id, |mut context, registry| {
+            if !context.player.owner.is_arena_live() || !owner.same_identity(&context.player.owner)
+            {
                 return Err(JsError::new("stale or foreign Director player"));
             }
-            if registry.runtime(player_id, owner, member_ref).is_none() {
-                return Err(JsError::new("stale or foreign script runtime"));
-            }
-            let result = invocation
-                .as_ref()
-                .map_err(|error| JsError::new(error.message.clone()))?;
             let mut conversion = JsConversionContext {
                 registry,
                 runtime: &runtime_for_conversion,
@@ -1164,26 +1398,14 @@ fn invoke_script_method_explicit(
                 active_arrays: HashSet::new(),
                 active_objects: HashSet::new(),
             };
-            js_value_to_datum_ref_with_context(context.player, context.symbols, &mut conversion, result)
-        }).ok_or_else(|| JsError::new("stale or foreign Director player"))??
-    };
-    let mut session_ref = session.borrow_mut();
-    let runtime_for_conversion = runtime.clone();
-    session_ref.with_player_js(player_id, |mut context, registry| {
-        if !context.player.owner.is_arena_live() || !owner.same_identity(&context.player.owner) {
-            return Err(JsError::new("stale or foreign Director player"));
-        }
-        let mut conversion = JsConversionContext {
-            registry,
-            runtime: &runtime_for_conversion,
-            session: Rc::downgrade(&session),
-            player_id,
-            owner: owner.clone(),
-            active_arrays: HashSet::new(),
-            active_objects: HashSet::new(),
-        };
-        datum_ref_to_js_value_with_context(context.player, context.symbols, &mut conversion, &datum)
-    }).ok_or_else(|| JsError::new("stale or foreign Director player"))?
+            datum_ref_to_js_value_with_context(
+                context.player,
+                context.symbols,
+                &mut conversion,
+                &datum,
+            )
+        })
+        .ok_or_else(|| JsError::new("stale or foreign Director player"))?
 }
 
 fn datum_ref_to_string(
@@ -1194,7 +1416,10 @@ fn datum_ref_to_string(
     let d = player.allocator.get_datum(dref).clone();
     match d {
         Datum::String(s) => Ok(s),
-        Datum::Symbol(s) => Ok(symbols.display(&s).map_err(|_| JsError::new("foreign or stale symbol"))?.to_owned()),
+        Datum::Symbol(s) => Ok(symbols
+            .display(&s)
+            .map_err(|_| JsError::new("foreign or stale symbol"))?
+            .to_owned()),
         Datum::Int(i) => Ok(i.to_string()),
         Datum::Float(f) => Ok(f.to_string()),
         _ => crate::player::datum_formatting::format_datum(dref, symbols, player)
@@ -1226,7 +1451,9 @@ fn js_value_to_datum_ref_plain(
             Datum::List(crate::director::lingo::datum::DatumType::List, items, false)
         }
         JsValue::Object(o) if object_has_callable(o) => {
-            return Err(JsError::new("callable JS object requires an owner-bound runtime"));
+            return Err(JsError::new(
+                "callable JS object requires an owner-bound runtime",
+            ));
         }
         JsValue::Object(o) => {
             // Plain data objects retain the historical PropList conversion.
@@ -1236,28 +1463,33 @@ fn js_value_to_datum_ref_plain(
                 .borrow()
                 .props
                 .iter()
-                .map(|(k, val)| -> Result<crate::director::lingo::datum::PropListPair, JsError> {
-                    let key_dr = player.alloc_datum(Datum::Symbol(symbols.intern(k)));
-                    let val_dr = js_value_to_datum_ref_plain(player, symbols, val)?;
-                    Ok((key_dr, val_dr))
-                })
+                .map(
+                    |(k, val)| -> Result<crate::director::lingo::datum::PropListPair, JsError> {
+                        let key_dr = player.alloc_datum(Datum::Symbol(symbols.intern(k)));
+                        let val_dr = js_value_to_datum_ref_plain(player, symbols, val)?;
+                        Ok((key_dr, val_dr))
+                    },
+                )
                 .collect::<Result<_, _>>()?;
             Datum::PropList(pairs, false)
         }
         JsValue::Function(_) | JsValue::Native(_) => {
-            return Err(JsError::new("callable JS value requires an owner-bound runtime"));
+            return Err(JsError::new(
+                "callable JS value requires an owner-bound runtime",
+            ));
         }
         JsValue::Iterator(_) => Datum::String("[for-in iter]".to_string()),
         JsValue::DirectorRef(k) => {
             use crate::player::js_lingo::value::DirectorRefKind;
             match k {
                 DirectorRefKind::Sprite(n) => Datum::SpriteRef(*n),
-                DirectorRefKind::Member { cast_lib, cast_member } => {
-                    Datum::CastMember(crate::player::cast_lib::CastMemberRef {
-                        cast_lib: *cast_lib,
-                        cast_member: *cast_member,
-                    })
-                }
+                DirectorRefKind::Member {
+                    cast_lib,
+                    cast_member,
+                } => Datum::CastMember(crate::player::cast_lib::CastMemberRef {
+                    cast_lib: *cast_lib,
+                    cast_member: *cast_member,
+                }),
             }
         }
     };
@@ -1275,10 +1507,13 @@ fn datum_ref_to_js_value_with_context(
     let datum = player.allocator.get_datum(dref).clone();
     match datum {
         Datum::List(_, items, _) => {
-            let values = items.iter()
+            let values = items
+                .iter()
                 .map(|item| datum_ref_to_js_value_with_context(player, symbols, context, item))
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(JsValue::Array(Rc::new(RefCell::new(crate::player::js_lingo::value::JsArray { items: values }))))
+            Ok(JsValue::Array(Rc::new(RefCell::new(
+                crate::player::js_lingo::value::JsArray { items: values },
+            ))))
         }
         Datum::PropList(pairs, _) => {
             let mut object = crate::player::js_lingo::value::JsObject::new();
@@ -1303,7 +1538,9 @@ fn datum_ref_to_js_value_with_context(
             ))
         }
         Datum::JsObjectRef(handle) => {
-            let (_, object) = context.registry.object(context.player_id, &context.owner, &handle)
+            let (_, object) = context
+                .registry
+                .object(context.player_id, &context.owner, &handle)
                 .ok_or_else(|| JsError::new("stale or foreign JS object"))?;
             Ok(JsValue::Object(object))
         }
@@ -1324,14 +1561,24 @@ fn js_value_to_datum_ref_with_context(
         JsValue::Array(array) => {
             let identity = Rc::as_ptr(array) as usize;
             if !context.active_arrays.insert(identity) {
-                return Err(JsError::new("cyclic JS array cannot cross the Director boundary"));
+                return Err(JsError::new(
+                    "cyclic JS array cannot cross the Director boundary",
+                ));
             }
-            let items = array.borrow().items.clone().into_iter()
+            let items = array
+                .borrow()
+                .items
+                .clone()
+                .into_iter()
                 .map(|item| js_value_to_datum_ref_with_context(player, symbols, context, &item))
                 .collect::<Result<std::collections::VecDeque<_>, _>>();
             context.active_arrays.remove(&identity);
             let items = items?;
-            Ok(player.alloc_datum(Datum::List(crate::director::lingo::datum::DatumType::List, items, false)))
+            Ok(player.alloc_datum(Datum::List(
+                crate::director::lingo::datum::DatumType::List,
+                items,
+                false,
+            )))
         }
         JsValue::Object(object) if object_has_callable(object) => {
             let handle = context.registry.register_object(
@@ -1345,12 +1592,19 @@ fn js_value_to_datum_ref_with_context(
         JsValue::Object(object) => {
             let identity = Rc::as_ptr(object) as usize;
             if !context.active_objects.insert(identity) {
-                return Err(JsError::new("cyclic JS object cannot cross the Director boundary"));
+                return Err(JsError::new(
+                    "cyclic JS object cannot cross the Director boundary",
+                ));
             }
-            let pairs = object.borrow().props.clone().into_iter()
+            let pairs = object
+                .borrow()
+                .props
+                .clone()
+                .into_iter()
                 .map(|(key, value)| {
                     let key_ref = player.alloc_datum(Datum::Symbol(symbols.intern(&key)));
-                    let value_ref = js_value_to_datum_ref_with_context(player, symbols, context, &value)?;
+                    let value_ref =
+                        js_value_to_datum_ref_with_context(player, symbols, context, &value)?;
                     Ok((key_ref, value_ref))
                 })
                 .collect::<Result<std::collections::VecDeque<_>, JsError>>();
@@ -1365,11 +1619,11 @@ fn js_value_to_datum_ref_with_context(
 #[cfg(test)]
 mod registry_tests {
     use super::*;
-    use async_std::channel;
     use crate::director::lingo::datum::Datum;
     use crate::player::ownership::{OwnerKey, OwnerToken};
     use crate::player::session::RuntimeSession;
     use crate::player::symbols::symbol_table::SymbolOwner;
+    use async_std::channel;
 
     fn owner(player: u64, generation: u64) -> OwnerToken {
         OwnerToken::new(OwnerKey {
@@ -1385,7 +1639,11 @@ mod registry_tests {
 
     fn session_with_object(
         session_id: u64,
-    ) -> (crate::player::session::RuntimeSessionHandle, OwnerToken, JsObjectHandle) {
+    ) -> (
+        crate::player::session::RuntimeSessionHandle,
+        OwnerToken,
+        JsObjectHandle,
+    ) {
         let mut session = RuntimeSession::new(SymbolOwner {
             session: session_id,
             generation: 1,
@@ -1540,25 +1798,17 @@ mod registry_tests {
             .expect("the replacement player exists");
 
         assert_eq!(stale_handle.id(), fresh_handle.id());
-        assert!(get_js_object_prop_explicit(
-            &session,
-            1,
-            &old_owner,
-            &stale_handle,
-            "value",
-        )
-        .is_err());
-        let value = get_js_object_prop_explicit(
-            &session,
-            1,
-            &fresh_owner,
-            &fresh_handle,
-            "value",
-        )
-        .expect("the fresh handle remains usable");
+        assert!(
+            get_js_object_prop_explicit(&session, 1, &old_owner, &stale_handle, "value",).is_err()
+        );
+        let value = get_js_object_prop_explicit(&session, 1, &fresh_owner, &fresh_handle, "value")
+            .expect("the fresh handle remains usable");
         assert!(session
             .borrow_mut()
-            .with_player(1, |context| matches!(context.player.get_datum(&value), Datum::Int(11)))
+            .with_player(1, |context| matches!(
+                context.player.get_datum(&value),
+                Datum::Int(11)
+            ))
             .expect("the replacement player exists"));
     }
 
@@ -1582,9 +1832,18 @@ mod registry_tests {
         object.set_own("Foo", JsValue::Int(2));
         let object = Rc::new(RefCell::new(object));
 
-        assert!(matches!(resolve_js_object_prop(&object, "Foo"), Some(JsValue::Int(2))));
-        assert!(matches!(resolve_js_object_prop(&object, "FOO"), Some(JsValue::Int(2))));
-        assert!(matches!(resolve_js_object_prop(&object, "inherited"), Some(JsValue::Int(13))));
+        assert!(matches!(
+            resolve_js_object_prop(&object, "Foo"),
+            Some(JsValue::Int(2))
+        ));
+        assert!(matches!(
+            resolve_js_object_prop(&object, "FOO"),
+            Some(JsValue::Int(2))
+        ));
+        assert!(matches!(
+            resolve_js_object_prop(&object, "inherited"),
+            Some(JsValue::Int(13))
+        ));
     }
 
     #[test]
@@ -1592,32 +1851,22 @@ mod registry_tests {
         let (session_a, owner_a, handle_a) = session_with_object(301);
         let (session_b, owner_b, handle_b) = session_with_object(301);
 
-        let value = get_js_object_prop_explicit(
-            &session_a,
-            1,
-            &owner_a,
-            &handle_a,
-            "value",
-        )
-        .expect("owner A can read its object");
+        let value = get_js_object_prop_explicit(&session_a, 1, &owner_a, &handle_a, "value")
+            .expect("owner A can read its object");
         assert!(session_a
             .borrow_mut()
-            .with_player(1, |context| matches!(context.player.get_datum(&value), Datum::Int(7)))
+            .with_player(1, |context| matches!(
+                context.player.get_datum(&value),
+                Datum::Int(7)
+            ))
             .expect("owner A player exists"));
 
         let set_value = session_a
             .borrow_mut()
             .with_player(1, |context| context.player.alloc_datum(Datum::Int(9)))
             .expect("owner A player exists");
-        set_js_object_prop_explicit(
-            &session_a,
-            1,
-            &owner_a,
-            &handle_a,
-            "VALUE",
-            &set_value,
-        )
-        .expect("owner A can set its object");
+        set_js_object_prop_explicit(&session_a, 1, &owner_a, &handle_a, "VALUE", &set_value)
+            .expect("owner A can set its object");
 
         let echoed = invoke_js_object_method_explicit(
             &session_a,
@@ -1630,29 +1879,33 @@ mod registry_tests {
         .expect("owner A can call its object");
         assert!(session_a
             .borrow_mut()
-            .with_player(1, |context| matches!(context.player.get_datum(&echoed), Datum::Int(9)))
+            .with_player(1, |context| matches!(
+                context.player.get_datum(&echoed),
+                Datum::Int(9)
+            ))
             .expect("owner A player exists"));
 
-        assert!(get_js_object_prop_explicit(&session_b, 1, &owner_b, &handle_a, "value")
-            .is_err(), "owner B cannot read owner A's colliding numeric handle");
-        assert!(set_js_object_prop_explicit(
-            &session_b,
-            1,
-            &owner_b,
-            &handle_a,
-            "value",
-            &set_value,
-        )
-        .is_err(), "owner B cannot mutate owner A's colliding numeric handle");
-        assert!(invoke_js_object_method_explicit(
-            &session_b,
-            1,
-            &owner_b,
-            &handle_a,
-            "echo",
-            &[DatumRef::Void],
-        )
-        .is_err(), "owner B cannot call owner A's colliding numeric handle");
+        assert!(
+            get_js_object_prop_explicit(&session_b, 1, &owner_b, &handle_a, "value").is_err(),
+            "owner B cannot read owner A's colliding numeric handle"
+        );
+        assert!(
+            set_js_object_prop_explicit(&session_b, 1, &owner_b, &handle_a, "value", &set_value,)
+                .is_err(),
+            "owner B cannot mutate owner A's colliding numeric handle"
+        );
+        assert!(
+            invoke_js_object_method_explicit(
+                &session_b,
+                1,
+                &owner_b,
+                &handle_a,
+                "echo",
+                &[DatumRef::Void],
+            )
+            .is_err(),
+            "owner B cannot call owner A's colliding numeric handle"
+        );
         assert!(get_js_object_prop_explicit(&session_b, 1, &owner_b, &handle_b, "value").is_ok());
     }
 
@@ -1662,7 +1915,9 @@ mod registry_tests {
         let (session_b, owner_b, handle_b) = session_with_object(307);
         let foreign = session_a
             .borrow_mut()
-            .with_player(1, |context| context.player.alloc_datum(Datum::JsObjectRef(handle_b)))
+            .with_player(1, |context| {
+                context.player.alloc_datum(Datum::JsObjectRef(handle_b))
+            })
             .expect("owner A player exists");
         let nested = session_a
             .borrow_mut()
@@ -1675,27 +1930,18 @@ mod registry_tests {
             })
             .expect("owner A player exists");
 
-        let error = set_js_object_prop_explicit(
-            &session_a,
-            1,
-            &owner_a,
-            &handle_a,
-            "value",
-            &nested,
-        )
-        .expect_err("nested foreign values must fail preflight");
+        let error =
+            set_js_object_prop_explicit(&session_a, 1, &owner_a, &handle_a, "value", &nested)
+                .expect_err("nested foreign values must fail preflight");
         assert_eq!(error.code, crate::player::ScriptErrorCode::InvalidReference);
-        let value = get_js_object_prop_explicit(
-            &session_a,
-            1,
-            &owner_a,
-            &handle_a,
-            "value",
-        )
-        .expect("the original property remains readable");
+        let value = get_js_object_prop_explicit(&session_a, 1, &owner_a, &handle_a, "value")
+            .expect("the original property remains readable");
         assert!(session_a
             .borrow_mut()
-            .with_player(1, |context| matches!(context.player.get_datum(&value), Datum::Int(7)))
+            .with_player(1, |context| matches!(
+                context.player.get_datum(&value),
+                Datum::Int(7)
+            ))
             .expect("owner A player exists"));
     }
 
@@ -1710,9 +1956,7 @@ mod registry_tests {
             .1;
         let array = Rc::new(RefCell::new(crate::player::js_lingo::value::JsArray::new()));
         array.borrow_mut().items.push(JsValue::Array(array.clone()));
-        let cyclic_object = Rc::new(RefCell::new(
-            crate::player::js_lingo::value::JsObject::new(),
-        ));
+        let cyclic_object = Rc::new(RefCell::new(crate::player::js_lingo::value::JsObject::new()));
         cyclic_object
             .borrow_mut()
             .set_own("self", JsValue::Object(cyclic_object.clone()));
@@ -1734,15 +1978,9 @@ mod registry_tests {
         );
 
         for handler in ["cycleArray", "cycleObject"] {
-            let error = invoke_js_object_method_explicit(
-                &session,
-                1,
-                &owner,
-                &handle,
-                handler,
-                &[],
-            )
-            .expect_err("cyclic JS result must fail conversion");
+            let error =
+                invoke_js_object_method_explicit(&session, 1, &owner, &handle, handler, &[])
+                    .expect_err("cyclic JS result must fail conversion");
             assert!(error.message.contains("cyclic JS"));
         }
     }
@@ -1789,18 +2027,14 @@ mod registry_tests {
             })),
         );
 
-        let result = invoke_js_object_method_explicit(
-            &session,
-            1,
-            &owner,
-            &handle,
-            "reenter",
-            &[],
-        )
-        .expect("same-runtime weak reentry succeeds");
+        let result = invoke_js_object_method_explicit(&session, 1, &owner, &handle, "reenter", &[])
+            .expect("same-runtime weak reentry succeeds");
         assert!(session
             .borrow_mut()
-            .with_player(1, |context| matches!(context.player.get_datum(&result), Datum::Int(23)))
+            .with_player(1, |context| matches!(
+                context.player.get_datum(&result),
+                Datum::Int(23)
+            ))
             .expect("the player exists"));
     }
 
@@ -1812,7 +2046,10 @@ mod registry_tests {
             .js_lingo_registry()
             .object(1, &owner, &handle)
             .expect("registered test object");
-        let member_ref = CastMemberRef { cast_lib: 2, cast_member: 9 };
+        let member_ref = CastMemberRef {
+            cast_lib: 2,
+            cast_member: 9,
+        };
         let proxy_method = |name: &str, property: &str| {
             Rc::new(crate::player::js_lingo::xdr::JsFunctionAtom {
                 name: Some(name.to_owned()),
@@ -1832,7 +2069,9 @@ mod registry_tests {
                     ],
                     prolog_length: 0,
                     version: 150,
-                    atoms: vec![crate::player::js_lingo::xdr::JsAtom::String(property.to_owned())],
+                    atoms: vec![crate::player::js_lingo::xdr::JsAtom::String(
+                        property.to_owned(),
+                    )],
                     source_notes: Vec::new(),
                     filename: None,
                     lineno: 1,
@@ -1855,10 +2094,12 @@ mod registry_tests {
                 captured_scope: None,
             })),
         );
-        session
-            .borrow_mut()
-            .js_lingo_registry_mut()
-            .insert_runtime(1, owner.clone(), member_ref.clone(), runtime.clone());
+        session.borrow_mut().js_lingo_registry_mut().insert_runtime(
+            1,
+            owner.clone(),
+            member_ref.clone(),
+            runtime.clone(),
+        );
         object.borrow_mut().set_own(
             "forward",
             JsValue::Native(Rc::new(crate::player::js_lingo::value::NativeFn {
@@ -1868,7 +2109,9 @@ mod registry_tests {
         );
         let script_ref = session
             .borrow_mut()
-            .with_player(1, |context| context.player.alloc_datum(Datum::ScriptRef(member_ref)))
+            .with_player(1, |context| {
+                context.player.alloc_datum(Datum::ScriptRef(member_ref))
+            })
             .expect("the player exists");
         let proxy = invoke_js_object_method_explicit(
             &session,
@@ -1887,44 +2130,35 @@ mod registry_tests {
             })
             .expect("the player exists")
             .expect("the script proxy retains its callable handler");
-        let result = invoke_js_object_method_explicit(
-            &session,
-            1,
-            &owner,
-            &proxy_handle,
-            "ping",
-            &[],
-        )
-        .expect("the real script proxy reenters its runtime");
+        let result =
+            invoke_js_object_method_explicit(&session, 1, &owner, &proxy_handle, "ping", &[])
+                .expect("the real script proxy reenters its runtime");
         assert!(session
             .borrow_mut()
-            .with_player(1, |context| matches!(context.player.get_datum(&result), Datum::Int(9)))
+            .with_player(1, |context| matches!(
+                context.player.get_datum(&result),
+                Datum::Int(9)
+            ))
             .expect("the player exists"));
-        let work = invoke_js_object_method_explicit(
-            &session,
-            1,
-            &owner,
-            &proxy_handle,
-            "work",
-            &[],
-        )
-        .expect("the outer interpreted proxy method reenters its runtime");
+        let work =
+            invoke_js_object_method_explicit(&session, 1, &owner, &proxy_handle, "work", &[])
+                .expect("the outer interpreted proxy method reenters its runtime");
         assert!(session
             .borrow_mut()
-            .with_player(1, |context| matches!(context.player.get_datum(&work), Datum::Int(2)))
+            .with_player(1, |context| matches!(
+                context.player.get_datum(&work),
+                Datum::Int(2)
+            ))
             .expect("the player exists"));
-        let result_again = invoke_js_object_method_explicit(
-            &session,
-            1,
-            &owner,
-            &proxy_handle,
-            "ping",
-            &[],
-        )
-        .expect("a subsequent interpreted proxy invocation remains usable");
+        let result_again =
+            invoke_js_object_method_explicit(&session, 1, &owner, &proxy_handle, "ping", &[])
+                .expect("a subsequent interpreted proxy invocation remains usable");
         assert!(session
             .borrow_mut()
-            .with_player(1, |context| matches!(context.player.get_datum(&result_again), Datum::Int(9)))
+            .with_player(1, |context| matches!(
+                context.player.get_datum(&result_again),
+                Datum::Int(9)
+            ))
             .expect("the player exists"));
     }
 
@@ -1949,15 +2183,9 @@ mod registry_tests {
             })),
         );
 
-        let error = invoke_js_object_method_explicit(
-            &session,
-            1,
-            &owner,
-            &handle,
-            "resetAndThrow",
-            &[],
-        )
-        .expect_err("reset must fence the late callback result");
+        let error =
+            invoke_js_object_method_explicit(&session, 1, &owner, &handle, "resetAndThrow", &[])
+                .expect_err("reset must fence the late callback result");
         assert_eq!(error.code, crate::player::ScriptErrorCode::InvalidReference);
     }
 
@@ -1975,7 +2203,10 @@ mod registry_tests {
         session
             .borrow_mut()
             .with_player(1, |context| {
-                context.player.globals.insert(context.symbols.intern("g"), object_ref);
+                context
+                    .player
+                    .globals
+                    .insert(context.symbols.intern("g"), object_ref);
             })
             .expect("the player exists");
 
@@ -2031,8 +2262,14 @@ mod registry_tests {
         };
         assert_eq!(entries.len(), 2);
         session.borrow_mut().with_player(1, |context| {
-            assert!(matches!(context.player.get_datum(&entries[0]), Datum::Int(2)));
-            assert!(matches!(context.player.get_datum(&entries[1]), Datum::Int(3)));
+            assert!(matches!(
+                context.player.get_datum(&entries[0]),
+                Datum::Int(2)
+            ));
+            assert!(matches!(
+                context.player.get_datum(&entries[1]),
+                Datum::Int(3)
+            ));
         });
         assert!(matches!(values.2, Datum::Int(7)));
         assert!(matches!(values.3, Datum::Int(7)));
@@ -2068,9 +2305,8 @@ mod registry_tests {
             "g.items[1] = 9".to_owned(),
         );
         let scheduler = crate::player::commands::drive_pending_owner(&session, 1, &owner);
-        let (assignment, ()) = futures::executor::block_on(async {
-            futures::join!(assignment, scheduler)
-        });
+        let (assignment, ()) =
+            futures::executor::block_on(async { futures::join!(assignment, scheduler) });
         assignment.expect("indexed JS assignment should complete through the owner scheduler");
         let updated = get_js_object_prop_explicit(&session, 1, &owner, &handle, "items")
             .expect("updated items property should be readable");
@@ -2142,8 +2378,13 @@ mod registry_tests {
         let h_ref = session
             .borrow_mut()
             .with_player(1, |context| {
-                let value = context.player.alloc_datum(Datum::JsObjectRef(handle.clone()));
-                context.player.globals.insert(context.symbols.intern("h"), value.clone());
+                let value = context
+                    .player
+                    .alloc_datum(Datum::JsObjectRef(handle.clone()));
+                context
+                    .player
+                    .globals
+                    .insert(context.symbols.intern("h"), value.clone());
                 value
             })
             .expect("the player exists");
@@ -2157,9 +2398,8 @@ mod registry_tests {
                 source.to_owned(),
             );
             let scheduler = crate::player::commands::drive_pending_owner(&session, 1, &owner);
-            let (result, ()) = futures::executor::block_on(async {
-                futures::join!(command, scheduler)
-            });
+            let (result, ()) =
+                futures::executor::block_on(async { futures::join!(command, scheduler) });
             result.expect("owner scheduler should complete the command")
         };
 
@@ -2186,8 +2426,16 @@ mod registry_tests {
                 let property = context.symbols.intern("propertyResult");
                 let global = context.symbols.intern("globalResult");
                 (
-                    context.player.globals.get(&property).map(|value| context.player.get_datum(value).clone()),
-                    context.player.globals.get(&global).map(|value| context.player.get_datum(value).clone()),
+                    context
+                        .player
+                        .globals
+                        .get(&property)
+                        .map(|value| context.player.get_datum(value).clone()),
+                    context
+                        .player
+                        .globals
+                        .get(&global)
+                        .map(|value| context.player.get_datum(value).clone()),
                 )
             })
             .expect("the player exists");

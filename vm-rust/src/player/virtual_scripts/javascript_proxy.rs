@@ -1,10 +1,10 @@
+use super::{VirtualScriptHandler, VirtualScriptRegistry};
+use crate::player::script_ref::ScriptInstanceRef;
+use crate::player::{DatumRef, DirPlayer, ScriptError};
 use crate::{
     director::lingo::datum::Datum,
-    player::symbols::{symbol::Symbol, symbol::{SymbolError}, symbol_table::SymbolTable},
+    player::symbols::{symbol::Symbol, symbol::SymbolError, symbol_table::SymbolTable},
 };
-use crate::player::script_ref::ScriptInstanceRef;
-use super::{VirtualScriptHandler, VirtualScriptRegistry};
-use crate::player::{DatumRef, DirPlayer, ScriptError};
 
 pub struct JavascriptProxy;
 
@@ -41,7 +41,9 @@ impl VirtualScriptHandler for JavascriptProxy {
                     // registry rather than the movie's cast (see
                     // `VirtualScriptRegistry::register`).
                     let script_ref = VirtualScriptRegistry::find_by_name(player, "JavaScriptProxy")
-                        .ok_or_else(|| ScriptError::new("JavaScriptProxy script not found".to_string()))?;
+                        .ok_or_else(|| {
+                            ScriptError::new("JavaScriptProxy script not found".to_string())
+                        })?;
                     let (_instance_ref, datum_ref) =
                         VirtualScriptRegistry::create_instance(player, symbols, &script_ref)?;
                     Ok(Some(datum_ref))

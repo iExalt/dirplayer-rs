@@ -1,37 +1,49 @@
-use std::collections::VecDeque;
 use crate::{
     director::lingo::datum::{Datum, DatumType},
-    player::{
-        DatumRef, HandlerExecutionResult, ScriptError, context_vars::player_get_context_var
-    },
+    player::{context_vars::player_get_context_var, DatumRef, HandlerExecutionResult, ScriptError},
 };
+use std::collections::VecDeque;
 
 use super::handler_manager::BytecodeHandlerContext;
 
 pub struct StackBytecodeHandler {}
 
 impl StackBytecodeHandler {
-    pub fn push_int(runtime: &mut crate::player::session::ExecutionContext,
-        ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+    pub fn push_int(
+        runtime: &mut crate::player::session::ExecutionContext,
+        ctx: &BytecodeHandlerContext,
+    ) -> Result<HandlerExecutionResult, ScriptError> {
         runtime.with_player(|player| {
             let n = player.get_ctx_current_bytecode(ctx).obj as i32;
             // Inline: store the int directly on the stack — no Datum, no DatumRef,
             // no arena. Materialized to a DatumRef only if/when a consumer needs one.
-            player.scopes.get_mut(ctx.scope_ref()).unwrap().stack.push_int(n);
+            player
+                .scopes
+                .get_mut(ctx.scope_ref())
+                .unwrap()
+                .stack
+                .push_int(n);
         });
         Ok(HandlerExecutionResult::Advance)
     }
 
-    pub fn push_f32(runtime: &mut crate::player::session::ExecutionContext,
-        ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+    pub fn push_f32(
+        runtime: &mut crate::player::session::ExecutionContext,
+        ctx: &BytecodeHandlerContext,
+    ) -> Result<HandlerExecutionResult, ScriptError> {
         runtime.with_player(|player| {
             let obj_value = player.get_ctx_current_bytecode(ctx).obj as u32;
-            
+
             // Interpret the 32 bits as f32, THEN convert to f64
             let float_f32 = f32::from_bits(obj_value);
             let float_f64 = float_f32 as f64;
-            
-            player.scopes.get_mut(ctx.scope_ref()).unwrap().stack.push_float(float_f64);
+
+            player
+                .scopes
+                .get_mut(ctx.scope_ref())
+                .unwrap()
+                .stack
+                .push_float(float_f64);
         });
         Ok(HandlerExecutionResult::Advance)
     }
@@ -65,10 +77,12 @@ impl StackBytecodeHandler {
                     "Not enough items in stack to create arglist".to_string(),
                 ));
             }
-            scope.stack.push_value(crate::player::scope::StackDatum::ArgMarker {
-                count: count as u16,
-                no_ret,
-            });
+            scope
+                .stack
+                .push_value(crate::player::scope::StackDatum::ArgMarker {
+                    count: count as u16,
+                    no_ret,
+                });
             Ok(())
         })?;
         Ok(HandlerExecutionResult::Advance)
@@ -82,8 +96,10 @@ impl StackBytecodeHandler {
         Self::push_arg_marker(runtime, ctx, true)
     }
 
-    pub fn push_symb(runtime: &mut crate::player::session::ExecutionContext,
-        ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+    pub fn push_symb(
+        runtime: &mut crate::player::session::ExecutionContext,
+        ctx: &BytecodeHandlerContext,
+    ) -> Result<HandlerExecutionResult, ScriptError> {
         let player = &mut *runtime.player;
         let name_id = player.get_ctx_current_bytecode(ctx).obj;
         // ctx.get_name indexes the retained cast snapshot — no per-op get_cast lookup
@@ -94,8 +110,10 @@ impl StackBytecodeHandler {
         Ok(HandlerExecutionResult::Advance)
     }
 
-    pub fn push_var_ref(runtime: &mut crate::player::session::ExecutionContext,
-        ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+    pub fn push_var_ref(
+        runtime: &mut crate::player::session::ExecutionContext,
+        ctx: &BytecodeHandlerContext,
+    ) -> Result<HandlerExecutionResult, ScriptError> {
         let player = &mut *runtime.player;
         let name_id = player.get_ctx_current_bytecode(ctx).obj;
         let symbol_name = ctx.get_name(name_id as u16);
@@ -104,10 +122,13 @@ impl StackBytecodeHandler {
         Ok(HandlerExecutionResult::Advance)
     }
 
-    pub fn push_cons(runtime: &mut crate::player::session::ExecutionContext,
-        ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+    pub fn push_cons(
+        runtime: &mut crate::player::session::ExecutionContext,
+        ctx: &BytecodeHandlerContext,
+    ) -> Result<HandlerExecutionResult, ScriptError> {
         runtime.with_player(|player| {
-            let literal_id = (player.get_ctx_current_bytecode(ctx).obj as u32 / ctx.multiplier) as usize;
+            let literal_id =
+                (player.get_ctx_current_bytecode(ctx).obj as u32 / ctx.multiplier) as usize;
             // The retained script is valid for the whole handler and lets us
             // call the &mut player fast-path allocators below.
             let script = ctx.code.script.as_ref();
@@ -117,23 +138,66 @@ impl StackBytecodeHandler {
             // Inline primitive literals (no Datum clone/alloc); other literal
             // types allocate and push a ref as before.
             match literal {
-                Datum::Int(n) => { let n = *n; player.scopes.get_mut(ctx.scope_ref()).unwrap().stack.push_int(n); }
-                Datum::Float(f) => { let f = *f; player.scopes.get_mut(ctx.scope_ref()).unwrap().stack.push_float(f); }
-                Datum::Symbol(s) => { let s = s.clone(); player.scopes.get_mut(ctx.scope_ref()).unwrap().stack.push_symbol(s); }
-                Datum::Void => { player.scopes.get_mut(ctx.scope_ref()).unwrap().stack.push_void(); }
+                Datum::Int(n) => {
+                    let n = *n;
+                    player
+                        .scopes
+                        .get_mut(ctx.scope_ref())
+                        .unwrap()
+                        .stack
+                        .push_int(n);
+                }
+                Datum::Float(f) => {
+                    let f = *f;
+                    player
+                        .scopes
+                        .get_mut(ctx.scope_ref())
+                        .unwrap()
+                        .stack
+                        .push_float(f);
+                }
+                Datum::Symbol(s) => {
+                    let s = s.clone();
+                    player
+                        .scopes
+                        .get_mut(ctx.scope_ref())
+                        .unwrap()
+                        .stack
+                        .push_symbol(s);
+                }
+                Datum::Void => {
+                    player
+                        .scopes
+                        .get_mut(ctx.scope_ref())
+                        .unwrap()
+                        .stack
+                        .push_void();
+                }
                 other => {
                     let dr = player.alloc_datum(other.clone());
-                    player.scopes.get_mut(ctx.scope_ref()).unwrap().stack.push(dr);
+                    player
+                        .scopes
+                        .get_mut(ctx.scope_ref())
+                        .unwrap()
+                        .stack
+                        .push(dr);
                 }
             }
             Ok(HandlerExecutionResult::Advance)
         })
     }
 
-    pub fn push_zero(runtime: &mut crate::player::session::ExecutionContext,
-        ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+    pub fn push_zero(
+        runtime: &mut crate::player::session::ExecutionContext,
+        ctx: &BytecodeHandlerContext,
+    ) -> Result<HandlerExecutionResult, ScriptError> {
         runtime.with_player(|player| {
-            player.scopes.get_mut(ctx.scope_ref()).unwrap().stack.push_int(0);
+            player
+                .scopes
+                .get_mut(ctx.scope_ref())
+                .unwrap()
+                .stack
+                .push_int(0);
             Ok(HandlerExecutionResult::Advance)
         })
     }
@@ -145,12 +209,18 @@ impl StackBytecodeHandler {
         // `[#a: 1, #b: 2]` compiles to `pusharglist N` + `pushproplist`, so the
         // key/value pairs arrive as a call-style arg marker.
         let arg_list: Vec<DatumRef> = runtime.with_player(|player| {
-            let (scopes, allocator, bitmap_manager) =
-                (&mut player.scopes, &mut player.allocator, &mut player.bitmap_manager);
+            let (scopes, allocator, bitmap_manager) = (
+                &mut player.scopes,
+                &mut player.allocator,
+                &mut player.bitmap_manager,
+            );
             let scope = scopes.get_mut(ctx.scope_ref()).unwrap();
-            scope.pop_call_args(allocator, bitmap_manager).map(|(a, _)| a).ok_or_else(|| {
-                ScriptError::new("push_prop_list: expected arg marker on stack".to_string())
-            })
+            scope
+                .pop_call_args(allocator, bitmap_manager)
+                .map(|(a, _)| a)
+                .ok_or_else(|| {
+                    ScriptError::new("push_prop_list: expected arg marker on stack".to_string())
+                })
         })?;
         runtime.with_player(|player| {
             if arg_list.len() % 2 != 0 {
@@ -172,18 +242,25 @@ impl StackBytecodeHandler {
         })
     }
 
-    pub fn push_list(runtime: &mut crate::player::session::ExecutionContext,
-        ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+    pub fn push_list(
+        runtime: &mut crate::player::session::ExecutionContext,
+        ctx: &BytecodeHandlerContext,
+    ) -> Result<HandlerExecutionResult, ScriptError> {
         runtime.with_player(|player| {
             // `[a, b, c]` compiles to `pusharglist N` + `pushlist`, so the
             // elements arrive as a call-style arg marker, not a list datum.
             let (items, _) = {
-                let (scopes, allocator, bitmap_manager) =
-                    (&mut player.scopes, &mut player.allocator, &mut player.bitmap_manager);
+                let (scopes, allocator, bitmap_manager) = (
+                    &mut player.scopes,
+                    &mut player.allocator,
+                    &mut player.bitmap_manager,
+                );
                 let scope = scopes.get_mut(ctx.scope_ref()).unwrap();
-                scope.pop_call_args(allocator, bitmap_manager).ok_or_else(|| {
-                    ScriptError::new("push_list: expected arg marker on stack".to_string())
-                })?
+                scope
+                    .pop_call_args(allocator, bitmap_manager)
+                    .ok_or_else(|| {
+                        ScriptError::new("push_list: expected arg marker on stack".to_string())
+                    })?
             };
             let list: VecDeque<DatumRef> = items.into();
             let result_id = player.alloc_datum(Datum::List(DatumType::List, list, false));
@@ -193,16 +270,24 @@ impl StackBytecodeHandler {
         })
     }
 
-    pub fn peek(runtime: &mut crate::player::session::ExecutionContext,
-        ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+    pub fn peek(
+        runtime: &mut crate::player::session::ExecutionContext,
+        ctx: &BytecodeHandlerContext,
+    ) -> Result<HandlerExecutionResult, ScriptError> {
         runtime.with_player(|player| {
             let offset = player.get_ctx_current_bytecode(ctx).obj;
             let datum_ref = {
-                let (scopes, allocator, bitmap_manager) =
-                    (&mut player.scopes, &mut player.allocator, &mut player.bitmap_manager);
+                let (scopes, allocator, bitmap_manager) = (
+                    &mut player.scopes,
+                    &mut player.allocator,
+                    &mut player.bitmap_manager,
+                );
                 let scope = scopes.get_mut(ctx.scope_ref()).unwrap();
                 let stack_index = scope.stack.len() - 1 - offset as usize;
-                scope.stack.get_ref_with(stack_index, allocator, bitmap_manager).unwrap()
+                scope
+                    .stack
+                    .get_ref_with(stack_index, allocator, bitmap_manager)
+                    .unwrap()
             };
             let scope = player.scopes.get_mut(ctx.scope_ref()).unwrap();
             scope.stack.push(datum_ref);
@@ -210,8 +295,10 @@ impl StackBytecodeHandler {
         })
     }
 
-    pub fn pop(runtime: &mut crate::player::session::ExecutionContext,
-        ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+    pub fn pop(
+        runtime: &mut crate::player::session::ExecutionContext,
+        ctx: &BytecodeHandlerContext,
+    ) -> Result<HandlerExecutionResult, ScriptError> {
         runtime.with_player(|player| {
             let count = player.get_ctx_current_bytecode(ctx).obj;
             let scope = player.scopes.get_mut(ctx.scope_ref()).unwrap();
@@ -236,8 +323,11 @@ impl StackBytecodeHandler {
             }
             let var_type = player.get_ctx_current_bytecode(ctx).obj as u32;
             let id_ref = {
-                let (scopes, allocator, bitmap_manager) =
-                    (&mut player.scopes, &mut player.allocator, &mut player.bitmap_manager);
+                let (scopes, allocator, bitmap_manager) = (
+                    &mut player.scopes,
+                    &mut player.allocator,
+                    &mut player.bitmap_manager,
+                );
                 let scope = scopes.get_mut(ctx.scope_ref()).unwrap();
                 scope.stack.pop_ref_with(allocator, bitmap_manager).unwrap()
             };
@@ -253,17 +343,21 @@ impl StackBytecodeHandler {
                 0x5 => {
                     // local - raw index, no variable multiplier. `id` is the
                     // dense slot directly.
-                    let local = player.scopes.get(ctx.scope_ref()).unwrap().local(id as usize);
-                    local.into_ref_with(
-                        &mut player.allocator,
-                        &mut player.bitmap_manager,
-                    )
+                    let local = player
+                        .scopes
+                        .get(ctx.scope_ref())
+                        .unwrap()
+                        .local(id as usize);
+                    local.into_ref_with(&mut player.allocator, &mut player.bitmap_manager)
                 }
                 _ => {
                     // For other var types (field etc.), fall back to the standard path
                     let cast_id_ref = if var_type == 0x6 && player.movie.dir_version >= 500 {
-                        let (scopes, allocator, bitmap_manager) =
-                            (&mut player.scopes, &mut player.allocator, &mut player.bitmap_manager);
+                        let (scopes, allocator, bitmap_manager) = (
+                            &mut player.scopes,
+                            &mut player.allocator,
+                            &mut player.bitmap_manager,
+                        );
                         let scope = scopes.get_mut(ctx.scope_ref()).unwrap();
                         Some(scope.stack.pop_ref_with(allocator, bitmap_manager).unwrap())
                     } else {
@@ -286,11 +380,16 @@ impl StackBytecodeHandler {
         })
     }
 
-    pub fn swap(runtime: &mut crate::player::session::ExecutionContext,
-        ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+    pub fn swap(
+        runtime: &mut crate::player::session::ExecutionContext,
+        ctx: &BytecodeHandlerContext,
+    ) -> Result<HandlerExecutionResult, ScriptError> {
         runtime.with_player(|player| {
-            let (scopes, allocator, bitmap_manager) =
-                (&mut player.scopes, &mut player.allocator, &mut player.bitmap_manager);
+            let (scopes, allocator, bitmap_manager) = (
+                &mut player.scopes,
+                &mut player.allocator,
+                &mut player.bitmap_manager,
+            );
             let scope = scopes.get_mut(ctx.scope_ref()).unwrap();
             let a = scope.stack.pop_ref_with(allocator, bitmap_manager).unwrap();
             let b = scope.stack.pop_ref_with(allocator, bitmap_manager).unwrap();
@@ -308,20 +407,25 @@ mod tests {
 
     use crate::{
         director::{
-            chunks::{handler::{Bytecode, HandlerDef}, script::ScriptChunk},
+            chunks::{
+                handler::{Bytecode, HandlerDef},
+                script::ScriptChunk,
+            },
             enums::ScriptType,
             lingo::opcode::OpCode,
         },
         player::{
-            bytecode::handler_manager::{BytecodeHandlerContext, HandlerCode, StaticBytecodeHandlerManager},
+            bytecode::handler_manager::{
+                BytecodeHandlerContext, HandlerCode, StaticBytecodeHandlerManager,
+            },
             cast_lib::CastMemberRef,
             ownership::{OwnerKey, OwnerToken},
             scope::{ScopeRef, StackDatum},
             script::Script,
             session::ExecutionContext,
-            symbols::symbol::{Symbol},
+            symbols::symbol::Symbol,
             symbols::symbol_table::SymbolTable,
-            ScopeToken, DirPlayer, ScriptErrorCode,
+            DirPlayer, ScopeToken, ScriptErrorCode,
         },
     };
 
@@ -329,7 +433,11 @@ mod tests {
         let (tx, _rx) = async_std::channel::unbounded();
         DirPlayer::new_with_owner(
             tx,
-            OwnerToken::new(OwnerKey { session: 73, player: 1, generation: 1 }),
+            OwnerToken::new(OwnerKey {
+                session: 73,
+                player: 1,
+                generation: 1,
+            }),
         )
     }
 
@@ -349,7 +457,10 @@ mod tests {
             compiled_ir: RefCell::new(None),
         });
         let script = Rc::new(Script {
-            member_ref: CastMemberRef { cast_lib: 0, cast_member: 0 },
+            member_ref: CastMemberRef {
+                cast_lib: 0,
+                cast_member: 0,
+            },
             name: String::new(),
             chunk: ScriptChunk {
                 script_number: 0,
@@ -388,9 +499,8 @@ mod tests {
         let slot = player.push_scope();
         let id_ref = player.alloc_datum(Datum::Int(1));
         let mut foreign_symbols = SymbolTable::new();
-        let foreign_cast_ref = player.alloc_datum(Datum::Symbol(
-            foreign_symbols.intern("foreignCast"),
-        ));
+        let foreign_cast_ref =
+            player.alloc_datum(Datum::Symbol(foreign_symbols.intern("foreignCast")));
         player.scopes[slot].stack.push(foreign_cast_ref);
         player.scopes[slot].stack.push(id_ref);
         let ctx = make_context(&player, slot, OpCode::PushChunkVarRef, 0x6);

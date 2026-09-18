@@ -62,14 +62,18 @@ pub fn variable_op_length(op: JsOp, slice: &[u8]) -> Result<usize, String> {
                 return Err("lookupswitchx truncated at header".into());
             }
             let npairs = read_u32_be(&slice[1 + JUMPX_OFFSET_LEN..])? as usize;
-            Ok(1 + JUMPX_OFFSET_LEN + ATOM_INDEXX_LEN + npairs * (ATOM_INDEXX_LEN + JUMPX_OFFSET_LEN))
+            Ok(1 + JUMPX_OFFSET_LEN
+                + ATOM_INDEXX_LEN
+                + npairs * (ATOM_INDEXX_LEN + JUMPX_OFFSET_LEN))
         }
         other => Err(format!("not a variable-length op: {:?}", other)),
     }
 }
 
 fn read_u32_be(s: &[u8]) -> Result<u32, String> {
-    if s.len() < 4 { return Err("short read for u32 BE".into()); }
+    if s.len() < 4 {
+        return Err("short read for u32 BE".into());
+    }
     Ok(u32::from_be_bytes([s[0], s[1], s[2], s[3]]))
 }
 

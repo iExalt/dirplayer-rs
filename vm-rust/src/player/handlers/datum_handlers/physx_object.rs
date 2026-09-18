@@ -11,75 +11,157 @@ use crate::{
     director::lingo::datum::{Datum, DatumType, PhysXObjectRef},
     player::{
         cast_lib::CastMemberRef,
-        cast_member::{CastMemberType, PhysXBodyType, PhysXConstraintKind, PhysXShapeKind, PhysXSleepMode},
-        reserve_player_mut, DatumRef, ScriptError,
+        cast_member::{
+            CastMemberType, PhysXBodyType, PhysXConstraintKind, PhysXShapeKind, PhysXSleepMode,
+        },
+        reserve_player_mut,
         symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable},
+        DatumRef, ScriptError,
     },
 };
 
-
 fn builtin_display(symbol: BuiltInSymbol, symbols: &SymbolTable) -> Result<String, ScriptError> {
-    Ok(symbols.display(&Symbol::builtin(symbol)).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?.to_owned())
+    Ok(symbols
+        .display(&Symbol::builtin(symbol))
+        .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
+        .to_owned())
 }
 
 pub struct PhysXObjectDatumHandlers {}
 
 impl PhysXObjectDatumHandlers {
-    pub fn get_prop(player: &mut crate::player::DirPlayer, symbols: &mut SymbolTable, obj_ref: &DatumRef, prop_name: &str) -> Result<DatumRef, ScriptError> {
-            let px_ref = match crate::player::handlers::datum_handlers::cast_member_ref::checked_get_datum(player, obj_ref, symbols)? {
+    pub fn get_prop(
+        player: &mut crate::player::DirPlayer,
+        symbols: &mut SymbolTable,
+        obj_ref: &DatumRef,
+        prop_name: &str,
+    ) -> Result<DatumRef, ScriptError> {
+        let px_ref =
+            match crate::player::handlers::datum_handlers::cast_member_ref::checked_get_datum(
+                player, obj_ref, symbols,
+            )? {
                 Datum::PhysXObjectRef(r) => r.clone(),
                 _ => return Err(ScriptError::new("Expected PhysXObjectRef".to_string())),
             };
-            let member_ref = CastMemberRef {
-                cast_lib: px_ref.cast_lib,
-                cast_member: px_ref.cast_member,
-            };
-            match px_ref.object_type {
-                BuiltInSymbol::RigidBody => Self::get_rigid_body_prop(player, symbols, &member_ref, px_ref.name, prop_name),
-                BuiltInSymbol::Spring | BuiltInSymbol::LinearJoint | BuiltInSymbol::AngularJoint | BuiltInSymbol::D6Joint | BuiltInSymbol::Constraint => {
-                    Self::get_constraint_prop(player, symbols, &member_ref, px_ref.object_type, px_ref.name, prop_name)
-                }
-                _ => Err(ScriptError::new(format!("Unknown PhysX object type: {}", builtin_display(px_ref.object_type, symbols)? ))),
+        let member_ref = CastMemberRef {
+            cast_lib: px_ref.cast_lib,
+            cast_member: px_ref.cast_member,
+        };
+        match px_ref.object_type {
+            BuiltInSymbol::RigidBody => {
+                Self::get_rigid_body_prop(player, symbols, &member_ref, px_ref.name, prop_name)
             }
+            BuiltInSymbol::Spring
+            | BuiltInSymbol::LinearJoint
+            | BuiltInSymbol::AngularJoint
+            | BuiltInSymbol::D6Joint
+            | BuiltInSymbol::Constraint => Self::get_constraint_prop(
+                player,
+                symbols,
+                &member_ref,
+                px_ref.object_type,
+                px_ref.name,
+                prop_name,
+            ),
+            _ => Err(ScriptError::new(format!(
+                "Unknown PhysX object type: {}",
+                builtin_display(px_ref.object_type, symbols)?
+            ))),
+        }
     }
 
-    pub fn set_prop(player: &mut crate::player::DirPlayer, symbols: &mut SymbolTable, obj_ref: &DatumRef, prop_name: &str, value: DatumRef) -> Result<(), ScriptError> {
-            let px_ref = match crate::player::handlers::datum_handlers::cast_member_ref::checked_get_datum(player, obj_ref, symbols)? {
+    pub fn set_prop(
+        player: &mut crate::player::DirPlayer,
+        symbols: &mut SymbolTable,
+        obj_ref: &DatumRef,
+        prop_name: &str,
+        value: DatumRef,
+    ) -> Result<(), ScriptError> {
+        let px_ref =
+            match crate::player::handlers::datum_handlers::cast_member_ref::checked_get_datum(
+                player, obj_ref, symbols,
+            )? {
                 Datum::PhysXObjectRef(r) => r.clone(),
                 _ => return Err(ScriptError::new("Expected PhysXObjectRef".to_string())),
             };
-            let val = crate::player::handlers::datum_handlers::cast_member_ref::checked_get_datum(player, &value, symbols)?.clone();
-            let member_ref = CastMemberRef {
-                cast_lib: px_ref.cast_lib,
-                cast_member: px_ref.cast_member,
-            };
-            match px_ref.object_type {
-                BuiltInSymbol::RigidBody => Self::set_rigid_body_prop(player, symbols, &member_ref, px_ref.name, prop_name, val),
-                BuiltInSymbol::Spring | BuiltInSymbol::LinearJoint | BuiltInSymbol::AngularJoint | BuiltInSymbol::D6Joint | BuiltInSymbol::Constraint => {
-                    Self::set_constraint_prop(player, symbols, &member_ref, px_ref.object_type, px_ref.name, prop_name, val)
-                }
-                _ => Err(ScriptError::new(format!("Unknown PhysX object type: {}", builtin_display(px_ref.object_type, symbols)? ))),
+        let val = crate::player::handlers::datum_handlers::cast_member_ref::checked_get_datum(
+            player, &value, symbols,
+        )?
+        .clone();
+        let member_ref = CastMemberRef {
+            cast_lib: px_ref.cast_lib,
+            cast_member: px_ref.cast_member,
+        };
+        match px_ref.object_type {
+            BuiltInSymbol::RigidBody => {
+                Self::set_rigid_body_prop(player, symbols, &member_ref, px_ref.name, prop_name, val)
             }
+            BuiltInSymbol::Spring
+            | BuiltInSymbol::LinearJoint
+            | BuiltInSymbol::AngularJoint
+            | BuiltInSymbol::D6Joint
+            | BuiltInSymbol::Constraint => Self::set_constraint_prop(
+                player,
+                symbols,
+                &member_ref,
+                px_ref.object_type,
+                px_ref.name,
+                prop_name,
+                val,
+            ),
+            _ => Err(ScriptError::new(format!(
+                "Unknown PhysX object type: {}",
+                builtin_display(px_ref.object_type, symbols)?
+            ))),
+        }
     }
 
-    pub fn call(player: &mut crate::player::DirPlayer, symbols: &mut SymbolTable, obj_ref: &DatumRef, handler_name: &str, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-            let px_ref = match crate::player::handlers::datum_handlers::cast_member_ref::checked_get_datum(player, obj_ref, symbols)? {
+    pub fn call(
+        player: &mut crate::player::DirPlayer,
+        symbols: &mut SymbolTable,
+        obj_ref: &DatumRef,
+        handler_name: &str,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        let px_ref =
+            match crate::player::handlers::datum_handlers::cast_member_ref::checked_get_datum(
+                player, obj_ref, symbols,
+            )? {
                 Datum::PhysXObjectRef(r) => r.clone(),
                 _ => return Err(ScriptError::new("Expected PhysXObjectRef".to_string())),
             };
-            let member_ref = CastMemberRef {
-                cast_lib: px_ref.cast_lib,
-                cast_member: px_ref.cast_member,
-            };
-            match px_ref.object_type {
-                BuiltInSymbol::RigidBody => Self::call_rigid_body(player, symbols, &member_ref, px_ref.name, handler_name, args),
-                BuiltInSymbol::Spring | BuiltInSymbol::LinearJoint | BuiltInSymbol::AngularJoint | BuiltInSymbol::D6Joint | BuiltInSymbol::Constraint => {
-                    Self::call_constraint(player, symbols, &member_ref, px_ref.object_type, px_ref.name, handler_name, args)
-                }
-                _ => Err(ScriptError::new(format!(
-                    "No handler {} for PhysX {} object", handler_name, builtin_display(px_ref.object_type, symbols)?
-                ))),
-            }
+        let member_ref = CastMemberRef {
+            cast_lib: px_ref.cast_lib,
+            cast_member: px_ref.cast_member,
+        };
+        match px_ref.object_type {
+            BuiltInSymbol::RigidBody => Self::call_rigid_body(
+                player,
+                symbols,
+                &member_ref,
+                px_ref.name,
+                handler_name,
+                args,
+            ),
+            BuiltInSymbol::Spring
+            | BuiltInSymbol::LinearJoint
+            | BuiltInSymbol::AngularJoint
+            | BuiltInSymbol::D6Joint
+            | BuiltInSymbol::Constraint => Self::call_constraint(
+                player,
+                symbols,
+                &member_ref,
+                px_ref.object_type,
+                px_ref.name,
+                handler_name,
+                args,
+            ),
+            _ => Err(ScriptError::new(format!(
+                "No handler {} for PhysX {} object",
+                handler_name,
+                builtin_display(px_ref.object_type, symbols)?
+            ))),
+        }
     }
 
     // --- Rigid Body ---
@@ -100,35 +182,62 @@ impl PhysXObjectDatumHandlers {
         // element, so handle it before the immutable borrow of the member.
         if prop.eq_ignore_ascii_case("orientation") {
             let (axis, angle) = {
-                let member = player.movie.cast_manager.find_member_by_ref(member_ref)
+                let member = player
+                    .movie
+                    .cast_manager
+                    .find_member_by_ref(member_ref)
                     .ok_or_else(|| ScriptError::new("PhysX member not found".to_string()))?;
                 let physx = match &member.member_type {
                     CastMemberType::PhysXPhysics(p) => p,
                     _ => return Err(ScriptError::new("Not a PhysX member".to_string())),
                 };
-                let rb_name_display = symbols.display(&rb_name).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?.to_owned();
-                let rb = physx.state.bodies.iter()
+                let rb_name_display = symbols
+                    .display(&rb_name)
+                    .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
+                    .to_owned();
+                let rb = physx
+                    .state
+                    .bodies
+                    .iter()
                     .find(|r| r.name == rb_name)
-                    .ok_or_else(|| ScriptError::new(format!("Rigid body '{}' not found", rb_name_display)))?;
-                ([rb.orientation[0], rb.orientation[1], rb.orientation[2]], rb.orientation[3])
+                    .ok_or_else(|| {
+                        ScriptError::new(format!("Rigid body '{}' not found", rb_name_display))
+                    })?;
+                (
+                    [rb.orientation[0], rb.orientation[1], rb.orientation[2]],
+                    rb.orientation[3],
+                )
             };
             let axis_ref = player.alloc_datum(Datum::Vector(axis));
             let angle_ref = player.alloc_datum(Datum::Float(angle));
             return Ok(player.alloc_datum(Datum::List(
-                DatumType::List, VecDeque::from([axis_ref, angle_ref]), false,
+                DatumType::List,
+                VecDeque::from([axis_ref, angle_ref]),
+                false,
             )));
         }
 
-        let member = player.movie.cast_manager.find_member_by_ref(member_ref)
+        let member = player
+            .movie
+            .cast_manager
+            .find_member_by_ref(member_ref)
             .ok_or_else(|| ScriptError::new("PhysX member not found".to_string()))?;
         let physx = match &member.member_type {
             CastMemberType::PhysXPhysics(p) => p,
             _ => return Err(ScriptError::new("Not a PhysX member".to_string())),
         };
-        let rb_name_display = symbols.display(&rb_name).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?.to_owned();
-        let rb = physx.state.bodies.iter()
+        let rb_name_display = symbols
+            .display(&rb_name)
+            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
+            .to_owned();
+        let rb = physx
+            .state
+            .bodies
+            .iter()
             .find(|r| r.name == rb_name)
-            .ok_or_else(|| ScriptError::new(format!("Rigid body '{}' not found", rb_name_display)))?;
+            .ok_or_else(|| {
+                ScriptError::new(format!("Rigid body '{}' not found", rb_name_display))
+            })?;
 
         let result = match_ci!(prop, {
             "name" => Datum::String(symbols.display(&rb.name).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?.to_owned()),
@@ -197,28 +306,49 @@ impl PhysXObjectDatumHandlers {
         rb_name: Symbol,
     ) -> Result<DatumRef, ScriptError> {
         let (shape, half_extents, radius, half_height, center) = {
-            let member = player.movie.cast_manager.find_member_by_ref(member_ref)
+            let member = player
+                .movie
+                .cast_manager
+                .find_member_by_ref(member_ref)
                 .ok_or_else(|| ScriptError::new("PhysX member not found".to_string()))?;
             let physx = match &member.member_type {
                 CastMemberType::PhysXPhysics(p) => p,
                 _ => return Err(ScriptError::new("Not a PhysX member".to_string())),
             };
-            let rb_name_display = symbols.display(&rb_name).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?.to_owned();
-            let rb = physx.state.bodies.iter()
+            let rb_name_display = symbols
+                .display(&rb_name)
+                .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
+                .to_owned();
+            let rb = physx
+                .state
+                .bodies
+                .iter()
                 .find(|r| r.name == rb_name)
-                .ok_or_else(|| ScriptError::new(format!("Rigid body '{}' not found", rb_name_display)))?;
-            (rb.shape, rb.half_extents, rb.radius, rb.half_height, rb.center_of_mass)
+                .ok_or_else(|| {
+                    ScriptError::new(format!("Rigid body '{}' not found", rb_name_display))
+                })?;
+            (
+                rb.shape,
+                rb.half_extents,
+                rb.radius,
+                rb.half_height,
+                rb.center_of_mass,
+            )
         };
         let mut props = std::collections::VecDeque::new();
         match shape {
             PhysXShapeKind::Box => {
-                let k_len = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Length)));
+                let k_len =
+                    player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Length)));
                 let v_len = player.alloc_datum(Datum::Float(half_extents[0] * 2.0));
-                let k_wid = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Width)));
+                let k_wid =
+                    player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Width)));
                 let v_wid = player.alloc_datum(Datum::Float(half_extents[1] * 2.0));
-                let k_hei = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Height)));
+                let k_hei =
+                    player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Height)));
                 let v_hei = player.alloc_datum(Datum::Float(half_extents[2] * 2.0));
-                let k_ctr = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Center)));
+                let k_ctr =
+                    player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Center)));
                 let v_ctr = player.alloc_datum(Datum::Vector(center));
                 props.push_back((k_len, v_len));
                 props.push_back((k_wid, v_wid));
@@ -248,27 +378,50 @@ impl PhysXObjectDatumHandlers {
                 // Director docs: [#numvertices, #numfaces, #vertexlist, #face].
                 // We populate from the convex_hull if present; otherwise zeros.
                 let (nv, nf) = {
-                    let member = player.movie.cast_manager.find_member_by_ref(member_ref)
+                    let member = player
+                        .movie
+                        .cast_manager
+                        .find_member_by_ref(member_ref)
                         .ok_or_else(|| ScriptError::new("PhysX member not found".to_string()))?;
                     let physx = match &member.member_type {
                         CastMemberType::PhysXPhysics(p) => p,
                         _ => return Err(ScriptError::new("Not a PhysX member".to_string())),
                     };
-                    let rb_name_display = symbols.display(&rb_name).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?.to_owned();
-                    let rb = physx.state.bodies.iter()
+                    let rb_name_display = symbols
+                        .display(&rb_name)
+                        .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
+                        .to_owned();
+                    let rb = physx
+                        .state
+                        .bodies
+                        .iter()
                         .find(|r| r.name == rb_name)
-                        .ok_or_else(|| ScriptError::new(format!("Rigid body '{}' not found", rb_name_display)))?;
-                    if let Some(h) = &rb.convex_hull { (h.verts.len() as i32, h.polygons.len() as i32) }
-                    else { (0, 0) }
+                        .ok_or_else(|| {
+                            ScriptError::new(format!("Rigid body '{}' not found", rb_name_display))
+                        })?;
+                    if let Some(h) = &rb.convex_hull {
+                        (h.verts.len() as i32, h.polygons.len() as i32)
+                    } else {
+                        (0, 0)
+                    }
                 };
                 let k_nv = player.alloc_datum(Datum::Symbol(symbols.intern("numvertices")));
                 let v_nv = player.alloc_datum(Datum::Int(nv));
                 let k_nf = player.alloc_datum(Datum::Symbol(symbols.intern("numfaces")));
                 let v_nf = player.alloc_datum(Datum::Int(nf));
-                let k_vl = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::VertexList)));
-                let v_vl = player.alloc_datum(Datum::List(DatumType::List, std::collections::VecDeque::new(), false));
+                let k_vl =
+                    player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::VertexList)));
+                let v_vl = player.alloc_datum(Datum::List(
+                    DatumType::List,
+                    std::collections::VecDeque::new(),
+                    false,
+                ));
                 let k_f = player.alloc_datum(Datum::Symbol(symbols.intern("face")));
-                let v_f = player.alloc_datum(Datum::List(DatumType::List, std::collections::VecDeque::new(), false));
+                let v_f = player.alloc_datum(Datum::List(
+                    DatumType::List,
+                    std::collections::VecDeque::new(),
+                    false,
+                ));
                 props.push_back((k_nv, v_nv));
                 props.push_back((k_nf, v_nf));
                 props.push_back((k_vl, v_vl));
@@ -297,20 +450,37 @@ impl PhysXObjectDatumHandlers {
                     };
                     let angle = crate::player::handlers::datum_handlers::cast_member_ref::checked_get_datum(player, &items[1], symbols)?.to_float()?;
                     Some([axis[0], axis[1], axis[2], angle])
-                } else { None }
-            } else { None }
-        } else { None };
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
-        let member = player.movie.cast_manager.find_mut_member_by_ref(member_ref)
+        let member = player
+            .movie
+            .cast_manager
+            .find_mut_member_by_ref(member_ref)
             .ok_or_else(|| ScriptError::new("PhysX member not found".to_string()))?;
         let physx = match &mut member.member_type {
             CastMemberType::PhysXPhysics(p) => p,
             _ => return Err(ScriptError::new("Not a PhysX member".to_string())),
         };
-        let rb_name_display = symbols.display(&rb_name).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?.to_owned();
-        let rb = physx.state.bodies.iter_mut()
+        let rb_name_display = symbols
+            .display(&rb_name)
+            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
+            .to_owned();
+        let rb = physx
+            .state
+            .bodies
+            .iter_mut()
             .find(|r| r.name == rb_name)
-            .ok_or_else(|| ScriptError::new(format!("Rigid body '{}' not found", rb_name_display)))?;
+            .ok_or_else(|| {
+                ScriptError::new(format!("Rigid body '{}' not found", rb_name_display))
+            })?;
 
         match_ci!(prop, {
             "position" => {
@@ -412,8 +582,14 @@ impl PhysXObjectDatumHandlers {
         // in the SAME update — so the rays started at the fallen position, hit
         // nothing, left pHoverContactPoint empty, and `Snowboard Enemy Graphics`
         // then read `[1]` off an empty list ("List index 1 out of bounds").
-        let sync = if prop.eq_ignore_ascii_case("position") || prop.eq_ignore_ascii_case("orientation") || prop.eq_ignore_ascii_case("transform") {
-            let rb_name_text = symbols.display(&rb_name).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?.to_owned();
+        let sync = if prop.eq_ignore_ascii_case("position")
+            || prop.eq_ignore_ascii_case("orientation")
+            || prop.eq_ignore_ascii_case("transform")
+        {
+            let rb_name_text = symbols
+                .display(&rb_name)
+                .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
+                .to_owned();
             Self::physx_body_sync_data(player, symbols, &member_ref, &rb_name_text)?
         } else {
             None
@@ -421,7 +597,10 @@ impl PhysXObjectDatumHandlers {
         if let Some((model_name, t)) = sync {
             if let Some(target) = Self::resolve_model_owner(player, symbols, &model_name)? {
                 crate::player::handlers::datum_handlers::shockwave3d_object::set_node_transform(
-                    player, &target, symbols.intern(&model_name), t,
+                    player,
+                    &target,
+                    symbols.intern(&model_name),
+                    t,
                 );
             }
         }
@@ -438,24 +617,41 @@ impl PhysXObjectDatumHandlers {
         member_ref: &CastMemberRef,
         rb_name: &str,
     ) -> Result<Option<(String, [f32; 16])>, ScriptError> {
-        let member = match player.movie.cast_manager.find_member_by_ref(member_ref) { Some(member) => member, None => return Ok(None) };
-        let CastMemberType::PhysXPhysics(physx) = &member.member_type else { return Ok(None) };
+        let member = match player.movie.cast_manager.find_member_by_ref(member_ref) {
+            Some(member) => member,
+            None => return Ok(None),
+        };
+        let CastMemberType::PhysXPhysics(physx) = &member.member_type else {
+            return Ok(None);
+        };
         let mut matching_body = None;
         for body in &physx.state.bodies {
-            let body_name = symbols.lower(&body.name).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+            let body_name = symbols
+                .lower(&body.name)
+                .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
             if body_name.eq_ignore_ascii_case(rb_name) {
                 matching_body = Some(body);
                 break;
             }
         }
-        let rb = match matching_body { Some(rb) => rb, None => return Ok(None) };
-        if rb.body_type == crate::player::cast_member::PhysXBodyType::Static || rb.model_name.is_empty() {
+        let rb = match matching_body {
+            Some(rb) => rb,
+            None => return Ok(None),
+        };
+        if rb.body_type == crate::player::cast_member::PhysXBodyType::Static
+            || rb.model_name.is_empty()
+        {
             return Ok(None);
         }
         let t = crate::player::handlers::datum_handlers::cast_member::physx::body_model_transform(
-            rb.position, rb.orientation, rb.center_of_mass, rb.sync_scale,
+            rb.position,
+            rb.orientation,
+            rb.center_of_mass,
+            rb.sync_scale,
         );
-        if t.iter().any(|v| !v.is_finite()) { return Ok(None); }
+        if t.iter().any(|v| !v.is_finite()) {
+            return Ok(None);
+        }
         Ok(Some((rb.model_name.clone(), t)))
     }
 
@@ -471,7 +667,9 @@ impl PhysXObjectDatumHandlers {
                 if let CastMemberType::Shockwave3d(w3d) = &member.member_type {
                     if let Some(scene) = &w3d.parsed_scene {
                         for node in &scene.nodes {
-                            let node_name = symbols.lower(&node.name).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+                            let node_name = symbols.lower(&node.name).map_err(|_| {
+                                crate::player::symbols::symbol::SymbolError::Foreign
+                            })?;
                             if node_name.eq_ignore_ascii_case(model_name) {
                                 return Ok(Some(CastMemberRef {
                                     cast_lib: cast.number as i32,
@@ -838,33 +1036,47 @@ impl PhysXObjectDatumHandlers {
         // Take an owned copy so the D6 limit getters below can allocate list datums
         // (which needs `&mut player`) without holding a borrow of the member.
         let c = {
-            let member = player.movie.cast_manager.find_member_by_ref(member_ref)
+            let member = player
+                .movie
+                .cast_manager
+                .find_member_by_ref(member_ref)
                 .ok_or_else(|| ScriptError::new("PhysX member not found".to_string()))?;
             let physx = match &member.member_type {
                 CastMemberType::PhysXPhysics(p) => p,
                 _ => return Err(ScriptError::new("Not a PhysX member".to_string())),
             };
-            let name_display = symbols.display(&name).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?.to_owned();
-            physx.state.constraints.iter()
+            let name_display = symbols
+                .display(&name)
+                .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
+                .to_owned();
+            physx
+                .state
+                .constraints
+                .iter()
                 .find(|c| c.name == name)
                 .cloned()
-                .ok_or_else(|| ScriptError::new(format!("Constraint '{}' not found", name_display)))?
+                .ok_or_else(|| {
+                    ScriptError::new(format!("Constraint '{}' not found", name_display))
+                })?
         };
         let c = &c;
 
-        let mut motion_symbol = |code: u8| Datum::Symbol(symbols.intern(match code {
-            0 => "locked",
-            1 => "limited",
-            _ => "free",
-        }));
+        let mut motion_symbol = |code: u8| {
+            Datum::Symbol(symbols.intern(match code {
+                0 => "locked",
+                1 => "limited",
+                _ => "free",
+            }))
+        };
         fn limit_datum(
             player: &mut crate::player::DirPlayer,
-        symbols: &mut SymbolTable,
+            symbols: &mut SymbolTable,
             vals: Option<[f64; 4]>,
         ) -> Datum {
             match vals {
                 Some(v) => {
-                    let items = v.iter()
+                    let items = v
+                        .iter()
                         .map(|f| player.alloc_datum(Datum::Float(*f)))
                         .collect::<std::collections::VecDeque<_>>();
                     Datum::List(DatumType::List, items, false)
@@ -934,14 +1146,23 @@ impl PhysXObjectDatumHandlers {
             None
         };
 
-        let member = player.movie.cast_manager.find_mut_member_by_ref(member_ref)
+        let member = player
+            .movie
+            .cast_manager
+            .find_mut_member_by_ref(member_ref)
             .ok_or_else(|| ScriptError::new("PhysX member not found".to_string()))?;
         let physx = match &mut member.member_type {
             CastMemberType::PhysXPhysics(p) => p,
             _ => return Err(ScriptError::new("Not a PhysX member".to_string())),
         };
-        let name_display = symbols.display(&name).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?.to_owned();
-        let c = physx.state.constraints.iter_mut()
+        let name_display = symbols
+            .display(&name)
+            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
+            .to_owned();
+        let c = physx
+            .state
+            .constraints
+            .iter_mut()
             .find(|c| c.name == name)
             .ok_or_else(|| ScriptError::new(format!("Constraint '{}' not found", name_display)))?;
 
@@ -952,7 +1173,10 @@ impl PhysXObjectDatumHandlers {
         // The dictionary notes limits must be set BEFORE the matching motion symbol.
         let motion_code = |v: &Datum| -> Result<Option<u8>, ScriptError> {
             let s = match v {
-                Datum::Symbol(s) => symbols.display(s).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?.to_owned(),
+                Datum::Symbol(s) => symbols
+                    .display(s)
+                    .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
+                    .to_owned(),
                 Datum::String(s) => s.clone(),
                 _ => return Ok(None),
             };
@@ -1017,7 +1241,10 @@ impl PhysXObjectDatumHandlers {
     ) -> Result<DatumRef, ScriptError> {
         // Suppress unused warnings — these arms are referenced in the macro
         let _ = (PhysXSleepMode::Energy, PhysXSleepMode::LinearVelocity);
-        let name_display = symbols.display(&name).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?.to_owned();
+        let name_display = symbols
+            .display(&name)
+            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
+            .to_owned();
         match_ci!(handler_name, {
             "getName" => Ok(player.alloc_datum(Datum::String(symbols.display(&name).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?.to_owned()))),
             "getRigidBodyA" | "getBodyA" => {

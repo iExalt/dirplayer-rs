@@ -58,7 +58,12 @@ fn top_level_atoms_include_globals_and_functions() {
             _ => None,
         })
         .collect();
-    assert_eq!(fn_names.len(), 3, "expected 3 declared functions, got {:?}", fn_names);
+    assert_eq!(
+        fn_names.len(),
+        3,
+        "expected 3 declared functions, got {:?}",
+        fn_names
+    );
     assert!(fn_names.iter().any(|n| n == "on_prepareMovie"));
     assert!(fn_names.iter().any(|n| n == "on_mouseUp"));
     assert!(fn_names.iter().any(|n| n == "add"));
@@ -113,7 +118,11 @@ fn add_function_is_exactly_three_instructions_and_return() {
     assert_eq!(args, vec!["x", "y"]);
 
     let ops = collect_ops(&f.script.bytecode);
-    assert_eq!(ops.len(), 4, "expected exactly: GETARG 0; GETARG 1; ADD; RETURN");
+    assert_eq!(
+        ops.len(),
+        4,
+        "expected exactly: GETARG 0; GETARG 1; ADD; RETURN"
+    );
     assert_eq!(ops[0].1, JsOp::Getarg);
     assert_eq!(const_operand(&ops[0].2), 0);
     assert_eq!(ops[1].1, JsOp::Getarg);
@@ -130,7 +139,10 @@ fn on_preparemovie_calls_trace_with_concat() {
         .into_iter()
         .map(|(_, o, _)| o)
         .collect();
-    assert!(kinds.contains(&JsOp::Add), "string concat in trace argument");
+    assert!(
+        kinds.contains(&JsOp::Add),
+        "string concat in trace argument"
+    );
     assert!(kinds.contains(&JsOp::Call), "trace() invocation");
 }
 
@@ -154,8 +166,10 @@ fn on_mouseup_has_loop_and_conditional() {
         .into_iter()
         .map(|(_, o, _)| o)
         .collect();
-    assert!(kinds.contains(&JsOp::Ifeq) || kinds.contains(&JsOp::Ifne),
-        "for-loop conditional branch");
+    assert!(
+        kinds.contains(&JsOp::Ifeq) || kinds.contains(&JsOp::Ifne),
+        "for-loop conditional branch"
+    );
     assert!(kinds.contains(&JsOp::Goto), "for-loop back-edge");
     assert!(kinds.contains(&JsOp::Gt), "if (pCounter > 100)");
     assert!(kinds.contains(&JsOp::Setprop), "sprite(1).locH = ...");

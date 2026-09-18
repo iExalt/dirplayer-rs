@@ -108,7 +108,14 @@ pub fn record_eval_local_hit() {
 #[inline(always)]
 pub fn record_ctxvar_local(is_write: bool) {
     if enabled() {
-        bump(if is_write { &CTXVAR_LOCAL_SET } else { &CTXVAR_LOCAL_GET }, 1);
+        bump(
+            if is_write {
+                &CTXVAR_LOCAL_SET
+            } else {
+                &CTXVAR_LOCAL_GET
+            },
+            1,
+        );
     }
 }
 
@@ -126,11 +133,20 @@ pub fn reset() {
         slot.store(0, Ordering::Relaxed);
     }
     for slot in [
-        &SYNC_OUT_EVENTS, &SYNC_OUT_LOCALS, &SYNC_IN_EVENTS, &SYNC_IN_LOCALS,
-        &HANDLERS_COMPILED, &HANDLERS_REJECTED,
-        &CALLS_WITH_IR, &CALLS_WITHOUT_IR, &CALL_ARGS_TOTAL,
-        &EVAL_LOCAL_HIT, &CTXVAR_LOCAL_GET, &CTXVAR_LOCAL_SET,
-        &REENTRY_ESCAPE_FIRST, &REENTRY_TO_NATIVE,
+        &SYNC_OUT_EVENTS,
+        &SYNC_OUT_LOCALS,
+        &SYNC_IN_EVENTS,
+        &SYNC_IN_LOCALS,
+        &HANDLERS_COMPILED,
+        &HANDLERS_REJECTED,
+        &CALLS_WITH_IR,
+        &CALLS_WITHOUT_IR,
+        &CALL_ARGS_TOTAL,
+        &EVAL_LOCAL_HIT,
+        &CTXVAR_LOCAL_GET,
+        &CTXVAR_LOCAL_SET,
+        &REENTRY_ESCAPE_FIRST,
+        &REENTRY_TO_NATIVE,
     ] {
         slot.store(0, Ordering::Relaxed);
     }
@@ -162,7 +178,14 @@ pub fn record_ir_reentry(escape_first: bool) {
     if !enabled() {
         return;
     }
-    bump(if escape_first { &REENTRY_ESCAPE_FIRST } else { &REENTRY_TO_NATIVE }, 1);
+    bump(
+        if escape_first {
+            &REENTRY_ESCAPE_FIRST
+        } else {
+            &REENTRY_TO_NATIVE
+        },
+        1,
+    );
 }
 
 #[inline(always)]
@@ -189,7 +212,14 @@ pub fn record_compile_outcome(compiled: bool) {
     if !enabled() {
         return;
     }
-    bump(if compiled { &HANDLERS_COMPILED } else { &HANDLERS_REJECTED }, 1);
+    bump(
+        if compiled {
+            &HANDLERS_COMPILED
+        } else {
+            &HANDLERS_REJECTED
+        },
+        1,
+    );
 }
 
 #[inline(always)]
@@ -197,7 +227,14 @@ pub fn record_handler_call(has_ir: bool, n_args: usize) {
     if !enabled() {
         return;
     }
-    bump(if has_ir { &CALLS_WITH_IR } else { &CALLS_WITHOUT_IR }, 1);
+    bump(
+        if has_ir {
+            &CALLS_WITH_IR
+        } else {
+            &CALLS_WITHOUT_IR
+        },
+        1,
+    );
     bump(&CALL_ARGS_TOTAL, n_args as u64);
 }
 
@@ -206,7 +243,11 @@ fn get(c: &AtomicU64) -> u64 {
 }
 
 fn pct(part: u64, whole: u64) -> f64 {
-    if whole == 0 { 0.0 } else { part as f64 * 100.0 / whole as f64 }
+    if whole == 0 {
+        0.0
+    } else {
+        part as f64 * 100.0 / whole as f64
+    }
 }
 
 /// Human-readable report. Opcodes are listed most-executed first, with the
@@ -235,7 +276,11 @@ pub fn report() -> String {
          (mean {:.2}/call)\n\n",
         pct(calls_ir, calls),
         pct(calls_no_ir, calls),
-        if calls == 0 { 0.0 } else { args as f64 / calls as f64 },
+        if calls == 0 {
+            0.0
+        } else {
+            args as f64 / calls as f64
+        },
     ));
 
     let hc = get(&HANDLERS_COMPILED);
@@ -255,8 +300,16 @@ pub fn report() -> String {
         "locals sync\n  out              {so_e} events, {so_l} slots (mean {:.2})\n  \
          in               {si_e} events, {si_l} slots (mean {:.2})\n  \
          slots copied     {}\n\n",
-        if so_e == 0 { 0.0 } else { so_l as f64 / so_e as f64 },
-        if si_e == 0 { 0.0 } else { si_l as f64 / si_e as f64 },
+        if so_e == 0 {
+            0.0
+        } else {
+            so_l as f64 / so_e as f64
+        },
+        if si_e == 0 {
+            0.0
+        } else {
+            si_l as f64 / si_e as f64
+        },
         so_l + si_l,
     ));
 
@@ -296,7 +349,9 @@ pub fn report() -> String {
         // not be able to take the run down.
         let name = num::FromPrimitive::from_usize(*idx)
             .and_then(|op: OpCode| {
-                crate::director::lingo::constants::opcode_names().get(&op).cloned()
+                crate::director::lingo::constants::opcode_names()
+                    .get(&op)
+                    .cloned()
             })
             .map(|n| n.to_string())
             .unwrap_or_else(|| format!("<0x{idx:02x}>"));

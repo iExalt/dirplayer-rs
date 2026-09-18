@@ -178,3 +178,49 @@ failed with `Flash request cast binding is stale or replaced`. This replaces
 the unexplained timeout with a concrete runtime failure; it does not satisfy
 the child lifecycle gate. No stale-cast repair was attempted before publication.
 The child/input changes remain uncommitted work in progress.
+
+## Score initialization ownership dependency
+
+Current source inspection traces child initialization from
+`run_movie_init_owned_at` through `begin_all_sprites` into
+`Score::begin_sprites`. `RuntimeSession::with_player` passes an explicit player
+and symbols but does not change ambient player selection. `begin_sprites`
+still uses `reserve_player_*` for span eligibility, Stage member assignment
+through `sprite_set_prop`, cast metadata and behavior allocation/attachment.
+A correct parsed child score therefore does not establish correct mounted child
+state. The native parser smoke test previously checked only score presence.
+
+The next diagnostic mounts the real fixture through the production nested
+startup with an entered parent channel 1, then compares the parsed channel/cast
+pair and mounted child/parent state. If this confirms ambient score access as
+the cause, the repair must pass the actual player through startup and its
+helpers, preserving Stage and FilmLoop semantics with short borrows. It must
+not introduce an active-player adapter or leave member assignment on an ambient
+player after fixing only the eligibility check. No runtime repair or passing
+regression is claimed in this source-level finding.
+
+The native mounted-state regression now reproduces the defect (one failure,
+595 filtered out, exit 101). The parsed frame 0/raw channel 6 pair is `(1,1)`.
+The parent keeps member `(1,91)` and `entered=true`; child 2 has `member=None`
+and `entered=true`, with owner session 79/player 2/generation 1 and
+`FlashHostRoute::LocalOwned`. No Flash instance generation exists yet. The
+navigator inspected actual stdout, failure diagnostics and source/artifact
+receipts in `/private/tmp/dirplayer-child-flash-validation/native-mounted-diagnostic-1/`.
+
+Artifact SHA-256:
+`9b3604abae42e3c67bdebc2347fb3bfcffe82643868fe6f8e59b706c2581c601`.
+`nested.rs` source SHA-256:
+`bac3e7fa3b51827cc5937a46bca8745fba8ddc75c2bedde45b8003545560b93c`.
+This new failure supplements the earlier passing 595-test checkpoint; the
+current augmented test suite is not green. The production migration proposal
+is pending, and the cast-binding fence remains unchanged.
+
+## Accepted resumed component
+
+The interrupted score/child-host/MouseDown component is now accepted at the
+[source and artifact identity](score-child-pointer-20260917/acceptance.json):
+600 native tests, four focused browser wrappers, the combined 19-fixture browser
+gate, and final production WASM compilation pass. The
+[acceptance record](score-child-pointer-20260917/README.md) states exact behavior,
+fixtures and renderer boundaries. Earlier failures above are historical; full
+Stage 2 and the separately listed remaining ownership paths stay open.

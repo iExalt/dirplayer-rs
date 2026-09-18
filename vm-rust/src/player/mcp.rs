@@ -1,4 +1,7 @@
-use super::{ScriptError, symbols::{symbol::SymbolError, symbol_table::SymbolTable}};
+use super::{
+    symbols::{symbol::SymbolError, symbol_table::SymbolTable},
+    ScriptError,
+};
 // MCP (Model Context Protocol) query functions for VM debugging
 // These functions return JSON strings for use with the MCP server
 
@@ -8,11 +11,16 @@ use fxhash::FxHashMap;
 use itertools::Itertools;
 use serde::Serialize;
 
-use crate::{director::{
-    enums::ScriptType,
-    file::get_variable_multiplier,
-    lingo::{decompiler::handler::decompile_handler, script::ScriptContext as LingoScriptContext},
-}, player::{datum_formatting::format_concrete_datum_with_depth, symbols::symbol::Symbol}};
+use crate::{
+    director::{
+        enums::ScriptType,
+        file::get_variable_multiplier,
+        lingo::{
+            decompiler::handler::decompile_handler, script::ScriptContext as LingoScriptContext,
+        },
+    },
+    player::{datum_formatting::format_concrete_datum_with_depth, symbols::symbol::Symbol},
+};
 
 use super::{
     allocator::ScriptInstanceAllocatorTrait,
@@ -244,7 +252,10 @@ pub struct McpEvalResult {
 /// Serialize result to JSON, with error fallback
 fn to_json<T: Serialize>(result: &T) -> String {
     serde_json::to_string_pretty(result).unwrap_or_else(|e| {
-        serde_json::to_string(&McpError { error: e.to_string() }).unwrap()
+        serde_json::to_string(&McpError {
+            error: e.to_string(),
+        })
+        .unwrap()
     })
 }
 
@@ -254,7 +265,10 @@ fn mcp_error(msg: impl Into<String>) -> String {
 }
 
 fn symbol_name(symbols: &SymbolTable, symbol: &Symbol) -> Result<String, ScriptError> {
-    Ok(symbols.display(symbol).map_err(|_| SymbolError::Foreign)?.to_owned())
+    Ok(symbols
+        .display(symbol)
+        .map_err(|_| SymbolError::Foreign)?
+        .to_owned())
 }
 
 fn script_type_str(script_type: &ScriptType) -> &'static str {
@@ -271,15 +285,28 @@ fn script_type_str(script_type: &ScriptType) -> &'static str {
 /// Max length for compact value representation
 const COMPACT_VALUE_MAX_LEN: usize = 60;
 
-fn datum_to_mcp_value(player: &DirPlayer, symbols: &SymbolTable, datum_ref: &super::DatumRef) -> Result<McpDatumValue, ScriptError> {
+fn datum_to_mcp_value(
+    player: &DirPlayer,
+    symbols: &SymbolTable,
+    datum_ref: &super::DatumRef,
+) -> Result<McpDatumValue, ScriptError> {
     datum_to_mcp_value_with_options(player, symbols, datum_ref, false)
 }
 
-fn datum_to_mcp_value_compact(player: &DirPlayer, symbols: &SymbolTable, datum_ref: &super::DatumRef) -> Result<McpDatumValue, ScriptError> {
+fn datum_to_mcp_value_compact(
+    player: &DirPlayer,
+    symbols: &SymbolTable,
+    datum_ref: &super::DatumRef,
+) -> Result<McpDatumValue, ScriptError> {
     datum_to_mcp_value_with_options(player, symbols, datum_ref, true)
 }
 
-fn datum_to_mcp_value_with_options(player: &DirPlayer, symbols: &SymbolTable, datum_ref: &super::DatumRef, compact: bool) -> Result<McpDatumValue, ScriptError> {
+fn datum_to_mcp_value_with_options(
+    player: &DirPlayer,
+    symbols: &SymbolTable,
+    datum_ref: &super::DatumRef,
+    compact: bool,
+) -> Result<McpDatumValue, ScriptError> {
     let datum = player.get_datum(datum_ref);
     let datum_id = match datum_ref {
         super::DatumRef::Void => None,
@@ -301,7 +328,12 @@ fn datum_to_mcp_value_with_options(player: &DirPlayer, symbols: &SymbolTable, da
 }
 
 /// Format datum in compact form for summaries
-fn format_datum_compact(datum: &crate::director::lingo::datum::Datum, player: &DirPlayer, symbols: &SymbolTable, datum_id: Option<usize>) -> Result<String, ScriptError> {
+fn format_datum_compact(
+    datum: &crate::director::lingo::datum::Datum,
+    player: &DirPlayer,
+    symbols: &SymbolTable,
+    datum_id: Option<usize>,
+) -> Result<String, ScriptError> {
     use crate::director::lingo::datum::Datum;
 
     Ok(match datum {
@@ -319,7 +351,7 @@ fn format_datum_compact(datum: &crate::director::lingo::datum::Datum, player: &D
             } else {
                 format!("\"{}\"", s)
             }
-        },
+        }
         Datum::StringChunk(..) => {
             let s = datum.string_value(symbols).unwrap_or_default();
             if s.len() > COMPACT_VALUE_MAX_LEN - 2 {
@@ -327,36 +359,43 @@ fn format_datum_compact(datum: &crate::director::lingo::datum::Datum, player: &D
             } else {
                 format!("\"{}\"", s)
             }
-        },
+        }
 
         // Lists - show count only
         Datum::List(_, items, _) => {
             format!("<list:{}>", items.len())
-        },
+        }
 
         // PropLists - show count only
         Datum::PropList(entries, _) => {
             format!("<propList:{}>", entries.len())
-        },
+        }
 
         // Script instances - compact form with ID
         Datum::ScriptInstanceRef(instance_ref) => {
             let instance = player.allocator.get_script_instance(instance_ref);
-            if let Some(script) = player.movie.cast_manager.get_script_by_ref(&instance.script) {
+            if let Some(script) = player
+                .movie
+                .cast_manager
+                .get_script_by_ref(&instance.script)
+            {
                 format!("<{}:{}>", script.name, instance_ref)
             } else {
                 format!("<instance:{}>", instance_ref)
             }
-        },
+        }
 
         // Script refs
         Datum::ScriptRef(member_ref) => {
             if let Some(script) = player.movie.cast_manager.get_script_by_ref(member_ref) {
                 format!("<script:{}>", script.name)
             } else {
-                format!("<script:{},{}>", member_ref.cast_lib, member_ref.cast_member)
+                format!(
+                    "<script:{},{}>",
+                    member_ref.cast_lib, member_ref.cast_member
+                )
             }
-        },
+        }
 
         // For other types, use ID-based short form if available
         _ => {
@@ -375,7 +414,11 @@ fn get_script_info(script: &Script, symbols: &SymbolTable) -> Result<McpScriptIn
         cast_member: script.member_ref.cast_member,
         name: script.name.clone(),
         script_type: script_type_str(&script.script_type).to_string(),
-        handlers: script.handler_names.iter().map(|x| symbol_name(symbols, x)).collect::<Result<_, _>>()?
+        handlers: script
+            .handler_names
+            .iter()
+            .map(|x| symbol_name(symbols, x))
+            .collect::<Result<_, _>>()?,
     })
 }
 
@@ -452,16 +495,19 @@ fn get_argument_names(lctx: Option<&LingoScriptContext>, arg_ids: &[u16]) -> Vec
 /// - limit: Maximum number of scripts to return (None = all)
 /// - offset: Number of scripts to skip (None = 0)
 pub fn mcp_list_scripts(
-    player: &DirPlayer, symbols: &SymbolTable,
+    player: &DirPlayer,
+    symbols: &SymbolTable,
     cast_lib: Option<i32>,
     limit: Option<usize>,
     offset: Option<usize>,
 ) -> String {
-    mcp_list_scripts_result(player, symbols, cast_lib, limit, offset).unwrap_or_else(|error| mcp_error(error.message))
+    mcp_list_scripts_result(player, symbols, cast_lib, limit, offset)
+        .unwrap_or_else(|error| mcp_error(error.message))
 }
 
 fn mcp_list_scripts_result(
-    player: &DirPlayer, symbols: &SymbolTable,
+    player: &DirPlayer,
+    symbols: &SymbolTable,
     cast_lib: Option<i32>,
     limit: Option<usize>,
     offset: Option<usize>,
@@ -487,18 +533,36 @@ fn mcp_list_scripts_result(
     Ok(to_json(&McpScriptList {
         scripts,
         total_count,
-        offset: if offset_val > 0 { Some(offset_val) } else { None },
+        offset: if offset_val > 0 {
+            Some(offset_val)
+        } else {
+            None
+        },
         limit,
     }))
 }
 
 /// Get detailed information about a specific script
-pub fn mcp_get_script(player: &DirPlayer, symbols: &SymbolTable, cast_lib: i32, cast_member: i32) -> String {
-    mcp_get_script_result(player, symbols, cast_lib, cast_member).unwrap_or_else(|error| mcp_error(error.message))
+pub fn mcp_get_script(
+    player: &DirPlayer,
+    symbols: &SymbolTable,
+    cast_lib: i32,
+    cast_member: i32,
+) -> String {
+    mcp_get_script_result(player, symbols, cast_lib, cast_member)
+        .unwrap_or_else(|error| mcp_error(error.message))
 }
 
-fn mcp_get_script_result(player: &DirPlayer, symbols: &SymbolTable, cast_lib: i32, cast_member: i32) -> Result<String, ScriptError> {
-    let member_ref = CastMemberRef { cast_lib, cast_member };
+fn mcp_get_script_result(
+    player: &DirPlayer,
+    symbols: &SymbolTable,
+    cast_lib: i32,
+    cast_member: i32,
+) -> Result<String, ScriptError> {
+    let member_ref = CastMemberRef {
+        cast_lib,
+        cast_member,
+    };
 
     let ctx = match get_script_context(player, &member_ref) {
         Ok(c) => c,
@@ -509,22 +573,24 @@ fn mcp_get_script_result(player: &DirPlayer, symbols: &SymbolTable, cast_lib: i3
         .script
         .handlers
         .iter()
-        .map(|(name, handler)| Ok(McpHandlerInfo {
-            name: symbol_name(symbols, name)?,
-            arguments: get_argument_names(Some(ctx.lctx), &handler.argument_name_ids),
-            locals: handler
-                .local_name_ids
-                .iter()
-                .map(|&id| {
-                    ctx.lctx
-                        .names
-                        .get(id as usize)
-                        .cloned()
-                        .unwrap_or_else(|| format!("local_{}", id))
-                })
-                .collect(),
-            bytecode_count: handler.bytecode_array.len(),
-        }))
+        .map(|(name, handler)| {
+            Ok(McpHandlerInfo {
+                name: symbol_name(symbols, name)?,
+                arguments: get_argument_names(Some(ctx.lctx), &handler.argument_name_ids),
+                locals: handler
+                    .local_name_ids
+                    .iter()
+                    .map(|&id| {
+                        ctx.lctx
+                            .names
+                            .get(id as usize)
+                            .cloned()
+                            .unwrap_or_else(|| format!("local_{}", id))
+                    })
+                    .collect(),
+                bytecode_count: handler.bytecode_array.len(),
+            })
+        })
         .collect::<Result<_, ScriptError>>()?;
 
     Ok(to_json(&McpScriptDetails {
@@ -533,27 +599,39 @@ fn mcp_get_script_result(player: &DirPlayer, symbols: &SymbolTable, cast_lib: i3
         name: ctx.script.name.clone(),
         script_type: script_type_str(&ctx.script.script_type).to_string(),
         handlers,
-        properties: ctx.script.properties.borrow().keys().map(|k| symbol_name(symbols, k)).collect::<Result<_, _>>()?,
+        properties: ctx
+            .script
+            .properties
+            .borrow()
+            .keys()
+            .map(|k| symbol_name(symbols, k))
+            .collect::<Result<_, _>>()?,
     }))
 }
 
 /// Disassemble a handler (show bytecode)
 pub fn mcp_disassemble_handler(
-    player: &DirPlayer, symbols: &mut SymbolTable,
+    player: &DirPlayer,
+    symbols: &mut SymbolTable,
     cast_lib: i32,
     cast_member: i32,
     handler_name: &str,
 ) -> String {
-    mcp_disassemble_handler_result(player, symbols, cast_lib, cast_member, handler_name).unwrap_or_else(|error| mcp_error(error.message))
+    mcp_disassemble_handler_result(player, symbols, cast_lib, cast_member, handler_name)
+        .unwrap_or_else(|error| mcp_error(error.message))
 }
 
 fn mcp_disassemble_handler_result(
-    player: &DirPlayer, symbols: &mut SymbolTable,
+    player: &DirPlayer,
+    symbols: &mut SymbolTable,
     cast_lib: i32,
     cast_member: i32,
     handler_name: &str,
 ) -> Result<String, ScriptError> {
-    let member_ref = CastMemberRef { cast_lib, cast_member };
+    let member_ref = CastMemberRef {
+        cast_lib,
+        cast_member,
+    };
 
     let ctx = match get_script_context(player, &member_ref) {
         Ok(c) => c,
@@ -562,7 +640,12 @@ fn mcp_disassemble_handler_result(
 
     let handler = match ctx.script.get_own_handler(symbols.intern(handler_name)) {
         Some(h) => h,
-        None => return Ok(mcp_error(format!("Handler '{}' not found in script", handler_name))),
+        None => {
+            return Ok(mcp_error(format!(
+                "Handler '{}' not found in script",
+                handler_name
+            )))
+        }
     };
 
     Ok(to_json(&McpDisassemblyResult {
@@ -583,21 +666,27 @@ fn mcp_disassemble_handler_result(
 
 /// Decompile a handler (show Lingo source)
 pub fn mcp_decompile_handler(
-    player: &DirPlayer, symbols: &mut SymbolTable,
+    player: &DirPlayer,
+    symbols: &mut SymbolTable,
     cast_lib: i32,
     cast_member: i32,
     handler_name: &str,
 ) -> String {
-    mcp_decompile_handler_result(player, symbols, cast_lib, cast_member, handler_name).unwrap_or_else(|error| mcp_error(error.message))
+    mcp_decompile_handler_result(player, symbols, cast_lib, cast_member, handler_name)
+        .unwrap_or_else(|error| mcp_error(error.message))
 }
 
 fn mcp_decompile_handler_result(
-    player: &DirPlayer, symbols: &mut SymbolTable,
+    player: &DirPlayer,
+    symbols: &mut SymbolTable,
     cast_lib: i32,
     cast_member: i32,
     handler_name: &str,
 ) -> Result<String, ScriptError> {
-    let member_ref = CastMemberRef { cast_lib, cast_member };
+    let member_ref = CastMemberRef {
+        cast_lib,
+        cast_member,
+    };
 
     let ctx = match get_script_context(player, &member_ref) {
         Ok(c) => c,
@@ -606,7 +695,12 @@ fn mcp_decompile_handler_result(
 
     let handler = match ctx.script.get_own_handler(symbols.intern(handler_name)) {
         Some(h) => h,
-        None => return Ok(mcp_error(format!("Handler '{}' not found in script", handler_name))),
+        None => {
+            return Ok(mcp_error(format!(
+                "Handler '{}' not found in script",
+                handler_name
+            )))
+        }
     };
 
     let decompiled = decompile_handler(
@@ -647,11 +741,22 @@ fn mcp_decompile_handler_result(
 /// Parameters:
 /// - depth: Maximum number of scopes to return from the top (None = all)
 /// - include_locals: Whether to include local variables and arguments (default: false)
-pub fn mcp_get_call_stack(player: &mut DirPlayer, symbols: &SymbolTable, depth: Option<usize>, include_locals: bool) -> String {
-    mcp_get_call_stack_result(player, symbols, depth, include_locals).unwrap_or_else(|error| mcp_error(error.message))
+pub fn mcp_get_call_stack(
+    player: &mut DirPlayer,
+    symbols: &SymbolTable,
+    depth: Option<usize>,
+    include_locals: bool,
+) -> String {
+    mcp_get_call_stack_result(player, symbols, depth, include_locals)
+        .unwrap_or_else(|error| mcp_error(error.message))
 }
 
-fn mcp_get_call_stack_result(player: &mut DirPlayer, symbols: &SymbolTable, depth: Option<usize>, include_locals: bool) -> Result<String, ScriptError> {
+fn mcp_get_call_stack_result(
+    player: &mut DirPlayer,
+    symbols: &SymbolTable,
+    depth: Option<usize>,
+    include_locals: bool,
+) -> Result<String, ScriptError> {
     // Filter out placeholder scopes (cast_lib == 0 && cast_member == 0)
     let valid_scopes: Vec<usize> = player
         .scopes
@@ -679,8 +784,16 @@ fn mcp_get_call_stack_result(player: &mut DirPlayer, symbols: &SymbolTable, dept
                     scope.handler_name_id,
                     scope.bytecode_index,
                     scope.stack.len(),
-                    if include_locals { Some(scope.locals.clone()) } else { None },
-                    if include_locals { Some(scope.args.clone()) } else { None },
+                    if include_locals {
+                        Some(scope.locals.clone())
+                    } else {
+                        None
+                    },
+                    if include_locals {
+                        Some(scope.args.clone())
+                    } else {
+                        None
+                    },
                 )
             };
             let script_name = player
@@ -713,8 +826,10 @@ fn mcp_get_call_stack_result(player: &mut DirPlayer, symbols: &SymbolTable, dept
                             .movie
                             .cast_manager
                             .get_script_by_ref(&script_ref)
-                            .and_then(|s| s.get_own_handler_by_local_name_id(handler_name_id)
-                                .map(|h| h.local_name_ids.clone()))
+                            .and_then(|s| {
+                                s.get_own_handler_by_local_name_id(handler_name_id)
+                                    .map(|h| h.local_name_ids.clone())
+                            })
                             .unwrap_or_default();
                         local_values
                             .iter()
@@ -722,13 +837,21 @@ fn mcp_get_call_stack_result(player: &mut DirPlayer, symbols: &SymbolTable, dept
                             .map(|(slot, v)| {
                                 let name = local_name_ids
                                     .get(slot)
-                                    .and_then(|nid| lctx_names.as_ref().and_then(|names| names.get(*nid as usize)).cloned())
+                                    .and_then(|nid| {
+                                        lctx_names
+                                            .as_ref()
+                                            .and_then(|names| names.get(*nid as usize))
+                                            .cloned()
+                                    })
                                     .unwrap_or_else(|| format!("local_{}", slot));
                                 let value_ref = v.clone().into_ref_with(
                                     &mut player.allocator,
                                     &mut player.bitmap_manager,
                                 );
-                                Ok((name, datum_to_mcp_value_compact(player, symbols, &value_ref)?))
+                                Ok((
+                                    name,
+                                    datum_to_mcp_value_compact(player, symbols, &value_ref)?,
+                                ))
                             })
                             .collect::<Result<_, ScriptError>>()?
                     })
@@ -736,10 +859,12 @@ fn mcp_get_call_stack_result(player: &mut DirPlayer, symbols: &SymbolTable, dept
                     None
                 },
                 args: if let Some(arg_refs) = args {
-                    Some(arg_refs
-                        .iter()
-                        .map(|datum_ref| datum_to_mcp_value_compact(player, symbols, datum_ref))
-                        .collect::<Result<_, ScriptError>>()?)
+                    Some(
+                        arg_refs
+                            .iter()
+                            .map(|datum_ref| datum_to_mcp_value_compact(player, symbols, datum_ref))
+                            .collect::<Result<_, ScriptError>>()?,
+                    )
                 } else {
                     None
                 },
@@ -749,7 +874,11 @@ fn mcp_get_call_stack_result(player: &mut DirPlayer, symbols: &SymbolTable, dept
         .collect::<Result<_, ScriptError>>()?;
 
     Ok(to_json(&McpCallStack {
-        current_scope_index: if scopes.is_empty() { None } else { Some(scopes.len() - 1) },
+        current_scope_index: if scopes.is_empty() {
+            None
+        } else {
+            Some(scopes.len() - 1)
+        },
         scopes,
     }))
 }
@@ -824,28 +953,48 @@ pub fn mcp_get_globals(player: &DirPlayer, symbols: &SymbolTable) -> String {
     mcp_get_globals_result(player, symbols).unwrap_or_else(|error| mcp_error(error.message))
 }
 
-fn mcp_get_globals_result(player: &DirPlayer, symbols: &SymbolTable) -> Result<String, ScriptError> {
+fn mcp_get_globals_result(
+    player: &DirPlayer,
+    symbols: &SymbolTable,
+) -> Result<String, ScriptError> {
     Ok(to_json(&McpGlobalsResult {
         globals: player
             .globals
             .iter()
-            .map(|(name, datum_ref)| Ok((symbol_name(symbols, name)?, datum_to_mcp_value(player, symbols, datum_ref)?)))
+            .map(|(name, datum_ref)| {
+                Ok((
+                    symbol_name(symbols, name)?,
+                    datum_to_mcp_value(player, symbols, datum_ref)?,
+                ))
+            })
             .collect::<Result<_, ScriptError>>()?,
     }))
 }
 
 /// Get locals for a specific scope
-pub fn mcp_get_locals(player: &mut DirPlayer, symbols: &SymbolTable, scope_index: Option<usize>) -> String {
-    mcp_get_locals_result(player, symbols, scope_index).unwrap_or_else(|error| mcp_error(error.message))
+pub fn mcp_get_locals(
+    player: &mut DirPlayer,
+    symbols: &SymbolTable,
+    scope_index: Option<usize>,
+) -> String {
+    mcp_get_locals_result(player, symbols, scope_index)
+        .unwrap_or_else(|error| mcp_error(error.message))
 }
 
-fn mcp_get_locals_result(player: &mut DirPlayer, symbols: &SymbolTable, scope_index: Option<usize>) -> Result<String, ScriptError> {
+fn mcp_get_locals_result(
+    player: &mut DirPlayer,
+    symbols: &SymbolTable,
+    scope_index: Option<usize>,
+) -> Result<String, ScriptError> {
     let index = scope_index.unwrap_or_else(|| player.scopes.len().saturating_sub(1));
 
     let (script_ref, handler_name_id, locals, args) = match player.scopes.get_mut(index) {
-        Some(scope) => {
-            (scope.script_ref.clone(), scope.handler_name_id, scope.locals.clone(), scope.args.clone())
-        }
+        Some(scope) => (
+            scope.script_ref.clone(),
+            scope.handler_name_id,
+            scope.locals.clone(),
+            scope.args.clone(),
+        ),
         None => return Ok(mcp_error(format!("Scope index {} not found", index))),
     };
 
@@ -876,8 +1025,10 @@ fn mcp_get_locals_result(player: &mut DirPlayer, symbols: &SymbolTable, scope_in
                 .movie
                 .cast_manager
                 .get_script_by_ref(&script_ref)
-                .and_then(|s| s.get_own_handler_by_local_name_id(handler_name_id)
-                    .map(|h| h.local_name_ids.clone()))
+                .and_then(|s| {
+                    s.get_own_handler_by_local_name_id(handler_name_id)
+                        .map(|h| h.local_name_ids.clone())
+                })
                 .unwrap_or_default();
             locals
                 .iter()
@@ -885,12 +1036,16 @@ fn mcp_get_locals_result(player: &mut DirPlayer, symbols: &SymbolTable, scope_in
                 .map(|(slot, v)| {
                     let name = local_name_ids
                         .get(slot)
-                        .and_then(|nid| lctx_names.as_ref().and_then(|names| names.get(*nid as usize)).cloned())
+                        .and_then(|nid| {
+                            lctx_names
+                                .as_ref()
+                                .and_then(|names| names.get(*nid as usize))
+                                .cloned()
+                        })
                         .unwrap_or_else(|| format!("local_{}", slot));
-                    let value_ref = v.clone().into_ref_with(
-                        &mut player.allocator,
-                        &mut player.bitmap_manager,
-                    );
+                    let value_ref = v
+                        .clone()
+                        .into_ref_with(&mut player.allocator, &mut player.bitmap_manager);
                     Ok((name, datum_to_mcp_value(player, symbols, &value_ref)?))
                 })
                 .collect::<Result<_, ScriptError>>()?
@@ -898,20 +1053,30 @@ fn mcp_get_locals_result(player: &mut DirPlayer, symbols: &SymbolTable, scope_in
         args: args
             .iter()
             .enumerate()
-            .map(|(i, datum_ref)| Ok(McpArgInfo {
-                name: arg_names.get(i).cloned().unwrap_or_else(|| format!("arg{}", i)),
-                value: datum_to_mcp_value(player, symbols, datum_ref)?,
-            }))
+            .map(|(i, datum_ref)| {
+                Ok(McpArgInfo {
+                    name: arg_names
+                        .get(i)
+                        .cloned()
+                        .unwrap_or_else(|| format!("arg{}", i)),
+                    value: datum_to_mcp_value(player, symbols, datum_ref)?,
+                })
+            })
             .collect::<Result<_, ScriptError>>()?,
     }))
 }
 
 /// Inspect a datum by ID
 pub fn mcp_inspect_datum(player: &DirPlayer, symbols: &SymbolTable, datum_id: DatumId) -> String {
-    mcp_inspect_datum_result(player, symbols, datum_id).unwrap_or_else(|error| mcp_error(error.message))
+    mcp_inspect_datum_result(player, symbols, datum_id)
+        .unwrap_or_else(|error| mcp_error(error.message))
 }
 
-fn mcp_inspect_datum_result(player: &DirPlayer, symbols: &SymbolTable, datum_id: DatumId) -> Result<String, ScriptError> {
+fn mcp_inspect_datum_result(
+    player: &DirPlayer,
+    symbols: &SymbolTable,
+    datum_id: DatumId,
+) -> Result<String, ScriptError> {
     let datum_ref = match player.allocator.get_datum_ref(datum_id) {
         Some(r) => r,
         None => return Ok(mcp_error(format!("Datum with ID {} not found", datum_id))),
@@ -927,14 +1092,28 @@ fn mcp_inspect_datum_result(player: &DirPlayer, symbols: &SymbolTable, datum_id:
                 .get_script_instance(instance_ref)
                 .properties
                 .iter()
-                .map(|(name, datum_ref)| Ok((symbol_name(symbols, name)?, datum_to_mcp_value(player, symbols, datum_ref)?)))
+                .map(|(name, datum_ref)| {
+                    Ok((
+                        symbol_name(symbols, name)?,
+                        datum_to_mcp_value(player, symbols, datum_ref)?,
+                    ))
+                })
                 .collect::<Result<_, ScriptError>>()?,
         ),
         crate::director::lingo::datum::Datum::PropList(entries, _) => Some(
             entries
                 .iter()
                 .map(|(k, v)| {
-                    Ok((format_concrete_datum_with_depth(player.get_datum(k), symbols, player, 0, 0)?, datum_to_mcp_value(player, symbols, v)?))
+                    Ok((
+                        format_concrete_datum_with_depth(
+                            player.get_datum(k),
+                            symbols,
+                            player,
+                            0,
+                            0,
+                        )?,
+                        datum_to_mcp_value(player, symbols, v)?,
+                    ))
                 })
                 .collect::<Result<_, ScriptError>>()?,
         ),
@@ -976,12 +1155,14 @@ pub fn mcp_list_cast_members(player: &DirPlayer, cast_lib: Option<i32>) -> Strin
         .iter()
         .filter(|cast| cast_lib.map_or(true, |lib| cast.number as i32 == lib))
         .flat_map(|cast| {
-            cast.members.iter().map(move |(&member_num, member)| McpCastMemberInfo {
-                cast_lib: cast.number as i32,
-                cast_member: member_num as i32,
-                name: member.name.clone(),
-                member_type: member.member_type.type_string().to_string(),
-            })
+            cast.members
+                .iter()
+                .map(move |(&member_num, member)| McpCastMemberInfo {
+                    cast_lib: cast.number as i32,
+                    cast_member: member_num as i32,
+                    name: member.name.clone(),
+                    member_type: member.member_type.type_string().to_string(),
+                })
         })
         .collect();
 
@@ -989,12 +1170,26 @@ pub fn mcp_list_cast_members(player: &DirPlayer, cast_lib: Option<i32>) -> Strin
 }
 
 /// Inspect a cast member
-pub fn mcp_inspect_cast_member(player: &DirPlayer, symbols: &SymbolTable, cast_lib: i32, cast_member: i32) -> String {
-    mcp_inspect_cast_member_result(player, symbols, cast_lib, cast_member).unwrap_or_else(|error| mcp_error(error.message))
+pub fn mcp_inspect_cast_member(
+    player: &DirPlayer,
+    symbols: &SymbolTable,
+    cast_lib: i32,
+    cast_member: i32,
+) -> String {
+    mcp_inspect_cast_member_result(player, symbols, cast_lib, cast_member)
+        .unwrap_or_else(|error| mcp_error(error.message))
 }
 
-fn mcp_inspect_cast_member_result(player: &DirPlayer, symbols: &SymbolTable, cast_lib: i32, cast_member: i32) -> Result<String, ScriptError> {
-    let member_ref = CastMemberRef { cast_lib, cast_member };
+fn mcp_inspect_cast_member_result(
+    player: &DirPlayer,
+    symbols: &SymbolTable,
+    cast_lib: i32,
+    cast_member: i32,
+) -> Result<String, ScriptError> {
+    let member_ref = CastMemberRef {
+        cast_lib,
+        cast_member,
+    };
 
     let cast = match player.movie.cast_manager.get_cast(cast_lib as u32) {
         Ok(c) => c,
@@ -1003,7 +1198,12 @@ fn mcp_inspect_cast_member_result(player: &DirPlayer, symbols: &SymbolTable, cas
 
     let member = match cast.members.get(&(cast_member as u32)) {
         Some(m) => m,
-        None => return Ok(mcp_error(format!("Cast member {} not found in cast library {}", cast_member, cast_lib))),
+        None => {
+            return Ok(mcp_error(format!(
+                "Cast member {} not found in cast library {}",
+                cast_member, cast_lib
+            )))
+        }
     };
 
     // For script members, include script type and handlers
@@ -1025,7 +1225,13 @@ fn mcp_inspect_cast_member_result(player: &DirPlayer, symbols: &SymbolTable, cas
         name: member.name.clone(),
         member_type: member.member_type.type_string().to_string(),
         script_type,
-        handlers: handlers.map(|h| h.iter().map(|x| symbol_name(symbols, x)).collect::<Result<_, ScriptError>>()).transpose()?,
+        handlers: handlers
+            .map(|h| {
+                h.iter()
+                    .map(|x| symbol_name(symbols, x))
+                    .collect::<Result<_, ScriptError>>()
+            })
+            .transpose()?,
     }))
 }
 

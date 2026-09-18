@@ -16,7 +16,8 @@ use wasm_bindgen_futures::JsFuture;
 use crate::{
     director::lingo::datum::{Datum, DatumType, XtraInstanceId},
     player::{
-        symbols::{symbol::Symbol, symbol_table::SymbolTable}, ownership::OwnerToken,
+        ownership::OwnerToken,
+        symbols::{symbol::Symbol, symbol_table::SymbolTable},
         DatumRef, DirPlayer, ScriptError,
     },
 };
@@ -109,7 +110,9 @@ impl CurlInstance {
     }
 
     fn effective_method(&self) -> String {
-        self.custom_method.clone().unwrap_or_else(|| self.method.clone())
+        self.custom_method
+            .clone()
+            .unwrap_or_else(|| self.method.clone())
     }
 
     pub(crate) fn requested_url(&self) -> &str {
@@ -131,9 +134,10 @@ impl CurlXtraManager {
         instance_id: u32,
         generation: u64,
     ) -> Result<Option<(DatumRef, String)>, ScriptError> {
-        let instance = self.instances.get(&instance_id).ok_or_else(|| {
-            ScriptError::new(format!("Curl instance #{} not found", instance_id))
-        })?;
+        let instance = self
+            .instances
+            .get(&instance_id)
+            .ok_or_else(|| ScriptError::new(format!("Curl instance #{} not found", instance_id)))?;
         if instance.generation != generation {
             return Err(ScriptError::new_code(
                 crate::player::ScriptErrorCode::InvalidReference,
@@ -152,9 +156,10 @@ impl CurlXtraManager {
         headers: String,
         effective_url: String,
     ) -> Result<(), ScriptError> {
-        let instance = self.instances.get_mut(&instance_id).ok_or_else(|| {
-            ScriptError::new(format!("Curl instance #{} not found", instance_id))
-        })?;
+        let instance = self
+            .instances
+            .get_mut(&instance_id)
+            .ok_or_else(|| ScriptError::new(format!("Curl instance #{} not found", instance_id)))?;
         if instance.generation != generation {
             return Err(ScriptError::new_code(
                 crate::player::ScriptErrorCode::InvalidReference,
@@ -169,7 +174,9 @@ impl CurlXtraManager {
     }
 
     pub(crate) fn instance_generation(&self, instance_id: XtraInstanceId) -> Option<u64> {
-        self.instances.get(&instance_id).map(|instance| instance.generation)
+        self.instances
+            .get(&instance_id)
+            .map(|instance| instance.generation)
     }
 
     pub fn new() -> Self {
@@ -216,8 +223,10 @@ impl CurlXtraManager {
         };
         self.instance_counter = self.instance_counter.wrapping_add(1);
         self.generation_counter = self.generation_counter.wrapping_add(1);
-        self.instances
-            .insert(self.instance_counter, CurlInstance::new(auto_detach, self.generation_counter));
+        self.instances.insert(
+            self.instance_counter,
+            CurlInstance::new(auto_detach, self.generation_counter),
+        );
         Ok(self.instance_counter)
     }
 
@@ -231,32 +240,48 @@ impl CurlXtraManager {
     ) -> Result<crate::player::xtra::manager::XtraPendingOrValue, ScriptError> {
         if handler_name.eq_ignore_ascii_case("execAsync") {
             check_owner(&self.owner, player)?;
-            let generation = self.instances.get(&instance_id).ok_or_else(|| {
-                ScriptError::new(format!("Curl instance #{} not found", instance_id))
-            })?.generation;
-            let completion = args.first().map(|handler_ref| {
-                let handler = checked_datum(player, handler_ref)?.symbol_value(symbols)?;
-                let display = symbols.display(&handler).map_err(|_| ScriptError::new_code(
-                    crate::player::ScriptErrorCode::InvalidReference,
-                    "foreign Curl completion callback symbol".to_owned(),
-                ))?.to_owned();
-                let target = args.get(1).cloned().unwrap_or(DatumRef::Void);
-                if !matches!(target, DatumRef::Void) {
-                    checked_retained(player, symbols, &target)?;
-                }
-                Ok::<_, ScriptError>((target, display))
-            }).transpose()?;
+            let generation = self
+                .instances
+                .get(&instance_id)
+                .ok_or_else(|| {
+                    ScriptError::new(format!("Curl instance #{} not found", instance_id))
+                })?
+                .generation;
+            let completion = args
+                .first()
+                .map(|handler_ref| {
+                    let handler = checked_datum(player, handler_ref)?.symbol_value(symbols)?;
+                    let display = symbols
+                        .display(&handler)
+                        .map_err(|_| {
+                            ScriptError::new_code(
+                                crate::player::ScriptErrorCode::InvalidReference,
+                                "foreign Curl completion callback symbol".to_owned(),
+                            )
+                        })?
+                        .to_owned();
+                    let target = args.get(1).cloned().unwrap_or(DatumRef::Void);
+                    if !matches!(target, DatumRef::Void) {
+                        checked_retained(player, symbols, &target)?;
+                    }
+                    Ok::<_, ScriptError>((target, display))
+                })
+                .transpose()?;
             // Parse all consumed values before mutating the live callback.
             // A rejected mode must leave the prior callback registration
             // untouched, matching the legacy async path.
-            let return_mode = args.get(2)
+            let return_mode = args
+                .get(2)
                 .map(|arg| checked_datum(player, arg)?.int_value())
                 .transpose()?
                 .unwrap_or(0);
             if let Some(completion) = completion {
-                self.instances.get_mut(&instance_id).ok_or_else(|| {
-                    ScriptError::new(format!("Curl instance #{} not found", instance_id))
-                })?.completion_callback = Some(completion);
+                self.instances
+                    .get_mut(&instance_id)
+                    .ok_or_else(|| {
+                        ScriptError::new(format!("Curl instance #{} not found", instance_id))
+                    })?
+                    .completion_callback = Some(completion);
             }
             let mut instance = self.instances.get(&instance_id).cloned().ok_or_else(|| {
                 ScriptError::new(format!("Curl instance #{} not found", instance_id))
@@ -270,7 +295,9 @@ impl CurlXtraManager {
             instance.progress_callback = None;
             return Ok(crate::player::xtra::manager::XtraPendingOrValue::Pending(
                 crate::player::xtra::manager::XtraPendingIntent::CurlExec {
-                    owner: self.owner.clone(), instance_id, generation,
+                    owner: self.owner.clone(),
+                    instance_id,
+                    generation,
                     request: crate::player::xtra::manager::CurlExecRequest {
                         instance,
                         return_mode,
@@ -291,22 +318,36 @@ impl CurlXtraManager {
         args: &[DatumRef],
     ) -> Result<DatumRef, ScriptError> {
         check_owner(&self.owner, player)?;
-        let instance = self.instances.get_mut(&instance_id).ok_or_else(|| {
-            ScriptError::new(format!("Curl instance #{} not found", instance_id))
-        })?;
+        let instance = self
+            .instances
+            .get_mut(&instance_id)
+            .ok_or_else(|| ScriptError::new(format!("Curl instance #{} not found", instance_id)))?;
         match handler_name.to_ascii_lowercase().as_str() {
             "setoption" => set_option_explicit(instance, player, symbols, args),
             "setform" => set_form_explicit(instance, player, symbols, args),
             "setsourcefile" => set_source_file_explicit(player),
             "setdestinationfile" => set_destination_file_explicit(player),
-            "setheadercallback" => set_callback_explicit(&mut instance.header_callback, player, symbols, args, "setHeaderCallback"),
-            "setprogresscallback" => set_callback_explicit(&mut instance.progress_callback, player, symbols, args, "setProgressCallback"),
+            "setheadercallback" => set_callback_explicit(
+                &mut instance.header_callback,
+                player,
+                symbols,
+                args,
+                "setHeaderCallback",
+            ),
+            "setprogresscallback" => set_callback_explicit(
+                &mut instance.progress_callback,
+                player,
+                symbols,
+                args,
+                "setProgressCallback",
+            ),
             "setsourcedatacallback" => Ok(DatumRef::Void),
             "getinfo" => get_info_explicit(instance, player, args),
             "exec" => alloc_int(player, CURLE_NOT_BUILT_IN),
             "execsocket" => alloc_int(player, CURLE_NOT_BUILT_IN),
             "close" => {
-                self.released_instances.push((instance_id, instance.generation));
+                self.released_instances
+                    .push((instance_id, instance.generation));
                 self.instances.remove(&instance_id);
                 Ok(DatumRef::Void)
             }
@@ -320,8 +361,10 @@ impl CurlXtraManager {
     pub(crate) fn take_teardown_requests(
         &mut self,
     ) -> Vec<crate::player::xtra::manager::XtraTeardownRequest> {
-        self.released_instances.drain(..).map(|(instance_id, generation)| {
-                crate::player::xtra::manager::XtraTeardownRequest {
+        self.released_instances
+            .drain(..)
+            .map(
+                |(instance_id, generation)| crate::player::xtra::manager::XtraTeardownRequest {
                     xtra_name: "Curl",
                     owner: self.owner.clone(),
                     instance_id,
@@ -330,8 +373,8 @@ impl CurlXtraManager {
                     socket_resource: None,
                     #[cfg(test)]
                     drop_probe: None,
-                }
-            })
+                },
+            )
             .collect()
     }
 }
@@ -360,17 +403,24 @@ fn checked_datum<'a>(player: &'a DirPlayer, datum: &DatumRef) -> Result<&'a Datu
     }
 }
 
-fn checked_retained(player: &DirPlayer, symbols: &SymbolTable, datum: &DatumRef) -> Result<(), ScriptError> {
+fn checked_retained(
+    player: &DirPlayer,
+    symbols: &SymbolTable,
+    datum: &DatumRef,
+) -> Result<(), ScriptError> {
     let value = checked_datum(player, datum)?;
     crate::player::compare::validate_direct_symbol_fields(value, symbols)?;
     if let Datum::ScriptInstanceRef(instance) = value {
         use crate::player::allocator::ScriptInstanceAllocatorTrait;
-        player.allocator.get_script_instance_opt(instance).ok_or_else(|| {
-            ScriptError::new_code(
-                crate::player::ScriptErrorCode::InvalidReference,
-                "foreign or stale Curl callback target".to_owned(),
-            )
-        })?;
+        player
+            .allocator
+            .get_script_instance_opt(instance)
+            .ok_or_else(|| {
+                ScriptError::new_code(
+                    crate::player::ScriptErrorCode::InvalidReference,
+                    "foreign or stale Curl callback target".to_owned(),
+                )
+            })?;
     }
     Ok(())
 }
@@ -400,17 +450,23 @@ impl CurlXtra {
             "curl_error" | "curl_escape" | "curl_hfs2posix"
         )
     }
-
 }
 
 fn curl_error_explicit(player: &mut DirPlayer, args: &[DatumRef]) -> Result<DatumRef, ScriptError> {
-    let code_ref = args.first().ok_or_else(|| ScriptError::new("curl_error requires an integer".to_owned()))?;
+    let code_ref = args
+        .first()
+        .ok_or_else(|| ScriptError::new("curl_error requires an integer".to_owned()))?;
     let code = checked_datum(player, code_ref)?.int_value()?;
     let msg = match code {
-        0 => "No error", 1 => "Unsupported protocol", 2 => "Failed init",
-        3 => "URL malformat", 4 => "Not built-in (unsupported in WASM)",
-        6 => "Couldn't resolve host", 7 => "Couldn't connect to server",
-        22 => "HTTP returned error", _ => "Unknown error",
+        0 => "No error",
+        1 => "Unsupported protocol",
+        2 => "Failed init",
+        3 => "URL malformat",
+        4 => "Not built-in (unsupported in WASM)",
+        6 => "Couldn't resolve host",
+        7 => "Couldn't connect to server",
+        22 => "HTTP returned error",
+        _ => "Unknown error",
     };
     Ok(player.alloc_datum(Datum::String(msg.to_owned())))
 }
@@ -420,9 +476,12 @@ fn curl_escape_explicit(
     symbols: &SymbolTable,
     args: &[DatumRef],
 ) -> Result<DatumRef, ScriptError> {
-    let input_ref = args.first().ok_or_else(|| ScriptError::new("curl_escape requires a string".to_owned()))?;
+    let input_ref = args
+        .first()
+        .ok_or_else(|| ScriptError::new("curl_escape requires a string".to_owned()))?;
     let input = checked_datum(player, input_ref)?.string_value(symbols)?;
-    let escaped = percent_encoding::utf8_percent_encode(&input, percent_encoding::NON_ALPHANUMERIC).to_string();
+    let escaped = percent_encoding::utf8_percent_encode(&input, percent_encoding::NON_ALPHANUMERIC)
+        .to_string();
     Ok(player.alloc_datum(Datum::String(escaped)))
 }
 
@@ -431,7 +490,9 @@ fn curl_hfs2posix_explicit(
     symbols: &SymbolTable,
     args: &[DatumRef],
 ) -> Result<DatumRef, ScriptError> {
-    let input_ref = args.first().ok_or_else(|| ScriptError::new("curl_hfs2posix requires a string".to_owned()))?;
+    let input_ref = args
+        .first()
+        .ok_or_else(|| ScriptError::new("curl_hfs2posix requires a string".to_owned()))?;
     let input = checked_datum(player, input_ref)?.string_value(symbols)?;
     let value = if input.contains(':') {
         format!("/{}", input.replace(':', "/"))
@@ -464,7 +525,9 @@ fn set_option_explicit(
     symbols: &SymbolTable,
     args: &[DatumRef],
 ) -> Result<DatumRef, ScriptError> {
-    let option_ref = args.first().ok_or_else(|| ScriptError::new("setOption requires an option id".to_owned()))?;
+    let option_ref = args
+        .first()
+        .ok_or_else(|| ScriptError::new("setOption requires an option id".to_owned()))?;
     let option = checked_datum(player, option_ref)?.int_value()?;
     let value_ref = args.get(1);
     match option {
@@ -491,7 +554,8 @@ fn set_option_explicit(
             instance.custom_method = Some(string_value_explicit(player, symbols, value_ref)?);
         }
         opt::HTTPHEADER => {
-            let arg = value_ref.ok_or_else(|| ScriptError::new("Missing list argument".to_owned()))?;
+            let arg =
+                value_ref.ok_or_else(|| ScriptError::new("Missing list argument".to_owned()))?;
             instance.headers = match checked_datum(player, arg)? {
                 Datum::List(_, items, _) => items
                     .iter()
@@ -504,13 +568,19 @@ fn set_option_explicit(
         opt::POSTFIELDS => {
             instance.body = Some(string_value_explicit(player, symbols, value_ref)?.into_bytes());
         }
-        opt::USERAGENT => instance.user_agent = Some(string_value_explicit(player, symbols, value_ref)?),
+        opt::USERAGENT => {
+            instance.user_agent = Some(string_value_explicit(player, symbols, value_ref)?)
+        }
         opt::REFERER => instance.referer = Some(string_value_explicit(player, symbols, value_ref)?),
         opt::COOKIE => instance.cookie = Some(string_value_explicit(player, symbols, value_ref)?),
-        opt::USERPWD => instance.user_pwd = Some(string_value_explicit(player, symbols, value_ref)?),
+        opt::USERPWD => {
+            instance.user_pwd = Some(string_value_explicit(player, symbols, value_ref)?)
+        }
         opt::PROXY => instance.proxy = Some(string_value_explicit(player, symbols, value_ref)?),
         opt::RANGE => instance.range = Some(string_value_explicit(player, symbols, value_ref)?),
-        opt::ACCEPT_ENCODING => instance.accept_encoding = Some(string_value_explicit(player, symbols, value_ref)?),
+        opt::ACCEPT_ENCODING => {
+            instance.accept_encoding = Some(string_value_explicit(player, symbols, value_ref)?)
+        }
         opt::SSL_VERIFYPEER | opt::CAINFO => {}
         _ => {}
     }
@@ -523,7 +593,9 @@ fn set_form_explicit(
     symbols: &SymbolTable,
     args: &[DatumRef],
 ) -> Result<DatumRef, ScriptError> {
-    let prop_ref = args.first().ok_or_else(|| ScriptError::new("setForm requires a property-list argument".to_owned()))?;
+    let prop_ref = args
+        .first()
+        .ok_or_else(|| ScriptError::new("setForm requires a property-list argument".to_owned()))?;
     let pairs = match checked_datum(player, prop_ref)? {
         Datum::PropList(pairs, _) => pairs
             .iter()
@@ -534,7 +606,11 @@ fn set_form_explicit(
                 ))
             })
             .collect::<Result<Vec<_>, ScriptError>>()?,
-        _ => return Err(ScriptError::new("setForm requires a property list".to_owned())),
+        _ => {
+            return Err(ScriptError::new(
+                "setForm requires a property list".to_owned(),
+            ))
+        }
     };
     instance.form = pairs;
     instance.method = "POST".to_owned();
@@ -561,10 +637,15 @@ fn set_callback_explicit(
         .first()
         .ok_or_else(|| ScriptError::new(format!("{name} requires a symbol")))?;
     let handler = checked_datum(player, handler_ref)?.symbol_value(symbols)?;
-    let handler = symbols.display(&handler).map_err(|_| ScriptError::new_code(
-        crate::player::ScriptErrorCode::InvalidReference,
-        "foreign Xtra callback symbol".to_owned(),
-    ))?.to_owned();
+    let handler = symbols
+        .display(&handler)
+        .map_err(|_| {
+            ScriptError::new_code(
+                crate::player::ScriptErrorCode::InvalidReference,
+                "foreign Xtra callback symbol".to_owned(),
+            )
+        })?
+        .to_owned();
     let target = args.get(1).cloned().unwrap_or(DatumRef::Void);
     if !matches!(target, DatumRef::Void) {
         checked_retained(player, symbols, &target)?;
@@ -578,7 +659,9 @@ fn get_info_explicit(
     player: &mut DirPlayer,
     args: &[DatumRef],
 ) -> Result<DatumRef, ScriptError> {
-    let info_ref = args.first().ok_or_else(|| ScriptError::new("getInfo requires an info id".to_owned()))?;
+    let info_ref = args
+        .first()
+        .ok_or_else(|| ScriptError::new("getInfo requires an info id".to_owned()))?;
     let info = checked_datum(player, info_ref)?.int_value()?;
     match info {
         2097154 => Ok(player.alloc_datum(Datum::String(instance.last_effective_url.clone()))),
@@ -627,8 +710,7 @@ pub(crate) async fn perform_fetch_owned(instance: &CurlInstance) -> (i32, Vec<u8
                 .iter()
                 .any(|h| h.to_ascii_lowercase().starts_with("content-type:"))
             {
-                content_type_override =
-                    Some("application/x-www-form-urlencoded".to_string());
+                content_type_override = Some("application/x-www-form-urlencoded".to_string());
             }
         }
     }

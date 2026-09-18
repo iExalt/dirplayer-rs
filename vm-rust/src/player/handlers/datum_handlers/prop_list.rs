@@ -1,7 +1,8 @@
-use std::{collections::VecDeque, collections::HashSet};
+use std::{collections::HashSet, collections::VecDeque};
 
 use log::debug;
 
+use crate::player::session::ExecutionContext;
 use crate::player::symbols::builtin::BuiltInSymbol;
 use crate::player::symbols::symbol::Symbol;
 use crate::{
@@ -11,11 +12,11 @@ use crate::{
         compare::{datum_equals, datum_less_than},
         datum_formatting::format_concrete_datum,
         handlers::types::TypeUtils,
-        player_duplicate_datum, DatumRef, DirPlayer, ScriptError,
+        player_duplicate_datum,
         symbols::symbol_table::SymbolTable,
+        DatumRef, DirPlayer, ScriptError,
     },
 };
-use crate::player::session::ExecutionContext;
 
 pub struct PropListDatumHandlers {}
 
@@ -144,7 +145,9 @@ impl PropListUtils {
         allocator: &DatumAllocator,
         symbols: &SymbolTable,
     ) -> Result<i32, ScriptError> {
-        let want_str = symbols.display(want).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+        let want_str = symbols
+            .display(want)
+            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
         // Hoisted: the integer arm re-parsed the symbol name for every entry.
         let want_as_int = want_str.parse::<i32>().ok();
         for (i, (k, _)) in prop_list.iter().enumerate() {
@@ -177,7 +180,12 @@ impl PropListUtils {
     /// else gets its type name, which is all the message was worth anyway.
     pub fn format_key_for_error(key: &Datum, symbols: &SymbolTable) -> Result<String, ScriptError> {
         match key {
-            Datum::Symbol(s) => Ok(format!("#{}", symbols.display(s).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?)),
+            Datum::Symbol(s) => Ok(format!(
+                "#{}",
+                symbols
+                    .display(s)
+                    .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
+            )),
             Datum::String(s) => Ok(format!("\"{s}\"")),
             Datum::Int(i) => Ok(i.to_string()),
             other => Ok(format!("<{}>", other.type_enum().type_str())),
@@ -213,12 +221,26 @@ impl PropListUtils {
             // authoritative display spelling exactly. Symbol/Symbol equality
             // remains interned identity equality in `datum_equals` below.
             (Datum::String(l), Datum::String(r)) => l == r,
-            (Datum::String(l), Datum::Symbol(r)) => l == symbols.display(r).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?,
-            (Datum::Symbol(l), Datum::String(r)) => symbols.display(l).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)? == r,
+            (Datum::String(l), Datum::Symbol(r)) => {
+                l == symbols
+                    .display(r)
+                    .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
+            }
+            (Datum::Symbol(l), Datum::String(r)) => {
+                symbols
+                    .display(l)
+                    .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
+                    == r
+            }
 
             // Handle symbol-to-int comparison (e.g., #2 should match key 2)
             (Datum::Symbol(s), Datum::Int(i)) | (Datum::Int(i), Datum::Symbol(s)) => {
-                symbols.display(s).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?.parse::<i32>().ok() == Some(*i)
+                symbols
+                    .display(s)
+                    .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
+                    .parse::<i32>()
+                    .ok()
+                    == Some(*i)
             }
 
             _ => datum_equals(left, right, allocator, symbols)?,
@@ -263,7 +285,11 @@ impl PropListUtils {
             .eq_ignore_ascii_case("string")
         {
             let datum_clone = Datum::PropList(prop_list.clone(), false);
-            let s = crate::player::datum_formatting::format_concrete_datum(&datum_clone, symbols, player)?;
+            let s = crate::player::datum_formatting::format_concrete_datum(
+                &datum_clone,
+                symbols,
+                player,
+            )?;
             return Ok(player.alloc_datum(Datum::String(s)));
         }
         // Try built-in properties, but return VOID if not found instead of error
@@ -291,7 +317,7 @@ impl PropListUtils {
                 return Err(ScriptError::new(format!(
                     "Invalid prop list built-in property {}",
                     prop_name
-                )))
+                )));
             }
         }
     }
@@ -342,15 +368,20 @@ impl PropListUtils {
         Self::validate_direct_ref(value_ref, &player.allocator, symbols)?;
         let key = player.get_datum(key_ref);
         let (prop_list, is_sorted) = player.get_datum(prop_list_ref).to_map_tuple()?;
-        let key_index = Self::get_key_index(&prop_list, key, &player.allocator, symbols, is_sorted)?;
+        let key_index =
+            Self::get_key_index(&prop_list, key, &player.allocator, symbols, is_sorted)?;
         if is_required && key_index < 0 {
             return Err(ScriptError::new(format!(
                 "Prop not found: {}",
                 Self::format_key_for_error(key, symbols)?
             )));
         }
-        let index_to_add =
-            PropListUtils::find_index_to_add(&prop_list, (key_ref, value_ref), &player.allocator, symbols)?;
+        let index_to_add = PropListUtils::find_index_to_add(
+            &prop_list,
+            (key_ref, value_ref),
+            &player.allocator,
+            symbols,
+        )?;
         let (prop_list, ..) = player.get_datum_mut(prop_list_ref).to_map_tuple_mut()?;
         if key_index >= 0 {
             prop_list[key_index as usize].1 = value_ref.clone();
@@ -449,10 +480,10 @@ impl PropListUtils {
 mod tests {
     use super::*;
     use crate::director::lingo::datum::{DatumType, TimeoutInstanceData, VarRef};
+    use crate::player::allocator::ScriptInstanceAllocatorTrait;
+    use crate::player::cast_lib::CastMemberRef;
     use crate::player::ownership::OwnerToken;
     use crate::player::script::ScriptInstance;
-    use crate::player::cast_lib::CastMemberRef;
-    use crate::player::allocator::ScriptInstanceAllocatorTrait;
     use async_std::channel;
     use fxhash::FxHashMap;
 
@@ -462,7 +493,8 @@ mod tests {
     }
 
     #[test]
-    fn lookup_preserves_exact_spelling_first_match_and_numeric_symbols() -> Result<(), ScriptError> {
+    fn lookup_preserves_exact_spelling_first_match_and_numeric_symbols() -> Result<(), ScriptError>
+    {
         let mut player = test_player();
         let mut symbols = SymbolTable::new();
         let alpha = symbols.intern("alpha");
@@ -513,7 +545,8 @@ mod tests {
     }
 
     #[test]
-    fn builtin_properties_are_available_and_explicit_properties_shadow_them() -> Result<(), ScriptError> {
+    fn builtin_properties_are_available_and_explicit_properties_shadow_them(
+    ) -> Result<(), ScriptError> {
         let mut player = test_player();
         let symbols = SymbolTable::new();
         let count_key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Count)));
@@ -609,7 +642,8 @@ mod tests {
     }
 
     #[test]
-    fn real_context_dispatch_preserves_fallback_prefix_and_foreign_probe_errors() -> Result<(), ScriptError> {
+    fn real_context_dispatch_preserves_fallback_prefix_and_foreign_probe_errors(
+    ) -> Result<(), ScriptError> {
         let mut player = test_player();
         let mut symbols = SymbolTable::new();
         let key = player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::ToString)));
@@ -629,13 +663,10 @@ mod tests {
         let args = Vec::new();
         let result = PropListDatumHandlers::call(&mut context, &prop_list, getter, &args)?;
         assert_eq!(result, value);
-        assert!(PropListDatumHandlers::call(
-            &mut context,
-            &prop_list,
-            uppercase_getter,
-            &args,
-        )
-        .is_err());
+        assert!(
+            PropListDatumHandlers::call(&mut context, &prop_list, uppercase_getter, &args,)
+                .is_err()
+        );
 
         let mut foreign_player = test_player();
         let foreign_probe = foreign_player.alloc_datum(Datum::String("probe".to_owned()));
@@ -663,7 +694,8 @@ mod tests {
     }
 
     #[test]
-    fn sort_is_stable_sets_owned_flag_and_lookup_stops_before_later_foreign_value() -> Result<(), ScriptError> {
+    fn sort_is_stable_sets_owned_flag_and_lookup_stops_before_later_foreign_value(
+    ) -> Result<(), ScriptError> {
         let mut player = test_player();
         let symbols = SymbolTable::new();
         let first_key = player.alloc_datum(Datum::String("a".to_owned()));
@@ -689,9 +721,8 @@ mod tests {
         assert_eq!(entries[1].1, equal_value);
 
         let mut foreign_player = test_player();
-        let foreign_value = foreign_player.alloc_datum(Datum::Symbol(
-            SymbolTable::new().intern("foreign-value"),
-        ));
+        let foreign_value =
+            foreign_player.alloc_datum(Datum::Symbol(SymbolTable::new().intern("foreign-value")));
         let later_key = player.alloc_datum(Datum::String("later".to_owned()));
         let lookup_list = player.alloc_datum(Datum::PropList(
             VecDeque::from([
@@ -701,16 +732,21 @@ mod tests {
             false,
         ));
         let lookup_args = vec![player.alloc_datum(Datum::String("a".to_owned()))];
-        let found = PropListDatumHandlers::get_a_prop(&mut player, &symbols, &lookup_list, &lookup_args)?;
+        let found =
+            PropListDatumHandlers::get_a_prop(&mut player, &symbols, &lookup_list, &lookup_args)?;
         assert!(matches!(player.get_datum(&found), Datum::Int(1)));
         let get_one_key = player.alloc_datum(Datum::String("first-value".to_owned()));
         let get_one_value = player.alloc_datum(Datum::String("needle".to_owned()));
         let get_one_list = player.alloc_datum(Datum::PropList(
-            VecDeque::from([(get_one_key.clone(), get_one_value.clone()), (later_key, foreign_value)]),
+            VecDeque::from([
+                (get_one_key.clone(), get_one_value.clone()),
+                (later_key, foreign_value),
+            ]),
             false,
         ));
         let get_one_args = vec![get_one_value];
-        let found_key = PropListDatumHandlers::get_one(&mut player, &symbols, &get_one_list, &get_one_args)?;
+        let found_key =
+            PropListDatumHandlers::get_one(&mut player, &symbols, &get_one_list, &get_one_args)?;
         assert_eq!(found_key, get_one_key);
         let missing_probe = player.alloc_datum(Datum::String("missing".to_owned()));
         assert!(PropListDatumHandlers::get_one(
@@ -758,7 +794,8 @@ mod tests {
         assert_eq!(original_nested_item, original_item);
 
         let mut foreign_symbols = SymbolTable::new();
-        let foreign_ref = player.alloc_datum(Datum::Symbol(foreign_symbols.intern("nested-foreign")));
+        let foreign_ref =
+            player.alloc_datum(Datum::Symbol(foreign_symbols.intern("nested-foreign")));
         let nested_foreign = player.alloc_datum(Datum::List(
             DatumType::List,
             VecDeque::from([foreign_ref]),
@@ -766,10 +803,7 @@ mod tests {
         ));
         let foreign_key = player.alloc_datum(Datum::String("nested".to_owned()));
         let foreign_root = player.alloc_datum(Datum::PropList(
-            VecDeque::from([(
-                foreign_key,
-                nested_foreign,
-            )]),
+            VecDeque::from([(foreign_key, nested_foreign)]),
             false,
         ));
         assert!(super::player_duplicate_datum(&mut player, &symbols, &foreign_root).is_err());
@@ -777,37 +811,39 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_rejects_nested_foreign_script_var_and_timeout_handles() -> Result<(), ScriptError> {
+    fn duplicate_rejects_nested_foreign_script_var_and_timeout_handles() -> Result<(), ScriptError>
+    {
         let mut player = test_player();
         let mut foreign_player = test_player();
         let symbols = SymbolTable::new();
-        let foreign_instance = foreign_player.allocator.alloc_script_instance(ScriptInstance {
-            instance_id: 1,
-            script: CastMemberRef { cast_lib: 1, cast_member: 1 },
-            ancestor: None,
-            properties: FxHashMap::default(),
-            begin_sprite_called: false,
-        });
+        let foreign_instance = foreign_player
+            .allocator
+            .alloc_script_instance(ScriptInstance {
+                instance_id: 1,
+                script: CastMemberRef {
+                    cast_lib: 1,
+                    cast_member: 1,
+                },
+                ancestor: None,
+                properties: FxHashMap::default(),
+                begin_sprite_called: false,
+            });
         let foreign_script = player.alloc_datum(Datum::ScriptInstanceRef(foreign_instance.clone()));
         let foreign_var = player.alloc_datum(Datum::VarRef(VarRef::ScriptInstance(
             foreign_instance.clone(),
         )));
-        let foreign_timeout = player.alloc_datum(Datum::TimeoutInstance(Box::new(
-            TimeoutInstanceData {
+        let foreign_timeout =
+            player.alloc_datum(Datum::TimeoutInstance(Box::new(TimeoutInstanceData {
                 name: "foreign".to_owned(),
                 duration: 1,
                 callback: foreign_script.clone(),
                 target: DatumRef::Void,
                 script_instance: Some(foreign_script.clone()),
-            },
-        )));
+            })));
 
         for child in [foreign_script, foreign_var, foreign_timeout] {
-            let nested = player.alloc_datum(Datum::List(
-                DatumType::List,
-                VecDeque::from([child]),
-                false,
-            ));
+            let nested =
+                player.alloc_datum(Datum::List(DatumType::List, VecDeque::from([child]), false));
             assert_eq!(
                 super::player_duplicate_datum(&mut player, &symbols, &nested)
                     .err()
@@ -820,12 +856,16 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_rejects_formerly_local_stale_script_var_and_timeout_handles() -> Result<(), ScriptError> {
+    fn duplicate_rejects_formerly_local_stale_script_var_and_timeout_handles(
+    ) -> Result<(), ScriptError> {
         let mut player = test_player();
         let symbols = SymbolTable::new();
         let stale_instance = player.allocator.alloc_script_instance(ScriptInstance {
             instance_id: 1,
-            script: CastMemberRef { cast_lib: 1, cast_member: 1 },
+            script: CastMemberRef {
+                cast_lib: 1,
+                cast_member: 1,
+            },
             ancestor: None,
             properties: FxHashMap::default(),
             begin_sprite_called: false,
@@ -836,22 +876,18 @@ mod tests {
         let stale_var = player.alloc_datum(Datum::VarRef(VarRef::ScriptInstance(
             stale_instance.clone(),
         )));
-        let stale_timeout = player.alloc_datum(Datum::TimeoutInstance(Box::new(
-            TimeoutInstanceData {
+        let stale_timeout =
+            player.alloc_datum(Datum::TimeoutInstance(Box::new(TimeoutInstanceData {
                 name: "stale".to_owned(),
                 duration: 1,
                 callback: stale_script.clone(),
                 target: DatumRef::Void,
                 script_instance: Some(stale_script.clone()),
-            },
-        )));
+            })));
 
         for child in [stale_script, stale_var, stale_timeout] {
-            let nested = player.alloc_datum(Datum::List(
-                DatumType::List,
-                VecDeque::from([child]),
-                false,
-            ));
+            let nested =
+                player.alloc_datum(Datum::List(DatumType::List, VecDeque::from([child]), false));
             assert_eq!(
                 super::player_duplicate_datum(&mut player, &symbols, &nested)
                     .err()
@@ -870,7 +906,10 @@ mod tests {
         let property_value = player.alloc_datum(Datum::String("Luna".to_owned()));
         let instance_ref = player.allocator.alloc_script_instance(ScriptInstance {
             instance_id: 1,
-            script: CastMemberRef { cast_lib: 1, cast_member: 1 },
+            script: CastMemberRef {
+                cast_lib: 1,
+                cast_member: 1,
+            },
             ancestor: None,
             properties: FxHashMap::from_iter([(property.clone(), property_value.clone())]),
             begin_sprite_called: false,
@@ -881,11 +920,13 @@ mod tests {
         assert_eq!(result, property_value);
 
         let symbol_key = player.alloc_datum(Datum::Symbol(property.clone()));
-        let symbol_result = TypeUtils::get_sub_prop(&instance, &symbol_key, &mut player, &mut symbols)?;
+        let symbol_result =
+            TypeUtils::get_sub_prop(&instance, &symbol_key, &mut player, &mut symbols)?;
         assert_eq!(symbol_result, property_value);
 
         let numeric_one = player.alloc_datum(Datum::Int(1));
-        let numeric_result = TypeUtils::get_sub_prop(&instance, &numeric_one, &mut player, &mut symbols)?;
+        let numeric_result =
+            TypeUtils::get_sub_prop(&instance, &numeric_one, &mut player, &mut symbols)?;
         assert_eq!(numeric_result, property_value);
 
         for index in [0, i32::MIN] {
@@ -894,17 +935,10 @@ mod tests {
             assert!(matches!(result, DatumRef::Void));
         }
 
-        let unsupported_key = player.alloc_datum(Datum::List(
-            DatumType::List,
-            VecDeque::new(),
-            false,
-        ));
-        let unsupported = TypeUtils::get_sub_prop(
-            &instance,
-            &unsupported_key,
-            &mut player,
-            &mut symbols,
-        )?;
+        let unsupported_key =
+            player.alloc_datum(Datum::List(DatumType::List, VecDeque::new(), false));
+        let unsupported =
+            TypeUtils::get_sub_prop(&instance, &unsupported_key, &mut player, &mut symbols)?;
         assert!(matches!(unsupported, DatumRef::Void));
         Ok(())
     }
@@ -932,14 +966,22 @@ impl PropListDatumHandlers {
                         let index_ref = &args[1];
                         let value_ref = &args[2];
 
-                        PropListUtils::validate_direct_ref(prop_key_ref, &player.allocator, symbols)?;
+                        PropListUtils::validate_direct_ref(
+                            prop_key_ref,
+                            &player.allocator,
+                            symbols,
+                        )?;
                         PropListUtils::validate_direct_ref(index_ref, &player.allocator, symbols)?;
                         PropListUtils::validate_direct_ref(value_ref, &player.allocator, symbols)?;
 
-                        let (prop_list, is_sorted) =
-                            player.get_datum(datum).to_map_tuple()?;
-                        let list_ref =
-                            PropListUtils::get_by_key(prop_list, prop_key_ref, &player.allocator, symbols, is_sorted)?;
+                        let (prop_list, is_sorted) = player.get_datum(datum).to_map_tuple()?;
+                        let list_ref = PropListUtils::get_by_key(
+                            prop_list,
+                            prop_key_ref,
+                            &player.allocator,
+                            symbols,
+                            is_sorted,
+                        )?;
 
                         let index = player.get_datum(index_ref).int_value()? as usize;
                         let adjusted_index = if index == 0 { 0 } else { index - 1 };
@@ -955,18 +997,15 @@ impl PropListDatumHandlers {
                                     0
                                 };
 
-
                                 // Allocate all VOID values first
                                 let void_refs: Vec<DatumRef> = (0..voids_needed)
                                     .map(|_| player.alloc_datum(Datum::Void))
                                     .collect();
 
-
                                 // Now get mutable reference and extend the list
                                 let (_, list_vec, _) =
                                     player.get_datum_mut(&list_ref).to_list_mut()?;
                                 list_vec.extend(void_refs);
-
 
                                 // Set the value
                                 list_vec[adjusted_index] = value_ref.clone();
@@ -989,15 +1028,19 @@ impl PropListDatumHandlers {
                                 // via its position (2 missions → a HUD "4 / 10").
                                 // set_at does the Int/positional split and still
                                 // routes non-integer keys to set_prop.
-                                PropListUtils::set_at(player, symbols, &list_ref, index_ref, value_ref)?;
+                                PropListUtils::set_at(
+                                    player, symbols, &list_ref, index_ref, value_ref,
+                                )?;
                                 Ok(DatumRef::Void)
                             }
                             Datum::Point(..) => {
                                 // Point: index 1 = locH (x), index 2 = locV (y)
                                 if adjusted_index < 2 {
                                     let new_val = player.get_datum(value_ref).clone();
-                                    let (component_val, is_float) = Datum::datum_to_inline_component(&new_val)?;
-                                    let (vals, flags) = player.get_datum_mut(&list_ref).to_point_inline_mut()?;
+                                    let (component_val, is_float) =
+                                        Datum::datum_to_inline_component(&new_val)?;
+                                    let (vals, flags) =
+                                        player.get_datum_mut(&list_ref).to_point_inline_mut()?;
                                     vals[adjusted_index] = component_val;
                                     Datum::inline_set_float(flags, adjusted_index, is_float);
                                     Ok(DatumRef::Void)
@@ -1012,8 +1055,10 @@ impl PropListDatumHandlers {
                                 // Rect: index 1-4
                                 if adjusted_index < 4 {
                                     let new_val = player.get_datum(value_ref).clone();
-                                    let (component_val, is_float) = Datum::datum_to_inline_component(&new_val)?;
-                                    let (vals, flags) = player.get_datum_mut(&list_ref).to_rect_inline_mut()?;
+                                    let (component_val, is_float) =
+                                        Datum::datum_to_inline_component(&new_val)?;
+                                    let (vals, flags) =
+                                        player.get_datum_mut(&list_ref).to_rect_inline_mut()?;
                                     vals[adjusted_index] = component_val;
                                     Datum::inline_set_float(flags, adjusted_index, is_float);
                                     Ok(DatumRef::Void)
@@ -1024,12 +1069,10 @@ impl PropListDatumHandlers {
                                     )))
                                 }
                             }
-                            _ => {
-                                Err(ScriptError::new(format!(
-                                    "Property is not a list or propList, it's: {}",
-                                    list_datum.type_str()
-                                )))
-                            }
+                            _ => Err(ScriptError::new(format!(
+                                "Property is not a list or propList, it's: {}",
+                                list_datum.type_str()
+                            ))),
                         }
                     }
                 } else if args.len() == 2 {
@@ -1061,16 +1104,19 @@ impl PropListDatumHandlers {
                     for (key_ref, val_ref) in prop_list {
                         let key = player.get_datum(&key_ref);
                         if let Datum::Symbol(s) = key {
-                            symbols
-                                .display(s)
-                                .map_err(|_| ScriptError::from(crate::player::symbols::symbol::SymbolError::Foreign))?;
+                            symbols.display(s).map_err(|_| {
+                                ScriptError::from(
+                                    crate::player::symbols::symbol::SymbolError::Foreign,
+                                )
+                            })?;
                             if *s == Symbol::builtin(BuiltInSymbol::ToString) {
                                 return Ok(val_ref.clone());
                             }
                         }
                     }
                     // Fallback: return string representation
-                    let formatted = crate::player::datum_formatting::format_datum(datum, symbols, player)?;
+                    let formatted =
+                        crate::player::datum_formatting::format_datum(datum, symbols, player)?;
                     Ok(player.alloc_datum(Datum::String(formatted)))
                 }
             }
@@ -1093,9 +1139,11 @@ impl PropListDatumHandlers {
                     let prop_list = player.get_datum(datum).to_map()?.clone();
                     for (key_ref, val_ref) in &prop_list {
                         if let Datum::Symbol(s) = player.get_datum(key_ref) {
-                            symbols
-                                .display(s)
-                                .map_err(|_| ScriptError::from(crate::player::symbols::symbol::SymbolError::Foreign))?;
+                            symbols.display(s).map_err(|_| {
+                                ScriptError::from(
+                                    crate::player::symbols::symbol::SymbolError::Foreign,
+                                )
+                            })?;
                             if *s == Symbol::builtin(BuiltInSymbol::ToString) {
                                 return Ok(val_ref.clone());
                             }
@@ -1115,113 +1163,145 @@ impl PropListDatumHandlers {
         }
     }
 
-    fn count(player: &mut DirPlayer, symbols: &SymbolTable, datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    fn count(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        let (prop_list, is_sorted) = player.get_datum(datum).to_map_tuple()?;
+        let count = if args.is_empty() {
+            prop_list.len()
+        } else if args.len() == 1 {
+            let prop_name = &args[0];
+            let prop_value = PropListUtils::get_by_key(
+                prop_list,
+                prop_name,
+                &player.allocator,
+                symbols,
+                is_sorted,
+            )?;
+            let prop_value = player.get_datum(&prop_value);
+            match prop_value {
+                Datum::List(_, list, _) => list.len(),
+                Datum::PropList(list, ..) => list.len(),
+                _ => return Err(ScriptError::new("Cannot get count of non-list".to_string())),
+            }
+        } else {
+            return Err(ScriptError::new(
+                "Invalid number of arguments for count".to_string(),
+            ));
+        };
+        Ok(player.alloc_datum(Datum::Int(count as i32)))
+    }
 
-
-            let (prop_list, is_sorted) = player.get_datum(datum).to_map_tuple()?;
-            let count = if args.is_empty() {
-                prop_list.len()
-            } else if args.len() == 1 {
-                let prop_name = &args[0];
-                let prop_value =
-                    PropListUtils::get_by_key(prop_list, prop_name, &player.allocator, symbols, is_sorted)?;
-                let prop_value = player.get_datum(&prop_value);
-                match prop_value {
-                    Datum::List(_, list, _) => list.len(),
-                    Datum::PropList(list, ..) => list.len(),
-                    _ => return Err(ScriptError::new("Cannot get count of non-list".to_string())),
-                }
-            } else {
+    pub fn get_one(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        PropListUtils::validate_direct_ref(&args[0], &player.allocator, symbols)?;
+        let find = player.get_datum(&args[0]);
+        let prop_list = player.get_datum(datum);
+        let prop_list = match prop_list {
+            Datum::PropList(list, ..) => list,
+            _ => {
                 return Err(ScriptError::new(
-                    "Invalid number of arguments for count".to_string(),
-                ));
-            };
-            Ok(player.alloc_datum(Datum::Int(count as i32)))
+                    "Cannot set prop list at non-prop list".to_string(),
+                ))
+            }
+        };
+        let mut visited = HashSet::new();
+        crate::player::compare::validate_reachable_symbols(
+            &args[0],
+            &player.allocator,
+            symbols,
+            &mut visited,
+        )?;
+        // For prop lists, getOne returns the PROPERTY (key) for a given value.
+        let mut found_key = None;
+        for (key_ref, value_ref) in prop_list {
+            crate::player::compare::validate_reachable_symbols(
+                value_ref,
+                &player.allocator,
+                symbols,
+                &mut visited,
+            )?;
+            if datum_equals(
+                player.get_datum(value_ref),
+                find,
+                &player.allocator,
+                symbols,
+            )
+            .unwrap_or(false)
+            {
+                found_key = Some(key_ref.clone());
+                break;
+            }
+        }
 
-
+        match found_key {
+            Some(key_ref) => Ok(key_ref),
+            None => Ok(player.alloc_datum(Datum::Int(0))),
+        }
     }
 
-    pub fn get_one(player: &mut DirPlayer, symbols: &SymbolTable, datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-            PropListUtils::validate_direct_ref(&args[0], &player.allocator, symbols)?;
-            let find = player.get_datum(&args[0]);
-            let prop_list = player.get_datum(datum);
-            let prop_list = match prop_list {
-                Datum::PropList(list, ..) => list,
-                _ => {
-                    return Err(ScriptError::new(
-                        "Cannot set prop list at non-prop list".to_string(),
-                    ))
-                }
-            };
-            let mut visited = HashSet::new();
+    pub fn find_pos(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        PropListUtils::validate_direct_ref(&args[0], &player.allocator, symbols)?;
+        let find = player.get_datum(&args[0]);
+        let prop_list = player.get_datum(datum);
+        let prop_list = match prop_list {
+            Datum::PropList(list, ..) => list,
+            _ => {
+                return Err(ScriptError::new(
+                    "Cannot set prop list at non-prop list".to_string(),
+                ))
+            }
+        };
+        let mut visited = HashSet::new();
+        crate::player::compare::validate_reachable_symbols(
+            &args[0],
+            &player.allocator,
+            symbols,
+            &mut visited,
+        )?;
+        let mut position = None;
+        for (index, (key_ref, _)) in prop_list.iter().enumerate() {
             crate::player::compare::validate_reachable_symbols(
-                &args[0], &player.allocator, symbols, &mut visited,
+                key_ref,
+                &player.allocator,
+                symbols,
+                &mut visited,
             )?;
-            // For prop lists, getOne returns the PROPERTY (key) for a given value.
-            let mut found_key = None;
-            for (key_ref, value_ref) in prop_list {
-                crate::player::compare::validate_reachable_symbols(
-                    value_ref, &player.allocator, symbols, &mut visited,
-                )?;
-                if datum_equals(player.get_datum(value_ref), find, &player.allocator, symbols)
-                    .unwrap_or(false)
-                {
-                    found_key = Some(key_ref.clone());
-                    break;
-                }
+            // Use the lookup-aware equality so a STRING argument matches a
+            // SYMBOL key (and vice-versa), matching Director: e.g.
+            // `[#dozer: "none"].findPos("dozer")` -> 6, and the doc's
+            // `foodList.findPos("breakfast")` -> 1 for key #breakfast.
+            // Plain datum_equals is type-strict (#dozer != "dozer") and
+            // returned VOID, breaking gSoundControl.adjustVolume.
+            if PropListUtils::datum_equals_for_lookup(
+                player.get_datum(key_ref),
+                find,
+                &player.allocator,
+                symbols,
+            )
+            .unwrap_or(false)
+            {
+                position = Some(index as i32);
+                break;
             }
-
-            match found_key {
-                Some(key_ref) => Ok(key_ref),
-                None => Ok(player.alloc_datum(Datum::Int(0))),
-            }
-
-
-    }
-
-    pub fn find_pos(player: &mut DirPlayer, symbols: &SymbolTable, datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-            PropListUtils::validate_direct_ref(&args[0], &player.allocator, symbols)?;
-            let find = player.get_datum(&args[0]);
-            let prop_list = player.get_datum(datum);
-            let prop_list = match prop_list {
-                Datum::PropList(list, ..) => list,
-                _ => {
-                    return Err(ScriptError::new(
-                        "Cannot set prop list at non-prop list".to_string(),
-                    ))
-                }
-            };
-            let mut visited = HashSet::new();
-            crate::player::compare::validate_reachable_symbols(
-                &args[0], &player.allocator, symbols, &mut visited,
-            )?;
-            let mut position = None;
-            for (index, (key_ref, _)) in prop_list.iter().enumerate() {
-                crate::player::compare::validate_reachable_symbols(
-                    key_ref, &player.allocator, symbols, &mut visited,
-                )?;
-                    // Use the lookup-aware equality so a STRING argument matches a
-                    // SYMBOL key (and vice-versa), matching Director: e.g.
-                    // `[#dozer: "none"].findPos("dozer")` -> 6, and the doc's
-                    // `foodList.findPos("breakfast")` -> 1 for key #breakfast.
-                    // Plain datum_equals is type-strict (#dozer != "dozer") and
-                    // returned VOID, breaking gSoundControl.adjustVolume.
-                if PropListUtils::datum_equals_for_lookup(
-                    player.get_datum(key_ref), find, &player.allocator, symbols,
-                )
-                .unwrap_or(false)
-                {
-                    position = Some(index as i32);
-                    break;
-                }
-            }
-            if let Some(position) = position {
-                return Ok(player.alloc_datum(Datum::Int(position as i32 + 1)));
-            } else {
-                return Ok(DatumRef::Void);
-            }
-
-
+        }
+        if let Some(position) = position {
+            return Ok(player.alloc_datum(Datum::Int(position as i32 + 1)));
+        } else {
+            return Ok(DatumRef::Void);
+        }
     }
 
     /// `sortedPropList.findPosNear(property)` — Director 11.5 Scripting
@@ -1235,156 +1315,194 @@ impl PropListDatumHandlers {
     /// position. On Run's DriveHuman behavior calls this on `sndGearSpeed`
     /// (integer speed keys -> gear symbols) to pick the gear sound nearest the
     /// current speed.
-    pub fn find_pos_near(player: &mut DirPlayer, symbols: &SymbolTable, datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-            PropListUtils::validate_direct_ref(&args[0], &player.allocator, symbols)?;
-            let (prop_list, is_sorted) = player.get_datum(datum).to_map_tuple()?;
-            let count = prop_list.len() as i32;
-            if count == 0 {
-                return Ok(player.alloc_datum(Datum::Int(0)));
-            }
-            let result = if is_sorted {
-                let pos = PropListUtils::find_index_to_add(
-                    prop_list,
-                    (&args[0], &args[0]),
-                    &player.allocator,
-                    symbols,
-                )?;
-                (pos + 1).clamp(1, count)
-            } else {
-                // Unsorted list: fall back to an exact key match (mirrors the
-                // linear-list `findPosNear` path), returning 0 when absent.
-                let find = player.get_datum(&args[0]);
-                let mut visited = HashSet::new();
-                crate::player::compare::validate_reachable_symbols(
-                    &args[0], &player.allocator, symbols, &mut visited,
-                )?;
-                let mut position = None;
-                for (index, (key_ref, _)) in prop_list.iter().enumerate() {
-                    crate::player::compare::validate_reachable_symbols(
-                        key_ref, &player.allocator, symbols, &mut visited,
-                    )?;
-                        // Lookup-aware equality so a string arg matches a symbol
-                        // key (parity with find_pos above).
-                    if PropListUtils::datum_equals_for_lookup(
-                        player.get_datum(key_ref), find, &player.allocator, symbols,
-                    )
-                    .unwrap_or(false)
-                    {
-                        position = Some(index as i32 + 1);
-                        break;
-                    }
-                }
-                position.unwrap_or(0)
-            };
-            Ok(player.alloc_datum(Datum::Int(result)))
-
-
-    }
-
-    // Finds position of value
-    pub fn get_pos(player: &mut DirPlayer, symbols: &SymbolTable, datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-            PropListUtils::validate_direct_ref(&args[0], &player.allocator, symbols)?;
+    pub fn find_pos_near(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        PropListUtils::validate_direct_ref(&args[0], &player.allocator, symbols)?;
+        let (prop_list, is_sorted) = player.get_datum(datum).to_map_tuple()?;
+        let count = prop_list.len() as i32;
+        if count == 0 {
+            return Ok(player.alloc_datum(Datum::Int(0)));
+        }
+        let result = if is_sorted {
+            let pos = PropListUtils::find_index_to_add(
+                prop_list,
+                (&args[0], &args[0]),
+                &player.allocator,
+                symbols,
+            )?;
+            (pos + 1).clamp(1, count)
+        } else {
+            // Unsorted list: fall back to an exact key match (mirrors the
+            // linear-list `findPosNear` path), returning 0 when absent.
             let find = player.get_datum(&args[0]);
-            let prop_list = player.get_datum(datum).to_map()?;
             let mut visited = HashSet::new();
             crate::player::compare::validate_reachable_symbols(
-                &args[0], &player.allocator, symbols, &mut visited,
+                &args[0],
+                &player.allocator,
+                symbols,
+                &mut visited,
             )?;
             let mut position = None;
-            for (index, (_, value_ref)) in prop_list.iter().enumerate() {
+            for (index, (key_ref, _)) in prop_list.iter().enumerate() {
                 crate::player::compare::validate_reachable_symbols(
-                    value_ref, &player.allocator, symbols, &mut visited,
+                    key_ref,
+                    &player.allocator,
+                    symbols,
+                    &mut visited,
                 )?;
-                if datum_equals(player.get_datum(value_ref), find, &player.allocator, symbols)
-                    .unwrap_or(false)
+                // Lookup-aware equality so a string arg matches a symbol
+                // key (parity with find_pos above).
+                if PropListUtils::datum_equals_for_lookup(
+                    player.get_datum(key_ref),
+                    find,
+                    &player.allocator,
+                    symbols,
+                )
+                .unwrap_or(false)
                 {
-                    position = Some(index as i32);
+                    position = Some(index as i32 + 1);
                     break;
                 }
             }
-            let position = position.unwrap_or(-1);
-            return Ok(player.alloc_datum(Datum::Int(position + 1)));
-
-
+            position.unwrap_or(0)
+        };
+        Ok(player.alloc_datum(Datum::Int(result)))
     }
 
-    pub fn get_last(player: &mut DirPlayer, symbols: &SymbolTable, datum: &DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-
-
-            let prop_list = player.get_datum(datum);
-            let prop_list = match prop_list {
-                Datum::PropList(list, ..) => list,
-                _ => {
-                    return Err(ScriptError::new(
-                        "Cannot set prop list at non-prop list".to_string(),
-                    ))
-                }
-            };
-            let last = prop_list.back().map(|(_, v)| v).unwrap();
-            Ok(last.clone())
-
-
+    // Finds position of value
+    pub fn get_pos(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        PropListUtils::validate_direct_ref(&args[0], &player.allocator, symbols)?;
+        let find = player.get_datum(&args[0]);
+        let prop_list = player.get_datum(datum).to_map()?;
+        let mut visited = HashSet::new();
+        crate::player::compare::validate_reachable_symbols(
+            &args[0],
+            &player.allocator,
+            symbols,
+            &mut visited,
+        )?;
+        let mut position = None;
+        for (index, (_, value_ref)) in prop_list.iter().enumerate() {
+            crate::player::compare::validate_reachable_symbols(
+                value_ref,
+                &player.allocator,
+                symbols,
+                &mut visited,
+            )?;
+            if datum_equals(
+                player.get_datum(value_ref),
+                find,
+                &player.allocator,
+                symbols,
+            )
+            .unwrap_or(false)
+            {
+                position = Some(index as i32);
+                break;
+            }
+        }
+        let position = position.unwrap_or(-1);
+        return Ok(player.alloc_datum(Datum::Int(position + 1)));
     }
 
-    pub fn duplicate(player: &mut DirPlayer, symbols: &SymbolTable, datum: &DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn get_last(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        _: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        let prop_list = player.get_datum(datum);
+        let prop_list = match prop_list {
+            Datum::PropList(list, ..) => list,
+            _ => {
+                return Err(ScriptError::new(
+                    "Cannot set prop list at non-prop list".to_string(),
+                ))
+            }
+        };
+        let last = prop_list.back().map(|(_, v)| v).unwrap();
+        Ok(last.clone())
+    }
+
+    pub fn duplicate(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        _: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
         Ok(player_duplicate_datum(player, symbols, datum)?)
     }
 
-    pub fn get_a_prop(player: &mut DirPlayer, symbols: &SymbolTable, datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn get_a_prop(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        PropListUtils::validate_direct_ref(&args[0], &player.allocator, symbols)?;
+        let key = player.get_datum(&args[0]);
+        let prop_list = player.get_datum(datum);
 
+        debug!(
+            "PropList getaProp: looking for key={} in proplist={}",
+            PropListUtils::format_for_debug(key, symbols, player),
+            PropListUtils::format_for_debug(prop_list, symbols, player)
+        );
 
-            PropListUtils::validate_direct_ref(&args[0], &player.allocator, symbols)?;
-            let key = player.get_datum(&args[0]);
-            let prop_list = player.get_datum(datum);
+        match prop_list {
+            Datum::PropList(entries, is_sorted) => {
+                debug!("PropList has {} entries", entries.len());
 
-            debug!(
-                "PropList getaProp: looking for key={} in proplist={}", 
-                PropListUtils::format_for_debug(key, symbols, player),
-                PropListUtils::format_for_debug(prop_list, symbols, player)
-            );
-
-            match prop_list {
-                Datum::PropList(entries, is_sorted) => {
+                for (i, (k, v)) in entries.iter().enumerate() {
                     debug!(
-                        "PropList has {} entries", 
-                        entries.len()
+                        "   [{}] key={}, value={}",
+                        i,
+                        PropListUtils::format_ref_for_debug(k, symbols, player),
+                        PropListUtils::format_ref_for_debug(v, symbols, player)
                     );
-
-
-                    for (i, (k, v)) in entries.iter().enumerate() {
-                        debug!(
-                            "   [{}] key={}, value={}", 
-                            i,
-                            PropListUtils::format_ref_for_debug(k, symbols, player),
-                            PropListUtils::format_ref_for_debug(v, symbols, player)
-                        );
-                    }
-
-
-                    let key_index =
-                        PropListUtils::get_key_index(entries, key, &player.allocator, symbols, *is_sorted)?;
-                    if key_index >= 0 {
-                        let result = entries[key_index as usize].1.clone();
-                        debug!(
-                            "Found at index {}: {}", 
-                            key_index,
-                            PropListUtils::format_ref_for_debug(&result, symbols, player)
-                        );
-                        Ok(result)
-                    } else {
-                        debug!("get_a_prop: Key not found, returning void");
-                        Ok(DatumRef::Void)
-                    }
                 }
-                _ => Err(ScriptError::new(
-                    "Cannot get a prop of non-prop list".to_string(),
-                )),
+
+                let key_index = PropListUtils::get_key_index(
+                    entries,
+                    key,
+                    &player.allocator,
+                    symbols,
+                    *is_sorted,
+                )?;
+                if key_index >= 0 {
+                    let result = entries[key_index as usize].1.clone();
+                    debug!(
+                        "Found at index {}: {}",
+                        key_index,
+                        PropListUtils::format_ref_for_debug(&result, symbols, player)
+                    );
+                    Ok(result)
+                } else {
+                    debug!("get_a_prop: Key not found, returning void");
+                    Ok(DatumRef::Void)
+                }
             }
-
-
+            _ => Err(ScriptError::new(
+                "Cannot get a prop of non-prop list".to_string(),
+            )),
+        }
     }
 
-    pub fn get_prop(player: &mut DirPlayer, symbols: &mut SymbolTable, datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn get_prop(
+        player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
         let base_prop_ref = {
             let key = player.get_datum(&args[0]);
             if matches!(key, Datum::Void) {
@@ -1402,7 +1520,10 @@ impl PropListDatumHandlers {
                 prop_list[key_index as usize].1.clone()
             } else {
                 let formatted_key = format_concrete_datum(key, symbols, player)?;
-                return Err(ScriptError::new(format!("Unknown prop {} in prop list", formatted_key)));
+                return Err(ScriptError::new(format!(
+                    "Unknown prop {} in prop list",
+                    formatted_key
+                )));
             }
         };
 
@@ -1417,124 +1538,140 @@ impl PropListDatumHandlers {
         }
     }
 
-    pub fn set_opt_prop(player: &mut DirPlayer, symbols: &SymbolTable, datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-
-
-            let prop_list = player.get_datum(datum);
-            match prop_list {
-                Datum::PropList(..) => {}
-                _ => {
-                    return Err(ScriptError::new(
-                        "Cannot set prop list at non-prop list".to_string(),
-                    ))
-                }
-            };
-            let prop_name_ref = &args[0];
-            let value_ref = &args[1];
-
-            PropListUtils::set_prop(datum, &prop_name_ref, &value_ref, player, symbols, false)?;
-            Ok(DatumRef::Void)
-
-
-    }
-
-    pub fn add_prop(player: &mut DirPlayer, symbols: &SymbolTable, datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-
-
-            let prop_name_ref = &args[0];
-            let value_ref = &args[1];
-
-            PropListUtils::validate_direct_ref(prop_name_ref, &player.allocator, symbols)?;
-            PropListUtils::validate_direct_ref(value_ref, &player.allocator, symbols)?;
-
-            let (prop_list, is_sorted) = player.get_datum(datum).to_map_tuple()?;
-            let index_to_add = if is_sorted {
-                PropListUtils::find_index_to_add(
-                    &prop_list,
-                    (&prop_name_ref, &value_ref),
-                    &player.allocator,
-                    symbols,
-                )?
-            } else {
-                prop_list.len() as i32
-            };
-
-            let (prop_list, ..) = player.get_datum_mut(datum).to_map_tuple_mut()?;
-            if is_sorted {
-                prop_list.insert(
-                    index_to_add as usize,
-                    (prop_name_ref.clone(), value_ref.clone()),
-                );
-            } else {
-                prop_list.push_back((prop_name_ref.clone(), value_ref.clone()));
+    pub fn set_opt_prop(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        let prop_list = player.get_datum(datum);
+        match prop_list {
+            Datum::PropList(..) => {}
+            _ => {
+                return Err(ScriptError::new(
+                    "Cannot set prop list at non-prop list".to_string(),
+                ))
             }
+        };
+        let prop_name_ref = &args[0];
+        let value_ref = &args[1];
 
-            Ok(DatumRef::Void)
-
-
+        PropListUtils::set_prop(datum, &prop_name_ref, &value_ref, player, symbols, false)?;
+        Ok(DatumRef::Void)
     }
 
-    fn set_required_prop(player: &mut DirPlayer, symbols: &SymbolTable, datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn add_prop(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        let prop_name_ref = &args[0];
+        let value_ref = &args[1];
 
+        PropListUtils::validate_direct_ref(prop_name_ref, &player.allocator, symbols)?;
+        PropListUtils::validate_direct_ref(value_ref, &player.allocator, symbols)?;
 
-            let prop_list = player.get_datum(datum);
-            match prop_list {
-                Datum::PropList(..) => {}
-                _ => {
-                    return Err(ScriptError::new(
-                        "Cannot set prop list at non-prop list".to_string(),
-                    ))
-                }
-            };
-            let prop_name_ref = &args[0];
-            let value_ref = &args[1];
+        let (prop_list, is_sorted) = player.get_datum(datum).to_map_tuple()?;
+        let index_to_add = if is_sorted {
+            PropListUtils::find_index_to_add(
+                &prop_list,
+                (&prop_name_ref, &value_ref),
+                &player.allocator,
+                symbols,
+            )?
+        } else {
+            prop_list.len() as i32
+        };
 
-            PropListUtils::set_prop(datum, &prop_name_ref, &value_ref, player, symbols, true)?;
-            Ok(DatumRef::Void)
+        let (prop_list, ..) = player.get_datum_mut(datum).to_map_tuple_mut()?;
+        if is_sorted {
+            prop_list.insert(
+                index_to_add as usize,
+                (prop_name_ref.clone(), value_ref.clone()),
+            );
+        } else {
+            prop_list.push_back((prop_name_ref.clone(), value_ref.clone()));
+        }
 
-
+        Ok(DatumRef::Void)
     }
 
-    pub fn set_at(player: &mut DirPlayer, symbols: &SymbolTable, datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    fn set_required_prop(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        let prop_list = player.get_datum(datum);
+        match prop_list {
+            Datum::PropList(..) => {}
+            _ => {
+                return Err(ScriptError::new(
+                    "Cannot set prop list at non-prop list".to_string(),
+                ))
+            }
+        };
+        let prop_name_ref = &args[0];
+        let value_ref = &args[1];
 
-
-            let prop_list = player.get_datum(datum);
-            match prop_list {
-                Datum::PropList(..) => {}
-                _ => {
-                    return Err(ScriptError::new(
-                        "Cannot set prop list at non-prop list".to_string(),
-                    ))
-                }
-            };
-            let prop_name_ref = &args[0];
-            let value_ref = &args[1];
-
-            PropListUtils::set_at(player, symbols, datum, &prop_name_ref, &value_ref)?;
-            Ok(DatumRef::Void)
-
-
+        PropListUtils::set_prop(datum, &prop_name_ref, &value_ref, player, symbols, true)?;
+        Ok(DatumRef::Void)
     }
 
-    pub fn get_at(player: &mut DirPlayer, symbols: &SymbolTable, datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn set_at(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        let prop_list = player.get_datum(datum);
+        match prop_list {
+            Datum::PropList(..) => {}
+            _ => {
+                return Err(ScriptError::new(
+                    "Cannot set prop list at non-prop list".to_string(),
+                ))
+            }
+        };
+        let prop_name_ref = &args[0];
+        let value_ref = &args[1];
 
-
-            let prop_list = player.get_datum(datum);
-            let (prop_list, is_sorted) = match prop_list {
-                Datum::PropList(prop_list, is_sorted) => (prop_list, *is_sorted),
-                _ => {
-                    return Err(ScriptError::new(
-                        "Cannot get prop list at non-prop list".to_string(),
-                    ))
-                }
-            };
-            let prop_name_ref = &args[0];
-            PropListUtils::get_at(&prop_list, &prop_name_ref, &player.allocator, symbols, is_sorted)
-
-
+        PropListUtils::set_at(player, symbols, datum, &prop_name_ref, &value_ref)?;
+        Ok(DatumRef::Void)
     }
 
-    pub fn delete_at(player: &mut DirPlayer, symbols: &SymbolTable, datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn get_at(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        let prop_list = player.get_datum(datum);
+        let (prop_list, is_sorted) = match prop_list {
+            Datum::PropList(prop_list, is_sorted) => (prop_list, *is_sorted),
+            _ => {
+                return Err(ScriptError::new(
+                    "Cannot get prop list at non-prop list".to_string(),
+                ))
+            }
+        };
+        let prop_name_ref = &args[0];
+        PropListUtils::get_at(
+            &prop_list,
+            &prop_name_ref,
+            &player.allocator,
+            symbols,
+            is_sorted,
+        )
+    }
+
+    pub fn delete_at(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
         let position = player.get_datum(&args[0]).int_value()?;
         let prop_list = player.get_datum_mut(datum);
         match prop_list {
@@ -1550,7 +1687,12 @@ impl PropListDatumHandlers {
         Ok(DatumRef::Void)
     }
 
-    pub fn delete_one(player: &mut DirPlayer, symbols: &SymbolTable, datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn delete_one(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
         let search_ref = &args[0];
         PropListUtils::validate_direct_ref(search_ref, &player.allocator, symbols)?;
         let mut visited = HashSet::new();
@@ -1604,25 +1746,31 @@ impl PropListDatumHandlers {
         Ok(DatumRef::Void)
     }
 
-    pub fn get_prop_at(player: &mut DirPlayer, symbols: &SymbolTable, datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
-
-
-            let prop_list = player.get_datum(datum);
-            let prop_list = match prop_list {
-                Datum::PropList(prop_list, ..) => prop_list,
-                _ => {
-                    return Err(ScriptError::new(
-                        "Cannot get prop list at non-prop list".to_string(),
-                    ))
-                }
-            };
-            let position = player.get_datum(&args[0]).int_value()?;
-            Ok(prop_list.get((position - 1) as usize).unwrap().0.clone())
-
-
+    pub fn get_prop_at(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        let prop_list = player.get_datum(datum);
+        let prop_list = match prop_list {
+            Datum::PropList(prop_list, ..) => prop_list,
+            _ => {
+                return Err(ScriptError::new(
+                    "Cannot get prop list at non-prop list".to_string(),
+                ))
+            }
+        };
+        let position = player.get_datum(&args[0]).int_value()?;
+        Ok(prop_list.get((position - 1) as usize).unwrap().0.clone())
     }
 
-    pub fn sort(player: &mut DirPlayer, symbols: &SymbolTable, datum: &DatumRef, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn sort(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        _: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
         let sorted_prop_list = {
             let prop_list = player.get_datum(datum).to_map()?;
             let mut visited = HashSet::new();
@@ -1661,73 +1809,90 @@ impl PropListDatumHandlers {
         Ok(DatumRef::Void)
     }
 
-    pub fn delete_prop(player: &mut DirPlayer, symbols: &SymbolTable, datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn delete_prop(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        let prop_name = player.get_datum(&args[0]);
 
+        if prop_name.is_void() {
+            return Ok(player.alloc_datum(datum_bool(false)));
+        }
 
-            let prop_name = player.get_datum(&args[0]);
-
-
-            if prop_name.is_void() {
-                return Ok(player.alloc_datum(datum_bool(false)));
-            }
-
-
-            if prop_name.is_string() || prop_name.is_symbol() {
-                // Key-based lookup for strings and symbols
-                let (prop_list, is_sorted) = player.get_datum(datum).to_map_tuple()?;
-                let index =
-                    PropListUtils::get_key_index(prop_list, prop_name, &player.allocator, symbols, is_sorted)?;
-                if index >= 0 {
-                    let prop_list = player.get_datum_mut(datum).to_map_mut()?;
-                    prop_list.remove(index as usize);
-                    Ok(player.alloc_datum(datum_bool(true)))
-                } else {
-                    Ok(player.alloc_datum(datum_bool(false)))
-                }
-            } else if prop_name.is_int() {
-                // For ints: try key lookup first, then fall back to positional
-                let (prop_list, is_sorted) = player.get_datum(datum).to_map_tuple()?;
-                let key_index =
-                    PropListUtils::get_key_index(prop_list, prop_name, &player.allocator, symbols, is_sorted)?;
-
-
-                if key_index >= 0 {
-                    // Found as key - delete by key
-                    let prop_list = player.get_datum_mut(datum).to_map_mut()?;
-                    prop_list.remove(key_index as usize);
-                    Ok(player.alloc_datum(datum_bool(true)))
-                } else {
-                    // Not found as key - try positional (1-based)
-                    let position = prop_name.int_value()?;
-                    let prop_list = player.get_datum_mut(datum).to_map_mut()?;
-
-
-                    if position >= 1 && position <= prop_list.len() as i32 {
-                        prop_list.remove((position - 1) as usize);
-                        Ok(player.alloc_datum(datum_bool(true)))
-                    } else {
-                        Ok(player.alloc_datum(datum_bool(false)))
-                    }
-                }
+        if prop_name.is_string() || prop_name.is_symbol() {
+            // Key-based lookup for strings and symbols
+            let (prop_list, is_sorted) = player.get_datum(datum).to_map_tuple()?;
+            let index = PropListUtils::get_key_index(
+                prop_list,
+                prop_name,
+                &player.allocator,
+                symbols,
+                is_sorted,
+            )?;
+            if index >= 0 {
+                let prop_list = player.get_datum_mut(datum).to_map_mut()?;
+                prop_list.remove(index as usize);
+                Ok(player.alloc_datum(datum_bool(true)))
             } else {
-                // Other types (list/point, etc.) — key-based lookup
-                let (prop_list, is_sorted) = player.get_datum(datum).to_map_tuple()?;
-                let index =
-                    PropListUtils::get_key_index(prop_list, prop_name, &player.allocator, symbols, is_sorted)?;
+                Ok(player.alloc_datum(datum_bool(false)))
+            }
+        } else if prop_name.is_int() {
+            // For ints: try key lookup first, then fall back to positional
+            let (prop_list, is_sorted) = player.get_datum(datum).to_map_tuple()?;
+            let key_index = PropListUtils::get_key_index(
+                prop_list,
+                prop_name,
+                &player.allocator,
+                symbols,
+                is_sorted,
+            )?;
 
-                if index >= 0 {
-                    let prop_list = player.get_datum_mut(datum).to_map_mut()?;
-                    prop_list.remove(index as usize);
+            if key_index >= 0 {
+                // Found as key - delete by key
+                let prop_list = player.get_datum_mut(datum).to_map_mut()?;
+                prop_list.remove(key_index as usize);
+                Ok(player.alloc_datum(datum_bool(true)))
+            } else {
+                // Not found as key - try positional (1-based)
+                let position = prop_name.int_value()?;
+                let prop_list = player.get_datum_mut(datum).to_map_mut()?;
+
+                if position >= 1 && position <= prop_list.len() as i32 {
+                    prop_list.remove((position - 1) as usize);
                     Ok(player.alloc_datum(datum_bool(true)))
                 } else {
                     Ok(player.alloc_datum(datum_bool(false)))
                 }
             }
+        } else {
+            // Other types (list/point, etc.) — key-based lookup
+            let (prop_list, is_sorted) = player.get_datum(datum).to_map_tuple()?;
+            let index = PropListUtils::get_key_index(
+                prop_list,
+                prop_name,
+                &player.allocator,
+                symbols,
+                is_sorted,
+            )?;
 
-
+            if index >= 0 {
+                let prop_list = player.get_datum_mut(datum).to_map_mut()?;
+                prop_list.remove(index as usize);
+                Ok(player.alloc_datum(datum_bool(true)))
+            } else {
+                Ok(player.alloc_datum(datum_bool(false)))
+            }
+        }
     }
 
-    pub fn get_prop_ref(player: &mut DirPlayer, symbols: &mut SymbolTable, datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn get_prop_ref(
+        player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
         if args.is_empty() {
             return Err(ScriptError::new(
                 "getPropRef requires at least one argument".to_string(),
@@ -1740,8 +1905,13 @@ impl PropListDatumHandlers {
         let result = match base {
             Datum::PropList(prop_list, _is_sorted) => {
                 // Get the property from the prop list
-                let prop_value =
-                    PropListUtils::get_by_key(&prop_list, &key, &player.allocator, symbols, *_is_sorted)?;
+                let prop_value = PropListUtils::get_by_key(
+                    &prop_list,
+                    &key,
+                    &player.allocator,
+                    symbols,
+                    *_is_sorted,
+                )?;
 
                 // If there's a second argument and the property is a list, index into it
                 if args.len() >= 2 {

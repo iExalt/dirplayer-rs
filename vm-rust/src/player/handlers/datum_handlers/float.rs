@@ -1,6 +1,9 @@
 use crate::{
     director::lingo::datum::Datum,
-    player::{symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable}, DatumRef, DirPlayer, ScriptError},
+    player::{
+        symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable},
+        DatumRef, DirPlayer, ScriptError,
+    },
 };
 
 pub struct FloatDatumHandlers {}

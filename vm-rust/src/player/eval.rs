@@ -1,16 +1,26 @@
-use std::{cell::{Cell, RefCell}, collections::VecDeque, hash::{Hash, Hasher}, rc::{Rc, Weak}};
 use log::error;
 use pest::{
     iterators::{Pair, Pairs},
     pratt_parser::{Assoc, Op, PrattParser},
     Parser,
 };
+use std::{
+    cell::{Cell, RefCell},
+    collections::VecDeque,
+    hash::{Hash, Hasher},
+    rc::{Rc, Weak},
+};
 
 use crate::{
-    director::lingo::datum::{Datum, DatumType, StringChunkExpr, StringChunkType, datum_bool},
+    director::lingo::datum::{datum_bool, Datum, DatumType, StringChunkExpr, StringChunkType},
     js_api::ascii_safe,
     player::{
-        DirPlayer, bytecode::{get_set::GetSetUtils, string::StringBytecodeHandler}, datum_operations::{add_datums, divide_datums, multiply_datums, subtract_datums}, handlers::datum_handlers::{prop_list::PropListUtils, string_chunk::StringChunkUtils}, script::{get_lctx_for_script, get_obj_prop, script_get_prop_opt, script_set_prop}, symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable}
+        bytecode::{get_set::GetSetUtils, string::StringBytecodeHandler},
+        datum_operations::{add_datums, divide_datums, multiply_datums, subtract_datums},
+        handlers::datum_handlers::{prop_list::PropListUtils, string_chunk::StringChunkUtils},
+        script::{get_lctx_for_script, get_obj_prop, script_get_prop_opt, script_set_prop},
+        symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable},
+        DirPlayer,
     },
 };
 
@@ -68,7 +78,10 @@ impl EvalId {
             return false;
         }
         let mut slot = self.capability.external_load.borrow_mut();
-        if slot.as_ref().is_some_and(|current| !current.same_token(&request)) {
+        if slot
+            .as_ref()
+            .is_some_and(|current| !current.same_token(&request))
+        {
             return false;
         }
         *slot = Some(request);
@@ -86,7 +99,10 @@ impl EvalId {
         request: &crate::player::xtra::external::ExternalXtraLoadRequest,
     ) {
         let mut slot = self.capability.external_load.borrow_mut();
-        if slot.as_ref().is_some_and(|current| current.same_token(request)) {
+        if slot
+            .as_ref()
+            .is_some_and(|current| current.same_token(request))
+        {
             slot.take();
         }
     }
@@ -121,7 +137,10 @@ pub(crate) enum EvalPending {
         request: crate::player::driver::InternalVmRequest,
         reason: Option<String>,
     },
-    SetProperty { capability: EvalAction, request: crate::player::driver::InternalVmRequest },
+    SetProperty {
+        capability: EvalAction,
+        request: crate::player::driver::InternalVmRequest,
+    },
 }
 
 pub(crate) enum PreparedGlobal {
@@ -151,7 +170,10 @@ pub(crate) struct EvalAction {
 
 impl EvalAction {
     fn new(serial: u64) -> Self {
-        Self { serial, capability: Rc::new(EvalActionCapability) }
+        Self {
+            serial,
+            capability: Rc::new(EvalActionCapability),
+        }
     }
 }
 
@@ -186,7 +208,8 @@ pub(crate) struct EvalContinuation {
     next_action: u64,
     waiting_action: Option<EvalAction>,
     waiting_discards_result: bool,
-    callback_sender: Option<async_std::channel::Sender<Result<crate::player::scope::ScopeResult, ScriptError>>>,
+    callback_sender:
+        Option<async_std::channel::Sender<Result<crate::player::scope::ScopeResult, ScriptError>>>,
     value_mode: Option<crate::player::driver::ValueEvaluationMode>,
     value_fallback: Option<DatumRef>,
 }
@@ -202,15 +225,20 @@ impl EvalContinuation {
             .with_player(player_id, |context| -> Result<_, ScriptError> {
                 let scope = if context.player.scope_count > 0 {
                     let candidate = if context.player.current_breakpoint.is_some() {
-                        context.player.eval_scope_index
-                            .unwrap_or(context.player.scope_count - 1) as usize
+                        context
+                            .player
+                            .eval_scope_index
+                            .unwrap_or(context.player.scope_count - 1)
+                            as usize
                     } else {
                         context.player.scope_count as usize - 1
                     };
                     if candidate >= context.player.scope_count as usize
                         || candidate >= context.player.scopes.len()
                     {
-                        return Err(ScriptError::new("debugger evaluator scope index is invalid".to_owned()));
+                        return Err(ScriptError::new(
+                            "debugger evaluator scope index is invalid".to_owned(),
+                        ));
                     }
                     let live_scope = &context.player.scopes[candidate];
                     Some(crate::player::ScopeToken {
@@ -219,7 +247,9 @@ impl EvalContinuation {
                         generation: live_scope.generation,
                         epoch: context.player.scope_invalidation_epoch,
                     })
-                } else { None };
+                } else {
+                    None
+                };
                 Ok((context.player.owner.clone(), scope))
             })
             .ok_or_else(crate::player::cancelled_scope_error)??;
@@ -247,7 +277,12 @@ impl EvalContinuation {
         self.owner.same_identity(owner) && self.owner.is_arena_live()
     }
 
-    pub(crate) fn child_anchor(&self) -> (crate::player::ownership::OwnerToken, Option<crate::player::ScopeToken>) {
+    pub(crate) fn child_anchor(
+        &self,
+    ) -> (
+        crate::player::ownership::OwnerToken,
+        Option<crate::player::ScopeToken>,
+    ) {
         (self.owner.clone(), self.scope.clone())
     }
 
@@ -282,15 +317,25 @@ impl EvalContinuation {
         continuation.state = EvalState::Waiting;
         let capability = continuation.new_action(false);
         let pending = match request {
-            crate::player::driver::InternalVmRequest::Global { name, args } => EvalPending::Global {
+            crate::player::driver::InternalVmRequest::Global { name, args } => {
+                EvalPending::Global {
+                    capability,
+                    request: crate::player::driver::InternalVmRequest::Global { name, args },
+                    reason: None,
+                    prepared_child: None,
+                }
+            }
+            crate::player::driver::InternalVmRequest::Object {
+                receiver,
+                name,
+                args,
+            } => EvalPending::Object {
                 capability,
-                request: crate::player::driver::InternalVmRequest::Global { name, args },
-                reason: None,
-                prepared_child: None,
-            },
-            crate::player::driver::InternalVmRequest::Object { receiver, name, args } => EvalPending::Object {
-                capability,
-                request: crate::player::driver::InternalVmRequest::Object { receiver, name, args },
+                request: crate::player::driver::InternalVmRequest::Object {
+                    receiver,
+                    name,
+                    args,
+                },
                 reason: None,
             },
             crate::player::driver::InternalVmRequest::Flash(request) => EvalPending::Object {
@@ -298,22 +343,47 @@ impl EvalContinuation {
                 request: crate::player::driver::InternalVmRequest::Flash(request),
                 reason: None,
             },
-            crate::player::driver::InternalVmRequest::ObjectProperty { receiver, name } => EvalPending::Object {
+            crate::player::driver::InternalVmRequest::SpriteAsync(request) => EvalPending::Object {
                 capability,
-                request: crate::player::driver::InternalVmRequest::ObjectProperty { receiver, name },
+                request: crate::player::driver::InternalVmRequest::SpriteAsync(request),
                 reason: None,
             },
-            crate::player::driver::InternalVmRequest::SetProperty { receiver, name, value } => EvalPending::SetProperty {
+            crate::player::driver::InternalVmRequest::ObjectProperty { receiver, name } => {
+                EvalPending::Object {
+                    capability,
+                    request: crate::player::driver::InternalVmRequest::ObjectProperty {
+                        receiver,
+                        name,
+                    },
+                    reason: None,
+                }
+            }
+            crate::player::driver::InternalVmRequest::SetProperty {
+                receiver,
+                name,
+                value,
+            } => EvalPending::SetProperty {
                 capability,
-                request: crate::player::driver::InternalVmRequest::SetProperty { receiver, name, value },
+                request: crate::player::driver::InternalVmRequest::SetProperty {
+                    receiver,
+                    name,
+                    value,
+                },
             },
-            crate::player::driver::InternalVmRequest::ExternalXtraLoad(request) => EvalPending::Global {
-                capability,
-                request: crate::player::driver::InternalVmRequest::ExternalXtraLoad(request),
-                reason: None,
-                prepared_child: None,
-            },
-            _ => return Err(ScriptError::new("standalone evaluator request is not a global, object, or property operation".to_owned())),
+            crate::player::driver::InternalVmRequest::ExternalXtraLoad(request) => {
+                EvalPending::Global {
+                    capability,
+                    request: crate::player::driver::InternalVmRequest::ExternalXtraLoad(request),
+                    reason: None,
+                    prepared_child: None,
+                }
+            }
+            _ => {
+                return Err(ScriptError::new(
+                    "standalone evaluator request is not a global, object, or property operation"
+                        .to_owned(),
+                ))
+            }
         };
         Ok((continuation, pending))
     }
@@ -349,9 +419,9 @@ impl EvalContinuation {
         };
         let fallback = match session.with_player(self.player_id, |context| {
             Ok::<_, ScriptError>(match mode {
-                crate::player::driver::ValueEvaluationMode::StringPropertyFallback => {
-                    context.player.alloc_datum(Datum::String(source_text.clone()))
-                }
+                crate::player::driver::ValueEvaluationMode::StringPropertyFallback => context
+                    .player
+                    .alloc_datum(Datum::String(source_text.clone())),
                 crate::player::driver::ValueEvaluationMode::GlobalVoid => DatumRef::Void,
             })
         }) {
@@ -364,7 +434,10 @@ impl EvalContinuation {
         if source_text.trim().is_empty() {
             return match mode {
                 crate::player::driver::ValueEvaluationMode::StringPropertyFallback => {
-                    self.state = EvalState::Completed(Ok(self.value_fallback.clone().unwrap_or(DatumRef::Void)));
+                    self.state = EvalState::Completed(Ok(self
+                        .value_fallback
+                        .clone()
+                        .unwrap_or(DatumRef::Void)));
                     EvalTurn::Complete(self.state_result())
                 }
                 crate::player::driver::ValueEvaluationMode::GlobalVoid => {
@@ -382,7 +455,10 @@ impl EvalContinuation {
                 }
             };
         }
-        let cleaned = crate::player::handlers::datum_handlers::string::normalise_lingo_expr_for_value(&source_text);
+        let cleaned =
+            crate::player::handlers::datum_handlers::string::normalise_lingo_expr_for_value(
+                &source_text,
+            );
         let cleaned = crate::player::handlers::types::truncate_to_first_balanced_list(&cleaned);
         let expression = match parse_lingo_expr_ast_runtime(Rule::eval_expr, cleaned) {
             Ok(expression) => expression,
@@ -398,7 +474,9 @@ impl EvalContinuation {
     fn state_result(&self) -> Result<DatumRef, ScriptError> {
         match &self.state {
             EvalState::Completed(result) => result.clone(),
-            _ => Err(ScriptError::new("value evaluator did not complete".to_owned())),
+            _ => Err(ScriptError::new(
+                "value evaluator did not complete".to_owned(),
+            )),
         }
     }
 
@@ -422,7 +500,8 @@ impl EvalContinuation {
 
     pub(crate) fn take_callback_sender(
         &mut self,
-    ) -> Option<async_std::channel::Sender<Result<crate::player::scope::ScopeResult, ScriptError>>> {
+    ) -> Option<async_std::channel::Sender<Result<crate::player::scope::ScopeResult, ScriptError>>>
+    {
         self.callback_sender.take()
     }
 
@@ -433,7 +512,10 @@ impl EvalContinuation {
         let owner_active = session
             .with_player(self.player_id, |context| {
                 self.accepts_owner(&context.player.owner)
-                    && self.scope.as_ref().map_or(true, |scope| scope.validate_active(context.player))
+                    && self
+                        .scope
+                        .as_ref()
+                        .map_or(true, |scope| scope.validate_active(context.player))
             })
             .unwrap_or(false);
         if !owner_active {
@@ -453,7 +535,11 @@ impl EvalContinuation {
                 // command source for another line; otherwise a resumed root
                 // handler incorrectly returns VOID.
                 if let Some(value) = self.values.pop() {
-                    if self.command_lines.as_ref().is_some_and(|lines| self.next_command_line < lines.len()) {
+                    if self
+                        .command_lines
+                        .as_ref()
+                        .is_some_and(|lines| self.next_command_line < lines.len())
+                    {
                         self.values.clear();
                         self.state = EvalState::Ready;
                         continue;
@@ -483,7 +569,11 @@ impl EvalContinuation {
                     return self.finish_value_error(error);
                 }
                 EvalTurn::Complete(Ok(value)) => {
-                    if self.command_lines.as_ref().is_some_and(|lines| self.next_command_line < lines.len()) {
+                    if self
+                        .command_lines
+                        .as_ref()
+                        .is_some_and(|lines| self.next_command_line < lines.len())
+                    {
                         self.values.clear();
                         self.state = EvalState::Ready;
                         continue;
@@ -494,7 +584,6 @@ impl EvalContinuation {
             }
         }
     }
-
 
     pub(crate) fn complete(
         &mut self,
@@ -512,7 +601,10 @@ impl EvalContinuation {
         let current_owner = session
             .with_player(self.player_id, |context| {
                 self.accepts_owner(&context.player.owner)
-                    && self.scope.as_ref().map_or(true, |scope| scope.validate_active(context.player))
+                    && self
+                        .scope
+                        .as_ref()
+                        .map_or(true, |scope| scope.validate_active(context.player))
             })
             .unwrap_or(false);
         if !current_owner {
@@ -521,8 +613,12 @@ impl EvalContinuation {
         let result_valid = match &result {
             Ok(value) => session
                 .with_player(self.player_id, |context| {
-                    crate::player::driver::checked_internal_datum(context.player, context.symbols, value)
-                        .map(|_| ())
+                    crate::player::driver::checked_internal_datum(
+                        context.player,
+                        context.symbols,
+                        value,
+                    )
+                    .map(|_| ())
                 })
                 .and_then(Result::ok)
                 .is_some(),
@@ -545,7 +641,11 @@ impl EvalContinuation {
                 return true;
             }
         };
-        self.values.push(if self.waiting_discards_result { DatumRef::Void } else { value });
+        self.values.push(if self.waiting_discards_result {
+            DatumRef::Void
+        } else {
+            value
+        });
         self.waiting_discards_result = false;
         self.state = EvalState::Ready;
         true
@@ -561,13 +661,15 @@ impl EvalContinuation {
     }
 
     fn next_command_ast(&mut self) -> Result<Option<LingoExpr>, ScriptError> {
-        let Some(lines) = self.command_lines.as_ref() else { return Ok(None) };
-        let Some(line) = lines.get(self.next_command_line).cloned() else { return Ok(None) };
+        let Some(lines) = self.command_lines.as_ref() else {
+            return Ok(None);
+        };
+        let Some(line) = lines.get(self.next_command_line).cloned() else {
+            return Ok(None);
+        };
         self.next_command_line += 1;
-        parse_lingo_expr_ast_runtime(Rule::command_eval_expr, line)
-            .map(Some)
+        parse_lingo_expr_ast_runtime(Rule::command_eval_expr, line).map(Some)
     }
-
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -611,7 +713,12 @@ pub enum LingoExpr {
     PutInto(Box<LingoExpr>, Box<LingoExpr>),
     PutDisplay(Box<LingoExpr>),
     ThePropOf(Box<LingoExpr>, String), // "the X of Y" constructs
-    ChunkExpr(Symbol, Box<LingoExpr>, Option<Box<LingoExpr>>, Box<LingoExpr>),
+    ChunkExpr(
+        Symbol,
+        Box<LingoExpr>,
+        Option<Box<LingoExpr>>,
+        Box<LingoExpr>,
+    ),
     DeleteChunk(Box<LingoExpr>), // delete <chunk_expr>
     /// `if EXPR then COMMAND` inline form (no `else`, no `end if`). Used
     /// by Director's text-eval contexts like `keyUpScript`, where the
@@ -639,10 +746,12 @@ fn checked_static_datum(
             .allocator
             .try_get_datum(datum_ref)
             .cloned()
-            .ok_or_else(|| ScriptError::new_code(
-                crate::player::ScriptErrorCode::InvalidReference,
-                "Foreign or stale datum reference".to_string(),
-            ))?,
+            .ok_or_else(|| {
+                ScriptError::new_code(
+                    crate::player::ScriptErrorCode::InvalidReference,
+                    "Foreign or stale datum reference".to_string(),
+                )
+            })?,
     };
     crate::player::compare::validate_direct_symbol_fields(&datum, symbols)?;
     Ok(datum)
@@ -673,9 +782,9 @@ fn eval_static_term_with_prefix(
 ) -> Result<DatumRef, ScriptError> {
     match first.as_rule() {
         Rule::not_op => {
-            let operand = iter.next().ok_or_else(|| {
-                ScriptError::new("Expected operand after not".to_string())
-            })?;
+            let operand = iter
+                .next()
+                .ok_or_else(|| ScriptError::new("Expected operand after not".to_string()))?;
             let operand_ref = eval_static_term_with_prefix(operand, iter, player, symbols)?;
             let value = checked_static_datum(player, &operand_ref, symbols)?.bool_value()?;
             Ok(player.alloc_datum(Datum::Int(i32::from(!value))))
@@ -712,19 +821,16 @@ pub fn eval_lingo_pair_static(
             }
             // Handle binary operators (e.g. "foo" & QUOTE & "bar")
             let mut iter = inner_pairs.into_iter();
-            let first = iter.next()
+            let first = iter
+                .next()
                 .ok_or_else(|| ScriptError::new("Expected expression content".to_string()))?;
             // Prefix operators bind to one term. Consume them recursively so
             // `not not true` and a prefix on a binary RHS (`true and not x`)
             // use the same term boundaries as the runtime Pratt evaluator.
-            let mut result = eval_static_term_with_prefix(
-                first,
-                &mut iter,
-                player,
-                symbols,
-            )?;
+            let mut result = eval_static_term_with_prefix(first, &mut iter, player, symbols)?;
             while let Some(op) = iter.next() {
-                let right = iter.next()
+                let right = iter
+                    .next()
                     .ok_or_else(|| ScriptError::new("Expected right operand".to_string()))?;
                 // `obj_prop`'s right operand is a property NAME, not a value — take its
                 // source text and skip evaluation (evaluating it would try to resolve
@@ -732,32 +838,29 @@ pub fn eval_lingo_pair_static(
                 if op.as_rule() == Rule::obj_prop {
                     let prop_name = right.as_str().trim().to_string();
                     let prop_symbol = symbols.intern(&prop_name);
-                    result = crate::player::script::get_obj_prop(
-                        player,
-                        symbols,
-                        &result,
-                        prop_symbol,
-                    )?;
+                    result =
+                        crate::player::script::get_obj_prop(player, symbols, &result, prop_symbol)?;
                     continue;
                 }
-                let right_ref = eval_static_term_with_prefix(
-                    right,
-                    &mut iter,
-                    player,
-                    symbols,
-                )?;
+                let right_ref = eval_static_term_with_prefix(right, &mut iter, player, symbols)?;
                 match op.as_rule() {
                     Rule::join => {
                         // String concatenation (&)
-                        let left_str = checked_static_datum(player, &result, symbols)?.string_value(symbols)?;
-                        let right_str = checked_static_datum(player, &right_ref, symbols)?.string_value(symbols)?;
-                        result = player.alloc_datum(Datum::String(format!("{}{}", left_str, right_str)));
+                        let left_str = checked_static_datum(player, &result, symbols)?
+                            .string_value(symbols)?;
+                        let right_str = checked_static_datum(player, &right_ref, symbols)?
+                            .string_value(symbols)?;
+                        result =
+                            player.alloc_datum(Datum::String(format!("{}{}", left_str, right_str)));
                     }
                     Rule::join_pad => {
                         // Padded concatenation (&&)
-                        let left_str = checked_static_datum(player, &result, symbols)?.string_value(symbols)?;
-                        let right_str = checked_static_datum(player, &right_ref, symbols)?.string_value(symbols)?;
-                        result = player.alloc_datum(Datum::String(format!("{} {}", left_str, right_str)));
+                        let left_str = checked_static_datum(player, &result, symbols)?
+                            .string_value(symbols)?;
+                        let right_str = checked_static_datum(player, &right_ref, symbols)?
+                            .string_value(symbols)?;
+                        result = player
+                            .alloc_datum(Datum::String(format!("{} {}", left_str, right_str)));
                     }
                     // Arithmetic. `.value` on a text member is how movies ship data
                     // tables, and those tables contain expressions, not just literals —
@@ -769,46 +872,69 @@ pub fn eval_lingo_pair_static(
                     Rule::add | Rule::subtract | Rule::multiply | Rule::divide => {
                         let rule = op.as_rule();
                         let v = match rule {
-                                Rule::add => {
-                                    let (l, r) = (checked_static_datum(player, &result, symbols)?, checked_static_datum(player, &right_ref, symbols)?);
-                                    crate::player::datum_operations::add_datums(l, r, player, symbols)?
-                                }
-                                Rule::subtract => {
-                                    let (l, r) = (checked_static_datum(player, &result, symbols)?, checked_static_datum(player, &right_ref, symbols)?);
-                                    crate::player::datum_operations::subtract_datums(l, r, player, symbols)?
-                                }
-                                Rule::multiply => {
-                                    checked_static_datum(player, &result, symbols)?;
-                                    checked_static_datum(player, &right_ref, symbols)?;
-                                    crate::player::datum_operations::multiply_datums(result.clone(), right_ref.clone(), player, symbols)?
-                                }
-                                _ => {
-                                    checked_static_datum(player, &result, symbols)?;
-                                    checked_static_datum(player, &right_ref, symbols)?;
-                                    crate::player::datum_operations::divide_datums(result.clone(), right_ref.clone(), player, symbols)?
-                                }
-                            };
+                            Rule::add => {
+                                let (l, r) = (
+                                    checked_static_datum(player, &result, symbols)?,
+                                    checked_static_datum(player, &right_ref, symbols)?,
+                                );
+                                crate::player::datum_operations::add_datums(l, r, player, symbols)?
+                            }
+                            Rule::subtract => {
+                                let (l, r) = (
+                                    checked_static_datum(player, &result, symbols)?,
+                                    checked_static_datum(player, &right_ref, symbols)?,
+                                );
+                                crate::player::datum_operations::subtract_datums(
+                                    l, r, player, symbols,
+                                )?
+                            }
+                            Rule::multiply => {
+                                checked_static_datum(player, &result, symbols)?;
+                                checked_static_datum(player, &right_ref, symbols)?;
+                                crate::player::datum_operations::multiply_datums(
+                                    result.clone(),
+                                    right_ref.clone(),
+                                    player,
+                                    symbols,
+                                )?
+                            }
+                            _ => {
+                                checked_static_datum(player, &result, symbols)?;
+                                checked_static_datum(player, &right_ref, symbols)?;
+                                crate::player::datum_operations::divide_datums(
+                                    result.clone(),
+                                    right_ref.clone(),
+                                    player,
+                                    symbols,
+                                )?
+                            }
+                        };
                         result = player.alloc_datum(v);
                     }
                     _ => {
                         return Err(ScriptError::new(format!(
-                            "Unsupported operator {:?} in static expression", op.as_rule()
+                            "Unsupported operator {:?} in static expression",
+                            op.as_rule()
                         )));
                     }
                 }
             }
             Ok(result)
-        },
+        }
         Rule::term_arg => {
-            let inner = pair.into_inner().next()
+            let inner = pair
+                .into_inner()
+                .next()
                 .ok_or_else(|| ScriptError::new("Expected term_arg content".to_string()))?;
             eval_lingo_pair_static(inner, player, symbols)
-        },
+        }
         Rule::list => {
-            let inner = pair.into_inner().next()
+            let inner = pair
+                .into_inner()
+                .next()
                 .ok_or_else(|| ScriptError::new("Expected list content".to_string()))?;
             eval_lingo_pair_static(inner, player, symbols)
-        },
+        }
         Rule::multi_list => {
             let mut result_vec = VecDeque::new();
             for inner_pair in pair.into_inner() {
@@ -820,48 +946,88 @@ pub fn eval_lingo_pair_static(
             }
         }
         Rule::string => {
-            let str_val = pair.into_inner().next()
+            let str_val = pair
+                .into_inner()
+                .next()
                 .ok_or_else(|| ScriptError::new("Expected string content".to_string()))?
                 .as_str();
             Ok(player.alloc_datum(Datum::String(str_val.to_owned())))
         }
         Rule::prop_list => {
-            let inner = pair.into_inner().next()
+            let inner = pair
+                .into_inner()
+                .next()
                 .ok_or_else(|| ScriptError::new("Expected prop list content".to_string()))?;
             eval_lingo_pair_static(inner, player, symbols)
-        },
+        }
         Rule::multi_prop_list => {
             let mut result_vec = VecDeque::new();
             for inner_pair in pair.into_inner() {
                 let mut pair_inner = inner_pair.into_inner();
-                let key = eval_lingo_pair_static(pair_inner.next()
-                    .ok_or_else(|| ScriptError::new("Expected prop list key".to_string()))?, player, symbols)?;
-                let value = eval_lingo_pair_static(pair_inner.next()
-                    .ok_or_else(|| ScriptError::new("Expected prop list value".to_string()))?, player, symbols)?;
+                let key = eval_lingo_pair_static(
+                    pair_inner
+                        .next()
+                        .ok_or_else(|| ScriptError::new("Expected prop list key".to_string()))?,
+                    player,
+                    symbols,
+                )?;
+                let value = eval_lingo_pair_static(
+                    pair_inner
+                        .next()
+                        .ok_or_else(|| ScriptError::new("Expected prop list value".to_string()))?,
+                    player,
+                    symbols,
+                )?;
 
                 result_vec.push_back((key, value));
             }
             Ok(player.alloc_datum(Datum::PropList(result_vec, false)))
         }
-        Rule::empty_prop_list => {
-            Ok(player.alloc_datum(Datum::PropList(VecDeque::new(), false)))
-        }
+        Rule::empty_prop_list => Ok(player.alloc_datum(Datum::PropList(VecDeque::new(), false))),
         Rule::number_int => {
-            let val = pair.as_str().parse::<i32>()
+            let val = pair
+                .as_str()
+                .parse::<i32>()
                 .map_err(|e| ScriptError::new(format!("Invalid integer: {}", e)))?;
             Ok(player.alloc_datum(Datum::Int(val)))
-        },
+        }
         Rule::number_float => {
-            let val = pair.as_str().parse::<f64>()
+            let val = pair
+                .as_str()
+                .parse::<f64>()
                 .map_err(|e| ScriptError::new(format!("Invalid float: {}", e)))?;
             Ok(player.alloc_datum(Datum::Float(val)))
-        },
+        }
         Rule::rect => {
             let mut inner = pair.into_inner();
-            let x_ref = eval_lingo_pair_static(inner.next().ok_or_else(|| ScriptError::new("Expected rect x".to_string()))?, player, symbols)?;
-            let y_ref = eval_lingo_pair_static(inner.next().ok_or_else(|| ScriptError::new("Expected rect y".to_string()))?, player, symbols)?;
-            let w_ref = eval_lingo_pair_static(inner.next().ok_or_else(|| ScriptError::new("Expected rect w".to_string()))?, player, symbols)?;
-            let h_ref = eval_lingo_pair_static(inner.next().ok_or_else(|| ScriptError::new("Expected rect h".to_string()))?, player, symbols)?;
+            let x_ref = eval_lingo_pair_static(
+                inner
+                    .next()
+                    .ok_or_else(|| ScriptError::new("Expected rect x".to_string()))?,
+                player,
+                symbols,
+            )?;
+            let y_ref = eval_lingo_pair_static(
+                inner
+                    .next()
+                    .ok_or_else(|| ScriptError::new("Expected rect y".to_string()))?,
+                player,
+                symbols,
+            )?;
+            let w_ref = eval_lingo_pair_static(
+                inner
+                    .next()
+                    .ok_or_else(|| ScriptError::new("Expected rect w".to_string()))?,
+                player,
+                symbols,
+            )?;
+            let h_ref = eval_lingo_pair_static(
+                inner
+                    .next()
+                    .ok_or_else(|| ScriptError::new("Expected rect h".to_string()))?,
+                player,
+                symbols,
+            )?;
             {
                 let x_datum = checked_static_datum(player, &x_ref, symbols)?;
                 let y_datum = checked_static_datum(player, &y_ref, symbols)?;
@@ -898,9 +1064,11 @@ pub fn eval_lingo_pair_static(
         }
         Rule::rgb_str_color => {
             let mut inner = pair.into_inner();
-            let str_inner = inner.next()
+            let str_inner = inner
+                .next()
                 .ok_or_else(|| ScriptError::new("Expected rgb string".to_string()))?
-                .into_inner().next()
+                .into_inner()
+                .next()
                 .ok_or_else(|| ScriptError::new("Expected rgb string content".to_string()))?;
             let str_val = str_inner.as_str();
             {
@@ -918,7 +1086,9 @@ pub fn eval_lingo_pair_static(
             }
         }
         Rule::symbol => {
-            let str_val = pair.into_inner().next()
+            let str_val = pair
+                .into_inner()
+                .next()
                 .ok_or_else(|| ScriptError::new("Expected symbol name".to_string()))?
                 .as_str();
             Ok(player.alloc_datum(Datum::Symbol(symbols.intern(str_val))))
@@ -926,19 +1096,25 @@ pub fn eval_lingo_pair_static(
         Rule::bool_true => Ok(player.alloc_datum(datum_bool(true))),
         Rule::bool_false => Ok(player.alloc_datum(datum_bool(false))),
         Rule::void => Ok(DatumRef::Void),
-        Rule::string_empty => {
-            Ok(player.alloc_datum(Datum::String("".to_owned())))
-        }
-        Rule::return_const => {
-            Ok(player.alloc_datum(Datum::String("\r\n".to_owned())))
-        }
-        Rule::nohash_symbol => {
-            Ok(player.alloc_datum(Datum::Symbol(symbols.intern(pair.as_str()))))
-        },
+        Rule::string_empty => Ok(player.alloc_datum(Datum::String("".to_owned()))),
+        Rule::return_const => Ok(player.alloc_datum(Datum::String("\r\n".to_owned()))),
+        Rule::nohash_symbol => Ok(player.alloc_datum(Datum::Symbol(symbols.intern(pair.as_str())))),
         Rule::point => {
             let mut inner = pair.into_inner();
-            let x_ref = eval_lingo_pair_static(inner.next().ok_or_else(|| ScriptError::new("Expected point x".to_string()))?, player, symbols)?;
-            let y_ref = eval_lingo_pair_static(inner.next().ok_or_else(|| ScriptError::new("Expected point y".to_string()))?, player, symbols)?;
+            let x_ref = eval_lingo_pair_static(
+                inner
+                    .next()
+                    .ok_or_else(|| ScriptError::new("Expected point x".to_string()))?,
+                player,
+                symbols,
+            )?;
+            let y_ref = eval_lingo_pair_static(
+                inner
+                    .next()
+                    .ok_or_else(|| ScriptError::new("Expected point y".to_string()))?,
+                player,
+                symbols,
+            )?;
             {
                 let x_datum = checked_static_datum(player, &x_ref, symbols)?;
                 let y_datum = checked_static_datum(player, &y_ref, symbols)?;
@@ -948,13 +1124,16 @@ pub fn eval_lingo_pair_static(
         }
         Rule::empty_list => {
             Ok(player.alloc_datum(Datum::List(DatumType::List, VecDeque::new(), false)))
-        },
+        }
         Rule::the_prop => {
             // For multi-word properties like "the long time", we need to get the full text
             // and extract the property name
             let full_text = pair.as_str();
-            let prop_name = if full_text.starts_with("the ") || full_text.starts_with("THE ") || full_text.starts_with("The ") {
-                &full_text[4..]  // Skip "the "
+            let prop_name = if full_text.starts_with("the ")
+                || full_text.starts_with("THE ")
+                || full_text.starts_with("The ")
+            {
+                &full_text[4..] // Skip "the "
             } else {
                 // Shouldn't happen with correct grammar, but handle it
                 full_text
@@ -970,7 +1149,9 @@ pub fn eval_lingo_pair_static(
         // `.value` needs sprite references as well as member references. The sprite
         // number is itself an expression (here the global `guispr`).
         Rule::sprite_ref => {
-            let inner = pair.into_inner().next()
+            let inner = pair
+                .into_inner()
+                .next()
                 .ok_or_else(|| ScriptError::new("Expected sprite number".to_string()))?;
             let num_ref = eval_lingo_pair_static(inner, player, symbols)?;
             {
@@ -982,7 +1163,8 @@ pub fn eval_lingo_pair_static(
             let mut inner = pair.into_inner();
 
             // First expression is the member name or number
-            let member_expr = inner.next()
+            let member_expr = inner
+                .next()
                 .ok_or_else(|| ScriptError::new("Expected member identifier".to_string()))?;
             let member_id_ref = eval_lingo_pair_static(member_expr, player, symbols)?;
 
@@ -1020,15 +1202,18 @@ pub fn eval_lingo_pair_static(
                             let cast_lib_num = match &cast_datum {
                                 Datum::Int(num) => *num,
                                 Datum::CastLib(num) => *num as i32,
-                                Datum::String(name) => {
-                                    player.movie.cast_manager.get_cast_by_name(name)
-                                        .map(|c| c.number as i32)
-                                        .unwrap_or(0)
+                                Datum::String(name) => player
+                                    .movie
+                                    .cast_manager
+                                    .get_cast_by_name(name)
+                                    .map(|c| c.number as i32)
+                                    .unwrap_or(0),
+                                _ => {
+                                    return Err(ScriptError::new(format!(
+                                        "Expected int, string, or castLib, got {:?}",
+                                        cast_datum.type_enum()
+                                    )))
                                 }
-                                _ => return Err(ScriptError::new(format!(
-                                    "Expected int, string, or castLib, got {:?}",
-                                    cast_datum.type_enum()
-                                ))),
                             };
                             let member_num = member_id_datum.int_value().unwrap_or(0);
                             super::cast_lib::CastMemberRef {
@@ -1046,25 +1231,30 @@ pub fn eval_lingo_pair_static(
         }
         Rule::castlib_ref => {
             let mut inner = pair.into_inner();
-            
-            let castlib_expr = inner.next()
+
+            let castlib_expr = inner
+                .next()
                 .ok_or_else(|| ScriptError::new("Expected castLib identifier".to_string()))?;
             let castlib_ref = eval_lingo_pair_static(castlib_expr, player, symbols)?;
-            
+
             {
-                let castlib_num = checked_static_datum(player, &castlib_ref, symbols)?.int_value()
+                let castlib_num = checked_static_datum(player, &castlib_ref, symbols)?
+                    .int_value()
                     .or_else(|_| -> Result<i32, ScriptError> {
                         // If it's not an int, try to get it as a string (named castLib)
-                        let name = checked_static_datum(player, &castlib_ref, symbols)?.string_value(symbols)?;
+                        let name = checked_static_datum(player, &castlib_ref, symbols)?
+                            .string_value(symbols)?;
                         // Convert castLib name to number
                         let cast = player
                             .movie
                             .cast_manager
                             .get_cast_by_name(&name)
-                            .ok_or_else(|| ScriptError::new(format!("CastLib not found: {}", name)))?;
+                            .ok_or_else(|| {
+                                ScriptError::new(format!("CastLib not found: {}", name))
+                            })?;
                         Ok(cast.number as i32)
                     })?;
-                
+
                 // Return a CastLib reference datum
                 Ok(player.alloc_datum(Datum::CastLib(castlib_num as u32)))
             }
@@ -1073,12 +1263,8 @@ pub fn eval_lingo_pair_static(
             // Handle well-known Lingo constants in static context
             let name = pair.as_str();
             match name {
-                "QUOTE" => {
-                    Ok(player.alloc_datum(Datum::String("\"".to_owned())))
-                },
-                "TAB" => {
-                    Ok(player.alloc_datum(Datum::String("\t".to_owned())))
-                },
+                "QUOTE" => Ok(player.alloc_datum(Datum::String("\"".to_owned()))),
+                "TAB" => Ok(player.alloc_datum(Datum::String("\t".to_owned()))),
                 // Otherwise it's a variable reference. Director's `value()`
                 // evaluates the string as Lingo, so identifiers resolve against
                 // the accessible context — NabiscoWorld Mini Mini-Golf stores
@@ -1140,7 +1326,7 @@ pub fn eval_lingo_pair_static(
                         return Ok(value.clone());
                     }
                     Ok(DatumRef::Void)
-                },
+                }
             }
         }
         Rule::config_key | Rule::config_ident_part => {
@@ -1152,9 +1338,11 @@ pub fn eval_lingo_pair_static(
         Rule::handler_call => {
             // Support common constructors in static context (e.g. vector(0, 0, -1))
             let mut inner = pair.into_inner();
-            let handler_name = inner.next()
+            let handler_name = inner
+                .next()
                 .ok_or_else(|| ScriptError::new("Expected handler name".to_string()))?
-                .as_str().to_lowercase();
+                .as_str()
+                .to_lowercase();
             let mut arg_refs = vec![];
             if let Some(args_container) = inner.next() {
                 for arg_pair in args_container.into_inner() {
@@ -1167,24 +1355,63 @@ pub fn eval_lingo_pair_static(
             }
             match handler_name.as_str() {
                 "vector" => {
-                    {
-                        let x = if arg_refs.len() > 0 { checked_static_datum(player, &arg_refs[0], symbols)?.to_float().unwrap_or(0.0) } else { 0.0 };
-                        let y = if arg_refs.len() > 1 { checked_static_datum(player, &arg_refs[1], symbols)?.to_float().unwrap_or(0.0) } else { 0.0 };
-                        let z = if arg_refs.len() > 2 { checked_static_datum(player, &arg_refs[2], symbols)?.to_float().unwrap_or(0.0) } else { 0.0 };
-                        Ok::<DatumRef, ScriptError>(player.alloc_datum(Datum::Vector([x, y, z])))
-                    }
+                    let x = if arg_refs.len() > 0 {
+                        checked_static_datum(player, &arg_refs[0], symbols)?
+                            .to_float()
+                            .unwrap_or(0.0)
+                    } else {
+                        0.0
+                    };
+                    let y = if arg_refs.len() > 1 {
+                        checked_static_datum(player, &arg_refs[1], symbols)?
+                            .to_float()
+                            .unwrap_or(0.0)
+                    } else {
+                        0.0
+                    };
+                    let z = if arg_refs.len() > 2 {
+                        checked_static_datum(player, &arg_refs[2], symbols)?
+                            .to_float()
+                            .unwrap_or(0.0)
+                    } else {
+                        0.0
+                    };
+                    Ok::<DatumRef, ScriptError>(player.alloc_datum(Datum::Vector([x, y, z])))
                 }
                 "rect" => {
-                    {
-                        let l = if arg_refs.len() > 0 { checked_static_datum(player, &arg_refs[0], symbols)?.to_float().unwrap_or(0.0) } else { 0.0 };
-                        let t = if arg_refs.len() > 1 { checked_static_datum(player, &arg_refs[1], symbols)?.to_float().unwrap_or(0.0) } else { 0.0 };
-                        let r = if arg_refs.len() > 2 { checked_static_datum(player, &arg_refs[2], symbols)?.to_float().unwrap_or(0.0) } else { 0.0 };
-                        let b = if arg_refs.len() > 3 { checked_static_datum(player, &arg_refs[3], symbols)?.to_float().unwrap_or(0.0) } else { 0.0 };
-                        Ok::<DatumRef, ScriptError>(player.alloc_datum(Datum::Rect([l, t, r, b], 0)))
-                    }
+                    let l = if arg_refs.len() > 0 {
+                        checked_static_datum(player, &arg_refs[0], symbols)?
+                            .to_float()
+                            .unwrap_or(0.0)
+                    } else {
+                        0.0
+                    };
+                    let t = if arg_refs.len() > 1 {
+                        checked_static_datum(player, &arg_refs[1], symbols)?
+                            .to_float()
+                            .unwrap_or(0.0)
+                    } else {
+                        0.0
+                    };
+                    let r = if arg_refs.len() > 2 {
+                        checked_static_datum(player, &arg_refs[2], symbols)?
+                            .to_float()
+                            .unwrap_or(0.0)
+                    } else {
+                        0.0
+                    };
+                    let b = if arg_refs.len() > 3 {
+                        checked_static_datum(player, &arg_refs[3], symbols)?
+                            .to_float()
+                            .unwrap_or(0.0)
+                    } else {
+                        0.0
+                    };
+                    Ok::<DatumRef, ScriptError>(player.alloc_datum(Datum::Rect([l, t, r, b], 0)))
                 }
                 _ => Err(ScriptError::new(format!(
-                    "Unsupported handler '{}' in static expression", handler_name
+                    "Unsupported handler '{}' in static expression",
+                    handler_name
                 ))),
             }
         }
@@ -1197,15 +1424,18 @@ pub fn eval_lingo_pair_static(
 
 fn parse_number_value(pair: Pair<Rule>) -> Result<f64, ScriptError> {
     match pair.as_rule() {
-        Rule::number_int => {
-            pair.as_str().parse::<f64>()
-                .map_err(|e| ScriptError::new(format!("Invalid number: {}", e)))
-        }
-        Rule::number_float => {
-            pair.as_str().parse::<f64>()
-                .map_err(|e| ScriptError::new(format!("Invalid number: {}", e)))
-        }
-        _ => Err(ScriptError::new(format!("Expected number, got {:?}", pair.as_rule())))
+        Rule::number_int => pair
+            .as_str()
+            .parse::<f64>()
+            .map_err(|e| ScriptError::new(format!("Invalid number: {}", e))),
+        Rule::number_float => pair
+            .as_str()
+            .parse::<f64>()
+            .map_err(|e| ScriptError::new(format!("Invalid number: {}", e))),
+        _ => Err(ScriptError::new(format!(
+            "Expected number, got {:?}",
+            pair.as_rule()
+        ))),
     }
 }
 
@@ -1268,7 +1498,10 @@ fn get_eval_top_level_prop(
             // debugger's useful diagnostic while hiding the internal
             // GetSetUtils top-level lookup error from normal evaluation.
             if player.current_breakpoint.is_some() {
-                Err(ScriptError::new(format!("Undefined variable: {}", prop_name)))
+                Err(ScriptError::new(format!(
+                    "Undefined variable: {}",
+                    prop_name
+                )))
             } else {
                 Ok(DatumRef::Void)
             }
@@ -1297,9 +1530,7 @@ fn get_eval_top_level_prop_classified(
                     ));
                 }
             }
-            return Ok(EvalLookupResult::Found(
-                player.alloc_datum(Datum::Int(0)),
-            ));
+            return Ok(EvalLookupResult::Found(player.alloc_datum(Datum::Int(0))));
         }
         let prop_symbol = symbols.intern(actual_prop);
         let result = player.get_movie_prop(symbols, prop_symbol)?;
@@ -1325,9 +1556,17 @@ fn get_eval_top_level_prop_classified(
             // Check locals by reverse-looking up the name_id from the name table
             {
                 let script_ref_for_locals = player.scopes[scope_idx].script_ref.clone();
-                if let Some(script_rc) = player.movie.cast_manager.get_script_by_ref(&script_ref_for_locals) {
+                if let Some(script_rc) = player
+                    .movie
+                    .cast_manager
+                    .get_script_by_ref(&script_ref_for_locals)
+                {
                     if let Some(lctx) = get_lctx_for_script(player, &script_rc) {
-                        if let Some(name_id) = lctx.names.iter().position(|n| n.eq_ignore_ascii_case(prop_name)) {
+                        if let Some(name_id) = lctx
+                            .names
+                            .iter()
+                            .position(|n| n.eq_ignore_ascii_case(prop_name))
+                        {
                             // `locals` is slot-indexed, so the name id has to
                             // be mapped through the HANDLER's local table to
                             // reach a slot. That mapping also enforces "this
@@ -1345,11 +1584,15 @@ fn get_eval_top_level_prop_classified(
                                 .movie
                                 .cast_manager
                                 .get_script_by_ref(&script_ref_for_locals)
-                                .and_then(|s| s.get_own_handler_by_local_name_id(
-                                    player.scopes[scope_idx].handler_name_id,
-                                ))
+                                .and_then(|s| {
+                                    s.get_own_handler_by_local_name_id(
+                                        player.scopes[scope_idx].handler_name_id,
+                                    )
+                                })
                                 .and_then(|h| {
-                                    h.local_name_ids.iter().position(|&nid| nid as usize == name_id)
+                                    h.local_name_ids
+                                        .iter()
+                                        .position(|&nid| nid as usize == name_id)
                                 });
                             if let Some(slot) = slot {
                                 let local = &player.scopes[scope_idx];
@@ -1394,7 +1637,9 @@ fn get_eval_top_level_prop_classified(
             if let Some(script_rc) = player.movie.cast_manager.get_script_by_ref(&script_ref) {
                 let script = script_rc.clone();
                 // Find the handler whose name_id matches this scope's handler_name_id
-                let handler_name = script.handlers.iter()
+                let handler_name = script
+                    .handlers
+                    .iter()
                     .find(|(_, h)| h.name_id == handler_name_id)
                     .map(|(name, _)| {
                         symbols
@@ -1404,14 +1649,16 @@ fn get_eval_top_level_prop_classified(
                     })
                     .transpose()?;
                 if let Some(handler_name) = handler_name {
-                    if let Some(handler_def) = script.get_own_handler(symbols.intern(&handler_name)) {
+                    if let Some(handler_def) = script.get_own_handler(symbols.intern(&handler_name))
+                    {
                         let handler_def = handler_def.clone();
                         // Check handler arguments by name
                         if let Some(lctx) = get_lctx_for_script(player, &script) {
                             for (i, &name_id) in handler_def.argument_name_ids.iter().enumerate() {
                                 if let Some(name) = lctx.names.get(name_id as usize) {
                                     if name.eq_ignore_ascii_case(prop_name) {
-                                        if let Some(arg_ref) = player.scopes[scope_idx].args.get(i) {
+                                        if let Some(arg_ref) = player.scopes[scope_idx].args.get(i)
+                                        {
                                             checked_static_datum(player, arg_ref, symbols)?;
                                             return Ok(EvalLookupResult::Found(arg_ref.clone()));
                                         }
@@ -1427,12 +1674,9 @@ fn get_eval_top_level_prop_classified(
             let receiver = player.scopes[scope_idx].receiver.clone();
             if let Some(receiver_ref) = receiver {
                 let prop_name_symbol = symbols.intern(prop_name);
-                if let Some(result) = script_get_prop_opt(
-                    player,
-                    symbols,
-                    &receiver_ref,
-                    prop_name_symbol,
-                )? {
+                if let Some(result) =
+                    script_get_prop_opt(player, symbols, &receiver_ref, prop_name_symbol)?
+                {
                     checked_static_datum(player, &result, symbols)?;
                     return Ok(EvalLookupResult::Found(result));
                 }
@@ -1490,7 +1734,10 @@ fn parse_lingo_expr_runtime(
                 // Extract the expression inside the brackets
                 let index_pairs = op.into_inner();
                 let index_expr = parse_lingo_expr_runtime(index_pairs, pratt)?;
-                Ok(LingoExpr::ListAccess(Box::new(list_expr), Box::new(index_expr)))
+                Ok(LingoExpr::ListAccess(
+                    Box::new(list_expr),
+                    Box::new(index_expr),
+                ))
             }
             _ => Err(ScriptError::new(format!(
                 "Invalid postfix operator {:?}",
@@ -1588,7 +1835,9 @@ fn parse_lingo_expr_runtime(
                         // pMapCastLib.member[expr] → ObjHandlerCall(obj, "getPropRef", [#member, expr])
                         // Unwrap single-element ListLiteral (from [expr] syntax)
                         let index_expr = match *member_expr {
-                            LingoExpr::ListLiteral(mut items) if items.len() == 1 => items.remove(0),
+                            LingoExpr::ListLiteral(mut items) if items.len() == 1 => {
+                                items.remove(0)
+                            }
                             other => other,
                         };
                         Ok(LingoExpr::ObjHandlerCall(
@@ -1668,69 +1917,97 @@ pub fn parse_lingo_rule_runtime(
             let y_expr = parse_lingo_rule_runtime(inner.next().unwrap(), pratt)?;
             let w_expr = parse_lingo_rule_runtime(inner.next().unwrap(), pratt)?;
             let h_expr = parse_lingo_rule_runtime(inner.next().unwrap(), pratt)?;
-            
-            Ok(LingoExpr::RectLiteral(vec![(x_expr, y_expr, w_expr, h_expr)]))
+
+            Ok(LingoExpr::RectLiteral(vec![(
+                x_expr, y_expr, w_expr, h_expr,
+            )]))
         }
         Rule::point => {
             let mut inner = pair.into_inner();
             let x_expr = parse_lingo_rule_runtime(inner.next().unwrap(), pratt)?;
             let y_expr = parse_lingo_rule_runtime(inner.next().unwrap(), pratt)?;
-            
+
             Ok(LingoExpr::PointLiteral(vec![(x_expr, y_expr)]))
         }
         Rule::member_ref => {
             let mut inner = pair.into_inner();
-            
+
             // First expression is the member number
             let member_expr = parse_lingo_rule_runtime(inner.next().unwrap(), pratt)?;
-            
+
             // Optional: "of castLib X"
             let cast_lib_expr = if let Some(castlib_pair) = inner.next() {
                 Some(Box::new(parse_lingo_rule_runtime(castlib_pair, pratt)?))
             } else {
                 None
             };
-            
+
             Ok(LingoExpr::MemberRef(Box::new(member_expr), cast_lib_expr))
         }
         Rule::sprite_ref => {
             let mut inner = pair.into_inner();
-            let sprite_num_pair = inner.next().ok_or_else(|| ScriptError::new("Expected sprite number".to_string()))?;
+            let sprite_num_pair = inner
+                .next()
+                .ok_or_else(|| ScriptError::new("Expected sprite number".to_string()))?;
             let sprite_num_expr = parse_lingo_expr_runtime(sprite_num_pair.into_inner(), pratt)?;
-            Ok(LingoExpr::HandlerCall("sprite".to_string(), vec![sprite_num_expr]))
+            Ok(LingoExpr::HandlerCall(
+                "sprite".to_string(),
+                vec![sprite_num_expr],
+            ))
         }
         Rule::field_ref => {
             let mut inner = pair.into_inner();
-            let field_arg_pair = inner.next().ok_or_else(|| ScriptError::new("Expected field name or number".to_string()))?;
+            let field_arg_pair = inner
+                .next()
+                .ok_or_else(|| ScriptError::new("Expected field name or number".to_string()))?;
             let field_arg_expr = parse_lingo_expr_runtime(field_arg_pair.into_inner(), pratt)?;
-            Ok(LingoExpr::HandlerCall("field".to_string(), vec![field_arg_expr]))
+            Ok(LingoExpr::HandlerCall(
+                "field".to_string(),
+                vec![field_arg_expr],
+            ))
         }
         // `script "name"` / `script("name")` — the space-separated form is what
         // the documented child-object idiom uses: `new(script "parentName", ..)`.
         Rule::script_ref => {
             let mut inner = pair.into_inner();
-            let script_arg_pair = inner.next().ok_or_else(|| ScriptError::new("Expected script name or number".to_string()))?;
+            let script_arg_pair = inner
+                .next()
+                .ok_or_else(|| ScriptError::new("Expected script name or number".to_string()))?;
             let script_arg_expr = parse_lingo_expr_runtime(script_arg_pair.into_inner(), pratt)?;
-            Ok(LingoExpr::HandlerCall("script".to_string(), vec![script_arg_expr]))
+            Ok(LingoExpr::HandlerCall(
+                "script".to_string(),
+                vec![script_arg_expr],
+            ))
         }
         Rule::sprite_of_expr => {
             let mut inner = pair.into_inner();
-            let prop_name_pair = inner.next().ok_or_else(|| ScriptError::new("Expected property name".to_string()))?;
+            let prop_name_pair = inner
+                .next()
+                .ok_or_else(|| ScriptError::new("Expected property name".to_string()))?;
             let prop_name = prop_name_pair.as_str().to_string();
-            let sprite_pair = inner.next().ok_or_else(|| ScriptError::new("Expected sprite expression".to_string()))?;
+            let sprite_pair = inner
+                .next()
+                .ok_or_else(|| ScriptError::new("Expected sprite expression".to_string()))?;
             let sprite_expr = parse_lingo_rule_runtime(sprite_pair, pratt)?;
             Ok(LingoExpr::ObjProp(Box::new(sprite_expr), prop_name))
         }
         Rule::castlib_ref => {
             let mut inner = pair.into_inner();
             let castlib_expr = parse_lingo_rule_runtime(inner.next().unwrap(), pratt)?;
-            Ok(LingoExpr::HandlerCall("castLib".to_string(), vec![castlib_expr]))
+            Ok(LingoExpr::HandlerCall(
+                "castLib".to_string(),
+                vec![castlib_expr],
+            ))
         }
         Rule::castlib_of_expr => {
             let mut inner = pair.into_inner();
-            let prop_name_pair = inner.next().ok_or_else(|| ScriptError::new("Expected property name".to_string()))?;
+            let prop_name_pair = inner
+                .next()
+                .ok_or_else(|| ScriptError::new("Expected property name".to_string()))?;
             let prop_name = prop_name_pair.as_str().to_string();
-            let castlib_pair = inner.next().ok_or_else(|| ScriptError::new("Expected castLib expression".to_string()))?;
+            let castlib_pair = inner
+                .next()
+                .ok_or_else(|| ScriptError::new("Expected castLib expression".to_string()))?;
             let castlib_expr = parse_lingo_rule_runtime(castlib_pair, pratt)?;
             Ok(LingoExpr::ObjProp(Box::new(castlib_expr), prop_name))
         }
@@ -1775,7 +2052,7 @@ pub fn parse_lingo_rule_runtime(
             // For put_handler_call, "put" is not captured as a child, only handler_call_args is
             let mut inner = pair.into_inner();
             let mut args = vec![];
-            
+
             if let Some(args_container) = inner.next() {
                 // This should be handler_call_args
                 for arg_pair in args_container.into_inner() {
@@ -1815,7 +2092,9 @@ pub fn parse_lingo_rule_runtime(
             // and the body command. The keyword nodes carry no data
             // beyond their text, so skip them and pick up the two
             // non-keyword children.
-            let mut content = pair.into_inner().filter(|p| !matches!(p.as_rule(), Rule::if_kw | Rule::then_kw));
+            let mut content = pair
+                .into_inner()
+                .filter(|p| !matches!(p.as_rule(), Rule::if_kw | Rule::then_kw));
             let cond_pair = content
                 .next()
                 .ok_or_else(|| ScriptError::new("if_inline: missing condition".to_string()))?;
@@ -1835,10 +2114,12 @@ pub fn parse_lingo_rule_runtime(
         Rule::pass_stmt => Ok(LingoExpr::Pass),
         Rule::handler_call | Rule::command_inline => {
             let mut inner = pair.into_inner();
-            let handler_name_pair = inner.next().ok_or_else(|| ScriptError::new("Expected handler name".to_string()))?;
+            let handler_name_pair = inner
+                .next()
+                .ok_or_else(|| ScriptError::new("Expected handler name".to_string()))?;
             let handler_name = handler_name_pair.as_str();
             let mut args = vec![];
-            
+
             if let Some(args_container) = inner.next() {
                 match args_container.as_rule() {
                     Rule::handler_call_args => {
@@ -1867,8 +2148,9 @@ pub fn parse_lingo_rule_runtime(
                     }
                     Rule::command_inline_args_single => {
                         // Process single expr
-                        let expr_pair = args_container.into_inner().next()
-                            .ok_or_else(|| ScriptError::new("Expected expr in single arg".to_string()))?;
+                        let expr_pair = args_container.into_inner().next().ok_or_else(|| {
+                            ScriptError::new("Expected expr in single arg".to_string())
+                        })?;
                         let arg_pairs = expr_pair.into_inner();
                         let arg_val = parse_lingo_expr_runtime(arg_pairs, pratt)?;
                         args.push(arg_val);
@@ -1926,9 +2208,7 @@ pub fn parse_lingo_rule_runtime(
             }
             Ok(LingoExpr::HandlerCall("sound".to_owned(), args))
         }
-        Rule::lang_ident | Rule::ident => {
-            Ok(LingoExpr::Identifier(pair.as_str().to_owned()))
-        }
+        Rule::lang_ident | Rule::ident => Ok(LingoExpr::Identifier(pair.as_str().to_owned())),
         Rule::prop_name => {
             // Property names (including reserved keywords when used after dot)
             Ok(LingoExpr::Identifier(pair.as_str().to_owned()))
@@ -1941,25 +2221,27 @@ pub fn parse_lingo_rule_runtime(
             // Parse dotted identifiers like "obj.prop.subprop" into nested ObjProp expressions
             let full_str = pair.as_str();
             let parts: Vec<&str> = full_str.split('.').collect();
-            
+
             if parts.is_empty() {
                 return Err(ScriptError::new("Empty dotted identifier".to_string()));
             }
-            
+
             // Start with the first identifier
             let mut result = LingoExpr::Identifier(parts[0].to_owned());
-            
+
             // Chain the rest as ObjProp accesses
             for part in &parts[1..] {
                 result = LingoExpr::ObjProp(Box::new(result), part.to_string());
             }
-            
+
             Ok(result)
         }
         Rule::assignment_expr => {
             let mut inner = pair.into_inner();
 
-            let first_term = inner.next().ok_or_else(|| ScriptError::new("Expected first term in assignment_expr".to_string()))?;
+            let first_term = inner.next().ok_or_else(|| {
+                ScriptError::new("Expected first term in assignment_expr".to_string())
+            })?;
             let mut result = parse_lingo_rule_runtime(first_term, pratt)?;
 
             while let Some(next_pair) = inner.next() {
@@ -1983,8 +2265,12 @@ pub fn parse_lingo_rule_runtime(
         }
         Rule::assignment => {
             let mut inner = pair.into_inner();
-            let left_pair = inner.next().ok_or_else(|| ScriptError::new("Expected left side of assignment".to_string()))?;
-            let right_pair = inner.next().ok_or_else(|| ScriptError::new("Expected right side of assignment".to_string()))?;
+            let left_pair = inner
+                .next()
+                .ok_or_else(|| ScriptError::new("Expected left side of assignment".to_string()))?;
+            let right_pair = inner
+                .next()
+                .ok_or_else(|| ScriptError::new("Expected right side of assignment".to_string()))?;
 
             let left_expr = if left_pair.as_rule() == Rule::assignment_expr {
                 parse_lingo_rule_runtime(left_pair, pratt)?
@@ -1994,9 +2280,7 @@ pub fn parse_lingo_rule_runtime(
                         let ident_name = left_pair.as_str();
                         LingoExpr::Identifier(ident_name.to_owned())
                     }
-                    Rule::dotted_ident => {
-                        parse_lingo_rule_runtime(left_pair, pratt)?
-                    }
+                    Rule::dotted_ident => parse_lingo_rule_runtime(left_pair, pratt)?,
                     _ => parse_lingo_rule_runtime(left_pair, pratt)?,
                 }
             };
@@ -2010,7 +2294,9 @@ pub fn parse_lingo_rule_runtime(
         }
         Rule::put_display => {
             let mut inner = pair.into_inner();
-            let expr_pair = inner.next().ok_or_else(|| ScriptError::new("Expected expression in put display".to_string()))?;
+            let expr_pair = inner.next().ok_or_else(|| {
+                ScriptError::new("Expected expression in put display".to_string())
+            })?;
             let value_expr = parse_lingo_expr_runtime(expr_pair.into_inner(), pratt)?;
             Ok(LingoExpr::PutDisplay(Box::new(value_expr)))
         }
@@ -2026,61 +2312,85 @@ pub fn parse_lingo_rule_runtime(
         }
         Rule::put_into => {
             let mut inner = pair.into_inner();
-            let expr_pair = inner.next().ok_or_else(|| ScriptError::new("Expected expression".to_string()))?;
+            let expr_pair = inner
+                .next()
+                .ok_or_else(|| ScriptError::new("Expected expression".to_string()))?;
             let expr = parse_lingo_expr_runtime(expr_pair.into_inner(), pratt)?;
-            let target_pair = inner.next().ok_or_else(|| ScriptError::new("Expected target identifier".to_string()))?;
+            let target_pair = inner
+                .next()
+                .ok_or_else(|| ScriptError::new("Expected target identifier".to_string()))?;
             let target_name = target_pair.as_str().to_string();
             Ok(LingoExpr::PutInto(
-                Box::new(expr), 
-                Box::new(LingoExpr::Identifier(target_name))
+                Box::new(expr),
+                Box::new(LingoExpr::Identifier(target_name)),
             ))
         }
         Rule::put_before => {
             let mut inner = pair.into_inner();
-            let expr_pair = inner.next().ok_or_else(|| ScriptError::new("Expected expression".to_string()))?;
+            let expr_pair = inner
+                .next()
+                .ok_or_else(|| ScriptError::new("Expected expression".to_string()))?;
             let expr = parse_lingo_expr_runtime(expr_pair.into_inner(), pratt)?;
-            let target_pair = inner.next().ok_or_else(|| ScriptError::new("Expected target identifier".to_string()))?;
+            let target_pair = inner
+                .next()
+                .ok_or_else(|| ScriptError::new("Expected target identifier".to_string()))?;
             let target_name = target_pair.as_str().to_string();
             Ok(LingoExpr::PutBefore(
-                Box::new(expr), 
-                Box::new(LingoExpr::Identifier(target_name))
+                Box::new(expr),
+                Box::new(LingoExpr::Identifier(target_name)),
             ))
-        },
+        }
         Rule::put_after => {
             let mut inner = pair.into_inner();
-            let expr_pair = inner.next().ok_or_else(|| ScriptError::new("Expected expression".to_string()))?;
+            let expr_pair = inner
+                .next()
+                .ok_or_else(|| ScriptError::new("Expected expression".to_string()))?;
             let expr = parse_lingo_expr_runtime(expr_pair.into_inner(), pratt)?;
-            let target_pair = inner.next().ok_or_else(|| ScriptError::new("Expected target identifier".to_string()))?;
+            let target_pair = inner
+                .next()
+                .ok_or_else(|| ScriptError::new("Expected target identifier".to_string()))?;
             let target_name = target_pair.as_str().to_string();
             Ok(LingoExpr::PutAfter(
-                Box::new(expr), 
-                Box::new(LingoExpr::Identifier(target_name))
+                Box::new(expr),
+                Box::new(LingoExpr::Identifier(target_name)),
             ))
-        },
+        }
         Rule::put_into_chunk => {
             let mut inner = pair.into_inner();
-            let expr_pair = inner.next().ok_or_else(|| ScriptError::new("Expected expression".to_string()))?;
+            let expr_pair = inner
+                .next()
+                .ok_or_else(|| ScriptError::new("Expected expression".to_string()))?;
             let expr = parse_lingo_expr_runtime(expr_pair.into_inner(), pratt)?;
-            let chunk_pair = inner.next().ok_or_else(|| ScriptError::new("Expected chunk expression".to_string()))?;
+            let chunk_pair = inner
+                .next()
+                .ok_or_else(|| ScriptError::new("Expected chunk expression".to_string()))?;
             let chunk = parse_lingo_rule_runtime(chunk_pair, pratt)?;
             Ok(LingoExpr::PutInto(Box::new(expr), Box::new(chunk)))
-        },
+        }
         Rule::put_before_chunk => {
             let mut inner = pair.into_inner();
-            let expr_pair = inner.next().ok_or_else(|| ScriptError::new("Expected expression".to_string()))?;
+            let expr_pair = inner
+                .next()
+                .ok_or_else(|| ScriptError::new("Expected expression".to_string()))?;
             let expr = parse_lingo_expr_runtime(expr_pair.into_inner(), pratt)?;
-            let chunk_pair = inner.next().ok_or_else(|| ScriptError::new("Expected chunk expression".to_string()))?;
+            let chunk_pair = inner
+                .next()
+                .ok_or_else(|| ScriptError::new("Expected chunk expression".to_string()))?;
             let chunk = parse_lingo_rule_runtime(chunk_pair, pratt)?;
             Ok(LingoExpr::PutBefore(Box::new(expr), Box::new(chunk)))
-        },
+        }
         Rule::put_after_chunk => {
             let mut inner = pair.into_inner();
-            let expr_pair = inner.next().ok_or_else(|| ScriptError::new("Expected expression".to_string()))?;
+            let expr_pair = inner
+                .next()
+                .ok_or_else(|| ScriptError::new("Expected expression".to_string()))?;
             let expr = parse_lingo_expr_runtime(expr_pair.into_inner(), pratt)?;
-            let chunk_pair = inner.next().ok_or_else(|| ScriptError::new("Expected chunk expression".to_string()))?;
+            let chunk_pair = inner
+                .next()
+                .ok_or_else(|| ScriptError::new("Expected chunk expression".to_string()))?;
             let chunk = parse_lingo_rule_runtime(chunk_pair, pratt)?;
             Ok(LingoExpr::PutAfter(Box::new(expr), Box::new(chunk)))
-        },
+        }
         Rule::put_statement => {
             let mut inner = pair.clone().into_inner();
             if let Some(inner_pair) = inner.next() {
@@ -2091,21 +2401,32 @@ pub fn parse_lingo_rule_runtime(
         }
         Rule::set_statement => {
             let mut inner = pair.into_inner();
-            let left_pair = inner.next().ok_or_else(|| ScriptError::new("Expected left side of set statement".to_string()))?;
-            let right_pair = inner.next().ok_or_else(|| ScriptError::new("Expected right side of set statement".to_string()))?;
+            let left_pair = inner.next().ok_or_else(|| {
+                ScriptError::new("Expected left side of set statement".to_string())
+            })?;
+            let right_pair = inner.next().ok_or_else(|| {
+                ScriptError::new("Expected right side of set statement".to_string())
+            })?;
             let left_expr = parse_lingo_expr_runtime(left_pair.into_inner(), pratt)?;
             let right_expr = parse_lingo_expr_runtime(right_pair.into_inner(), pratt)?;
-            Ok(LingoExpr::Assignment(Box::new(left_expr), Box::new(right_expr)))
+            Ok(LingoExpr::Assignment(
+                Box::new(left_expr),
+                Box::new(right_expr),
+            ))
         }
         Rule::delete_statement => {
             let mut inner = pair.into_inner();
-            let chunk_pair = inner.next().ok_or_else(|| ScriptError::new("Expected chunk expression after delete".to_string()))?;
+            let chunk_pair = inner.next().ok_or_else(|| {
+                ScriptError::new("Expected chunk expression after delete".to_string())
+            })?;
             let chunk_expr = parse_lingo_rule_runtime(chunk_pair, pratt)?;
             Ok(LingoExpr::DeleteChunk(Box::new(chunk_expr)))
         }
         Rule::chunk_expr => {
             let mut inner = pair.into_inner();
-            let chunk_type_pair = inner.next().ok_or_else(|| ScriptError::new("Expected chunk type".to_string()))?;
+            let chunk_type_pair = inner
+                .next()
+                .ok_or_else(|| ScriptError::new("Expected chunk type".to_string()))?;
             let chunk_type = match chunk_type_pair.as_str().to_ascii_lowercase().as_str() {
                 "item" => Symbol::builtin(BuiltInSymbol::Item),
                 "word" => Symbol::builtin(BuiltInSymbol::Word),
@@ -2113,15 +2434,23 @@ pub fn parse_lingo_rule_runtime(
                 "line" => Symbol::builtin(BuiltInSymbol::Line),
                 _ => return Err(ScriptError::new("Invalid string chunk type".to_string())),
             };
-            let index_pair = inner.next().ok_or_else(|| ScriptError::new("Expected index expression".to_string()))?;
+            let index_pair = inner
+                .next()
+                .ok_or_else(|| ScriptError::new("Expected index expression".to_string()))?;
             let index_expr = parse_lingo_expr_runtime(index_pair.into_inner(), pratt)?;
             // Check for optional range: "to <expr>"
-            let next_pair = inner.next().ok_or_else(|| ScriptError::new("Expected source expression".to_string()))?;
+            let next_pair = inner
+                .next()
+                .ok_or_else(|| ScriptError::new("Expected source expression".to_string()))?;
             let (range_end_expr, source_pair) = if next_pair.as_rule() == Rule::chunk_range {
-                let range_inner = next_pair.into_inner().next()
+                let range_inner = next_pair
+                    .into_inner()
+                    .next()
                     .ok_or_else(|| ScriptError::new("Expected range end expression".to_string()))?;
                 let range_expr = parse_lingo_expr_runtime(range_inner.into_inner(), pratt)?;
-                let src = inner.next().ok_or_else(|| ScriptError::new("Expected source expression after range".to_string()))?;
+                let src = inner.next().ok_or_else(|| {
+                    ScriptError::new("Expected source expression after range".to_string())
+                })?;
                 (Some(range_expr), src)
             } else {
                 (None, next_pair)
@@ -2130,22 +2459,27 @@ pub fn parse_lingo_rule_runtime(
                 Rule::ident | Rule::lang_ident => {
                     // Regular identifier - just use it as-is
                     LingoExpr::Identifier(source_pair.as_str().to_string())
-                },
+                }
                 Rule::the_prop => {
                     // "the X" property - parse it to get the full "the X" form
                     parse_lingo_rule_runtime(source_pair, pratt)?
-                },
+                }
                 Rule::the_prop_of => {
                     // "the X of Y" - parse recursively
                     parse_lingo_rule_runtime(source_pair, pratt)?
-                },
+                }
                 Rule::chunk_expr => {
                     // Nested chunk expression
                     parse_lingo_rule_runtime(source_pair, pratt)?
-                },
+                }
                 _ => parse_lingo_rule_runtime(source_pair, pratt)?,
             };
-            Ok(LingoExpr::ChunkExpr(chunk_type, Box::new(index_expr), range_end_expr.map(Box::new), Box::new(source_expr)))
+            Ok(LingoExpr::ChunkExpr(
+                chunk_type,
+                Box::new(index_expr),
+                range_end_expr.map(Box::new),
+                Box::new(source_expr),
+            ))
         }
         Rule::the_prop => {
             // For multi-word properties like "the long time", we need to get the full text
@@ -2160,18 +2494,29 @@ pub fn parse_lingo_rule_runtime(
             // "number of <kind>" on the target expr; the runtime get_obj_prop
             // path on String resolves it to chunk count.
             let mut inner = pair.into_inner();
-            let kind_pair = inner.next().ok_or_else(|| ScriptError::new("Expected chunk kind after 'the number of'".to_string()))?;
+            let kind_pair = inner.next().ok_or_else(|| {
+                ScriptError::new("Expected chunk kind after 'the number of'".to_string())
+            })?;
             let kind = kind_pair.as_str().to_ascii_lowercase();
-            let target_pair = inner.next().ok_or_else(|| ScriptError::new("Expected target after 'in'/'of'".to_string()))?;
+            let target_pair = inner
+                .next()
+                .ok_or_else(|| ScriptError::new("Expected target after 'in'/'of'".to_string()))?;
             let target_expr = parse_lingo_expr_runtime(target_pair.into_inner(), pratt)?;
-            Ok(LingoExpr::ThePropOf(Box::new(target_expr), format!("number of {}", kind)))
+            Ok(LingoExpr::ThePropOf(
+                Box::new(target_expr),
+                format!("number of {}", kind),
+            ))
         }
         Rule::the_prop_of => {
             let mut inner = pair.into_inner();
-            let prop_name_pair = inner.next().ok_or_else(|| ScriptError::new("Expected property name after 'the'".to_string()))?;
+            let prop_name_pair = inner.next().ok_or_else(|| {
+                ScriptError::new("Expected property name after 'the'".to_string())
+            })?;
             let prop_name = prop_name_pair.as_str().to_string();
-            let target_pair = inner.next().ok_or_else(|| ScriptError::new("Expected target after 'of'".to_string()))?;
-            
+            let target_pair = inner
+                .next()
+                .ok_or_else(|| ScriptError::new("Expected target after 'of'".to_string()))?;
+
             // Check what kind of target we have
             let target_expr = match target_pair.as_rule() {
                 Rule::castlib_of_expr | Rule::sprite_of_expr | Rule::prop_of_expr => {
@@ -2183,14 +2528,18 @@ pub fn parse_lingo_rule_runtime(
                     parse_lingo_expr_runtime(target_pair.into_inner(), pratt)?
                 }
             };
-            
+
             Ok(LingoExpr::ThePropOf(Box::new(target_expr), prop_name))
         }
         Rule::prop_of_expr => {
             let mut inner = pair.into_inner();
-            let prop_name_pair = inner.next().ok_or_else(|| ScriptError::new("Expected property name".to_string()))?;
+            let prop_name_pair = inner
+                .next()
+                .ok_or_else(|| ScriptError::new("Expected property name".to_string()))?;
             let prop_name = prop_name_pair.as_str().to_string();
-            let obj_expr_pair = inner.next().ok_or_else(|| ScriptError::new("Expected object expression".to_string()))?;
+            let obj_expr_pair = inner
+                .next()
+                .ok_or_else(|| ScriptError::new("Expected object expression".to_string()))?;
             let obj_expr = parse_lingo_expr_runtime(obj_expr_pair.into_inner(), pratt)?;
             Ok(LingoExpr::ObjProp(Box::new(obj_expr), prop_name))
         }
@@ -2203,9 +2552,7 @@ pub fn parse_lingo_rule_runtime(
             }
             Ok(LingoExpr::ListLiteral(exprs))
         }
-        Rule::parens_empty => {
-            Ok(LingoExpr::ListLiteral(vec![]))
-        }
+        Rule::parens_empty => Ok(LingoExpr::ListLiteral(vec![])),
         _ => Err(ScriptError::new(format!(
             "Invalid runtime Lingo expression {:?}",
             inner_rule
@@ -2214,13 +2561,20 @@ pub fn parse_lingo_rule_runtime(
 }
 
 /// Evaluate common chunk expression components: chunk_type, start index, end index, value string.
-fn write_chunk_source(player: &mut DirPlayer, symbols: &mut SymbolTable, source_expr: &LingoExpr, new_string: String) {
+fn write_chunk_source(
+    player: &mut DirPlayer,
+    symbols: &mut SymbolTable,
+    source_expr: &LingoExpr,
+    new_string: String,
+) {
     match source_expr {
         LingoExpr::Identifier(name) => {
             let new_ref = player.alloc_datum(Datum::String(new_string));
             player.globals.insert(symbols.intern(name), new_ref);
-        },
-        LingoExpr::HandlerCall(handler_name, args) if handler_name.eq_ignore_ascii_case("field") => {
+        }
+        LingoExpr::HandlerCall(handler_name, args)
+            if handler_name.eq_ignore_ascii_case("field") =>
+        {
             // field(name_or_num) or field(name_or_num, castLib_num)
             let member_name_or_num = args.first().and_then(|arg| match arg {
                 LingoExpr::StringLiteral(s) => Some(Datum::String(s.clone())),
@@ -2232,27 +2586,39 @@ fn write_chunk_source(player: &mut DirPlayer, symbols: &mut SymbolTable, source_
                 _ => None,
             });
             if let Some(member_id) = member_name_or_num {
-                let member_ref = player.movie.cast_manager
-                    .find_member_ref_by_identifiers(symbols, &member_id, cast_id.as_ref(), &player.allocator);
+                let member_ref = player.movie.cast_manager.find_member_ref_by_identifiers(
+                    symbols,
+                    &member_id,
+                    cast_id.as_ref(),
+                    &player.allocator,
+                );
                 if let Ok(Some(member_ref)) = member_ref {
-                    if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                    if let Some(member) = player
+                        .movie
+                        .cast_manager
+                        .find_mut_member_by_ref(&member_ref)
+                    {
                         use crate::player::cast_member::CastMemberType;
                         match &mut member.member_type {
-                            CastMemberType::Field(field) => { field.set_text_preserving_caret(new_string); },
-                            CastMemberType::Text(text) => { text.set_text_preserving_caret(new_string); },
-                            _ => { log::warn!("put into chunk: source is not a field/text member"); }
+                            CastMemberType::Field(field) => {
+                                field.set_text_preserving_caret(new_string);
+                            }
+                            CastMemberType::Text(text) => {
+                                text.set_text_preserving_caret(new_string);
+                            }
+                            _ => {
+                                log::warn!("put into chunk: source is not a field/text member");
+                            }
                         }
                     }
                 }
             }
-        },
+        }
         _ => {
             log::warn!("put into chunk: cannot write back to non-identifier, non-field source");
         }
     }
 }
-
-
 
 /// One synchronous evaluator turn. Pending requests own all arguments and are
 /// returned to the session before any host work can begin.
@@ -2330,12 +2696,7 @@ pub(crate) async fn invoke_request_owned(
     let (id, _action, receiver) = session
         .borrow_mut()
         .start_eval_request(player_id, request)?;
-    let mut cancellation = EvalCancellationGuard::new(
-        session.clone(),
-        player_id,
-        owner,
-        id,
-    )?;
+    let mut cancellation = EvalCancellationGuard::new(session.clone(), player_id, owner, id)?;
     let result = receiver
         .recv()
         .await
@@ -2352,9 +2713,10 @@ pub(crate) async fn invoke_value_request_owned(
     source: DatumRef,
     mode: crate::player::driver::ValueEvaluationMode,
 ) -> Result<DatumRef, ScriptError> {
-    let (id, turn) = session
-        .borrow_mut()
-        .start_owned_value_request(player_id, owner.clone(), source, mode)?;
+    let (id, turn) =
+        session
+            .borrow_mut()
+            .start_owned_value_request(player_id, owner.clone(), source, mode)?;
     crate::player::drive_eval_owned(session, player_id, owner, id, turn).await
 }
 
@@ -2380,50 +2742,48 @@ pub(crate) async fn invoke_script_callback_owned(
         args,
         use_raw_arg_list,
     )?;
-    let mut cancellation = EvalCancellationGuard::new(
-        session.clone(),
-        player_id,
-        owner.clone(),
-        id.clone(),
-    )?;
+    let mut cancellation =
+        EvalCancellationGuard::new(session.clone(), player_id, owner.clone(), id.clone())?;
     match turn {
         crate::player::session::EvalRequestTurn::Child(
             crate::player::driver::DriverTurn::Waiting,
         ) => {
-            session.borrow_mut().retain_pending_command(crate::player::driver::PendingCommand {
-                player_id,
-                owner,
-                action: None,
-                started: false,
-                ticket: None,
-                completer: None,
-                event_sender: None,
-                score_continuation: None,
-                child_completion: None,
-                eval_child: Some(id),
-                eval_sender: None,
-            });
+            session
+                .borrow_mut()
+                .retain_pending_command(crate::player::driver::PendingCommand {
+                    player_id,
+                    owner,
+                    action: None,
+                    started: false,
+                    ticket: None,
+                    completer: None,
+                    event_sender: None,
+                    score_continuation: None,
+                    child_completion: None,
+                    eval_child: Some(id),
+                    eval_sender: None,
+                });
         }
         crate::player::session::EvalRequestTurn::Child(
             crate::player::driver::DriverTurn::Pending(action),
         ) => {
-            session.borrow_mut().retain_pending_command(crate::player::driver::PendingCommand {
-                player_id,
-                owner,
-                ticket: Some(action.ticket().clone()),
-                action: Some(action),
-                started: false,
-                completer: None,
-                event_sender: None,
-                score_continuation: None,
-                child_completion: None,
-                eval_child: Some(id),
-                eval_sender: None,
-            });
+            session
+                .borrow_mut()
+                .retain_pending_command(crate::player::driver::PendingCommand {
+                    player_id,
+                    owner,
+                    ticket: Some(action.ticket().clone()),
+                    action: Some(action),
+                    started: false,
+                    completer: None,
+                    event_sender: None,
+                    score_continuation: None,
+                    child_completion: None,
+                    eval_child: Some(id),
+                    eval_sender: None,
+                });
         }
-        crate::player::session::EvalRequestTurn::Evaluator(
-            EvalTurn::Complete(_),
-        ) => {}
+        crate::player::session::EvalRequestTurn::Evaluator(EvalTurn::Complete(_)) => {}
         crate::player::session::EvalRequestTurn::Child(
             crate::player::driver::DriverTurn::Complete(_),
         )
@@ -2431,6 +2791,7 @@ pub(crate) async fn invoke_script_callback_owned(
             crate::player::driver::DriverTurn::Error(_),
         ) => {}
         crate::player::session::EvalRequestTurn::Evaluator(EvalTurn::Pending { .. })
+        | crate::player::session::EvalRequestTurn::SpriteAsync(_)
         | crate::player::session::EvalRequestTurn::MovieAsync(_)
         | crate::player::session::EvalRequestTurn::Flash(_) => {
             return Err(ScriptError::new(
@@ -2564,34 +2925,70 @@ enum EvalFrame {
     ApplyNot,
     ApplyObjProp(String),
     ApplySetProperty(String),
-    ApplyHandler { name: String, argc: usize },
-    ApplyValueHandler { name: String, argc: usize },
-    ApplyObjHandler { name: String, argc: usize },
+    ApplyHandler {
+        name: String,
+        argc: usize,
+    },
+    ApplyValueHandler {
+        name: String,
+        argc: usize,
+    },
+    ApplyObjHandler {
+        name: String,
+        argc: usize,
+    },
     ApplyListAccess,
-    ApplyChunkAccess { property: String, target: LingoExpr },
+    ApplyChunkAccess {
+        property: String,
+        target: LingoExpr,
+    },
     ApplyAssignment(LingoExpr),
-    ProbeIndexedAssignment { value: DatumRef, target: LingoExpr },
-    ApplyIndexedAssignment { value: DatumRef, property: Option<String> },
+    ProbeIndexedAssignment {
+        value: DatumRef,
+        target: LingoExpr,
+    },
+    ApplyIndexedAssignment {
+        value: DatumRef,
+        property: Option<String>,
+    },
     ApplyIndexedAssignmentResult {
         value: DatumRef,
         index: DatumRef,
         receiver: Option<(DatumRef, Symbol)>,
     },
     ApplySetAtResult(DatumRef),
-    ApplyPut { kind: u8, target: LingoExpr },
-    ApplyPutChunk { kind: u8, target: LingoExpr, value: DatumRef },
+    ApplyPut {
+        kind: u8,
+        target: LingoExpr,
+    },
+    ApplyPutChunk {
+        kind: u8,
+        target: LingoExpr,
+        value: DatumRef,
+    },
     FormatPutValue(DatumRef),
     ReadChunkSource(LingoExpr),
     ReadChunkSourceDone,
     ConvertIndex,
     ConvertEnd,
     ApplyChunkSource,
-    ApplyChunk { chunk_type: Symbol, has_end: bool },
-    ApplyDeleteChunk { chunk_type: Symbol, has_end: bool, source: LingoExpr },
+    ApplyChunk {
+        chunk_type: Symbol,
+        has_end: bool,
+    },
+    ApplyDeleteChunk {
+        chunk_type: Symbol,
+        has_end: bool,
+        source: LingoExpr,
+    },
     ApplyRect,
     ApplyPoint,
-    ApplyMember { has_cast: bool },
-    ApplyIf { body: LingoExpr },
+    ApplyMember {
+        has_cast: bool,
+    },
+    ApplyIf {
+        body: LingoExpr,
+    },
 }
 
 macro_rules! eval_turn_try {
@@ -2612,7 +3009,9 @@ impl EvalContinuation {
 
     fn pop_values(&mut self, count: usize) -> Result<Vec<DatumRef>, ScriptError> {
         if self.values.len() < count {
-            return Err(ScriptError::new("evaluator argument stack underflow".to_owned()));
+            return Err(ScriptError::new(
+                "evaluator argument stack underflow".to_owned(),
+            ));
         }
         let start = self.values.len() - count;
         // Child frames are pushed in reverse order, so the operand stack
@@ -2626,7 +3025,9 @@ impl EvalContinuation {
         name: &str,
     ) -> Result<Symbol, ScriptError> {
         session
-            .with_player(player_id, |context| Ok::<_, ScriptError>(context.symbols.intern(name)))
+            .with_player(player_id, |context| {
+                Ok::<_, ScriptError>(context.symbols.intern(name))
+            })
             .ok_or_else(crate::player::cancelled_scope_error)?
     }
 
@@ -2637,8 +3038,12 @@ impl EvalContinuation {
     ) -> Result<DatumRef, ScriptError> {
         session
             .with_player(player_id, |context| {
-                crate::player::driver::checked_internal_datum(context.player, context.symbols, value)
-                    .map(|_| value.clone())
+                crate::player::driver::checked_internal_datum(
+                    context.player,
+                    context.symbols,
+                    value,
+                )
+                .map(|_| value.clone())
             })
             .ok_or_else(crate::player::cancelled_scope_error)?
     }
@@ -2670,47 +3075,68 @@ impl EvalContinuation {
         match expr {
             LingoExpr::SymbolLiteral(name) => {
                 let result = Self::intern(session, self.player_id, &name).and_then(|symbol| {
-                    session.with_player(self.player_id, |context| {
-                        Ok::<_, ScriptError>(context.player.alloc_datum(Datum::Symbol(symbol)))
-                    }).ok_or_else(crate::player::cancelled_scope_error)?
+                    session
+                        .with_player(self.player_id, |context| {
+                            Ok::<_, ScriptError>(context.player.alloc_datum(Datum::Symbol(symbol)))
+                        })
+                        .ok_or_else(crate::player::cancelled_scope_error)?
                 });
                 self.values.push(eval_turn_try!(result));
             }
             LingoExpr::StringLiteral(value) => {
-                let result = session.with_player(self.player_id, |context| {
-                    Ok::<_, ScriptError>(context.player.alloc_datum(Datum::String(value)))
-                }).ok_or_else(crate::player::cancelled_scope_error).and_then(|result| result);
+                let result = session
+                    .with_player(self.player_id, |context| {
+                        Ok::<_, ScriptError>(context.player.alloc_datum(Datum::String(value)))
+                    })
+                    .ok_or_else(crate::player::cancelled_scope_error)
+                    .and_then(|result| result);
                 self.values.push(eval_turn_try!(result));
             }
             LingoExpr::VoidLiteral | LingoExpr::Pass => self.values.push(DatumRef::Void),
             LingoExpr::BoolLiteral(value) => {
-                let result = session.with_player(self.player_id, |context| {
-                    Ok::<_, ScriptError>(context.player.alloc_datum(Datum::Int(i32::from(value))))
-                }).ok_or_else(crate::player::cancelled_scope_error).and_then(|result| result);
+                let result = session
+                    .with_player(self.player_id, |context| {
+                        Ok::<_, ScriptError>(
+                            context.player.alloc_datum(Datum::Int(i32::from(value))),
+                        )
+                    })
+                    .ok_or_else(crate::player::cancelled_scope_error)
+                    .and_then(|result| result);
                 self.values.push(eval_turn_try!(result));
             }
             LingoExpr::IntLiteral(value) => {
-                let result = session.with_player(self.player_id, |context| {
-                    Ok::<_, ScriptError>(context.player.alloc_datum(Datum::Int(value)))
-                }).ok_or_else(crate::player::cancelled_scope_error).and_then(|result| result);
+                let result = session
+                    .with_player(self.player_id, |context| {
+                        Ok::<_, ScriptError>(context.player.alloc_datum(Datum::Int(value)))
+                    })
+                    .ok_or_else(crate::player::cancelled_scope_error)
+                    .and_then(|result| result);
                 self.values.push(eval_turn_try!(result));
             }
             LingoExpr::FloatLiteral(value) => {
-                let result = session.with_player(self.player_id, |context| {
-                    Ok::<_, ScriptError>(context.player.alloc_datum(Datum::Float(value)))
-                }).ok_or_else(crate::player::cancelled_scope_error).and_then(|result| result);
+                let result = session
+                    .with_player(self.player_id, |context| {
+                        Ok::<_, ScriptError>(context.player.alloc_datum(Datum::Float(value)))
+                    })
+                    .ok_or_else(crate::player::cancelled_scope_error)
+                    .and_then(|result| result);
                 self.values.push(eval_turn_try!(result));
             }
             LingoExpr::ColorLiteral(value) => {
-                let result = session.with_player(self.player_id, |context| {
-                    Ok::<_, ScriptError>(context.player.alloc_datum(Datum::ColorRef(value)))
-                }).ok_or_else(crate::player::cancelled_scope_error).and_then(|result| result);
+                let result = session
+                    .with_player(self.player_id, |context| {
+                        Ok::<_, ScriptError>(context.player.alloc_datum(Datum::ColorRef(value)))
+                    })
+                    .ok_or_else(crate::player::cancelled_scope_error)
+                    .and_then(|result| result);
                 self.values.push(eval_turn_try!(result));
             }
             LingoExpr::ListLiteral(items) => {
                 let len = items.len();
                 self.frames.push(EvalFrame::ApplyList(len));
-                for item in items.into_iter().rev() { self.frames.push(EvalFrame::Evaluate(item)); }
+                for item in items.into_iter().rev() {
+                    self.frames.push(EvalFrame::Evaluate(item));
+                }
             }
             LingoExpr::PropListLiteral(pairs) => {
                 let len = pairs.len();
@@ -2725,17 +3151,21 @@ impl EvalContinuation {
                     && !name.eq_ignore_ascii_case("vector")
                     && !name.eq_ignore_ascii_case("rect")
                 {
-                    return Some(EvalTurn::Complete(Err(ScriptError::new(
-                        format!("handler '{}' is not supported by value()", name),
-                    ))));
+                    return Some(EvalTurn::Complete(Err(ScriptError::new(format!(
+                        "handler '{}' is not supported by value()",
+                        name
+                    )))));
                 }
                 let argc = args.len();
                 if self.value_mode.is_some() {
-                    self.frames.push(EvalFrame::ApplyValueHandler { name, argc });
+                    self.frames
+                        .push(EvalFrame::ApplyValueHandler { name, argc });
                 } else {
                     self.frames.push(EvalFrame::ApplyHandler { name, argc });
                 }
-                for arg in args.into_iter().rev() { self.frames.push(EvalFrame::Evaluate(arg)); }
+                for arg in args.into_iter().rev() {
+                    self.frames.push(EvalFrame::Evaluate(arg));
+                }
             }
             LingoExpr::ObjProp(object, name) => {
                 self.frames.push(EvalFrame::ApplyObjProp(name));
@@ -2743,13 +3173,16 @@ impl EvalContinuation {
             }
             LingoExpr::ObjHandlerCall(object, name, args) => {
                 if self.value_mode.is_some() {
-                    return Some(EvalTurn::Complete(Err(ScriptError::new(
-                        format!("object handler '{}' is not supported by value()", name),
-                    ))));
+                    return Some(EvalTurn::Complete(Err(ScriptError::new(format!(
+                        "object handler '{}' is not supported by value()",
+                        name
+                    )))));
                 }
                 let argc = args.len();
                 self.frames.push(EvalFrame::ApplyObjHandler { name, argc });
-                for arg in args.into_iter().rev() { self.frames.push(EvalFrame::Evaluate(arg)); }
+                for arg in args.into_iter().rev() {
+                    self.frames.push(EvalFrame::Evaluate(arg));
+                }
                 self.frames.push(EvalFrame::Evaluate(*object));
             }
             LingoExpr::ListAccess(list, index) => {
@@ -2760,13 +3193,17 @@ impl EvalContinuation {
                             Box::new(LingoExpr::ObjProp(obj.clone(), prop_name.clone())),
                             index.clone(),
                         );
-                        self.frames.push(EvalFrame::ApplyChunkAccess { property: prop_lower, target });
+                        self.frames.push(EvalFrame::ApplyChunkAccess {
+                            property: prop_lower,
+                            target,
+                        });
                         self.frames.push(EvalFrame::Evaluate(*index));
                         self.frames.push(EvalFrame::Evaluate(*obj));
                     } else {
                         self.frames.push(EvalFrame::ApplyListAccess);
                         self.frames.push(EvalFrame::Evaluate(*index));
-                        self.frames.push(EvalFrame::Evaluate(LingoExpr::ObjProp(obj, prop_name)));
+                        self.frames
+                            .push(EvalFrame::Evaluate(LingoExpr::ObjProp(obj, prop_name)));
                     }
                 } else {
                     self.frames.push(EvalFrame::ApplyListAccess);
@@ -2778,28 +3215,34 @@ impl EvalContinuation {
                 self.frames.push(EvalFrame::ApplyAssignment(*left));
                 self.frames.push(EvalFrame::Evaluate(*right));
             }
-            LingoExpr::Add(a,b) => self.push_binary(EvalBinary::Add, *a, *b),
-            LingoExpr::Subtract(a,b) => self.push_binary(EvalBinary::Subtract, *a, *b),
-            LingoExpr::Multiply(a,b) => self.push_binary(EvalBinary::Multiply, *a, *b),
-            LingoExpr::Divide(a,b) => self.push_binary(EvalBinary::Divide, *a, *b),
-            LingoExpr::Modulo(a,b) => self.push_binary(EvalBinary::Modulo, *a, *b),
-            LingoExpr::Join(a,b) => self.push_binary(EvalBinary::Join(false), *a, *b),
-            LingoExpr::JoinPad(a,b) => self.push_binary(EvalBinary::Join(true), *a, *b),
-            LingoExpr::Eq(a,b) => self.push_binary(EvalBinary::Eq, *a, *b),
-            LingoExpr::Ne(a,b) => self.push_binary(EvalBinary::Ne, *a, *b),
-            LingoExpr::Lt(a,b) => self.push_binary(EvalBinary::Lt, *a, *b),
-            LingoExpr::Gt(a,b) => self.push_binary(EvalBinary::Gt, *a, *b),
-            LingoExpr::Le(a,b) => self.push_binary(EvalBinary::Le, *a, *b),
-            LingoExpr::Ge(a,b) => self.push_binary(EvalBinary::Ge, *a, *b),
-            LingoExpr::And(a,b) => self.push_binary(EvalBinary::And, *a, *b),
-            LingoExpr::Or(a,b) => self.push_binary(EvalBinary::Or, *a, *b),
-            LingoExpr::Not(value) => { self.frames.push(EvalFrame::ApplyNot); self.frames.push(EvalFrame::Evaluate(*value)); }
+            LingoExpr::Add(a, b) => self.push_binary(EvalBinary::Add, *a, *b),
+            LingoExpr::Subtract(a, b) => self.push_binary(EvalBinary::Subtract, *a, *b),
+            LingoExpr::Multiply(a, b) => self.push_binary(EvalBinary::Multiply, *a, *b),
+            LingoExpr::Divide(a, b) => self.push_binary(EvalBinary::Divide, *a, *b),
+            LingoExpr::Modulo(a, b) => self.push_binary(EvalBinary::Modulo, *a, *b),
+            LingoExpr::Join(a, b) => self.push_binary(EvalBinary::Join(false), *a, *b),
+            LingoExpr::JoinPad(a, b) => self.push_binary(EvalBinary::Join(true), *a, *b),
+            LingoExpr::Eq(a, b) => self.push_binary(EvalBinary::Eq, *a, *b),
+            LingoExpr::Ne(a, b) => self.push_binary(EvalBinary::Ne, *a, *b),
+            LingoExpr::Lt(a, b) => self.push_binary(EvalBinary::Lt, *a, *b),
+            LingoExpr::Gt(a, b) => self.push_binary(EvalBinary::Gt, *a, *b),
+            LingoExpr::Le(a, b) => self.push_binary(EvalBinary::Le, *a, *b),
+            LingoExpr::Ge(a, b) => self.push_binary(EvalBinary::Ge, *a, *b),
+            LingoExpr::And(a, b) => self.push_binary(EvalBinary::And, *a, *b),
+            LingoExpr::Or(a, b) => self.push_binary(EvalBinary::Or, *a, *b),
+            LingoExpr::Not(value) => {
+                self.frames.push(EvalFrame::ApplyNot);
+                self.frames.push(EvalFrame::Evaluate(*value));
+            }
             LingoExpr::PutInto(value, target) => self.push_put(0, *value, *target),
             LingoExpr::PutBefore(value, target) => self.push_put(1, *value, *target),
             LingoExpr::PutAfter(value, target) => self.push_put(2, *value, *target),
             LingoExpr::PutDisplay(value) => self.push_put(3, *value, LingoExpr::VoidLiteral),
             LingoExpr::ChunkExpr(kind, index, end, source) => {
-                self.frames.push(EvalFrame::ApplyChunk { chunk_type: kind, has_end: end.is_some() });
+                self.frames.push(EvalFrame::ApplyChunk {
+                    chunk_type: kind,
+                    has_end: end.is_some(),
+                });
                 if let Some(end) = end {
                     self.frames.push(EvalFrame::ConvertEnd);
                     self.frames.push(EvalFrame::Evaluate(*end));
@@ -2809,19 +3252,35 @@ impl EvalContinuation {
                 self.frames.push(EvalFrame::ApplyChunkSource);
                 self.frames.push(EvalFrame::Evaluate(*source));
             }
-            LingoExpr::DeleteChunk(chunk) => if let LingoExpr::ChunkExpr(kind,index,end,source)=*chunk {
-                let source_expr = *source;
-                self.frames.push(EvalFrame::ApplyDeleteChunk { chunk_type: kind, has_end:end.is_some(), source:source_expr.clone() });
-                self.frames.push(EvalFrame::ReadChunkSource(source_expr));
-                if let Some(end)=end { self.frames.push(EvalFrame::ConvertEnd); self.frames.push(EvalFrame::Evaluate(*end)); }
-                self.frames.push(EvalFrame::ConvertIndex);
-                self.frames.push(EvalFrame::Evaluate(*index));
-            } else { return Some(EvalTurn::Complete(Err(ScriptError::new("Expected chunk expression after delete".to_owned())))); },
-            LingoExpr::ThePropOf(object,name) => {
+            LingoExpr::DeleteChunk(chunk) => {
+                if let LingoExpr::ChunkExpr(kind, index, end, source) = *chunk {
+                    let source_expr = *source;
+                    self.frames.push(EvalFrame::ApplyDeleteChunk {
+                        chunk_type: kind,
+                        has_end: end.is_some(),
+                        source: source_expr.clone(),
+                    });
+                    self.frames.push(EvalFrame::ReadChunkSource(source_expr));
+                    if let Some(end) = end {
+                        self.frames.push(EvalFrame::ConvertEnd);
+                        self.frames.push(EvalFrame::Evaluate(*end));
+                    }
+                    self.frames.push(EvalFrame::ConvertIndex);
+                    self.frames.push(EvalFrame::Evaluate(*index));
+                } else {
+                    return Some(EvalTurn::Complete(Err(ScriptError::new(
+                        "Expected chunk expression after delete".to_owned(),
+                    ))));
+                }
+            }
+            LingoExpr::ThePropOf(object, name) => {
                 let compound = name == "number" || name == "count";
                 match (*object, compound) {
                     (LingoExpr::ObjProp(inner_object, inner_property), true) => {
-                        self.frames.push(EvalFrame::ApplyObjProp(format!("{} of {}", name, inner_property)));
+                        self.frames.push(EvalFrame::ApplyObjProp(format!(
+                            "{} of {}",
+                            name, inner_property
+                        )));
                         self.frames.push(EvalFrame::Evaluate(*inner_object));
                     }
                     (object, _) => {
@@ -2831,34 +3290,67 @@ impl EvalContinuation {
                 }
             }
             LingoExpr::RectLiteral(values) => {
-                if values.len()!=1 { return Some(EvalTurn::Complete(Err(ScriptError::new("RectLiteral must have 1 tuple of 4 elements".to_owned())))); }
-                let (a,b,c,d)=values.into_iter().next().unwrap(); self.frames.push(EvalFrame::ApplyRect);
-                self.frames.extend([EvalFrame::Evaluate(d),EvalFrame::Evaluate(c),EvalFrame::Evaluate(b),EvalFrame::Evaluate(a)]);
+                if values.len() != 1 {
+                    return Some(EvalTurn::Complete(Err(ScriptError::new(
+                        "RectLiteral must have 1 tuple of 4 elements".to_owned(),
+                    ))));
+                }
+                let (a, b, c, d) = values.into_iter().next().unwrap();
+                self.frames.push(EvalFrame::ApplyRect);
+                self.frames.extend([
+                    EvalFrame::Evaluate(d),
+                    EvalFrame::Evaluate(c),
+                    EvalFrame::Evaluate(b),
+                    EvalFrame::Evaluate(a),
+                ]);
             }
             LingoExpr::PointLiteral(values) => {
-                if values.len()!=1 { return Some(EvalTurn::Complete(Err(ScriptError::new("PointLiteral must have 1 tuple of 2 elements".to_owned())))); }
-                let (a,b)=values.into_iter().next().unwrap(); self.frames.push(EvalFrame::ApplyPoint);
-                self.frames.extend([EvalFrame::Evaluate(b),EvalFrame::Evaluate(a)]);
+                if values.len() != 1 {
+                    return Some(EvalTurn::Complete(Err(ScriptError::new(
+                        "PointLiteral must have 1 tuple of 2 elements".to_owned(),
+                    ))));
+                }
+                let (a, b) = values.into_iter().next().unwrap();
+                self.frames.push(EvalFrame::ApplyPoint);
+                self.frames
+                    .extend([EvalFrame::Evaluate(b), EvalFrame::Evaluate(a)]);
             }
-            LingoExpr::MemberRef(member,cast) => {
-                let has_cast=cast.is_some(); self.frames.push(EvalFrame::ApplyMember{has_cast});
-                if let Some(cast)=cast { self.frames.push(EvalFrame::Evaluate(*cast)); }
+            LingoExpr::MemberRef(member, cast) => {
+                let has_cast = cast.is_some();
+                self.frames.push(EvalFrame::ApplyMember { has_cast });
+                if let Some(cast) = cast {
+                    self.frames.push(EvalFrame::Evaluate(*cast));
+                }
                 self.frames.push(EvalFrame::Evaluate(*member));
             }
-            LingoExpr::IfThen(cond,body) => { self.frames.push(EvalFrame::ApplyIf{body:*body}); self.frames.push(EvalFrame::Evaluate(*cond)); }
+            LingoExpr::IfThen(cond, body) => {
+                self.frames.push(EvalFrame::ApplyIf { body: *body });
+                self.frames.push(EvalFrame::Evaluate(*cond));
+            }
             LingoExpr::Identifier(name) => {
-                let result = session.with_player(self.player_id, |context| {
-                    if self.value_mode.is_some() {
-                        match get_eval_top_level_prop_classified(context.player, context.symbols, &name)? {
-                            EvalLookupResult::Found(value) => Ok(value),
-                            EvalLookupResult::OrdinaryError(_) => Ok(DatumRef::Void),
+                let result = session
+                    .with_player(self.player_id, |context| {
+                        if self.value_mode.is_some() {
+                            match get_eval_top_level_prop_classified(
+                                context.player,
+                                context.symbols,
+                                &name,
+                            )? {
+                                EvalLookupResult::Found(value) => Ok(value),
+                                EvalLookupResult::OrdinaryError(_) => Ok(DatumRef::Void),
+                            }
+                        } else {
+                            get_eval_top_level_prop(context.player, context.symbols, &name)
                         }
-                    } else {
-                        get_eval_top_level_prop(context.player, context.symbols, &name)
-                    }
-                }).ok_or_else(crate::player::cancelled_scope_error).and_then(|result| result);
+                    })
+                    .ok_or_else(crate::player::cancelled_scope_error)
+                    .and_then(|result| result);
                 let value = eval_turn_try!(result);
-                self.values.push(eval_turn_try!(Self::validate_ref(session, self.player_id, &value)));
+                self.values.push(eval_turn_try!(Self::validate_ref(
+                    session,
+                    self.player_id,
+                    &value
+                )));
             }
         }
         None
@@ -2869,8 +3361,8 @@ impl EvalContinuation {
         self.frames.push(EvalFrame::Evaluate(right));
         self.frames.push(EvalFrame::Evaluate(left));
     }
-    fn push_put(&mut self, kind:u8, value:LingoExpr, target:LingoExpr) {
-        self.frames.push(EvalFrame::ApplyPut{kind,target});
+    fn push_put(&mut self, kind: u8, value: LingoExpr, target: LingoExpr) {
+        self.frames.push(EvalFrame::ApplyPut { kind, target });
         self.frames.push(EvalFrame::Evaluate(value));
     }
 
@@ -2887,27 +3379,50 @@ impl EvalContinuation {
                 let i = index_datum.int_value()?;
                 let i = if i >= 1 { (i - 1) as usize } else { 0 };
                 let (_, items, _) = player.get_datum_mut(list).to_list_mut()?;
-                if i >= items.len() { return Err(ScriptError::new(format!("List index {} out of bounds (list has {} items)", i + 1, items.len()))); }
+                if i >= items.len() {
+                    return Err(ScriptError::new(format!(
+                        "List index {} out of bounds (list has {} items)",
+                        i + 1,
+                        items.len()
+                    )));
+                }
                 items[i] = value.clone();
             }
             Datum::PropList(..) => PropListUtils::set_at(player, symbols, list, index, value)?,
             Datum::Point(..) => {
                 let i = index_datum.int_value()?;
                 let i = if i >= 1 { (i - 1) as usize } else { 0 };
-                if i >= 2 { return Err(ScriptError::new(format!("Point index {} out of bounds", i + 1))); }
+                if i >= 2 {
+                    return Err(ScriptError::new(format!(
+                        "Point index {} out of bounds",
+                        i + 1
+                    )));
+                }
                 let (val, is_float) = Datum::datum_to_inline_component(player.get_datum(value))?;
                 let (vals, flags) = player.get_datum_mut(list).to_point_inline_mut()?;
-                vals[i] = val; Datum::inline_set_float(flags, i, is_float);
+                vals[i] = val;
+                Datum::inline_set_float(flags, i, is_float);
             }
             Datum::Rect(..) => {
                 let i = index_datum.int_value()?;
                 let i = if i >= 1 { (i - 1) as usize } else { 0 };
-                if i >= 4 { return Err(ScriptError::new(format!("Rect index {} out of bounds", i + 1))); }
+                if i >= 4 {
+                    return Err(ScriptError::new(format!(
+                        "Rect index {} out of bounds",
+                        i + 1
+                    )));
+                }
                 let (val, is_float) = Datum::datum_to_inline_component(player.get_datum(value))?;
                 let (vals, flags) = player.get_datum_mut(list).to_rect_inline_mut()?;
-                vals[i] = val; Datum::inline_set_float(flags, i, is_float);
+                vals[i] = val;
+                Datum::inline_set_float(flags, i, is_float);
             }
-            datum => return Err(ScriptError::new(format!("Cannot assign to index of type: {}", datum.type_str()))),
+            datum => {
+                return Err(ScriptError::new(format!(
+                    "Cannot assign to index of type: {}",
+                    datum.type_str()
+                )))
+            }
         }
         Ok(value.clone())
     }
@@ -2922,38 +3437,92 @@ impl EvalContinuation {
             Datum::List(_, items, _) => {
                 let i = player.get_datum(index).int_value()?;
                 if i < 1 || i as usize > items.len() {
-                    Err(ScriptError::new(format!("List index {} out of bounds (list has {} items)", i, items.len())))
-                } else { Ok(items[(i - 1) as usize].clone()) }
+                    Err(ScriptError::new(format!(
+                        "List index {} out of bounds (list has {} items)",
+                        i,
+                        items.len()
+                    )))
+                } else {
+                    Ok(items[(i - 1) as usize].clone())
+                }
             }
-            Datum::PropList(pairs, sorted) => PropListUtils::get_at(pairs, index, &player.allocator, symbols, *sorted),
+            Datum::PropList(pairs, sorted) => {
+                PropListUtils::get_at(pairs, index, &player.allocator, symbols, *sorted)
+            }
             Datum::Point(vals, flags) => {
                 let i = player.get_datum(index).int_value()?;
-                if !(1..=2).contains(&i) { return Err(ScriptError::new(format!("Point index {} out of bounds (must be 1 or 2)", i))); }
+                if !(1..=2).contains(&i) {
+                    return Err(ScriptError::new(format!(
+                        "Point index {} out of bounds (must be 1 or 2)",
+                        i
+                    )));
+                }
                 let i = (i - 1) as usize;
-                Ok(player.alloc_datum(Datum::inline_component_to_datum(vals[i], Datum::inline_is_float(*flags, i))))
+                Ok(player.alloc_datum(Datum::inline_component_to_datum(
+                    vals[i],
+                    Datum::inline_is_float(*flags, i),
+                )))
             }
             Datum::Rect(vals, flags) => {
                 let i = player.get_datum(index).int_value()?;
-                if !(1..=4).contains(&i) { return Err(ScriptError::new(format!("Rect index {} out of bounds (must be 1-4)", i))); }
+                if !(1..=4).contains(&i) {
+                    return Err(ScriptError::new(format!(
+                        "Rect index {} out of bounds (must be 1-4)",
+                        i
+                    )));
+                }
                 let i = (i - 1) as usize;
-                Ok(player.alloc_datum(Datum::inline_component_to_datum(vals[i], Datum::inline_is_float(*flags, i))))
+                Ok(player.alloc_datum(Datum::inline_component_to_datum(
+                    vals[i],
+                    Datum::inline_is_float(*flags, i),
+                )))
             }
             Datum::String(value) => {
                 let i = player.get_datum(index).int_value()?;
-                if i < 1 || i as usize > value.chars().count() { Ok(player.alloc_datum(Datum::String(String::new()))) }
-                else { Ok(player.alloc_datum(Datum::String(value.chars().nth((i - 1) as usize).unwrap().to_string()))) }
+                if i < 1 || i as usize > value.chars().count() {
+                    Ok(player.alloc_datum(Datum::String(String::new())))
+                } else {
+                    Ok(player.alloc_datum(Datum::String(
+                        value.chars().nth((i - 1) as usize).unwrap().to_string(),
+                    )))
+                }
             }
             Datum::SpriteRef(sprite_number) => {
                 let prop_name = match player.get_datum(index) {
-                    Datum::Symbol(name) => symbols.display(name).map_err(|_| ScriptError::new_code(crate::player::ScriptErrorCode::InvalidReference, "foreign symbol".to_owned()))?.to_owned(),
+                    Datum::Symbol(name) => symbols
+                        .display(name)
+                        .map_err(|_| {
+                            ScriptError::new_code(
+                                crate::player::ScriptErrorCode::InvalidReference,
+                                "foreign symbol".to_owned(),
+                            )
+                        })?
+                        .to_owned(),
                     Datum::String(name) => name.clone(),
-                    other => return Err(ScriptError::new(format!("Cannot index sprite {} with {}", sprite_number, other.type_str()))),
+                    other => {
+                        return Err(ScriptError::new(format!(
+                            "Cannot index sprite {} with {}",
+                            sprite_number,
+                            other.type_str()
+                        )))
+                    }
                 };
                 let prop_symbol = symbols.intern(&prop_name);
-                let result = crate::player::score::sprite_get_prop(player, symbols, *sprite_number, prop_symbol)?;
-                Ok(player.last_sprite_prop_ref.take().unwrap_or_else(|| player.alloc_datum(result)))
+                let result = crate::player::score::sprite_get_prop(
+                    player,
+                    symbols,
+                    *sprite_number,
+                    prop_symbol,
+                )?;
+                Ok(player
+                    .last_sprite_prop_ref
+                    .take()
+                    .unwrap_or_else(|| player.alloc_datum(result)))
             }
-            datum => Err(ScriptError::new(format!("Cannot index non-list type: {:?}", datum.type_enum()))),
+            datum => Err(ScriptError::new(format!(
+                "Cannot index non-list type: {:?}",
+                datum.type_enum()
+            ))),
         }
     }
 
@@ -2967,23 +3536,69 @@ impl EvalContinuation {
         }
     }
 
-    fn apply_frame(&mut self, session:&mut crate::player::session::RuntimeSession, frame:EvalFrame) -> Option<EvalTurn> {
+    fn apply_frame(
+        &mut self,
+        session: &mut crate::player::session::RuntimeSession,
+        frame: EvalFrame,
+    ) -> Option<EvalTurn> {
         match frame {
             EvalFrame::Evaluate(expr) => self.frames.push(EvalFrame::Evaluate(expr)),
             EvalFrame::ApplyList(count) => {
-                let items=match self.pop_values(count){Ok(v)=>v,Err(e)=>return Some(EvalTurn::Complete(Err(e)))};
-                let result=session.with_player(self.player_id,|context| Ok::<_,ScriptError>(context.player.alloc_datum(Datum::List(DatumType::List,items.into_iter().collect(),false)))).ok_or_else(crate::player::cancelled_scope_error).and_then(|result| result);
+                let items = match self.pop_values(count) {
+                    Ok(v) => v,
+                    Err(e) => return Some(EvalTurn::Complete(Err(e))),
+                };
+                let result = session
+                    .with_player(self.player_id, |context| {
+                        Ok::<_, ScriptError>(context.player.alloc_datum(Datum::List(
+                            DatumType::List,
+                            items.into_iter().collect(),
+                            false,
+                        )))
+                    })
+                    .ok_or_else(crate::player::cancelled_scope_error)
+                    .and_then(|result| result);
                 self.values.push(eval_turn_try!(result));
             }
             EvalFrame::ApplyPropList(count) => {
-                let vals=match self.pop_values(count*2){Ok(v)=>v,Err(e)=>return Some(EvalTurn::Complete(Err(e)))};
-                let pairs=vals.chunks_exact(2).map(|v|(v[0].clone(),v[1].clone())).collect();
-                let result=session.with_player(self.player_id,|context| Ok::<_,ScriptError>(context.player.alloc_datum(Datum::PropList(pairs,false)))).ok_or_else(crate::player::cancelled_scope_error).and_then(|result| result);
+                let vals = match self.pop_values(count * 2) {
+                    Ok(v) => v,
+                    Err(e) => return Some(EvalTurn::Complete(Err(e))),
+                };
+                let pairs = vals
+                    .chunks_exact(2)
+                    .map(|v| (v[0].clone(), v[1].clone()))
+                    .collect();
+                let result = session
+                    .with_player(self.player_id, |context| {
+                        Ok::<_, ScriptError>(
+                            context.player.alloc_datum(Datum::PropList(pairs, false)),
+                        )
+                    })
+                    .ok_or_else(crate::player::cancelled_scope_error)
+                    .and_then(|result| result);
                 self.values.push(eval_turn_try!(result));
             }
-            EvalFrame::ApplyNot => { let v=eval_turn_try!(self.pop_value()); let result=session.with_player(self.player_id,|context| {let n=context.player.get_datum(&v).int_value()?; Ok::<_,ScriptError>(context.player.alloc_datum(Datum::Int(i32::from(n==0))))}).ok_or_else(crate::player::cancelled_scope_error).and_then(|result| result); self.values.push(eval_turn_try!(result)); }
+            EvalFrame::ApplyNot => {
+                let v = eval_turn_try!(self.pop_value());
+                let result = session
+                    .with_player(self.player_id, |context| {
+                        let n = context.player.get_datum(&v).int_value()?;
+                        Ok::<_, ScriptError>(
+                            context.player.alloc_datum(Datum::Int(i32::from(n == 0))),
+                        )
+                    })
+                    .ok_or_else(crate::player::cancelled_scope_error)
+                    .and_then(|result| result);
+                self.values.push(eval_turn_try!(result));
+            }
             EvalFrame::ApplyBinary(op) => {
-                let args=match self.pop_values(2){Ok(v)=>v,Err(e)=>return Some(EvalTurn::Complete(Err(e)))}; let l=args[0].clone();let r=args[1].clone();
+                let args = match self.pop_values(2) {
+                    Ok(v) => v,
+                    Err(e) => return Some(EvalTurn::Complete(Err(e))),
+                };
+                let l = args[0].clone();
+                let r = args[1].clone();
                 let result=session.with_player(self.player_id,|context| {
                     let p=context.player; let ld=p.get_datum(&l);let rd=p.get_datum(&r);
                     let d=match op { EvalBinary::Add=>add_datums(ld.clone(),rd.clone(),p,context.symbols)?, EvalBinary::Subtract=>subtract_datums(ld.clone(),rd.clone(),p,context.symbols)?, EvalBinary::Multiply=>multiply_datums(l.clone(),r.clone(),p,context.symbols)?, EvalBinary::Divide=>divide_datums(l.clone(),r.clone(),p,context.symbols)?, EvalBinary::Modulo=>crate::player::bytecode::arithmetics::ArithmeticsBytecodeHandler::modulo_datums(&l,&r,p,context.symbols)?, EvalBinary::Join(pad)=>return StringBytecodeHandler::concat_datums(l,r,p,context.symbols,pad), EvalBinary::Eq=>Datum::Int(i32::from(crate::player::compare::datum_equals(ld,rd,&p.allocator,context.symbols)?)), EvalBinary::Ne=>Datum::Int(i32::from(!crate::player::compare::datum_equals(ld,rd,&p.allocator,context.symbols)?)), EvalBinary::Lt=>Datum::Int(i32::from(crate::player::compare::datum_less_than(ld,rd,&p.allocator,context.symbols)?)), EvalBinary::Gt=>Datum::Int(i32::from(crate::player::compare::datum_greater_than(ld,rd,&p.allocator,context.symbols)?)), EvalBinary::Le=>Datum::Int(i32::from({let e=crate::player::compare::datum_equals(ld,rd,&p.allocator,context.symbols)?;let l=crate::player::compare::datum_less_than(ld,rd,&p.allocator,context.symbols)?;e||l})), EvalBinary::Ge=>Datum::Int(i32::from({let e=crate::player::compare::datum_equals(ld,rd,&p.allocator,context.symbols)?;let g=crate::player::compare::datum_greater_than(ld,rd,&p.allocator,context.symbols)?;e||g})), EvalBinary::And=>{let left=ld.int_value()?;let right=rd.int_value()?;Datum::Int(i32::from(left!=0 && right!=0))}, EvalBinary::Or=>{let left=ld.int_value()?;let right=rd.int_value()?;Datum::Int(i32::from(left!=0 || right!=0))}}; Ok::<_,ScriptError>(p.alloc_datum(d))
@@ -3038,12 +3653,19 @@ impl EvalContinuation {
                         },
                     });
                 }
-                let result = session.with_player(self.player_id, |context| {
-                    let symbol = context.symbols.intern(&name);
-                    get_obj_prop(context.player, context.symbols, &object, symbol)
-                }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r);
+                let result = session
+                    .with_player(self.player_id, |context| {
+                        let symbol = context.symbols.intern(&name);
+                        get_obj_prop(context.player, context.symbols, &object, symbol)
+                    })
+                    .ok_or_else(crate::player::cancelled_scope_error)
+                    .and_then(|r| r);
                 let result = eval_turn_try!(result);
-                self.values.push(eval_turn_try!(Self::validate_ref(session, self.player_id, &result)));
+                self.values.push(eval_turn_try!(Self::validate_ref(
+                    session,
+                    self.player_id,
+                    &result
+                )));
             }
             EvalFrame::ApplyValueHandler { name, argc } => {
                 let args = match self.pop_values(argc) {
@@ -3053,7 +3675,9 @@ impl EvalContinuation {
                 let result = session
                     .with_player(self.player_id, |context| {
                         let mut component = |index: usize| -> Result<f64, ScriptError> {
-                            let Some(reference) = args.get(index) else { return Ok(0.0) };
+                            let Some(reference) = args.get(index) else {
+                                return Ok(0.0);
+                            };
                             let datum = crate::player::driver::checked_internal_datum(
                                 context.player,
                                 context.symbols,
@@ -3068,80 +3692,142 @@ impl EvalContinuation {
                                 component(2)?,
                             ])))
                         } else {
-                            Ok::<_, ScriptError>(context.player.alloc_datum(Datum::Rect([
-                                component(0)?,
-                                component(1)?,
-                                component(2)?,
-                                component(3)?,
-                            ], 0)))
+                            Ok::<_, ScriptError>(context.player.alloc_datum(Datum::Rect(
+                                [component(0)?, component(1)?, component(2)?, component(3)?],
+                                0,
+                            )))
                         }
                     })
                     .ok_or_else(crate::player::cancelled_scope_error)
                     .and_then(|result| result);
                 let result = eval_turn_try!(result);
-                self.values.push(eval_turn_try!(Self::validate_ref(session, self.player_id, &result)));
+                self.values.push(eval_turn_try!(Self::validate_ref(
+                    session,
+                    self.player_id,
+                    &result
+                )));
             }
-            EvalFrame::ApplyHandler{name,argc} => {
-                let args=match self.pop_values(argc){Ok(v)=>v,Err(e)=>return Some(EvalTurn::Complete(Err(e)))}; let symbol=match Self::intern(session,self.player_id,&name){Ok(s)=>s,Err(e)=>return Some(EvalTurn::Complete(Err(e)))};
-                let receiver = match session.with_player(self.player_id, |context| {
-                    if context.player.current_breakpoint.is_none() || context.player.scope_count == 0 {
-                        return Ok::<_, ScriptError>(None);
-                    }
-                    let scope_idx = context.player.eval_scope_index
-                        .unwrap_or(context.player.scope_count - 1) as usize;
-                    let Some(scope) = context.player.scopes.get(scope_idx) else { return Ok(None); };
-                    let Some(receiver_ref) = scope.receiver.clone() else { return Ok(None); };
-                    let script_ref = scope.script_ref.clone();
-                    let Some(script) = context.player.movie.cast_manager.get_script_by_ref(&script_ref) else { return Ok(None); };
-                    if script.get_own_handler(symbol.clone()).is_some() {
-                        Ok(Some(context.player.alloc_datum(Datum::ScriptInstanceRef(receiver_ref))))
-                    } else { Ok(None) }
-                }).ok_or_else(crate::player::cancelled_scope_error).and_then(|result| result) {
+            EvalFrame::ApplyHandler { name, argc } => {
+                let args = match self.pop_values(argc) {
+                    Ok(v) => v,
+                    Err(e) => return Some(EvalTurn::Complete(Err(e))),
+                };
+                let symbol = match Self::intern(session, self.player_id, &name) {
+                    Ok(s) => s,
+                    Err(e) => return Some(EvalTurn::Complete(Err(e))),
+                };
+                let receiver = match session
+                    .with_player(self.player_id, |context| {
+                        if context.player.current_breakpoint.is_none()
+                            || context.player.scope_count == 0
+                        {
+                            return Ok::<_, ScriptError>(None);
+                        }
+                        let scope_idx = context
+                            .player
+                            .eval_scope_index
+                            .unwrap_or(context.player.scope_count - 1)
+                            as usize;
+                        let Some(scope) = context.player.scopes.get(scope_idx) else {
+                            return Ok(None);
+                        };
+                        let Some(receiver_ref) = scope.receiver.clone() else {
+                            return Ok(None);
+                        };
+                        let script_ref = scope.script_ref.clone();
+                        let Some(script) = context
+                            .player
+                            .movie
+                            .cast_manager
+                            .get_script_by_ref(&script_ref)
+                        else {
+                            return Ok(None);
+                        };
+                        if script.get_own_handler(symbol.clone()).is_some() {
+                            Ok(Some(
+                                context
+                                    .player
+                                    .alloc_datum(Datum::ScriptInstanceRef(receiver_ref)),
+                            ))
+                        } else {
+                            Ok(None)
+                        }
+                    })
+                    .ok_or_else(crate::player::cancelled_scope_error)
+                    .and_then(|result| result)
+                {
                     Ok(value) => value,
                     Err(error) => return Some(EvalTurn::Complete(Err(error))),
                 };
                 if let Some(receiver) = receiver {
                     let capability = self.new_action(false);
-                    return Some(EvalTurn::Pending { request: EvalPending::Object {
-                        capability,
-                        request: crate::player::driver::InternalVmRequest::Object { receiver, name: symbol.clone(), args },
-                        reason: None,
-                    }});
+                    return Some(EvalTurn::Pending {
+                        request: EvalPending::Object {
+                            capability,
+                            request: crate::player::driver::InternalVmRequest::Object {
+                                receiver,
+                                name: symbol.clone(),
+                                args,
+                            },
+                            reason: None,
+                        },
+                    });
                 }
-                match session.dispatch_global(self.player_id,&symbol,&args) {
+                match session.dispatch_global(self.player_id, &symbol, &args) {
                     Ok(crate::player::driver::GlobalDispatch::SyncResult(result)) => {
                         let result = eval_turn_try!(result);
-                        self.values.push(eval_turn_try!(Self::validate_ref(session, self.player_id, &result)));
-                    },
-                    Ok(crate::player::driver::GlobalDispatch::Child { receiver, handler_ref }) => {
-                        let capability = self.new_action(false);
-                        return Some(EvalTurn::Pending { request: EvalPending::Global {
-                            capability,
-                            request: crate::player::driver::InternalVmRequest::Global { name: symbol, args: args.clone() },
-                            reason: None,
-                            prepared_child: Some(crate::player::eval::PreparedGlobal::Child {
-                                receiver,
-                                handler_ref,
-                                args: args.clone(),
-                                use_raw_arg_list: true,
-                                completion: None,
-                            }),
-                        }});
+                        self.values.push(eval_turn_try!(Self::validate_ref(
+                            session,
+                            self.player_id,
+                            &result
+                        )));
                     }
-                    Ok(crate::player::driver::GlobalDispatch::ChildPrepared { receiver, handler_ref, args: prepared_args }) => {
+                    Ok(crate::player::driver::GlobalDispatch::Child {
+                        receiver,
+                        handler_ref,
+                    }) => {
                         let capability = self.new_action(false);
-                        return Some(EvalTurn::Pending { request: EvalPending::Global {
-                            capability,
-                            request: crate::player::driver::InternalVmRequest::Global { name: symbol, args: args.clone() },
-                            reason: None,
-                            prepared_child: Some(crate::player::eval::PreparedGlobal::Child {
-                                receiver,
-                                handler_ref,
-                                args: prepared_args,
-                                use_raw_arg_list: false,
-                                completion: None,
-                            }),
-                        }});
+                        return Some(EvalTurn::Pending {
+                            request: EvalPending::Global {
+                                capability,
+                                request: crate::player::driver::InternalVmRequest::Global {
+                                    name: symbol,
+                                    args: args.clone(),
+                                },
+                                reason: None,
+                                prepared_child: Some(crate::player::eval::PreparedGlobal::Child {
+                                    receiver,
+                                    handler_ref,
+                                    args: args.clone(),
+                                    use_raw_arg_list: true,
+                                    completion: None,
+                                }),
+                            },
+                        });
+                    }
+                    Ok(crate::player::driver::GlobalDispatch::ChildPrepared {
+                        receiver,
+                        handler_ref,
+                        args: prepared_args,
+                    }) => {
+                        let capability = self.new_action(false);
+                        return Some(EvalTurn::Pending {
+                            request: EvalPending::Global {
+                                capability,
+                                request: crate::player::driver::InternalVmRequest::Global {
+                                    name: symbol,
+                                    args: args.clone(),
+                                },
+                                reason: None,
+                                prepared_child: Some(crate::player::eval::PreparedGlobal::Child {
+                                    receiver,
+                                    handler_ref,
+                                    args: prepared_args,
+                                    use_raw_arg_list: false,
+                                    completion: None,
+                                }),
+                            },
+                        });
                     }
                     Ok(crate::player::driver::GlobalDispatch::ChildWithCompletion {
                         receiver,
@@ -3150,84 +3836,142 @@ impl EvalContinuation {
                         completion,
                     }) => {
                         let capability = self.new_action(false);
-                        return Some(EvalTurn::Pending { request: EvalPending::Global {
-                            capability,
-                            request: crate::player::driver::InternalVmRequest::Global { name: symbol, args },
-                            reason: None,
-                            prepared_child: Some(crate::player::eval::PreparedGlobal::Child {
-                                receiver,
-                                handler_ref,
-                                args: prepared_args,
-                                use_raw_arg_list: false,
-                                completion: Some(completion),
-                            }),
-                        }});
+                        return Some(EvalTurn::Pending {
+                            request: EvalPending::Global {
+                                capability,
+                                request: crate::player::driver::InternalVmRequest::Global {
+                                    name: symbol,
+                                    args,
+                                },
+                                reason: None,
+                                prepared_child: Some(crate::player::eval::PreparedGlobal::Child {
+                                    receiver,
+                                    handler_ref,
+                                    args: prepared_args,
+                                    use_raw_arg_list: false,
+                                    completion: Some(completion),
+                                }),
+                            },
+                        });
                     }
                     Ok(crate::player::driver::GlobalDispatch::AncestorChildren { calls }) => {
                         let capability = self.new_action(false);
-                        return Some(EvalTurn::Pending { request: EvalPending::Global {
-                            capability,
-                            request: crate::player::driver::InternalVmRequest::Global { name: symbol, args },
-                            reason: None,
-                            prepared_child: Some(crate::player::eval::PreparedGlobal::Ancestors { calls }),
-                        }});
+                        return Some(EvalTurn::Pending {
+                            request: EvalPending::Global {
+                                capability,
+                                request: crate::player::driver::InternalVmRequest::Global {
+                                    name: symbol,
+                                    args,
+                                },
+                                reason: None,
+                                prepared_child: Some(
+                                    crate::player::eval::PreparedGlobal::Ancestors { calls },
+                                ),
+                            },
+                        });
                     }
                     Ok(crate::player::driver::GlobalDispatch::ChildSequence { plan }) => {
                         let capability = self.new_action(false);
-                        return Some(EvalTurn::Pending { request: EvalPending::Global {
-                            capability,
-                            request: crate::player::driver::InternalVmRequest::Global { name: symbol, args },
-                            reason: None,
-                            prepared_child: Some(crate::player::eval::PreparedGlobal::Broadcast { plan }),
-                        }});
+                        return Some(EvalTurn::Pending {
+                            request: EvalPending::Global {
+                                capability,
+                                request: crate::player::driver::InternalVmRequest::Global {
+                                    name: symbol,
+                                    args,
+                                },
+                                reason: None,
+                                prepared_child: Some(
+                                    crate::player::eval::PreparedGlobal::Broadcast { plan },
+                                ),
+                            },
+                        });
                     }
-                    Ok(crate::player::driver::GlobalDispatch::PendingRequest { request, reason }) => {
+                    Ok(crate::player::driver::GlobalDispatch::PendingRequest {
+                        request,
+                        reason,
+                    }) => {
                         let capability = self.new_action(false);
-                        return Some(EvalTurn::Pending { request: EvalPending::Global {
-                            capability,
-                            request,
-                            reason: Some(reason),
-                            prepared_child: None,
-                        }});
+                        return Some(EvalTurn::Pending {
+                            request: EvalPending::Global {
+                                capability,
+                                request,
+                                reason: Some(reason),
+                                prepared_child: None,
+                            },
+                        });
                     }
                     Ok(crate::player::driver::GlobalDispatch::Pending { reason }) => {
                         let capability = self.new_action(false);
-                        return Some(EvalTurn::Pending { request: EvalPending::Global {
-                            capability,
-                            request: crate::player::driver::InternalVmRequest::Global { name: symbol, args },
-                            reason: Some(reason),
-                            prepared_child: None,
-                        }});
+                        return Some(EvalTurn::Pending {
+                            request: EvalPending::Global {
+                                capability,
+                                request: crate::player::driver::InternalVmRequest::Global {
+                                    name: symbol,
+                                    args,
+                                },
+                                reason: Some(reason),
+                                prepared_child: None,
+                            },
+                        });
                     }
                     Err(e) => return Some(EvalTurn::Complete(Err(e))),
                 }
             }
-            EvalFrame::ApplyObjHandler{name,argc} => {
-                let args=match self.pop_values(argc){Ok(v)=>v,Err(e)=>return Some(EvalTurn::Complete(Err(e)))}; let receiver=match self.pop_value(){Ok(v)=>v,Err(e)=>return Some(EvalTurn::Complete(Err(e)))}; let symbol=match Self::intern(session,self.player_id,&name){Ok(s)=>s,Err(e)=>return Some(EvalTurn::Complete(Err(e)))};
+            EvalFrame::ApplyObjHandler { name, argc } => {
+                let args = match self.pop_values(argc) {
+                    Ok(v) => v,
+                    Err(e) => return Some(EvalTurn::Complete(Err(e))),
+                };
+                let receiver = match self.pop_value() {
+                    Ok(v) => v,
+                    Err(e) => return Some(EvalTurn::Complete(Err(e))),
+                };
+                let symbol = match Self::intern(session, self.player_id, &name) {
+                    Ok(s) => s,
+                    Err(e) => return Some(EvalTurn::Complete(Err(e))),
+                };
                 let capability = self.new_action(false);
-                return Some(EvalTurn::Pending{request:EvalPending::Object{capability,request:crate::player::driver::InternalVmRequest::Object{receiver,name:symbol,args},reason:None}});
+                return Some(EvalTurn::Pending {
+                    request: EvalPending::Object {
+                        capability,
+                        request: crate::player::driver::InternalVmRequest::Object {
+                            receiver,
+                            name: symbol,
+                            args,
+                        },
+                        reason: None,
+                    },
+                });
             }
             EvalFrame::ApplyListAccess => {
-                let index=eval_turn_try!(self.pop_value());let list=eval_turn_try!(self.pop_value());
+                let index = eval_turn_try!(self.pop_value());
+                let list = eval_turn_try!(self.pop_value());
                 eval_turn_try!(Self::validate_ref(session, self.player_id, &index));
                 eval_turn_try!(Self::validate_ref(session, self.player_id, &list));
-                let js_property = session.with_player(self.player_id, |context| {
-                    let is_js = matches!(crate::player::driver::checked_internal_datum(
-                        context.player,
-                        context.symbols,
-                        &list,
-                    )?, Datum::JsObjectRef(_));
-                    if is_js {
-                        let property = crate::player::driver::checked_internal_datum(
-                            context.player,
-                            context.symbols,
-                            &index,
-                        )?.string_value(context.symbols)?;
-                        Ok::<_, ScriptError>(Some(context.symbols.intern(&property)))
-                    } else {
-                        Ok(None)
-                    }
-                }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r);
+                let js_property = session
+                    .with_player(self.player_id, |context| {
+                        let is_js = matches!(
+                            crate::player::driver::checked_internal_datum(
+                                context.player,
+                                context.symbols,
+                                &list,
+                            )?,
+                            Datum::JsObjectRef(_)
+                        );
+                        if is_js {
+                            let property = crate::player::driver::checked_internal_datum(
+                                context.player,
+                                context.symbols,
+                                &index,
+                            )?
+                            .string_value(context.symbols)?;
+                            Ok::<_, ScriptError>(Some(context.symbols.intern(&property)))
+                        } else {
+                            Ok(None)
+                        }
+                    })
+                    .ok_or_else(crate::player::cancelled_scope_error)
+                    .and_then(|r| r);
                 if let Some(name) = eval_turn_try!(js_property) {
                     let capability = self.new_action(false);
                     return Some(EvalTurn::Pending {
@@ -3241,54 +3985,115 @@ impl EvalContinuation {
                         },
                     });
                 }
-                let result = session.with_player(self.player_id, |context| {
-                    let p = context.player;
-                    match p.get_datum(&list) {
-                        Datum::List(_, items, _) => {
-                            let i = p.get_datum(&index).int_value()?;
-                            if i < 1 || i as usize > items.len() {
-                                Err(ScriptError::new(format!("List index {} out of bounds (list has {} items)", i, items.len())))
-                            } else {
-                                Ok(items[(i - 1) as usize].clone())
+                let result = session
+                    .with_player(self.player_id, |context| {
+                        let p = context.player;
+                        match p.get_datum(&list) {
+                            Datum::List(_, items, _) => {
+                                let i = p.get_datum(&index).int_value()?;
+                                if i < 1 || i as usize > items.len() {
+                                    Err(ScriptError::new(format!(
+                                        "List index {} out of bounds (list has {} items)",
+                                        i,
+                                        items.len()
+                                    )))
+                                } else {
+                                    Ok(items[(i - 1) as usize].clone())
+                                }
                             }
+                            Datum::PropList(pairs, sorted) => PropListUtils::get_at(
+                                pairs,
+                                &index,
+                                &p.allocator,
+                                context.symbols,
+                                *sorted,
+                            ),
+                            Datum::Point(vals, flags) => {
+                                let i = p.get_datum(&index).int_value()?;
+                                if !(1..=2).contains(&i) {
+                                    return Err(ScriptError::new(format!(
+                                        "Point index {} out of bounds (must be 1 or 2)",
+                                        i
+                                    )));
+                                }
+                                let i = (i - 1) as usize;
+                                Ok(p.alloc_datum(Datum::inline_component_to_datum(
+                                    vals[i],
+                                    Datum::inline_is_float(*flags, i),
+                                )))
+                            }
+                            Datum::Rect(vals, flags) => {
+                                let i = p.get_datum(&index).int_value()?;
+                                if !(1..=4).contains(&i) {
+                                    return Err(ScriptError::new(format!(
+                                        "Rect index {} out of bounds (must be 1-4)",
+                                        i
+                                    )));
+                                }
+                                let i = (i - 1) as usize;
+                                Ok(p.alloc_datum(Datum::inline_component_to_datum(
+                                    vals[i],
+                                    Datum::inline_is_float(*flags, i),
+                                )))
+                            }
+                            Datum::String(value) => {
+                                let i = p.get_datum(&index).int_value()?;
+                                if i < 1 || i as usize > value.chars().count() {
+                                    Ok(p.alloc_datum(Datum::String(String::new())))
+                                } else {
+                                    Ok(p.alloc_datum(Datum::String(
+                                        value.chars().nth((i - 1) as usize).unwrap().to_string(),
+                                    )))
+                                }
+                            }
+                            Datum::SpriteRef(sprite_number) => {
+                                let prop_name = match p.get_datum(&index) {
+                                    Datum::Symbol(name) => context
+                                        .symbols
+                                        .display(name)
+                                        .map_err(|_| {
+                                            ScriptError::new_code(
+                                                crate::player::ScriptErrorCode::InvalidReference,
+                                                "foreign symbol".to_owned(),
+                                            )
+                                        })?
+                                        .to_owned(),
+                                    Datum::String(name) => name.clone(),
+                                    other => {
+                                        return Err(ScriptError::new(format!(
+                                            "Cannot index sprite {} with {}",
+                                            sprite_number,
+                                            other.type_str()
+                                        )))
+                                    }
+                                };
+                                let prop_symbol = context.symbols.intern(&prop_name);
+                                let result = crate::player::score::sprite_get_prop(
+                                    p,
+                                    context.symbols,
+                                    *sprite_number,
+                                    prop_symbol,
+                                )?;
+                                Ok(p.last_sprite_prop_ref
+                                    .take()
+                                    .unwrap_or_else(|| p.alloc_datum(result)))
+                            }
+                            _ => Err(ScriptError::new("cannot index value".to_owned())),
                         }
-                        Datum::PropList(pairs, sorted) => PropListUtils::get_at(
-                            pairs, &index, &p.allocator, context.symbols, *sorted,
-                        ),
-                        Datum::Point(vals, flags) => {
-                            let i = p.get_datum(&index).int_value()?;
-                            if !(1..=2).contains(&i) { return Err(ScriptError::new(format!("Point index {} out of bounds (must be 1 or 2)", i))); }
-                            let i = (i - 1) as usize;
-                            Ok(p.alloc_datum(Datum::inline_component_to_datum(vals[i], Datum::inline_is_float(*flags, i))))
-                        }
-                        Datum::Rect(vals, flags) => {
-                            let i = p.get_datum(&index).int_value()?;
-                            if !(1..=4).contains(&i) { return Err(ScriptError::new(format!("Rect index {} out of bounds (must be 1-4)", i))); }
-                            let i = (i - 1) as usize;
-                            Ok(p.alloc_datum(Datum::inline_component_to_datum(vals[i], Datum::inline_is_float(*flags, i))))
-                        }
-                        Datum::String(value) => {
-                            let i = p.get_datum(&index).int_value()?;
-                            if i < 1 || i as usize > value.chars().count() { Ok(p.alloc_datum(Datum::String(String::new()))) }
-                            else { Ok(p.alloc_datum(Datum::String(value.chars().nth((i - 1) as usize).unwrap().to_string()))) }
-                        }
-                        Datum::SpriteRef(sprite_number) => {
-                            let prop_name = match p.get_datum(&index) {
-                                Datum::Symbol(name) => context.symbols.display(name).map_err(|_| ScriptError::new_code(crate::player::ScriptErrorCode::InvalidReference, "foreign symbol".to_owned()))?.to_owned(),
-                                Datum::String(name) => name.clone(),
-                                other => return Err(ScriptError::new(format!("Cannot index sprite {} with {}", sprite_number, other.type_str()))),
-                            };
-                            let prop_symbol = context.symbols.intern(&prop_name);
-                            let result = crate::player::score::sprite_get_prop(p, context.symbols, *sprite_number, prop_symbol)?;
-                            Ok(p.last_sprite_prop_ref.take().unwrap_or_else(|| p.alloc_datum(result)))
-                        }
-                        _ => Err(ScriptError::new("cannot index value".to_owned())),
-                    }
-                }).ok_or_else(crate::player::cancelled_scope_error).and_then(|result| result);
+                    })
+                    .ok_or_else(crate::player::cancelled_scope_error)
+                    .and_then(|result| result);
                 let result = eval_turn_try!(result);
-                self.values.push(eval_turn_try!(Self::validate_ref(session, self.player_id, &result)));
+                self.values.push(eval_turn_try!(Self::validate_ref(
+                    session,
+                    self.player_id,
+                    &result
+                )));
             }
-            EvalFrame::ApplyChunkAccess { property: prop_name, target } => {
+            EvalFrame::ApplyChunkAccess {
+                property: prop_name,
+                target,
+            } => {
                 let index = eval_turn_try!(self.pop_value());
                 let object = eval_turn_try!(self.pop_value());
                 eval_turn_try!(Self::validate_ref(session, self.player_id, &index));
@@ -3331,48 +4136,120 @@ impl EvalContinuation {
                 }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r);
                 let result = eval_turn_try!(result);
                 if let Some(value) = result {
-                    self.values.push(eval_turn_try!(Self::validate_ref(session, self.player_id, &value)));
+                    self.values.push(eval_turn_try!(Self::validate_ref(
+                        session,
+                        self.player_id,
+                        &value
+                    )));
                 } else {
                     self.schedule_chunk_fallback(target);
                 }
             }
-            EvalFrame::ApplyAssignment(target) => { let value=eval_turn_try!(self.pop_value()); match target {LingoExpr::Identifier(name)=>{let result=session.with_player(self.player_id,|context|{let p=context.player;if name.starts_with("the "){let sym=context.symbols.intern(&name[4..]);p.set_movie_prop(context.symbols,sym,p.get_datum(&value).clone())?;}else if let Some(receiver)=current_do_receiver_with_prop(p,context.symbols,&name)?{let sym=context.symbols.intern(&name);script_set_prop(p,context.symbols,&receiver,sym,&value,true)?;}else{let sym=context.symbols.intern(&name);p.globals.insert(sym,value.clone());}Ok::<_,ScriptError>(value)}).ok_or_else(crate::player::cancelled_scope_error).and_then(|result| result);self.values.push(eval_turn_try!(result));},LingoExpr::ObjProp(object,name)|LingoExpr::ThePropOf(object,name)=>{self.frames.push(EvalFrame::ApplySetProperty(name));self.frames.push(EvalFrame::Evaluate(*object));self.values.push(value);},LingoExpr::ListAccess(list,index)=>{
-                            if let LingoExpr::ObjProp(object, property) = list.as_ref() {
-                                let target = LingoExpr::ListAccess(
-                                    Box::new(LingoExpr::ObjProp(object.clone(), property.clone())),
-                                    index.clone(),
-                                );
-                                self.frames.push(EvalFrame::ProbeIndexedAssignment { value, target });
-                                self.frames.push(EvalFrame::Evaluate((**object).clone()));
-                            } else {
-                                self.frames.push(EvalFrame::ApplyIndexedAssignment { value, property: None });
-                                self.frames.push(EvalFrame::Evaluate(*index));
-                                self.frames.push(EvalFrame::Evaluate(*list));
-                            }
-                        },_=>return Some(EvalTurn::Complete(Err(ScriptError::new("invalid assignment target".to_owned()))))} }
+            EvalFrame::ApplyAssignment(target) => {
+                let value = eval_turn_try!(self.pop_value());
+                match target {
+                    LingoExpr::Identifier(name) => {
+                        let result = session
+                            .with_player(self.player_id, |context| {
+                                let p = context.player;
+                                if name.starts_with("the ") {
+                                    let sym = context.symbols.intern(&name[4..]);
+                                    p.set_movie_prop(
+                                        context.symbols,
+                                        sym,
+                                        p.get_datum(&value).clone(),
+                                    )?;
+                                } else if let Some(receiver) =
+                                    current_do_receiver_with_prop(p, context.symbols, &name)?
+                                {
+                                    let sym = context.symbols.intern(&name);
+                                    script_set_prop(
+                                        p,
+                                        context.symbols,
+                                        &receiver,
+                                        sym,
+                                        &value,
+                                        true,
+                                    )?;
+                                } else {
+                                    let sym = context.symbols.intern(&name);
+                                    p.globals.insert(sym, value.clone());
+                                }
+                                Ok::<_, ScriptError>(value)
+                            })
+                            .ok_or_else(crate::player::cancelled_scope_error)
+                            .and_then(|result| result);
+                        self.values.push(eval_turn_try!(result));
+                    }
+                    LingoExpr::ObjProp(object, name) | LingoExpr::ThePropOf(object, name) => {
+                        self.frames.push(EvalFrame::ApplySetProperty(name));
+                        self.frames.push(EvalFrame::Evaluate(*object));
+                        self.values.push(value);
+                    }
+                    LingoExpr::ListAccess(list, index) => {
+                        if let LingoExpr::ObjProp(object, property) = list.as_ref() {
+                            let target = LingoExpr::ListAccess(
+                                Box::new(LingoExpr::ObjProp(object.clone(), property.clone())),
+                                index.clone(),
+                            );
+                            self.frames
+                                .push(EvalFrame::ProbeIndexedAssignment { value, target });
+                            self.frames.push(EvalFrame::Evaluate((**object).clone()));
+                        } else {
+                            self.frames.push(EvalFrame::ApplyIndexedAssignment {
+                                value,
+                                property: None,
+                            });
+                            self.frames.push(EvalFrame::Evaluate(*index));
+                            self.frames.push(EvalFrame::Evaluate(*list));
+                        }
+                    }
+                    _ => {
+                        return Some(EvalTurn::Complete(Err(ScriptError::new(
+                            "invalid assignment target".to_owned(),
+                        ))))
+                    }
+                }
+            }
             EvalFrame::ProbeIndexedAssignment { value, target } => {
                 let object = eval_turn_try!(self.pop_value());
                 eval_turn_try!(Self::validate_ref(session, self.player_id, &object));
                 let LingoExpr::ListAccess(list, index) = target else {
-                    return Some(EvalTurn::Complete(Err(ScriptError::new("invalid indexed assignment probe".to_owned()))));
+                    return Some(EvalTurn::Complete(Err(ScriptError::new(
+                        "invalid indexed assignment probe".to_owned(),
+                    ))));
                 };
                 let LingoExpr::ObjProp(_, property) = list.as_ref() else {
-                    return Some(EvalTurn::Complete(Err(ScriptError::new("invalid indexed assignment probe".to_owned()))));
+                    return Some(EvalTurn::Complete(Err(ScriptError::new(
+                        "invalid indexed assignment probe".to_owned(),
+                    ))));
                 };
-                let receiver_kind = eval_turn_try!(session.with_player(self.player_id, |context| {
-                    let datum = crate::player::driver::checked_internal_datum(
-                        context.player,
-                        context.symbols,
-                        &object,
-                    )?;
-                    Ok::<_, ScriptError>(matches!(datum, Datum::Shockwave3dObjectRef(_) | Datum::JsObjectRef(_)))
-                }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r));
+                let receiver_kind = eval_turn_try!(session
+                    .with_player(self.player_id, |context| {
+                        let datum = crate::player::driver::checked_internal_datum(
+                            context.player,
+                            context.symbols,
+                            &object,
+                        )?;
+                        Ok::<_, ScriptError>(matches!(
+                            datum,
+                            Datum::Shockwave3dObjectRef(_) | Datum::JsObjectRef(_)
+                        ))
+                    })
+                    .ok_or_else(crate::player::cancelled_scope_error)
+                    .and_then(|r| r));
                 if receiver_kind {
                     self.values.push(object);
-                    self.frames.push(EvalFrame::ApplyIndexedAssignment { value, property: Some(property.clone()) });
+                    self.frames.push(EvalFrame::ApplyIndexedAssignment {
+                        value,
+                        property: Some(property.clone()),
+                    });
                     self.frames.push(EvalFrame::Evaluate(*index));
                 } else {
-                    self.frames.push(EvalFrame::ApplyIndexedAssignment { value, property: None });
+                    self.frames.push(EvalFrame::ApplyIndexedAssignment {
+                        value,
+                        property: None,
+                    });
                     self.frames.push(EvalFrame::Evaluate(*index));
                     self.frames.push(EvalFrame::Evaluate(*list));
                 }
@@ -3384,23 +4261,30 @@ impl EvalContinuation {
                 eval_turn_try!(Self::validate_ref(session, self.player_id, &container));
                 eval_turn_try!(Self::validate_ref(session, self.player_id, &value));
                 if property.is_none() {
-                    let js_property = session.with_player(self.player_id, |context| {
-                        let is_js = matches!(crate::player::driver::checked_internal_datum(
-                            context.player,
-                            context.symbols,
-                            &container,
-                        )?, Datum::JsObjectRef(_));
-                        if is_js {
-                            let property = crate::player::driver::checked_internal_datum(
-                                context.player,
-                                context.symbols,
-                                &index,
-                            )?.string_value(context.symbols)?;
-                            Ok::<_, ScriptError>(Some(context.symbols.intern(&property)))
-                        } else {
-                            Ok(None)
-                        }
-                    }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r);
+                    let js_property = session
+                        .with_player(self.player_id, |context| {
+                            let is_js = matches!(
+                                crate::player::driver::checked_internal_datum(
+                                    context.player,
+                                    context.symbols,
+                                    &container,
+                                )?,
+                                Datum::JsObjectRef(_)
+                            );
+                            if is_js {
+                                let property = crate::player::driver::checked_internal_datum(
+                                    context.player,
+                                    context.symbols,
+                                    &index,
+                                )?
+                                .string_value(context.symbols)?;
+                                Ok::<_, ScriptError>(Some(context.symbols.intern(&property)))
+                            } else {
+                                Ok(None)
+                            }
+                        })
+                        .ok_or_else(crate::player::cancelled_scope_error)
+                        .and_then(|r| r);
                     if let Some(name) = eval_turn_try!(js_property) {
                         self.frames.push(EvalFrame::ApplySetAtResult(value.clone()));
                         let capability = self.new_action(false);
@@ -3417,20 +4301,27 @@ impl EvalContinuation {
                     }
                 }
                 if let Some(property) = property {
-                    let js_receiver = session.with_player(self.player_id, |context| {
-                        Ok::<_, ScriptError>(matches!(
-                            crate::player::driver::checked_internal_datum(
-                                context.player,
-                                context.symbols,
-                                &container,
-                            )?,
-                            Datum::JsObjectRef(_),
-                        ))
-                    }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r);
+                    let js_receiver = session
+                        .with_player(self.player_id, |context| {
+                            Ok::<_, ScriptError>(matches!(
+                                crate::player::driver::checked_internal_datum(
+                                    context.player,
+                                    context.symbols,
+                                    &container,
+                                )?,
+                                Datum::JsObjectRef(_),
+                            ))
+                        })
+                        .ok_or_else(crate::player::cancelled_scope_error)
+                        .and_then(|r| r);
                     if eval_turn_try!(js_receiver) {
-                        let name = match session.with_player(self.player_id, |context| {
-                            Ok::<_, ScriptError>(context.symbols.intern(&property))
-                        }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r) {
+                        let name = match session
+                            .with_player(self.player_id, |context| {
+                                Ok::<_, ScriptError>(context.symbols.intern(&property))
+                            })
+                            .ok_or_else(crate::player::cancelled_scope_error)
+                            .and_then(|r| r)
+                        {
                             Ok(name) => name,
                             Err(error) => return Some(EvalTurn::Complete(Err(error))),
                         };
@@ -3451,67 +4342,116 @@ impl EvalContinuation {
                             },
                         });
                     }
-                    let is_s3d = session.with_player(self.player_id, |context| {
-                        Ok::<_, ScriptError>(matches!(context.player.get_datum(&container), Datum::Shockwave3dObjectRef(_)))
-                    }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r);
+                    let is_s3d = session
+                        .with_player(self.player_id, |context| {
+                            Ok::<_, ScriptError>(matches!(
+                                context.player.get_datum(&container),
+                                Datum::Shockwave3dObjectRef(_)
+                            ))
+                        })
+                        .ok_or_else(crate::player::cancelled_scope_error)
+                        .and_then(|r| r);
                     if eval_turn_try!(is_s3d) {
-                        let (property_ref, set_at) = match session.with_player(self.player_id, |context| {
-                            let property_ref = context.player.alloc_datum(Datum::Symbol(context.symbols.intern(&property)));
-                            Ok::<_, ScriptError>((property_ref, Symbol::builtin(BuiltInSymbol::SetAt)))
-                        }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r) {
+                        let (property_ref, set_at) = match session
+                            .with_player(self.player_id, |context| {
+                                let property_ref = context
+                                    .player
+                                    .alloc_datum(Datum::Symbol(context.symbols.intern(&property)));
+                                Ok::<_, ScriptError>((
+                                    property_ref,
+                                    Symbol::builtin(BuiltInSymbol::SetAt),
+                                ))
+                            })
+                            .ok_or_else(crate::player::cancelled_scope_error)
+                            .and_then(|r| r)
+                        {
                             Ok(v) => v,
                             Err(error) => return Some(EvalTurn::Complete(Err(error))),
                         };
                         self.frames.push(EvalFrame::ApplySetAtResult(value.clone()));
                         let capability = self.new_action(false);
-                        return Some(EvalTurn::Pending { request: EvalPending::Object {
-                            capability,
-                            request: crate::player::driver::InternalVmRequest::Object {
-                                receiver: container,
-                                name: set_at,
-                                args: vec![property_ref, index, value.clone()],
+                        return Some(EvalTurn::Pending {
+                            request: EvalPending::Object {
+                                capability,
+                                request: crate::player::driver::InternalVmRequest::Object {
+                                    receiver: container,
+                                    name: set_at,
+                                    args: vec![property_ref, index, value.clone()],
+                                },
+                                reason: None,
                             },
-                            reason: None,
-                        }});
+                        });
                     }
-                    let result = session.with_player(self.player_id, |context| {
-                        let symbol = context.symbols.intern(&property);
-                        get_obj_prop(context.player, context.symbols, &container, symbol)
-                    }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r);
+                    let result = session
+                        .with_player(self.player_id, |context| {
+                            let symbol = context.symbols.intern(&property);
+                            get_obj_prop(context.player, context.symbols, &container, symbol)
+                        })
+                        .ok_or_else(crate::player::cancelled_scope_error)
+                        .and_then(|r| r);
                     let list = eval_turn_try!(result);
-                    let result = session.with_player(self.player_id, |context| {
-                        Self::set_indexed_value(context.player, context.symbols, &list, &index, &value)
-                    }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r);
+                    let result = session
+                        .with_player(self.player_id, |context| {
+                            Self::set_indexed_value(
+                                context.player,
+                                context.symbols,
+                                &list,
+                                &index,
+                                &value,
+                            )
+                        })
+                        .ok_or_else(crate::player::cancelled_scope_error)
+                        .and_then(|r| r);
                     self.values.push(eval_turn_try!(result));
                 } else {
-                    let result = session.with_player(self.player_id, |context| {
-                        Self::set_indexed_value(context.player, context.symbols, &container, &index, &value)
-                    }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r);
+                    let result = session
+                        .with_player(self.player_id, |context| {
+                            Self::set_indexed_value(
+                                context.player,
+                                context.symbols,
+                                &container,
+                                &index,
+                                &value,
+                            )
+                        })
+                        .ok_or_else(crate::player::cancelled_scope_error)
+                        .and_then(|r| r);
                     self.values.push(eval_turn_try!(result));
                 }
             }
-            EvalFrame::ApplyIndexedAssignmentResult { value, index, receiver } => {
+            EvalFrame::ApplyIndexedAssignmentResult {
+                value,
+                index,
+                receiver,
+            } => {
                 let container = eval_turn_try!(self.pop_value());
                 eval_turn_try!(Self::validate_ref(session, self.player_id, &container));
                 eval_turn_try!(Self::validate_ref(session, self.player_id, &index));
                 eval_turn_try!(Self::validate_ref(session, self.player_id, &value));
-                let js_property = session.with_player(self.player_id, |context| {
-                    let is_js = matches!(crate::player::driver::checked_internal_datum(
-                        context.player,
-                        context.symbols,
-                        &container,
-                    )?, Datum::JsObjectRef(_));
-                    if is_js {
-                        let property = crate::player::driver::checked_internal_datum(
-                            context.player,
-                            context.symbols,
-                            &index,
-                        )?.string_value(context.symbols)?;
-                        Ok::<_, ScriptError>(Some(context.symbols.intern(&property)))
-                    } else {
-                        Ok(None)
-                    }
-                }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r);
+                let js_property = session
+                    .with_player(self.player_id, |context| {
+                        let is_js = matches!(
+                            crate::player::driver::checked_internal_datum(
+                                context.player,
+                                context.symbols,
+                                &container,
+                            )?,
+                            Datum::JsObjectRef(_)
+                        );
+                        if is_js {
+                            let property = crate::player::driver::checked_internal_datum(
+                                context.player,
+                                context.symbols,
+                                &index,
+                            )?
+                            .string_value(context.symbols)?;
+                            Ok::<_, ScriptError>(Some(context.symbols.intern(&property)))
+                        } else {
+                            Ok(None)
+                        }
+                    })
+                    .ok_or_else(crate::player::cancelled_scope_error)
+                    .and_then(|r| r);
                 if let Some(name) = eval_turn_try!(js_property) {
                     self.frames.push(EvalFrame::ApplySetAtResult(value.clone()));
                     let capability = self.new_action(false);
@@ -3526,9 +4466,18 @@ impl EvalContinuation {
                         },
                     });
                 }
-                let result = session.with_player(self.player_id, |context| {
-                    Self::set_indexed_value(context.player, context.symbols, &container, &index, &value)
-                }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r);
+                let result = session
+                    .with_player(self.player_id, |context| {
+                        Self::set_indexed_value(
+                            context.player,
+                            context.symbols,
+                            &container,
+                            &index,
+                            &value,
+                        )
+                    })
+                    .ok_or_else(crate::player::cancelled_scope_error)
+                    .and_then(|r| r);
                 let _ = eval_turn_try!(result);
                 if let Some((receiver, name)) = receiver {
                     self.frames.push(EvalFrame::ApplySetAtResult(value.clone()));
@@ -3550,211 +4499,505 @@ impl EvalContinuation {
                 let _ = eval_turn_try!(self.pop_value());
                 self.values.push(value);
             }
-            EvalFrame::ApplyPut{kind,target}=>{
-                let value=eval_turn_try!(self.pop_value());
-                if kind==3 {
-                    let result = session.with_player(self.player_id, |mut context| {
-                        crate::player::handlers::manager::BuiltInHandlerManager::put(&mut context, &vec![value])
-                    }).ok_or_else(crate::player::cancelled_scope_error).and_then(|result| result);
+            EvalFrame::ApplyPut { kind, target } => {
+                let value = eval_turn_try!(self.pop_value());
+                if kind == 3 {
+                    let result = session
+                        .with_player(self.player_id, |mut context| {
+                            crate::player::handlers::manager::BuiltInHandlerManager::put(
+                                &mut context,
+                                &vec![value],
+                            )
+                        })
+                        .ok_or_else(crate::player::cancelled_scope_error)
+                        .and_then(|result| result);
                     self.values.push(eval_turn_try!(result));
-                } else if let LingoExpr::ChunkExpr(chunk_type,index,end,source)=target {
-                    let source_expr=*source;
-                    let apply_target=LingoExpr::ChunkExpr(
-                        chunk_type.clone(), index.clone(), end.clone(),
+                } else if let LingoExpr::ChunkExpr(chunk_type, index, end, source) = target {
+                    let source_expr = *source;
+                    let apply_target = LingoExpr::ChunkExpr(
+                        chunk_type.clone(),
+                        index.clone(),
+                        end.clone(),
                         Box::new(source_expr.clone()),
                     );
-                    self.frames.push(EvalFrame::ApplyPutChunk{kind,target:apply_target,value:value.clone()});
+                    self.frames.push(EvalFrame::ApplyPutChunk {
+                        kind,
+                        target: apply_target,
+                        value: value.clone(),
+                    });
                     self.frames.push(EvalFrame::ReadChunkSource(source_expr));
                     self.frames.push(EvalFrame::FormatPutValue(value));
-                    if let Some(end)=end { self.frames.push(EvalFrame::ConvertEnd); self.frames.push(EvalFrame::Evaluate(*end)); }
+                    if let Some(end) = end {
+                        self.frames.push(EvalFrame::ConvertEnd);
+                        self.frames.push(EvalFrame::Evaluate(*end));
+                    }
                     self.frames.push(EvalFrame::ConvertIndex);
                     self.frames.push(EvalFrame::Evaluate(*index));
-                } else if let LingoExpr::Identifier(name)=target {
-                    let result=session.with_player(self.player_id,|context|{
-                        let sym=context.symbols.intern(&name);
-                        if kind == 0 {
-                            context.player.globals.insert(sym, value.clone());
-                        } else {
-                            let old=context.player.globals.get(&sym).cloned().unwrap_or_else(||context.player.alloc_datum(Datum::String(String::new())));
-                            use crate::player::datum_formatting::datum_to_string_for_concat;
-                            let text = if kind == 1 {
-                                let value_text = datum_to_string_for_concat(context.player.get_datum(&value),context.symbols,context.player)?;
-                                let old_text = datum_to_string_for_concat(context.player.get_datum(&old),context.symbols,context.player)?;
-                                format!("{}{}", value_text, old_text)
+                } else if let LingoExpr::Identifier(name) = target {
+                    let result = session
+                        .with_player(self.player_id, |context| {
+                            let sym = context.symbols.intern(&name);
+                            if kind == 0 {
+                                context.player.globals.insert(sym, value.clone());
                             } else {
-                                let old_text = datum_to_string_for_concat(context.player.get_datum(&old),context.symbols,context.player)?;
-                                let value_text = datum_to_string_for_concat(context.player.get_datum(&value),context.symbols,context.player)?;
-                                format!("{}{}", old_text, value_text)
-                            };
-                            let result_ref = context.player.alloc_datum(Datum::String(text));
-                            context.player.globals.insert(sym, result_ref);
-                        }
-                        Ok::<_,ScriptError>(DatumRef::Void)
-                    }).ok_or_else(crate::player::cancelled_scope_error).and_then(|result| result);self.values.push(eval_turn_try!(result));
-                } else { return Some(EvalTurn::Complete(Err(ScriptError::new("invalid put target".to_owned())))); }
+                                let old = context.player.globals.get(&sym).cloned().unwrap_or_else(
+                                    || context.player.alloc_datum(Datum::String(String::new())),
+                                );
+                                use crate::player::datum_formatting::datum_to_string_for_concat;
+                                let text = if kind == 1 {
+                                    let value_text = datum_to_string_for_concat(
+                                        context.player.get_datum(&value),
+                                        context.symbols,
+                                        context.player,
+                                    )?;
+                                    let old_text = datum_to_string_for_concat(
+                                        context.player.get_datum(&old),
+                                        context.symbols,
+                                        context.player,
+                                    )?;
+                                    format!("{}{}", value_text, old_text)
+                                } else {
+                                    let old_text = datum_to_string_for_concat(
+                                        context.player.get_datum(&old),
+                                        context.symbols,
+                                        context.player,
+                                    )?;
+                                    let value_text = datum_to_string_for_concat(
+                                        context.player.get_datum(&value),
+                                        context.symbols,
+                                        context.player,
+                                    )?;
+                                    format!("{}{}", old_text, value_text)
+                                };
+                                let result_ref = context.player.alloc_datum(Datum::String(text));
+                                context.player.globals.insert(sym, result_ref);
+                            }
+                            Ok::<_, ScriptError>(DatumRef::Void)
+                        })
+                        .ok_or_else(crate::player::cancelled_scope_error)
+                        .and_then(|result| result);
+                    self.values.push(eval_turn_try!(result));
+                } else {
+                    return Some(EvalTurn::Complete(Err(ScriptError::new(
+                        "invalid put target".to_owned(),
+                    ))));
+                }
             }
             EvalFrame::FormatPutValue(value) => {
                 eval_turn_try!(Self::validate_ref(session, self.player_id, &value));
-                let result = session.with_player(self.player_id, |context| {
-                    use crate::player::datum_formatting::datum_to_string_for_concat;
-                    let text = datum_to_string_for_concat(context.player.get_datum(&value), context.symbols, context.player)?;
-                    Ok::<_, ScriptError>(context.player.alloc_datum(Datum::String(text)))
-                }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r);
+                let result = session
+                    .with_player(self.player_id, |context| {
+                        use crate::player::datum_formatting::datum_to_string_for_concat;
+                        let text = datum_to_string_for_concat(
+                            context.player.get_datum(&value),
+                            context.symbols,
+                            context.player,
+                        )?;
+                        Ok::<_, ScriptError>(context.player.alloc_datum(Datum::String(text)))
+                    })
+                    .ok_or_else(crate::player::cancelled_scope_error)
+                    .and_then(|r| r);
                 self.values.push(eval_turn_try!(result));
             }
-            EvalFrame::ReadChunkSource(source) => {
-                match source {
-                    LingoExpr::Identifier(name) => {
-                        let result = session.with_player(self.player_id, |context| {
-                            let symbol = context.symbols.intern(&name);
-                            Ok::<_, ScriptError>(context.player.globals.get(&symbol).cloned().unwrap_or_else(|| {
-                                context.player.alloc_datum(Datum::String(String::new()))
-                            }))
-                        }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r);
-                        let value = eval_turn_try!(result);
-                        self.values.push(eval_turn_try!(Self::validate_ref(session, self.player_id, &value)));
-                    }
-                    expression => {
-                        self.frames.push(EvalFrame::ReadChunkSourceDone);
-                        self.frames.push(EvalFrame::Evaluate(expression));
-                    }
+            EvalFrame::ReadChunkSource(source) => match source {
+                LingoExpr::Identifier(name) => {
+                    let result =
+                        session
+                            .with_player(self.player_id, |context| {
+                                let symbol = context.symbols.intern(&name);
+                                Ok::<_, ScriptError>(
+                                    context.player.globals.get(&symbol).cloned().unwrap_or_else(
+                                        || context.player.alloc_datum(Datum::String(String::new())),
+                                    ),
+                                )
+                            })
+                            .ok_or_else(crate::player::cancelled_scope_error)
+                            .and_then(|r| r);
+                    let value = eval_turn_try!(result);
+                    self.values.push(eval_turn_try!(Self::validate_ref(
+                        session,
+                        self.player_id,
+                        &value
+                    )));
                 }
-            }
+                expression => {
+                    self.frames.push(EvalFrame::ReadChunkSourceDone);
+                    self.frames.push(EvalFrame::Evaluate(expression));
+                }
+            },
             EvalFrame::ReadChunkSourceDone => {
                 let value = eval_turn_try!(self.pop_value());
-                self.values.push(eval_turn_try!(Self::validate_ref(session, self.player_id, &value)));
+                self.values.push(eval_turn_try!(Self::validate_ref(
+                    session,
+                    self.player_id,
+                    &value
+                )));
             }
             EvalFrame::ConvertIndex => {
                 let input = eval_turn_try!(self.pop_value());
                 eval_turn_try!(Self::validate_ref(session, self.player_id, &input));
-                let result = session.with_player(self.player_id, |context| {
-                    let index = context.player.get_datum(&input).int_value()?;
-                    Ok::<_, ScriptError>(context.player.alloc_datum(Datum::Int(index)))
-                }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r);
+                let result = session
+                    .with_player(self.player_id, |context| {
+                        let index = context.player.get_datum(&input).int_value()?;
+                        Ok::<_, ScriptError>(context.player.alloc_datum(Datum::Int(index)))
+                    })
+                    .ok_or_else(crate::player::cancelled_scope_error)
+                    .and_then(|r| r);
                 self.values.push(eval_turn_try!(result));
             }
             EvalFrame::ConvertEnd => {
                 let input = eval_turn_try!(self.pop_value());
                 eval_turn_try!(Self::validate_ref(session, self.player_id, &input));
-                let result = session.with_player(self.player_id, |context| {
-                    let end = context.player.get_datum(&input).int_value()?;
-                    Ok::<_, ScriptError>(context.player.alloc_datum(Datum::Int(end)))
-                }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r);
+                let result = session
+                    .with_player(self.player_id, |context| {
+                        let end = context.player.get_datum(&input).int_value()?;
+                        Ok::<_, ScriptError>(context.player.alloc_datum(Datum::Int(end)))
+                    })
+                    .ok_or_else(crate::player::cancelled_scope_error)
+                    .and_then(|r| r);
                 self.values.push(eval_turn_try!(result));
             }
-            EvalFrame::ApplyPutChunk{kind,target,value}=>{
+            EvalFrame::ApplyPutChunk {
+                kind,
+                target,
+                value,
+            } => {
                 let has_end = matches!(&target, LingoExpr::ChunkExpr(_, _, Some(_), _));
-                let source_ref=eval_turn_try!(self.pop_value());
-                let formatted_value=eval_turn_try!(self.pop_value());
-                let end=if has_end { eval_turn_try!(self.pop_value()) } else { DatumRef::Void };
-                let index=eval_turn_try!(self.pop_value());
+                let source_ref = eval_turn_try!(self.pop_value());
+                let formatted_value = eval_turn_try!(self.pop_value());
+                let end = if has_end {
+                    eval_turn_try!(self.pop_value())
+                } else {
+                    DatumRef::Void
+                };
+                let index = eval_turn_try!(self.pop_value());
                 eval_turn_try!(Self::validate_ref(session, self.player_id, &source_ref));
                 eval_turn_try!(Self::validate_ref(session, self.player_id, &value));
-                eval_turn_try!(Self::validate_ref(session, self.player_id, &formatted_value));
+                eval_turn_try!(Self::validate_ref(
+                    session,
+                    self.player_id,
+                    &formatted_value
+                ));
                 eval_turn_try!(Self::validate_ref(session, self.player_id, &index));
-                if has_end { eval_turn_try!(Self::validate_ref(session, self.player_id, &end)); }
-                let LingoExpr::ChunkExpr(chunk_type,_,_,source_expr)=target else { unreachable!() };
-                let result=session.with_player(self.player_id,|context|{let p=context.player;let i=p.get_datum(&index).int_value()?;let e=if !matches!(end,DatumRef::Void){p.get_datum(&end).int_value()?}else{i};let text=p.get_datum(&source_ref).string_value(context.symbols)?;let value_text=p.get_datum(&formatted_value).string_value(context.symbols)?;let chunk=StringChunkExpr{chunk_type:StringChunkType::from_symbol(&chunk_type,context.symbols)?,start:i,end:e,item_delimiter:p.movie.item_delimiter};let changed=match kind{0=>StringChunkUtils::string_by_putting_into_chunk(&text,&chunk,&value_text)?,1=>StringChunkUtils::string_by_putting_before_chunk(&text,&chunk,&value_text)?,_=>StringChunkUtils::string_by_putting_after_chunk(&text,&chunk,&value_text)?};write_chunk_source(p,context.symbols,&source_expr,changed);Ok::<_,ScriptError>(DatumRef::Void)}).ok_or_else(crate::player::cancelled_scope_error).and_then(|result|result);self.values.push(eval_turn_try!(result));
+                if has_end {
+                    eval_turn_try!(Self::validate_ref(session, self.player_id, &end));
+                }
+                let LingoExpr::ChunkExpr(chunk_type, _, _, source_expr) = target else {
+                    unreachable!()
+                };
+                let result = session
+                    .with_player(self.player_id, |context| {
+                        let p = context.player;
+                        let i = p.get_datum(&index).int_value()?;
+                        let e = if !matches!(end, DatumRef::Void) {
+                            p.get_datum(&end).int_value()?
+                        } else {
+                            i
+                        };
+                        let text = p.get_datum(&source_ref).string_value(context.symbols)?;
+                        let value_text = p
+                            .get_datum(&formatted_value)
+                            .string_value(context.symbols)?;
+                        let chunk = StringChunkExpr {
+                            chunk_type: StringChunkType::from_symbol(&chunk_type, context.symbols)?,
+                            start: i,
+                            end: e,
+                            item_delimiter: p.movie.item_delimiter,
+                        };
+                        let changed = match kind {
+                            0 => StringChunkUtils::string_by_putting_into_chunk(
+                                &text,
+                                &chunk,
+                                &value_text,
+                            )?,
+                            1 => StringChunkUtils::string_by_putting_before_chunk(
+                                &text,
+                                &chunk,
+                                &value_text,
+                            )?,
+                            _ => StringChunkUtils::string_by_putting_after_chunk(
+                                &text,
+                                &chunk,
+                                &value_text,
+                            )?,
+                        };
+                        write_chunk_source(p, context.symbols, &source_expr, changed);
+                        Ok::<_, ScriptError>(DatumRef::Void)
+                    })
+                    .ok_or_else(crate::player::cancelled_scope_error)
+                    .and_then(|result| result);
+                self.values.push(eval_turn_try!(result));
             }
             EvalFrame::ApplyChunkSource => {
                 let source = eval_turn_try!(self.pop_value());
                 eval_turn_try!(Self::validate_ref(session, self.player_id, &source));
-                let result = session.with_player(self.player_id, |context| {
-                    let text = context.player.get_datum(&source).string_value(context.symbols)?;
-                    Ok::<_, ScriptError>((source, context.player.alloc_datum(Datum::String(text))))
-                }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r);
+                let result = session
+                    .with_player(self.player_id, |context| {
+                        let text = context
+                            .player
+                            .get_datum(&source)
+                            .string_value(context.symbols)?;
+                        Ok::<_, ScriptError>((
+                            source,
+                            context.player.alloc_datum(Datum::String(text)),
+                        ))
+                    })
+                    .ok_or_else(crate::player::cancelled_scope_error)
+                    .and_then(|r| r);
                 let (source, converted) = eval_turn_try!(result);
                 self.values.push(source);
                 self.values.push(converted);
             }
-            EvalFrame::ApplyChunk{chunk_type,has_end}=>{
-                let end=if has_end{eval_turn_try!(self.pop_value())}else{DatumRef::Void};
-                let index=eval_turn_try!(self.pop_value());
-                let converted=eval_turn_try!(self.pop_value());
-                let source=eval_turn_try!(self.pop_value());
-                let result=session.with_player(self.player_id,|context|{
-                    let p=context.player;
-                    let i=p.get_datum(&index).int_value()?;
-                    let e=if has_end{p.get_datum(&end).int_value()?}else{i};
-                    let text=p.get_datum(&converted).string_value(context.symbols)?;
-                    let chunk=StringChunkExpr{chunk_type:StringChunkType::from_symbol(&chunk_type,context.symbols)?,start:i,end:e,item_delimiter:p.movie.item_delimiter};
-                    let resolved=StringChunkUtils::resolve_chunk_expr_string(&text,&chunk)?;
-                    let datum=match p.get_datum(&source){
-                        Datum::CastMember(member_ref)=>Datum::StringChunk(crate::director::lingo::datum::StringChunkSource::Member(*member_ref),chunk,resolved),
-                        Datum::StringChunk(..)=>Datum::StringChunk(crate::director::lingo::datum::StringChunkSource::Datum(source.clone()),chunk,resolved),
-                        _=>Datum::String(resolved),
-                    };
-                    Ok::<_,ScriptError>(p.alloc_datum(datum))
-                }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r);
-                let value=eval_turn_try!(result);
-                self.values.push(eval_turn_try!(Self::validate_ref(session,self.player_id,&value)));
+            EvalFrame::ApplyChunk {
+                chunk_type,
+                has_end,
+            } => {
+                let end = if has_end {
+                    eval_turn_try!(self.pop_value())
+                } else {
+                    DatumRef::Void
+                };
+                let index = eval_turn_try!(self.pop_value());
+                let converted = eval_turn_try!(self.pop_value());
+                let source = eval_turn_try!(self.pop_value());
+                let result = session
+                    .with_player(self.player_id, |context| {
+                        let p = context.player;
+                        let i = p.get_datum(&index).int_value()?;
+                        let e = if has_end {
+                            p.get_datum(&end).int_value()?
+                        } else {
+                            i
+                        };
+                        let text = p.get_datum(&converted).string_value(context.symbols)?;
+                        let chunk = StringChunkExpr {
+                            chunk_type: StringChunkType::from_symbol(&chunk_type, context.symbols)?,
+                            start: i,
+                            end: e,
+                            item_delimiter: p.movie.item_delimiter,
+                        };
+                        let resolved = StringChunkUtils::resolve_chunk_expr_string(&text, &chunk)?;
+                        let datum = match p.get_datum(&source) {
+                            Datum::CastMember(member_ref) => Datum::StringChunk(
+                                crate::director::lingo::datum::StringChunkSource::Member(
+                                    *member_ref,
+                                ),
+                                chunk,
+                                resolved,
+                            ),
+                            Datum::StringChunk(..) => Datum::StringChunk(
+                                crate::director::lingo::datum::StringChunkSource::Datum(
+                                    source.clone(),
+                                ),
+                                chunk,
+                                resolved,
+                            ),
+                            _ => Datum::String(resolved),
+                        };
+                        Ok::<_, ScriptError>(p.alloc_datum(datum))
+                    })
+                    .ok_or_else(crate::player::cancelled_scope_error)
+                    .and_then(|r| r);
+                let value = eval_turn_try!(result);
+                self.values.push(eval_turn_try!(Self::validate_ref(
+                    session,
+                    self.player_id,
+                    &value
+                )));
             }
             EvalFrame::ApplySetProperty(name) => {
-                let receiver = match self.pop_value() { Ok(v) => v, Err(e) => return Some(EvalTurn::Complete(Err(e))) };
-                let value = match self.pop_value() { Ok(v) => v, Err(e) => return Some(EvalTurn::Complete(Err(e))) };
+                let receiver = match self.pop_value() {
+                    Ok(v) => v,
+                    Err(e) => return Some(EvalTurn::Complete(Err(e))),
+                };
+                let value = match self.pop_value() {
+                    Ok(v) => v,
+                    Err(e) => return Some(EvalTurn::Complete(Err(e))),
+                };
                 eval_turn_try!(Self::validate_ref(session, self.player_id, &receiver));
                 eval_turn_try!(Self::validate_ref(session, self.player_id, &value));
-                let symbol = match Self::intern(session, self.player_id, &name) { Ok(v) => v, Err(e) => return Some(EvalTurn::Complete(Err(e))) };
+                let symbol = match Self::intern(session, self.player_id, &name) {
+                    Ok(v) => v,
+                    Err(e) => return Some(EvalTurn::Complete(Err(e))),
+                };
                 let capability = self.new_action(true);
-                return Some(EvalTurn::Pending { request: EvalPending::SetProperty { capability, request: crate::player::driver::InternalVmRequest::SetProperty { receiver, name: symbol, value } } });
+                return Some(EvalTurn::Pending {
+                    request: EvalPending::SetProperty {
+                        capability,
+                        request: crate::player::driver::InternalVmRequest::SetProperty {
+                            receiver,
+                            name: symbol,
+                            value,
+                        },
+                    },
+                });
             }
             EvalFrame::ApplyRect => {
-                let values=match self.pop_values(4){Ok(v)=>v,Err(e)=>return Some(EvalTurn::Complete(Err(e)))};
-                let result=session.with_player(self.player_id,|context|{let refs=[&values[0],&values[1],&values[2],&values[3]];let d=Datum::build_rect(context.player.get_datum(refs[0]),context.player.get_datum(refs[1]),context.player.get_datum(refs[2]),context.player.get_datum(refs[3]))?;Ok::<_,ScriptError>(context.player.alloc_datum(d))}).ok_or_else(crate::player::cancelled_scope_error).and_then(|result|result);self.values.push(eval_turn_try!(result));
+                let values = match self.pop_values(4) {
+                    Ok(v) => v,
+                    Err(e) => return Some(EvalTurn::Complete(Err(e))),
+                };
+                let result = session
+                    .with_player(self.player_id, |context| {
+                        let refs = [&values[0], &values[1], &values[2], &values[3]];
+                        let d = Datum::build_rect(
+                            context.player.get_datum(refs[0]),
+                            context.player.get_datum(refs[1]),
+                            context.player.get_datum(refs[2]),
+                            context.player.get_datum(refs[3]),
+                        )?;
+                        Ok::<_, ScriptError>(context.player.alloc_datum(d))
+                    })
+                    .ok_or_else(crate::player::cancelled_scope_error)
+                    .and_then(|result| result);
+                self.values.push(eval_turn_try!(result));
             }
             EvalFrame::ApplyPoint => {
-                let values=match self.pop_values(2){Ok(v)=>v,Err(e)=>return Some(EvalTurn::Complete(Err(e)))};
-                let result=session.with_player(self.player_id,|context|{let d=Datum::build_point(context.player.get_datum(&values[0]),context.player.get_datum(&values[1]))?;Ok::<_,ScriptError>(context.player.alloc_datum(d))}).ok_or_else(crate::player::cancelled_scope_error).and_then(|result|result);self.values.push(eval_turn_try!(result));
+                let values = match self.pop_values(2) {
+                    Ok(v) => v,
+                    Err(e) => return Some(EvalTurn::Complete(Err(e))),
+                };
+                let result = session
+                    .with_player(self.player_id, |context| {
+                        let d = Datum::build_point(
+                            context.player.get_datum(&values[0]),
+                            context.player.get_datum(&values[1]),
+                        )?;
+                        Ok::<_, ScriptError>(context.player.alloc_datum(d))
+                    })
+                    .ok_or_else(crate::player::cancelled_scope_error)
+                    .and_then(|result| result);
+                self.values.push(eval_turn_try!(result));
             }
-            EvalFrame::ApplyMember{has_cast} => {
-                let cast = if has_cast { Some(eval_turn_try!(self.pop_value())) } else { None };
+            EvalFrame::ApplyMember { has_cast } => {
+                let cast = if has_cast {
+                    Some(eval_turn_try!(self.pop_value()))
+                } else {
+                    None
+                };
                 let member = eval_turn_try!(self.pop_value());
-                let result = session.with_player(self.player_id, |context| {
-                    let p = context.player;
-                    let member_datum = p.get_datum(&member).clone();
-                    let cast_datum = cast.as_ref().map(|r| p.get_datum(r).clone());
-                    let found = p.movie.cast_manager.find_member_ref_by_identifiers(
-                        context.symbols, &member_datum, cast_datum.as_ref(), &p.allocator,
-                    )?;
-                    let member_ref = match found {
-                        Some(r) => r,
-                        None => if let Some(cast_datum) = cast_datum {
-                            let cast_lib = match cast_datum {
-                                Datum::Int(number) => number,
-                                Datum::CastLib(number) => number as i32,
-                                Datum::String(name) => p.movie.cast_manager.get_cast_by_name(&name)
-                                    .map(|c| c.number as i32).unwrap_or(0),
-                                datum => return Err(ScriptError::new(format!(
-                                    "Expected int, string, or castLib, got {:?}", datum.type_enum(),
-                                ))),
-                            };
-                            super::cast_lib::CastMemberRef {
-                                cast_lib,
-                                cast_member: member_datum.int_value().unwrap_or(0),
+                let result = session
+                    .with_player(self.player_id, |context| {
+                        let p = context.player;
+                        let member_datum = p.get_datum(&member).clone();
+                        let cast_datum = cast.as_ref().map(|r| p.get_datum(r).clone());
+                        let found = p.movie.cast_manager.find_member_ref_by_identifiers(
+                            context.symbols,
+                            &member_datum,
+                            cast_datum.as_ref(),
+                            &p.allocator,
+                        )?;
+                        let member_ref = match found {
+                            Some(r) => r,
+                            None => {
+                                if let Some(cast_datum) = cast_datum {
+                                    let cast_lib = match cast_datum {
+                                        Datum::Int(number) => number,
+                                        Datum::CastLib(number) => number as i32,
+                                        Datum::String(name) => p
+                                            .movie
+                                            .cast_manager
+                                            .get_cast_by_name(&name)
+                                            .map(|c| c.number as i32)
+                                            .unwrap_or(0),
+                                        datum => {
+                                            return Err(ScriptError::new(format!(
+                                                "Expected int, string, or castLib, got {:?}",
+                                                datum.type_enum(),
+                                            )))
+                                        }
+                                    };
+                                    super::cast_lib::CastMemberRef {
+                                        cast_lib,
+                                        cast_member: member_datum.int_value().unwrap_or(0),
+                                    }
+                                } else {
+                                    INVALID_CAST_MEMBER_REF
+                                }
                             }
-                        } else { INVALID_CAST_MEMBER_REF },
-                    };
-                    Ok::<_, ScriptError>(p.alloc_datum(Datum::CastMember(member_ref)))
-                }).ok_or_else(crate::player::cancelled_scope_error).and_then(|r| r);
+                        };
+                        Ok::<_, ScriptError>(p.alloc_datum(Datum::CastMember(member_ref)))
+                    })
+                    .ok_or_else(crate::player::cancelled_scope_error)
+                    .and_then(|r| r);
                 let value = eval_turn_try!(result);
-                self.values.push(eval_turn_try!(Self::validate_ref(session, self.player_id, &value)));
+                self.values.push(eval_turn_try!(Self::validate_ref(
+                    session,
+                    self.player_id,
+                    &value
+                )));
             }
-            EvalFrame::ApplyDeleteChunk{chunk_type,has_end,source} => {
-                let source_ref=eval_turn_try!(self.pop_value());let end=if has_end{eval_turn_try!(self.pop_value())}else{DatumRef::Void};let index=eval_turn_try!(self.pop_value());
+            EvalFrame::ApplyDeleteChunk {
+                chunk_type,
+                has_end,
+                source,
+            } => {
+                let source_ref = eval_turn_try!(self.pop_value());
+                let end = if has_end {
+                    eval_turn_try!(self.pop_value())
+                } else {
+                    DatumRef::Void
+                };
+                let index = eval_turn_try!(self.pop_value());
                 eval_turn_try!(Self::validate_ref(session, self.player_id, &source_ref));
                 eval_turn_try!(Self::validate_ref(session, self.player_id, &index));
-                if has_end { eval_turn_try!(Self::validate_ref(session, self.player_id, &end)); }
-                let result=session.with_player(self.player_id,|context|{let p=context.player;let i=p.get_datum(&index).int_value()?;let e=if has_end{p.get_datum(&end).int_value()?}else{i};let text=p.get_datum(&source_ref).string_value(context.symbols)?;let chunk=StringChunkExpr{chunk_type:StringChunkType::from_symbol(&chunk_type,context.symbols)?,start:i,end:e,item_delimiter:p.movie.item_delimiter};let new_text=StringChunkUtils::string_by_deleting_chunk(&text,&chunk)?;write_chunk_source(p,context.symbols,&source,new_text);Ok::<_,ScriptError>(DatumRef::Void)}).ok_or_else(crate::player::cancelled_scope_error).and_then(|result|result);self.values.push(eval_turn_try!(result));
+                if has_end {
+                    eval_turn_try!(Self::validate_ref(session, self.player_id, &end));
+                }
+                let result = session
+                    .with_player(self.player_id, |context| {
+                        let p = context.player;
+                        let i = p.get_datum(&index).int_value()?;
+                        let e = if has_end {
+                            p.get_datum(&end).int_value()?
+                        } else {
+                            i
+                        };
+                        let text = p.get_datum(&source_ref).string_value(context.symbols)?;
+                        let chunk = StringChunkExpr {
+                            chunk_type: StringChunkType::from_symbol(&chunk_type, context.symbols)?,
+                            start: i,
+                            end: e,
+                            item_delimiter: p.movie.item_delimiter,
+                        };
+                        let new_text = StringChunkUtils::string_by_deleting_chunk(&text, &chunk)?;
+                        write_chunk_source(p, context.symbols, &source, new_text);
+                        Ok::<_, ScriptError>(DatumRef::Void)
+                    })
+                    .ok_or_else(crate::player::cancelled_scope_error)
+                    .and_then(|result| result);
+                self.values.push(eval_turn_try!(result));
             }
-            EvalFrame::ApplyIf{body}=>{let cond=eval_turn_try!(self.pop_value());let yes=eval_turn_try!(session.with_player(self.player_id,|context|context.player.get_datum(&cond).bool_value()).ok_or_else(crate::player::cancelled_scope_error).and_then(|result| result));if yes{self.frames.push(EvalFrame::Evaluate(body));}else{self.values.push(DatumRef::Void);}}
+            EvalFrame::ApplyIf { body } => {
+                let cond = eval_turn_try!(self.pop_value());
+                let yes = eval_turn_try!(session
+                    .with_player(self.player_id, |context| context
+                        .player
+                        .get_datum(&cond)
+                        .bool_value())
+                    .ok_or_else(crate::player::cancelled_scope_error)
+                    .and_then(|result| result));
+                if yes {
+                    self.frames.push(EvalFrame::Evaluate(body));
+                } else {
+                    self.values.push(DatumRef::Void);
+                }
+            }
         }
         None
     }
 
-    fn run_frames(&mut self, session:&mut crate::player::session::RuntimeSession)->EvalTurn {
-        while let Some(frame)=self.frames.pop() {
-            let pending=match frame {EvalFrame::Evaluate(expr)=>self.evaluate_frame(session,EvalFrame::Evaluate(expr)),other=>self.apply_frame(session,other)};
-            if let Some(turn)=pending{return turn;}
+    fn run_frames(&mut self, session: &mut crate::player::session::RuntimeSession) -> EvalTurn {
+        while let Some(frame) = self.frames.pop() {
+            let pending = match frame {
+                EvalFrame::Evaluate(expr) => {
+                    self.evaluate_frame(session, EvalFrame::Evaluate(expr))
+                }
+                other => self.apply_frame(session, other),
+            };
+            if let Some(turn) = pending {
+                return turn;
+            }
         }
         EvalTurn::Complete(self.pop_value())
     }
@@ -3772,7 +5015,10 @@ pub fn eval_lingo_expr_static(
             eval_lingo_pair_static(expr_pair.1.clone(), player, symbols)
         }
         Err(e) => {
-            let error_msg = format!("eval_lingo_expr_static parse error: {}", ascii_safe(&e.to_string()));
+            let error_msg = format!(
+                "eval_lingo_expr_static parse error: {}",
+                ascii_safe(&e.to_string())
+            );
             error!("{}", error_msg);
             web_sys::console::error_1(&error_msg.clone().into());
             Err(ScriptError::new(error_msg))
@@ -3792,9 +5038,10 @@ pub fn try_eval_lingo_expr_static(
             let expr_pair = &parse_result.enumerate().next().unwrap();
             eval_lingo_pair_static(expr_pair.1.clone(), player, symbols)
         }
-        Err(e) => {
-            Err(ScriptError::new(format!("eval_lingo_expr_static parse error: {}", ascii_safe(&e.to_string()))))
-        }
+        Err(e) => Err(ScriptError::new(format!(
+            "eval_lingo_expr_static parse error: {}",
+            ascii_safe(&e.to_string())
+        ))),
     }
 }
 
@@ -3821,25 +5068,33 @@ pub fn parse_lingo_expr_ast_runtime(rule: Rule, expr: String) -> Result<LingoExp
 
 fn create_lingo_pratt_parser() -> PrattParser<Rule> {
     PrattParser::new()
-        .op(Op::infix(Rule::or_op, Assoc::Left))              // Lowest: or
-        .op(Op::infix(Rule::and_op, Assoc::Left))             // and
-        .op(Op::prefix(Rule::not_op))                         // not (prefix)
-        .op(Op::infix(Rule::eq_op, Assoc::Left)               // = comparison
+        .op(Op::infix(Rule::or_op, Assoc::Left)) // Lowest: or
+        .op(Op::infix(Rule::and_op, Assoc::Left)) // and
+        .op(Op::prefix(Rule::not_op)) // not (prefix)
+        .op(
+            Op::infix(Rule::eq_op, Assoc::Left)               // = comparison
             | Op::infix(Rule::ne_op, Assoc::Left)             // <>
             | Op::infix(Rule::lt_op, Assoc::Left)             // 
             | Op::infix(Rule::gt_op, Assoc::Left)             // >
             | Op::infix(Rule::le_op, Assoc::Left)             // <=
-            | Op::infix(Rule::ge_op, Assoc::Left))            // >=
-        .op(Op::infix(Rule::join, Assoc::Left)                // & concatenation
-            | Op::infix(Rule::join_pad, Assoc::Left))         // && padded concat
+            | Op::infix(Rule::ge_op, Assoc::Left),
+        ) // >=
+        .op(
+            Op::infix(Rule::join, Assoc::Left)                // & concatenation
+            | Op::infix(Rule::join_pad, Assoc::Left),
+        ) // && padded concat
         .op(Op::infix(Rule::add, Assoc::Left)                 // +, -
             | Op::infix(Rule::subtract, Assoc::Left))
-        .op(Op::infix(Rule::multiply, Assoc::Left)            // *, /, mod
+        .op(
+            Op::infix(Rule::multiply, Assoc::Left)            // *, /, mod
             | Op::infix(Rule::divide, Assoc::Left)
-            | Op::infix(Rule::mod_op, Assoc::Left))
-        .op(Op::prefix(Rule::neg_op))                         // unary minus
-        .op(Op::infix(Rule::obj_prop, Assoc::Left)            // Highest: .
-            | Op::postfix(Rule::list_index))                  // and [index]
+            | Op::infix(Rule::mod_op, Assoc::Left),
+        )
+        .op(Op::prefix(Rule::neg_op)) // unary minus
+        .op(
+            Op::infix(Rule::obj_prop, Assoc::Left)            // Highest: .
+            | Op::postfix(Rule::list_index),
+        ) // and [index]
 }
 
 // Helper functions for testing config parsing without requiring player instance
@@ -3871,8 +5126,8 @@ mod tests {
     use crate::player::ownership::OwnerToken;
     use async_std::channel;
     use fxhash::FxHashMap;
-    use std::{cell::RefCell, collections::HashMap};
     use std::future::Future;
+    use std::{cell::RefCell, collections::HashMap};
 
     fn test_session() -> crate::player::session::RuntimeSession {
         let mut session = crate::player::session::RuntimeSession::new(
@@ -3897,7 +5152,10 @@ mod tests {
         crate::player::script::ScriptHandlerRef,
     ) {
         use crate::director::{
-            chunks::{handler::{Bytecode, HandlerDef}, script::ScriptChunk},
+            chunks::{
+                handler::{Bytecode, HandlerDef},
+                script::ScriptChunk,
+            },
             enums::ScriptType,
             lingo::opcode::OpCode,
         };
@@ -4004,21 +5262,10 @@ mod tests {
             .expect("test player exists");
         let handle = Rc::new(std::cell::RefCell::new(session));
         let foreign_owner = OwnerToken::transitional();
-        assert!(EvalCancellationGuard::new(
-            handle.clone(),
-            1,
-            foreign_owner,
-            id.clone(),
-        )
-        .is_err());
+        assert!(EvalCancellationGuard::new(handle.clone(), 1, foreign_owner, id.clone(),).is_err());
         let colliding_id = EvalId::new(id.serial);
-        let terminal_guard = EvalCancellationGuard::new(
-            handle,
-            1,
-            owner,
-            colliding_id,
-        )
-        .expect("owner-valid terminal guard should be inert");
+        let terminal_guard = EvalCancellationGuard::new(handle, 1, owner, colliding_id)
+            .expect("owner-valid terminal guard should be inert");
         drop(terminal_guard);
         assert!(!id.is_cancelled());
     }
@@ -4060,7 +5307,10 @@ mod tests {
         ));
         let waker = futures::task::noop_waker();
         let mut context = std::task::Context::from_waker(&waker);
-        assert!(matches!(request.as_mut().poll(&mut context), std::task::Poll::Pending));
+        assert!(matches!(
+            request.as_mut().poll(&mut context),
+            std::task::Poll::Pending
+        ));
         let first_route = handle
             .borrow_mut()
             .take_pending_eval_request_for(1)
@@ -4091,11 +5341,12 @@ mod tests {
         drop(request);
         drop(borrowed);
         let wake = rx.try_recv().expect("drop should enqueue owner pump wake");
-        assert!(matches!(wake.command, crate::player::commands::PlayerVMCommand::PumpPending));
+        assert!(matches!(
+            wake.command,
+            crate::player::commands::PlayerVMCommand::PumpPending
+        ));
         async_std::task::block_on(crate::player::commands::drive_pending_owner(
-            &handle,
-            1,
-            &owner,
+            &handle, 1, &owner,
         ));
         assert!(handle
             .borrow_mut()
@@ -4125,7 +5376,10 @@ mod tests {
         } else {
             panic!("neighbor completion should be synchronous");
         }
-        assert!(matches!(neighbor_receiver.try_recv(), Ok(Ok(DatumRef::Void))));
+        assert!(matches!(
+            neighbor_receiver.try_recv(),
+            Ok(Ok(DatumRef::Void))
+        ));
     }
 
     #[test]
@@ -4151,13 +5405,17 @@ mod tests {
                     "drop-load".to_owned(),
                     "DropLoadXtra",
                 )?;
-                context.player.xtra_manager_state.external.attach_continuation(
-                    &request,
-                    crate::player::xtra::external::ExternalXtraContinuation::Create {
-                        xtra_name: "DropLoadXtra".to_owned(),
-                        args: Vec::new(),
-                    },
-                )?;
+                context
+                    .player
+                    .xtra_manager_state
+                    .external
+                    .attach_continuation(
+                        &request,
+                        crate::player::xtra::external::ExternalXtraContinuation::Create {
+                            xtra_name: "DropLoadXtra".to_owned(),
+                            args: Vec::new(),
+                        },
+                    )?;
                 Ok::<_, crate::player::ScriptError>(request)
             })
             .expect("load fixture player exists")
@@ -4171,13 +5429,17 @@ mod tests {
                     "drop-load".to_owned(),
                     "DropLoadXtra",
                 )?;
-                context.player.xtra_manager_state.external.attach_continuation(
-                    &request,
-                    crate::player::xtra::external::ExternalXtraContinuation::Create {
-                        xtra_name: "DropLoadXtra".to_owned(),
-                        args: Vec::new(),
-                    },
-                )?;
+                context
+                    .player
+                    .xtra_manager_state
+                    .external
+                    .attach_continuation(
+                        &request,
+                        crate::player::xtra::external::ExternalXtraContinuation::Create {
+                            xtra_name: "DropLoadXtra".to_owned(),
+                            args: Vec::new(),
+                        },
+                    )?;
                 Ok::<_, crate::player::ScriptError>(request)
             })
             .expect("load fixture player exists")
@@ -4192,54 +5454,78 @@ mod tests {
         ));
         let waker = futures::task::noop_waker();
         let mut context = std::task::Context::from_waker(&waker);
-        assert!(matches!(caller.as_mut().poll(&mut context), std::task::Poll::Pending));
+        assert!(matches!(
+            caller.as_mut().poll(&mut context),
+            std::task::Poll::Pending
+        ));
 
-        let mut pump = Box::pin(crate::player::commands::pump_pending_eval_requests(&handle, 1));
-        assert!(matches!(pump.as_mut().poll(&mut context), std::task::Poll::Pending));
+        let mut pump = Box::pin(crate::player::commands::pump_pending_eval_requests(
+            &handle, 1,
+        ));
+        assert!(matches!(
+            pump.as_mut().poll(&mut context),
+            std::task::Poll::Pending
+        ));
 
         let borrowed = handle.borrow_mut();
         drop(caller);
         drop(borrowed);
         assert!(matches!(
-            rx.try_recv().expect("cancellation should enqueue owner pump wake").command,
+            rx.try_recv()
+                .expect("cancellation should enqueue owner pump wake")
+                .command,
             crate::player::commands::PlayerVMCommand::PumpPending
         ));
         async_std::task::block_on(crate::player::commands::drive_pending_owner(
-            &handle,
-            1,
-            &owner,
+            &handle, 1, &owner,
         ));
         assert!(async_std::task::block_on(async_std::future::timeout(
             std::time::Duration::from_secs(5),
             pump,
-        )).expect("cancellation pump should wake promptly"));
+        ))
+        .expect("cancellation pump should wake promptly"));
         assert!(handle
             .borrow_mut()
             .with_player(1, |context| {
-                context.player.xtra_manager_state.external.take_load_waiter(&load)
+                context
+                    .player
+                    .xtra_manager_state
+                    .external
+                    .take_load_waiter(&load)
             })
             .expect("test player exists")
             .is_none());
         assert!(handle
             .borrow_mut()
             .with_player(1, |context| {
-                context.player.xtra_manager_state.external.take_load_continuation(&load)
+                context
+                    .player
+                    .xtra_manager_state
+                    .external
+                    .take_load_continuation(&load)
             })
             .expect("test player exists")
             .is_none());
-        handle.borrow_mut().with_player(1, |context| {
-            context.player.xtra_manager_state.external.complete_load(
-                &owner,
-                sibling.state_id,
-                sibling.attempt_id,
-                &sibling.name,
-                true,
-            );
-        }).expect("test player exists");
+        handle
+            .borrow_mut()
+            .with_player(1, |context| {
+                context.player.xtra_manager_state.external.complete_load(
+                    &owner,
+                    sibling.state_id,
+                    sibling.attempt_id,
+                    &sibling.name,
+                    true,
+                );
+            })
+            .expect("test player exists");
         let sibling_receiver = handle
             .borrow_mut()
             .with_player(1, |context| {
-                context.player.xtra_manager_state.external.take_load_waiter(&sibling)
+                context
+                    .player
+                    .xtra_manager_state
+                    .external
+                    .take_load_waiter(&sibling)
             })
             .expect("test player exists")
             .expect("sibling receiver survives target cancellation");
@@ -4250,7 +5536,11 @@ mod tests {
         assert!(handle
             .borrow_mut()
             .with_player(1, |context| {
-                context.player.xtra_manager_state.external.take_load_continuation(&sibling)
+                context
+                    .player
+                    .xtra_manager_state
+                    .external
+                    .take_load_continuation(&sibling)
             })
             .expect("test player exists")
             .is_some());
@@ -4284,7 +5574,9 @@ mod tests {
         drop(borrowed);
         assert!(id.is_cancelled());
         assert!(matches!(
-            handle.borrow_mut().resume_eval(id, &action, &owner, Ok(DatumRef::Void)),
+            handle
+                .borrow_mut()
+                .resume_eval(id, &action, &owner, Ok(DatumRef::Void)),
             EvalTurn::Complete(Err(_))
         ));
     }
@@ -4340,17 +5632,14 @@ mod tests {
         mode: crate::player::driver::ValueEvaluationMode,
     ) -> Result<Datum, ScriptError> {
         let id = EvalId::new(10_000);
-        let mut continuation = EvalContinuation::new(
-            session,
-            1,
-            id,
-            LingoExpr::VoidLiteral,
-        )?;
+        let mut continuation = EvalContinuation::new(session, 1, id, LingoExpr::VoidLiteral)?;
         let turn = continuation.start_value_request(session, source, mode);
         let value = match turn {
             EvalTurn::Complete(result) => result?,
             EvalTurn::Pending { .. } => {
-                return Err(ScriptError::new("static value test unexpectedly suspended".to_owned()))
+                return Err(ScriptError::new(
+                    "static value test unexpectedly suspended".to_owned(),
+                ))
             }
         };
         session
@@ -4429,7 +5718,10 @@ mod tests {
                         bytecode_index: 0,
                     },
                     script_ref: INVALID_CAST_MEMBER_REF,
-                    handler_ref: (INVALID_CAST_MEMBER_REF, Symbol::builtin(BuiltInSymbol::Item)),
+                    handler_ref: (
+                        INVALID_CAST_MEMBER_REF,
+                        Symbol::builtin(BuiltInSymbol::Item),
+                    ),
                     bytecode_index: 0,
                     completer,
                     error: None,
@@ -4503,13 +5795,8 @@ mod tests {
             .unwrap()
             .unwrap();
         let id = EvalId::new(10_001);
-        let mut continuation = EvalContinuation::new(
-            &mut session,
-            1,
-            id,
-            LingoExpr::VoidLiteral,
-        )
-        .unwrap();
+        let mut continuation =
+            EvalContinuation::new(&mut session, 1, id, LingoExpr::VoidLiteral).unwrap();
         let turn = continuation.start_value_request(
             &mut session,
             foreign,
@@ -4549,13 +5836,8 @@ mod tests {
             .unwrap()
             .unwrap();
         let id = EvalId::new(10_002);
-        let mut continuation = EvalContinuation::new(
-            &mut session,
-            1,
-            id,
-            LingoExpr::VoidLiteral,
-        )
-        .unwrap();
+        let mut continuation =
+            EvalContinuation::new(&mut session, 1, id, LingoExpr::VoidLiteral).unwrap();
         let turn = continuation.start_value_request(
             &mut session,
             chunk,
@@ -4585,7 +5867,10 @@ mod tests {
         let receiver = session
             .with_player(1, |context| {
                 let value = context.player.alloc_datum(Datum::JsObjectRef(handle));
-                context.player.globals.insert(context.symbols.intern("g"), value.clone());
+                context
+                    .player
+                    .globals
+                    .insert(context.symbols.intern("g"), value.clone());
                 value
             })
             .unwrap();
@@ -4600,15 +5885,21 @@ mod tests {
             Box::new(LingoExpr::IntLiteral(9)),
         );
         let eval_id = session.start_eval(1, assignment).unwrap();
-        let (action, requested_receiver, requested_name) = match session.turn_eval(eval_id.clone()) {
+        let (action, requested_receiver, requested_name) = match session.turn_eval(eval_id.clone())
+        {
             EvalTurn::Pending {
-                request: EvalPending::Object {
-                    capability,
-                    request: crate::player::driver::InternalVmRequest::ObjectProperty { receiver, name },
-                    ..
-                },
+                request:
+                    EvalPending::Object {
+                        capability,
+                        request:
+                            crate::player::driver::InternalVmRequest::ObjectProperty { receiver, name },
+                        ..
+                    },
             } => (capability, receiver, name),
-            other => panic!("indexed JS assignment did not request g.items: {:?}", std::mem::discriminant(&other)),
+            other => panic!(
+                "indexed JS assignment did not request g.items: {:?}",
+                std::mem::discriminant(&other)
+            ),
         };
         assert_eq!(requested_receiver, receiver);
         assert_eq!(requested_name, Symbol::builtin(BuiltInSymbol::Items));
@@ -4626,20 +5917,25 @@ mod tests {
         let owner = session
             .with_player(1, |context| context.player.owner.clone())
             .unwrap();
-        let (set_action, set_receiver, set_name, set_value) = match session.resume_eval(
-            eval_id.clone(),
-            &action,
-            &owner,
-            Ok(items),
-        ) {
-            EvalTurn::Pending {
-                request: EvalPending::SetProperty {
-                    capability,
-                    request: crate::player::driver::InternalVmRequest::SetProperty { receiver, name, value },
-                },
-            } => (capability, receiver, name, value),
-            other => panic!("indexed JS assignment did not write back g.items: {:?}", std::mem::discriminant(&other)),
-        };
+        let (set_action, set_receiver, set_name, set_value) =
+            match session.resume_eval(eval_id.clone(), &action, &owner, Ok(items)) {
+                EvalTurn::Pending {
+                    request:
+                        EvalPending::SetProperty {
+                            capability,
+                            request:
+                                crate::player::driver::InternalVmRequest::SetProperty {
+                                    receiver,
+                                    name,
+                                    value,
+                                },
+                        },
+                } => (capability, receiver, name, value),
+                other => panic!(
+                    "indexed JS assignment did not write back g.items: {:?}",
+                    std::mem::discriminant(&other)
+                ),
+            };
         assert_eq!(set_receiver, receiver);
         assert_eq!(set_name, Symbol::builtin(BuiltInSymbol::Items));
         let updated = session
@@ -4672,7 +5968,8 @@ mod tests {
             panic!("expected nested list result");
         };
         let Datum::Symbol(symbol) = checked_static_datum(&player, &values[0], &symbols)
-            .expect("nested symbol should be valid") else {
+            .expect("nested symbol should be valid")
+        else {
             panic!("expected symbol literal");
         };
         assert_eq!(symbols.display(&symbol).unwrap(), "MiXeD");
@@ -4690,11 +5987,8 @@ mod tests {
 
     #[test]
     fn parser_uses_builtin_chunk_type_without_session_context() {
-        let ast = parse_lingo_expr_ast_runtime(
-            Rule::eval_expr,
-            "item 1 of \"a,b\"".to_string(),
-        )
-        .expect("chunk expression should parse");
+        let ast = parse_lingo_expr_ast_runtime(Rule::eval_expr, "item 1 of \"a,b\"".to_string())
+            .expect("chunk expression should parse");
         let LingoExpr::ChunkExpr(chunk_type, ..) = ast else {
             panic!("expected chunk expression");
         };
@@ -4712,7 +6006,8 @@ mod tests {
         )
         .expect("nested arithmetic should evaluate");
         let Datum::List(_, values, _) = checked_static_datum(&player, &value, &symbols)
-            .expect("result should belong to the supplied session") else {
+            .expect("result should belong to the supplied session")
+        else {
             panic!("expected nested list result");
         };
         assert!(matches!(
@@ -4735,24 +6030,20 @@ mod tests {
         let global_value = player.alloc_datum(Datum::Symbol(foreign));
         player.globals.insert(global_name, global_value);
 
-        let result = eval_lingo_expr_static(
-            "foreign_global".to_string(),
-            &mut player,
-            &mut symbols,
+        let result =
+            eval_lingo_expr_static("foreign_global".to_string(), &mut player, &mut symbols);
+        assert!(
+            result.is_err(),
+            "foreign global values must fail through eval"
         );
-        assert!(result.is_err(), "foreign global values must fail through eval");
     }
 
     #[test]
     fn static_eval_unknown_identifier_is_void() {
         let mut player = test_player();
         let mut symbols = SymbolTable::new();
-        let value = eval_lingo_expr_static(
-            "not_declared".to_string(),
-            &mut player,
-            &mut symbols,
-        )
-        .expect("ordinary unknown identifiers should use Director's VOID fallback");
+        let value = eval_lingo_expr_static("not_declared".to_string(), &mut player, &mut symbols)
+            .expect("ordinary unknown identifiers should use Director's VOID fallback");
         assert!(matches!(
             checked_static_datum(&player, &value, &symbols),
             Ok(Datum::Void)
@@ -4775,7 +6066,10 @@ mod tests {
             EvalTurn::Complete(Ok(value)) => session
                 .with_player(1, |context| context.player.get_datum(&value).clone())
                 .unwrap(),
-            other => panic!("unexpected subtraction turn: {:?}", std::mem::discriminant(&other)),
+            other => panic!(
+                "unexpected subtraction turn: {:?}",
+                std::mem::discriminant(&other)
+            ),
         };
         assert!(matches!(result, Datum::Int(7)));
 
@@ -4795,7 +6089,9 @@ mod tests {
                 .unwrap(),
             other => panic!("unexpected list turn: {:?}", std::mem::discriminant(&other)),
         };
-        let Datum::List(_, values, _) = result else { panic!("expected list") };
+        let Datum::List(_, values, _) = result else {
+            panic!("expected list")
+        };
         let ints: Vec<_> = values
             .iter()
             .map(|value| {
@@ -4813,10 +6109,23 @@ mod tests {
         let mut session = test_session();
         let result = session
             .with_player(1, |context| {
-                let value = eval_lingo_expr_static("not true".to_owned(), context.player, context.symbols)?;
-                let nested = eval_lingo_expr_static("not not true".to_owned(), context.player, context.symbols)?;
-                let parenthesized = eval_lingo_expr_static("not (not true)".to_owned(), context.player, context.symbols)?;
-                let rhs = eval_lingo_expr_static("1 + not false".to_owned(), context.player, context.symbols)?;
+                let value =
+                    eval_lingo_expr_static("not true".to_owned(), context.player, context.symbols)?;
+                let nested = eval_lingo_expr_static(
+                    "not not true".to_owned(),
+                    context.player,
+                    context.symbols,
+                )?;
+                let parenthesized = eval_lingo_expr_static(
+                    "not (not true)".to_owned(),
+                    context.player,
+                    context.symbols,
+                )?;
+                let rhs = eval_lingo_expr_static(
+                    "1 + not false".to_owned(),
+                    context.player,
+                    context.symbols,
+                )?;
                 Ok::<_, ScriptError>((
                     context.player.get_datum(&value).clone(),
                     context.player.get_datum(&nested).clone(),
@@ -4853,13 +6162,8 @@ mod tests {
             request:
                 EvalPending::Object {
                     capability,
-                        request:
-                            crate::player::driver::InternalVmRequest::Object {
-                                receiver,
-                                args,
-                                ..
-                            },
-                        ..
+                    request: crate::player::driver::InternalVmRequest::Object { receiver, args, .. },
+                    ..
                 },
         } = pending
         else {
@@ -4876,18 +6180,19 @@ mod tests {
             .unwrap();
         assert_eq!(values, vec![1, 4, 5]);
 
-        let owner = session.with_player(1, |context| context.player.owner.clone()).unwrap();
+        let owner = session
+            .with_player(1, |context| context.player.owner.clone())
+            .unwrap();
         let completion = session
             .with_player(1, |context| context.player.alloc_datum(Datum::Int(10)))
             .unwrap();
-        let result = session.resume_eval(
-            id.clone(),
-            &capability,
-            &owner,
-            Ok(completion),
-        );
-        let EvalTurn::Complete(Ok(value)) = result else { panic!("expected resumed completion") };
-        let result = session.with_player(1, |context| context.player.get_datum(&value).clone()).unwrap();
+        let result = session.resume_eval(id.clone(), &capability, &owner, Ok(completion));
+        let EvalTurn::Complete(Ok(value)) = result else {
+            panic!("expected resumed completion")
+        };
+        let result = session
+            .with_player(1, |context| context.player.get_datum(&value).clone())
+            .unwrap();
         assert!(matches!(result, Datum::Int(8)));
         assert!(matches!(session.turn_eval(id), EvalTurn::Complete(Err(_))));
     }
@@ -4907,10 +6212,15 @@ mod tests {
             .unwrap();
         let pending = session.turn_eval(id.clone());
         let action = match pending {
-            EvalTurn::Pending { request: EvalPending::Object { capability, .. } } => capability,
+            EvalTurn::Pending {
+                request: EvalPending::Object { capability, .. },
+            } => capability,
             _ => panic!("expected an owned pending action"),
         };
-        assert!(matches!(session.turn_eval(id.clone()), EvalTurn::Complete(Err(_))));
+        assert!(matches!(
+            session.turn_eval(id.clone()),
+            EvalTurn::Complete(Err(_))
+        ));
         let foreign = OwnerToken::transitional();
         let foreign_value = session
             .with_player(1, |context| context.player.alloc_datum(Datum::Int(99)))
@@ -4919,33 +6229,50 @@ mod tests {
             session.resume_eval(id.clone(), &action, &foreign, Ok(foreign_value)),
             EvalTurn::Complete(Err(_))
         ));
-        let owner = session.with_player(1, |context| context.player.owner.clone()).unwrap();
+        let owner = session
+            .with_player(1, |context| context.player.owner.clone())
+            .unwrap();
         let value = session
             .with_player(1, |context| context.player.alloc_datum(Datum::Int(7)))
             .unwrap();
-        assert!(matches!(session.resume_eval(id.clone(), &action, &owner, Ok(value)), EvalTurn::Complete(Ok(_))));
-        assert!(matches!(session.resume_eval(id, &action, &owner, Ok(DatumRef::Void)), EvalTurn::Complete(Err(_))));
+        assert!(matches!(
+            session.resume_eval(id.clone(), &action, &owner, Ok(value)),
+            EvalTurn::Complete(Ok(_))
+        ));
+        assert!(matches!(
+            session.resume_eval(id, &action, &owner, Ok(DatumRef::Void)),
+            EvalTurn::Complete(Err(_))
+        ));
     }
 
     #[test]
     fn owned_eval_rejects_previous_action_after_next_wait_is_issued() {
         let mut session = test_session();
         let call = |name: &str| {
-            LingoExpr::ObjHandlerCall(
-                Box::new(LingoExpr::IntLiteral(1)), name.to_owned(), vec![],
-            )
+            LingoExpr::ObjHandlerCall(Box::new(LingoExpr::IntLiteral(1)), name.to_owned(), vec![])
         };
         let id = session
-            .start_eval(1, LingoExpr::Add(Box::new(call("first")), Box::new(call("second"))))
+            .start_eval(
+                1,
+                LingoExpr::Add(Box::new(call("first")), Box::new(call("second"))),
+            )
             .unwrap();
         let first = match session.turn_eval(id.clone()) {
-            EvalTurn::Pending { request: EvalPending::Object { capability, .. } } => capability,
+            EvalTurn::Pending {
+                request: EvalPending::Object { capability, .. },
+            } => capability,
             _ => panic!("expected first pending action"),
         };
-        let owner = session.with_player(1, |context| context.player.owner.clone()).unwrap();
-        let first_value = session.with_player(1, |context| context.player.alloc_datum(Datum::Int(3))).unwrap();
+        let owner = session
+            .with_player(1, |context| context.player.owner.clone())
+            .unwrap();
+        let first_value = session
+            .with_player(1, |context| context.player.alloc_datum(Datum::Int(3)))
+            .unwrap();
         let second = match session.resume_eval(id.clone(), &first, &owner, Ok(first_value)) {
-            EvalTurn::Pending { request: EvalPending::Object { capability, .. } } => capability,
+            EvalTurn::Pending {
+                request: EvalPending::Object { capability, .. },
+            } => capability,
             _ => panic!("expected second pending action"),
         };
         assert_ne!(first, second);
@@ -4953,47 +6280,78 @@ mod tests {
             session.resume_eval(id.clone(), &first, &owner, Ok(DatumRef::Void)),
             EvalTurn::Complete(Err(_))
         ));
-        let second_value = session.with_player(1, |context| context.player.alloc_datum(Datum::Int(4))).unwrap();
-        assert!(matches!(session.resume_eval(id, &second, &owner, Ok(second_value)), EvalTurn::Complete(Ok(_))));
+        let second_value = session
+            .with_player(1, |context| context.player.alloc_datum(Datum::Int(4)))
+            .unwrap();
+        assert!(matches!(
+            session.resume_eval(id, &second, &owner, Ok(second_value)),
+            EvalTurn::Complete(Ok(_))
+        ));
     }
     #[test]
     fn owned_eval_rejects_foreign_element_exposed_by_local_list() {
         let mut session = test_session();
         let mut foreign_symbols = SymbolTable::new();
         let foreign_symbol = foreign_symbols.intern("foreign_element");
-        let list_name = session.with_player(1, |context| {
-            let foreign = context.player.alloc_datum(Datum::Symbol(foreign_symbol));
-            let list = context.player.alloc_datum(Datum::List(
-                DatumType::List,
-                vec![foreign].into_iter().collect(),
-                false,
-            ));
-            let name = context.symbols.intern("local_list");
-            context.player.globals.insert(name.clone(), list);
-            name
-        }).unwrap();
-        let name = session.with_player(1, |context| context.symbols.display(&list_name).unwrap().to_owned()).unwrap();
-        let id = session.start_eval(1, LingoExpr::ListAccess(
-            Box::new(LingoExpr::Identifier(name)),
-            Box::new(LingoExpr::IntLiteral(1)),
-        )).unwrap();
-        assert!(matches!(session.turn_eval(id), EvalTurn::Complete(Err(error)) if error.code == crate::player::ScriptErrorCode::InvalidReference));
+        let list_name = session
+            .with_player(1, |context| {
+                let foreign = context.player.alloc_datum(Datum::Symbol(foreign_symbol));
+                let list = context.player.alloc_datum(Datum::List(
+                    DatumType::List,
+                    vec![foreign].into_iter().collect(),
+                    false,
+                ));
+                let name = context.symbols.intern("local_list");
+                context.player.globals.insert(name.clone(), list);
+                name
+            })
+            .unwrap();
+        let name = session
+            .with_player(1, |context| {
+                context.symbols.display(&list_name).unwrap().to_owned()
+            })
+            .unwrap();
+        let id = session
+            .start_eval(
+                1,
+                LingoExpr::ListAccess(
+                    Box::new(LingoExpr::Identifier(name)),
+                    Box::new(LingoExpr::IntLiteral(1)),
+                ),
+            )
+            .unwrap();
+        assert!(
+            matches!(session.turn_eval(id), EvalTurn::Complete(Err(error)) if error.code == crate::player::ScriptErrorCode::InvalidReference)
+        );
     }
 
     #[test]
     fn rejected_complete_eval_keeps_pending_ticket() {
         let mut session = test_session();
-        let id = session.start_eval(1, LingoExpr::ObjHandlerCall(
-            Box::new(LingoExpr::IntLiteral(1)), "deferred".to_owned(), vec![],
-        )).unwrap();
+        let id = session
+            .start_eval(
+                1,
+                LingoExpr::ObjHandlerCall(
+                    Box::new(LingoExpr::IntLiteral(1)),
+                    "deferred".to_owned(),
+                    vec![],
+                ),
+            )
+            .unwrap();
         let action = match session.turn_eval(id.clone()) {
-            EvalTurn::Pending { request: EvalPending::Object { capability, .. } } => capability,
+            EvalTurn::Pending {
+                request: EvalPending::Object { capability, .. },
+            } => capability,
             _ => panic!("expected pending object request"),
         };
         let foreign_owner = OwnerToken::transitional();
         assert!(!session.complete_eval(id.clone(), &action, &foreign_owner, Ok(DatumRef::Void)));
-        let owner = session.with_player(1, |context| context.player.owner.clone()).unwrap();
-        let value = session.with_player(1, |context| context.player.alloc_datum(Datum::Int(9))).unwrap();
+        let owner = session
+            .with_player(1, |context| context.player.owner.clone())
+            .unwrap();
+        let value = session
+            .with_player(1, |context| context.player.alloc_datum(Datum::Int(9)))
+            .unwrap();
         assert!(session.complete_eval(id.clone(), &action, &owner, Ok(value)));
         assert!(matches!(session.turn_eval(id), EvalTurn::Complete(Ok(_))));
     }
@@ -5001,41 +6359,83 @@ mod tests {
     #[test]
     fn owned_eval_root_completion_returns_value() {
         let mut session = test_session();
-        let id = session.start_eval(1, LingoExpr::ObjHandlerCall(
-            Box::new(LingoExpr::IntLiteral(1)), "deferred".to_owned(), vec![],
-        )).unwrap();
+        let id = session
+            .start_eval(
+                1,
+                LingoExpr::ObjHandlerCall(
+                    Box::new(LingoExpr::IntLiteral(1)),
+                    "deferred".to_owned(),
+                    vec![],
+                ),
+            )
+            .unwrap();
         let action = match session.turn_eval(id.clone()) {
-            EvalTurn::Pending { request: EvalPending::Object { capability, .. } } => capability,
+            EvalTurn::Pending {
+                request: EvalPending::Object { capability, .. },
+            } => capability,
             _ => panic!("expected pending root handler"),
         };
-        let owner = session.with_player(1, |context| context.player.owner.clone()).unwrap();
-        let value = session.with_player(1, |context| context.player.alloc_datum(Datum::Int(9))).unwrap();
+        let owner = session
+            .with_player(1, |context| context.player.owner.clone())
+            .unwrap();
+        let value = session
+            .with_player(1, |context| context.player.alloc_datum(Datum::Int(9)))
+            .unwrap();
         let result = session.resume_eval(id, &action, &owner, Ok(value));
-        let EvalTurn::Complete(Ok(result)) = result else { panic!("expected root result") };
-        assert!(matches!(session.with_player(1, |context| context.player.get_datum(&result).clone()).unwrap(), Datum::Int(9)));
+        let EvalTurn::Complete(Ok(result)) = result else {
+            panic!("expected root result")
+        };
+        assert!(matches!(
+            session
+                .with_player(1, |context| context.player.get_datum(&result).clone())
+                .unwrap(),
+            Datum::Int(9)
+        ));
     }
 
     #[test]
     fn owned_command_last_pending_line_returns_its_completion() {
         let mut session = test_session();
-        let id = session.start_command_eval(1, vec![
-            "sendAllSprites(#first)".to_owned(),
-            "sendAllSprites(#last)".to_owned(),
-        ]).unwrap();
+        let id = session
+            .start_command_eval(
+                1,
+                vec![
+                    "sendAllSprites(#first)".to_owned(),
+                    "sendAllSprites(#last)".to_owned(),
+                ],
+            )
+            .unwrap();
         let first = match session.turn_eval(id.clone()) {
-            EvalTurn::Pending { request: EvalPending::Global { capability, .. } } => capability,
+            EvalTurn::Pending {
+                request: EvalPending::Global { capability, .. },
+            } => capability,
             _ => panic!("expected first command to suspend"),
         };
-        let owner = session.with_player(1, |context| context.player.owner.clone()).unwrap();
-        let first_value = session.with_player(1, |context| context.player.alloc_datum(Datum::Int(4))).unwrap();
+        let owner = session
+            .with_player(1, |context| context.player.owner.clone())
+            .unwrap();
+        let first_value = session
+            .with_player(1, |context| context.player.alloc_datum(Datum::Int(4)))
+            .unwrap();
         let second = match session.resume_eval(id.clone(), &first, &owner, Ok(first_value)) {
-            EvalTurn::Pending { request: EvalPending::Global { capability, .. } } => capability,
+            EvalTurn::Pending {
+                request: EvalPending::Global { capability, .. },
+            } => capability,
             _ => panic!("expected second command to suspend"),
         };
-        let last_value = session.with_player(1, |context| context.player.alloc_datum(Datum::Int(11))).unwrap();
+        let last_value = session
+            .with_player(1, |context| context.player.alloc_datum(Datum::Int(11)))
+            .unwrap();
         let result = session.resume_eval(id, &second, &owner, Ok(last_value));
-        let EvalTurn::Complete(Ok(result)) = result else { panic!("expected last command result") };
-        assert!(matches!(session.with_player(1, |context| context.player.get_datum(&result).clone()).unwrap(), Datum::Int(11)));
+        let EvalTurn::Complete(Ok(result)) = result else {
+            panic!("expected last command result")
+        };
+        assert!(matches!(
+            session
+                .with_player(1, |context| context.player.get_datum(&result).clone())
+                .unwrap(),
+            Datum::Int(11)
+        ));
     }
 
     fn datum_result(session: &mut crate::player::session::RuntimeSession, id: EvalId) -> Datum {
@@ -5044,14 +6444,25 @@ mod tests {
             EvalTurn::Complete(Err(error)) => panic!("evaluation failed: {error:?}"),
             EvalTurn::Pending { .. } => panic!("test expression unexpectedly suspended"),
         };
-        session.with_player(1, |context| context.player.get_datum(&result).clone()).unwrap()
+        session
+            .with_player(1, |context| context.player.get_datum(&result).clone())
+            .unwrap()
     }
 
-    fn global_datum(session: &mut crate::player::session::RuntimeSession, name: &str) -> Option<Datum> {
-        session.with_player(1, |context| {
-            let symbol = context.symbols.intern(name);
-            context.player.globals.get(&symbol).map(|value| context.player.get_datum(value).clone())
-        }).unwrap()
+    fn global_datum(
+        session: &mut crate::player::session::RuntimeSession,
+        name: &str,
+    ) -> Option<Datum> {
+        session
+            .with_player(1, |context| {
+                let symbol = context.symbols.intern(name);
+                context
+                    .player
+                    .globals
+                    .get(&symbol)
+                    .map(|value| context.player.get_datum(value).clone())
+            })
+            .unwrap()
     }
 
     fn item_chunk(index: i32, end: Option<i32>, source: &str) -> LingoExpr {
@@ -5066,12 +6477,18 @@ mod tests {
     #[test]
     fn owned_eval_chunk_read_preserves_ranged_output() {
         let mut session = test_session();
-        session.with_player(1, |context| {
-            let symbol = context.symbols.intern("read_source");
-            let value = context.player.alloc_datum(Datum::String("a,b,c,d".to_owned()));
-            context.player.globals.insert(symbol, value);
-        }).unwrap();
-        let id = session.start_eval(1, item_chunk(2, Some(3), "read_source")).unwrap();
+        session
+            .with_player(1, |context| {
+                let symbol = context.symbols.intern("read_source");
+                let value = context
+                    .player
+                    .alloc_datum(Datum::String("a,b,c,d".to_owned()));
+                context.player.globals.insert(symbol, value);
+            })
+            .unwrap();
+        let id = session
+            .start_eval(1, item_chunk(2, Some(3), "read_source"))
+            .unwrap();
         let result = datum_result(&mut session, id);
         assert!(matches!(result, Datum::String(value) if value == "b,c"));
     }
@@ -5080,33 +6497,59 @@ mod tests {
     fn owned_eval_chunk_delete_and_put_preserve_source_and_concat_formatting() {
         let mut session = test_session();
         let set_source = |session: &mut crate::player::session::RuntimeSession, value: &str| {
-            session.with_player(1, |context| {
-                let symbol = context.symbols.intern("chunk_source");
-                let value = context.player.alloc_datum(Datum::String(value.to_owned()));
-                context.player.globals.insert(symbol, value);
-            }).unwrap();
+            session
+                .with_player(1, |context| {
+                    let symbol = context.symbols.intern("chunk_source");
+                    let value = context.player.alloc_datum(Datum::String(value.to_owned()));
+                    context.player.globals.insert(symbol, value);
+                })
+                .unwrap();
         };
 
         set_source(&mut session, "a,b,c,d");
-        let deleted = session.start_eval(1, LingoExpr::DeleteChunk(Box::new(item_chunk(2, Some(3), "chunk_source")))).unwrap();
+        let deleted = session
+            .start_eval(
+                1,
+                LingoExpr::DeleteChunk(Box::new(item_chunk(2, Some(3), "chunk_source"))),
+            )
+            .unwrap();
         assert!(matches!(datum_result(&mut session, deleted), Datum::Void));
-        assert!(matches!(global_datum(&mut session, "chunk_source"), Some(Datum::String(value)) if value == "a,d"));
+        assert!(
+            matches!(global_datum(&mut session, "chunk_source"), Some(Datum::String(value)) if value == "a,d")
+        );
 
         set_source(&mut session, "a,b,c");
-        let numeric = session.start_eval(1, LingoExpr::PutBefore(
-            Box::new(LingoExpr::IntLiteral(2)),
-            Box::new(item_chunk(2, None, "chunk_source")),
-        )).unwrap();
+        let numeric = session
+            .start_eval(
+                1,
+                LingoExpr::PutBefore(
+                    Box::new(LingoExpr::IntLiteral(2)),
+                    Box::new(item_chunk(2, None, "chunk_source")),
+                ),
+            )
+            .unwrap();
         assert!(matches!(datum_result(&mut session, numeric), Datum::Void));
-        assert!(matches!(global_datum(&mut session, "chunk_source"), Some(Datum::String(value)) if value == "a,2b,c"));
+        assert!(
+            matches!(global_datum(&mut session, "chunk_source"), Some(Datum::String(value)) if value == "a,2b,c")
+        );
 
         set_source(&mut session, "a,b,c");
-        let list = session.start_eval(1, LingoExpr::PutBefore(
-            Box::new(LingoExpr::ListLiteral(vec![LingoExpr::IntLiteral(1), LingoExpr::IntLiteral(2)])),
-            Box::new(item_chunk(2, None, "chunk_source")),
-        )).unwrap();
+        let list = session
+            .start_eval(
+                1,
+                LingoExpr::PutBefore(
+                    Box::new(LingoExpr::ListLiteral(vec![
+                        LingoExpr::IntLiteral(1),
+                        LingoExpr::IntLiteral(2),
+                    ])),
+                    Box::new(item_chunk(2, None, "chunk_source")),
+                ),
+            )
+            .unwrap();
         assert!(matches!(datum_result(&mut session, list), Datum::Void));
-        assert!(matches!(global_datum(&mut session, "chunk_source"), Some(Datum::String(value)) if value == "a,[1, 2]b,c"));
+        assert!(
+            matches!(global_datum(&mut session, "chunk_source"), Some(Datum::String(value)) if value == "a,[1, 2]b,c")
+        );
     }
 
     #[test]
@@ -5129,10 +6572,15 @@ mod tests {
     #[test]
     fn owned_eval_chunk_fallback_re_evaluates_original_target() {
         let mut session = test_session();
-        let initialize = session.start_eval(1, LingoExpr::Assignment(
-            Box::new(LingoExpr::Identifier("fallback_count".to_owned())),
-            Box::new(LingoExpr::IntLiteral(0)),
-        )).unwrap();
+        let initialize = session
+            .start_eval(
+                1,
+                LingoExpr::Assignment(
+                    Box::new(LingoExpr::Identifier("fallback_count".to_owned())),
+                    Box::new(LingoExpr::IntLiteral(0)),
+                ),
+            )
+            .unwrap();
         let _ = datum_result(&mut session, initialize);
         let target = LingoExpr::ListAccess(
             Box::new(LingoExpr::ObjProp(
@@ -5149,18 +6597,28 @@ mod tests {
         );
         let id = session.start_eval(1, target).unwrap();
         assert!(matches!(session.turn_eval(id), EvalTurn::Complete(Err(_))));
-        assert!(matches!(global_datum(&mut session, "fallback_count"), Some(Datum::Int(2))));
+        assert!(matches!(
+            global_datum(&mut session, "fallback_count"),
+            Some(Datum::Int(2))
+        ));
     }
 
     #[test]
     fn owned_command_lazily_reports_later_parse_error_after_prior_assignment() {
         let mut session = test_session();
-        let id = session.start_command_eval(1, vec![
-            "put 7 into prior_assignment".to_owned(),
-            "put ???".to_owned(),
-        ]).unwrap();
+        let id = session
+            .start_command_eval(
+                1,
+                vec![
+                    "put 7 into prior_assignment".to_owned(),
+                    "put ???".to_owned(),
+                ],
+            )
+            .unwrap();
         assert!(matches!(session.turn_eval(id), EvalTurn::Complete(Err(_))));
-        assert!(matches!(global_datum(&mut session, "prior_assignment"), Some(Datum::Int(7))));
+        assert!(matches!(
+            global_datum(&mut session, "prior_assignment"),
+            Some(Datum::Int(7))
+        ));
     }
-
 }

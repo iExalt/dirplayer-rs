@@ -75,7 +75,11 @@ pub struct Scene3dStore {
 
 impl Scene3dStore {
     pub fn new() -> Self {
-        Scene3dStore { tags: HashMap::new(), scenes: HashMap::new(), next_id: 1 }
+        Scene3dStore {
+            tags: HashMap::new(),
+            scenes: HashMap::new(),
+            next_id: 1,
+        }
     }
 
     /// Idempotent per tag: returns the existing scene id or mints a new one.
@@ -92,7 +96,11 @@ impl Scene3dStore {
 
     pub fn upload_mesh(&mut self, scene_id: i32, mesh_id: u32, data: MeshData) {
         if let Some(scene) = self.scenes.get_mut(&scene_id) {
-            let generation = scene.meshes.get(&mesh_id).map(|m| m.generation + 1).unwrap_or(0);
+            let generation = scene
+                .meshes
+                .get(&mesh_id)
+                .map(|m| m.generation + 1)
+                .unwrap_or(0);
             scene.meshes.insert(mesh_id, SceneMesh { data, generation });
         }
     }
@@ -105,8 +113,20 @@ impl Scene3dStore {
 
     pub fn upload_texture(&mut self, scene_id: i32, name: &str, w: u32, h: u32, rgba: Vec<u8>) {
         if let Some(scene) = self.scenes.get_mut(&scene_id) {
-            let generation = scene.textures.get(name).map(|t| t.generation + 1).unwrap_or(0);
-            scene.textures.insert(name.to_string(), UploadedTexture { w, h, rgba, generation });
+            let generation = scene
+                .textures
+                .get(name)
+                .map(|t| t.generation + 1)
+                .unwrap_or(0);
+            scene.textures.insert(
+                name.to_string(),
+                UploadedTexture {
+                    w,
+                    h,
+                    rgba,
+                    generation,
+                },
+            );
         }
     }
 
@@ -172,11 +192,19 @@ mod tests {
         let (second_tx, _) = channel::unbounded();
         let mut first = DirPlayer::new_with_owner(
             first_tx,
-            OwnerToken::new(OwnerKey { session: 11, player: 1, generation: 1 }),
+            OwnerToken::new(OwnerKey {
+                session: 11,
+                player: 1,
+                generation: 1,
+            }),
         );
         let mut second = DirPlayer::new_with_owner(
             second_tx,
-            OwnerToken::new(OwnerKey { session: 11, player: 2, generation: 1 }),
+            OwnerToken::new(OwnerKey {
+                session: 11,
+                player: 2,
+                generation: 1,
+            }),
         );
 
         let first_scene = first.scene3d_store.create("shared-tag");

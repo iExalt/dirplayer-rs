@@ -176,4 +176,3 @@ mod tests {
         assert_eq!(kb.key(), "a");
     }
 }
-

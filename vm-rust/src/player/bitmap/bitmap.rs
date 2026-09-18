@@ -9,8 +9,14 @@ use std::convert::TryInto;
 use crate::{
     director::enums::BitmapInfo,
     player::{
-        cast_lib::CastMemberRef, handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers,
-        sprite::ColorRef, symbols::{builtin::BuiltInSymbol, symbol::{Symbol, SymbolError}, symbol_table::SymbolTable},
+        cast_lib::CastMemberRef,
+        handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers,
+        sprite::ColorRef,
+        symbols::{
+            builtin::BuiltInSymbol,
+            symbol::{Symbol, SymbolError},
+            symbol_table::SymbolTable,
+        },
     },
 };
 use num::FromPrimitive;
@@ -47,7 +53,11 @@ impl PaletteRef {
                 Some(palette) => PaletteRef::BuiltIn(palette),
                 None => {
                     web_sys::console::warn_1(
-                        &format!("Unknown built-in palette ID: {}, defaulting to SystemWin", i).into()
+                        &format!(
+                            "Unknown built-in palette ID: {}, defaulting to SystemWin",
+                            i
+                        )
+                        .into(),
                     );
                     PaletteRef::BuiltIn(BuiltInPalette::SystemWin)
                 }
@@ -170,7 +180,9 @@ pub fn nearest_palette_index(r: u8, g: u8, b: u8, palette: &BuiltInPalette) -> u
             if d < best_distance {
                 best_distance = d;
                 best_index = i as u8;
-                if d == 0 { break; }
+                if d == 0 {
+                    break;
+                }
             }
         }
     }
@@ -202,7 +214,14 @@ impl Bitmap {
     /// has an alpha channel; Bitmap::new's white showed as a bar under a claw
     /// a movie cropped taller than its image.
     pub fn crop_rgba(&self, left: i32, top: i32, width: u16, height: u16) -> Bitmap {
-        let mut out = Bitmap::new(width, height, 32, 32, if self.use_alpha { 8 } else { 0 }, self.palette_ref.clone());
+        let mut out = Bitmap::new(
+            width,
+            height,
+            32,
+            32,
+            if self.use_alpha { 8 } else { 0 },
+            self.palette_ref.clone(),
+        );
         if self.use_alpha {
             out.data.fill(0);
         }
@@ -212,10 +231,14 @@ impl Bitmap {
         let sh = self.height as i32;
         for dy in 0..height as i32 {
             let sy = top + dy;
-            if sy < 0 || sy >= sh { continue; }
+            if sy < 0 || sy >= sh {
+                continue;
+            }
             for dx in 0..width as i32 {
                 let sx = left + dx;
-                if sx < 0 || sx >= sw { continue; }
+                if sx < 0 || sx >= sw {
+                    continue;
+                }
                 let si = ((sy * sw + sx) * 4) as usize;
                 let di = ((dy * width as i32 + dx) * 4) as usize;
                 out.data[di..di + 4].copy_from_slice(&self.data[si..si + 4]);
@@ -248,7 +271,14 @@ impl Bitmap {
                 "[bitmap] refusing absurd Bitmap::new({}x{} depth={}) — clamped to 1x1",
                 width, height, bit_depth
             );
-            return Self::new(1, 1, bit_depth, original_bit_depth, alpha_depth, palette_ref);
+            return Self::new(
+                1,
+                1,
+                bit_depth,
+                original_bit_depth,
+                alpha_depth,
+                palette_ref,
+            );
         }
 
         // `bit_depth as usize / 8` truncates to 0 for sub-byte depths
@@ -294,9 +324,9 @@ impl Bitmap {
 
 fn get_num_channels(bit_depth: u8) -> Result<u8, String> {
     match bit_depth {
-        1 | 2 | 4 | 8 => Ok(1),  // 8-bit and below: 1 byte per pixel
-        16 => Ok(2),              // 16-bit: 2 bytes per pixel
-        32 => Ok(4),              // 32-bit: 4 bytes per pixel
+        1 | 2 | 4 | 8 => Ok(1), // 8-bit and below: 1 byte per pixel
+        16 => Ok(2),            // 16-bit: 2 bytes per pixel
+        32 => Ok(4),            // 32-bit: 4 bytes per pixel
         _ => Err("Invalid bit depth".to_string()),
     }
 }
@@ -307,7 +337,7 @@ fn get_alignment_width(bit_depth: u8) -> Result<u16, String> {
         1 => Ok(16),
         4 | 32 => Ok(4),
         2 | 8 => Ok(2),
-        16 => Ok(1),  // 16-bit aligns like 8-bit (1 byte per pixel)
+        16 => Ok(1), // 16-bit aligns like 8-bit (1 byte per pixel)
         _ => Err("Invalid bit depth".to_string()),
     }
 }
@@ -499,7 +529,8 @@ fn decode_bitmap_16bit(
     if data.len() < expected_size {
         return Err(format!(
             "16-bit bitmap: insufficient data (got {}, expected {})",
-            data.len(), expected_size
+            data.len(),
+            expected_size
         ));
     }
 
@@ -530,7 +561,7 @@ fn decode_bitmap_16bit(
 
             // Convert 5-bit to 8-bit by shifting left and filling lower bits
             let dst = (y * width as usize + x) * 4;
-            result[dst]     = (r5 << 3) | (r5 >> 2);
+            result[dst] = (r5 << 3) | (r5 >> 2);
             result[dst + 1] = (g5 << 3) | (g5 >> 2);
             result[dst + 2] = (b5 << 3) | (b5 >> 2);
             result[dst + 3] = 255;
@@ -573,7 +604,10 @@ fn decode_generic_bitmap(
     }
 
     let bytes_per_pixel = bit_depth / 8;
-    let expected_size = scan_width as usize * scan_height as usize * num_channels as usize * bytes_per_pixel as usize;
+    let expected_size = scan_width as usize
+        * scan_height as usize
+        * num_channels as usize
+        * bytes_per_pixel as usize;
 
     if expected_size != data.len() {
         warn!(
@@ -954,13 +988,17 @@ pub fn decompress_bitmap(
 
     bitmap.use_alpha = info.use_alpha;
     bitmap.trim_white_space = info.trim_white_space;
-    
+
     Ok(bitmap)
 }
 
 /// Encode a Bitmap back to raw byte format (pre-RLE).
 /// This reverses the decoding done by decompress_bitmap.
-pub fn encode_bitmap_data(bitmap: &Bitmap, target_bit_depth: u8, pitch: u16) -> Result<Vec<u8>, String> {
+pub fn encode_bitmap_data(
+    bitmap: &Bitmap,
+    target_bit_depth: u8,
+    pitch: u16,
+) -> Result<Vec<u8>, String> {
     let scan_width = if pitch > 0 && target_bit_depth > 0 {
         (pitch as u32 * 8 / target_bit_depth as u32) as u16
     } else {
@@ -974,7 +1012,10 @@ pub fn encode_bitmap_data(bitmap: &Bitmap, target_bit_depth: u8, pitch: u16) -> 
         8 => encode_bitmap_8bit(bitmap, scan_width),
         16 => encode_bitmap_16bit(bitmap, scan_width),
         32 => encode_bitmap_32bit(bitmap, scan_width),
-        _ => Err(format!("Unsupported target bit depth for encoding: {}", target_bit_depth)),
+        _ => Err(format!(
+            "Unsupported target bit depth for encoding: {}",
+            target_bit_depth
+        )),
     }
 }
 
@@ -1177,7 +1218,11 @@ pub fn compress_bitmap(data: &[u8]) -> Vec<u8> {
 }
 
 #[inline]
-fn lookup_builtin_palette(palette: &BuiltInPalette, color_index: u8, original_bit_depth: u8) -> Option<(u8, u8, u8)> {
+fn lookup_builtin_palette(
+    palette: &BuiltInPalette,
+    color_index: u8,
+    original_bit_depth: u8,
+) -> Option<(u8, u8, u8)> {
     match palette {
         BuiltInPalette::GrayScale => {
             // Uses 4-color palette for 2-bit images and 16-color palette for 4-bit images
@@ -1293,20 +1338,33 @@ pub fn resolve_color_ref(
                             member_ref.cast_lib as u32,
                             member_ref.cast_member as u32,
                         );
-                        palettes.get(slot_number as usize)
+                        palettes
+                            .get(slot_number as usize)
                             .or_else(|| palettes.find_by_member(member_ref.cast_member as u32))
                     };
                     if let Some(member) = palette_member {
-                        member.colors.get(idx as usize).copied()
+                        member
+                            .colors
+                            .get(idx as usize)
+                            .copied()
                             .unwrap_or_else(|| color_fallback(idx))
-                    } else if let Some(member) = palettes.find_by_cast_lib(member_ref.cast_lib as u32) {
+                    } else if let Some(member) =
+                        palettes.find_by_cast_lib(member_ref.cast_lib as u32)
+                    {
                         // Fallback: exact palette member not found (stale clutId from old numbering),
                         // use any palette in the same cast library
-                        member.colors.get(idx as usize).copied()
+                        member
+                            .colors
+                            .get(idx as usize)
+                            .copied()
                             .unwrap_or_else(|| color_fallback(idx))
                     } else {
-                        lookup_builtin_palette(&get_system_default_palette(), idx, original_bit_depth)
-                            .unwrap_or_else(|| color_fallback(idx))
+                        lookup_builtin_palette(
+                            &get_system_default_palette(),
+                            idx,
+                            original_bit_depth,
+                        )
+                        .unwrap_or_else(|| color_fallback(idx))
                     }
                 }
                 PaletteRef::Default => {
@@ -1363,7 +1421,10 @@ pub struct PaletteQuantizer {
 
 impl PaletteQuantizer {
     pub fn new(table: Vec<(u8, u8, u8)>) -> Self {
-        Self { table, memo: std::cell::RefCell::new(fxhash::FxHashMap::default()) }
+        Self {
+            table,
+            memo: std::cell::RefCell::new(fxhash::FxHashMap::default()),
+        }
     }
 
     /// The quantizer used for a non-indexed (16/32-bit) destination, which
@@ -1494,7 +1555,9 @@ pub fn decompress_alpha_rle(data: &[u8], width: usize, height: usize) -> Vec<u8>
             continue;
         } else {
             let count = (257 - control) as usize;
-            if pos >= data.len() { break; }
+            if pos >= data.len() {
+                break;
+            }
             let val = data[pos];
             pos += 1;
             for _ in 0..count {
@@ -1578,7 +1641,8 @@ fn decode_jpeg_bitd(data: &[u8], info: &BitmapInfo, cast_lib: u32) -> Result<Bit
                 rgba_data.push(chunk[0]);
                 rgba_data.push(chunk[1]);
                 rgba_data.push(chunk[2]);
-                let alpha = alpha_bytes.as_ref()
+                let alpha = alpha_bytes
+                    .as_ref()
                     .and_then(|ab| ab.get(i).copied())
                     .unwrap_or(255);
                 rgba_data.push(alpha);
@@ -1589,14 +1653,18 @@ fn decode_jpeg_bitd(data: &[u8], info: &BitmapInfo, cast_lib: u32) -> Result<Bit
                 rgba_data.push(gray);
                 rgba_data.push(gray);
                 rgba_data.push(gray);
-                let alpha = alpha_bytes.as_ref()
+                let alpha = alpha_bytes
+                    .as_ref()
                     .and_then(|ab| ab.get(i).copied())
                     .unwrap_or(255);
                 rgba_data.push(alpha);
             }
         }
         _ => {
-            return Err(format!("Unsupported JPEG color type in BITD: {:?}", color_type));
+            return Err(format!(
+                "Unsupported JPEG color type in BITD: {:?}",
+                color_type
+            ));
         }
     }
 
@@ -1615,7 +1683,11 @@ fn decode_jpeg_bitd(data: &[u8], info: &BitmapInfo, cast_lib: u32) -> Result<Bit
     })
 }
 
-pub fn decode_jpeg_bitmap(data: &[u8], info: &BitmapInfo, alfa_data: Option<&Vec<u8>>) -> Result<Bitmap, String> {
+pub fn decode_jpeg_bitmap(
+    data: &[u8],
+    info: &BitmapInfo,
+    alfa_data: Option<&Vec<u8>>,
+) -> Result<Bitmap, String> {
     use image::ImageDecoder;
     use std::io::Cursor;
 
@@ -1657,7 +1729,8 @@ pub fn decode_jpeg_bitmap(data: &[u8], info: &BitmapInfo, alfa_data: Option<&Vec
                 rgba.push(chunk[0]); // R
                 rgba.push(chunk[1]); // G
                 rgba.push(chunk[2]); // B
-                let alpha = alpha_bytes.as_ref()
+                let alpha = alpha_bytes
+                    .as_ref()
                     .and_then(|ab| ab.get(i).copied())
                     .unwrap_or(255);
                 rgba.push(alpha);
@@ -1670,7 +1743,8 @@ pub fn decode_jpeg_bitmap(data: &[u8], info: &BitmapInfo, alfa_data: Option<&Vec
                 rgba.push(gray);
                 rgba.push(gray);
                 rgba.push(gray);
-                let alpha = alpha_bytes.as_ref()
+                let alpha = alpha_bytes
+                    .as_ref()
                     .and_then(|ab| ab.get(i).copied())
                     .unwrap_or(255);
                 rgba.push(alpha);
@@ -1704,24 +1778,57 @@ mod crop_tests {
     #[test]
     fn crop_keeps_the_alpha_channel() {
         // 3x3, opaque red centre, everything else fully transparent.
-        let mut src = Bitmap::new(3, 3, 32, 32, 8, PaletteRef::BuiltIn(BuiltInPalette::SystemWin));
+        let mut src = Bitmap::new(
+            3,
+            3,
+            32,
+            32,
+            8,
+            PaletteRef::BuiltIn(BuiltInPalette::SystemWin),
+        );
         src.use_alpha = true;
-        for i in 0..9 { src.data[i * 4..i * 4 + 4].copy_from_slice(&[0, 0, 0, 0]); }
+        for i in 0..9 {
+            src.data[i * 4..i * 4 + 4].copy_from_slice(&[0, 0, 0, 0]);
+        }
         src.data[4 * 4..4 * 4 + 4].copy_from_slice(&[255, 0, 0, 255]);
         let out = src.crop_rgba(1, 0, 2, 2); // columns 1..2, rows 0..1
         assert!(out.use_alpha);
-        assert_eq!(&out.data[0..4], &[0, 0, 0, 0], "top-left of the crop is transparent");
-        assert_eq!(&out.data[(1 * 2 + 0) * 4..(1 * 2 + 0) * 4 + 4], &[255, 0, 0, 255], "the red pixel lands at (0,1)");
-        assert_eq!(&out.data[(1 * 2 + 1) * 4..(1 * 2 + 1) * 4 + 4], &[0, 0, 0, 0]);
+        assert_eq!(
+            &out.data[0..4],
+            &[0, 0, 0, 0],
+            "top-left of the crop is transparent"
+        );
+        assert_eq!(
+            &out.data[(1 * 2 + 0) * 4..(1 * 2 + 0) * 4 + 4],
+            &[255, 0, 0, 255],
+            "the red pixel lands at (0,1)"
+        );
+        assert_eq!(
+            &out.data[(1 * 2 + 1) * 4..(1 * 2 + 1) * 4 + 4],
+            &[0, 0, 0, 0]
+        );
     }
 
     #[test]
     fn crop_outside_the_source_is_transparent() {
-        let mut src = Bitmap::new(2, 2, 32, 32, 8, PaletteRef::BuiltIn(BuiltInPalette::SystemWin));
+        let mut src = Bitmap::new(
+            2,
+            2,
+            32,
+            32,
+            8,
+            PaletteRef::BuiltIn(BuiltInPalette::SystemWin),
+        );
         src.use_alpha = true;
-        for i in 0..4 { src.data[i * 4..i * 4 + 4].copy_from_slice(&[9, 9, 9, 255]); }
+        for i in 0..4 {
+            src.data[i * 4..i * 4 + 4].copy_from_slice(&[9, 9, 9, 255]);
+        }
         let out = src.crop_rgba(1, 1, 3, 3); // runs past the right and bottom edge
         assert_eq!(&out.data[0..4], &[9, 9, 9, 255]);
-        assert_eq!(&out.data[(2 * 3 + 2) * 4..(2 * 3 + 2) * 4 + 4], &[0, 0, 0, 0], "padding past the source is transparent");
+        assert_eq!(
+            &out.data[(2 * 3 + 2) * 4..(2 * 3 + 2) * 4 + 4],
+            &[0, 0, 0, 0],
+            "padding past the source is transparent"
+        );
     }
 }

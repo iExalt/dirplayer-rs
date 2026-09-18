@@ -47,7 +47,6 @@ impl StackExpressionTracker {
             // ============================================================
             // PUSH OPERATIONS
             // ============================================================
-            
             OpCode::PushInt8 | OpCode::PushInt16 | OpCode::PushInt32 => {
                 let expr = format!("{}", bytecode.obj);
                 self.push_expr(expr.clone());
@@ -84,7 +83,7 @@ impl StackExpressionTracker {
 
             OpCode::PushCons => {
                 let literal_id = (bytecode.obj as u32 / multiplier) as usize;
-                
+
                 if let Some(literal) = literals.get(literal_id) {
                     let expr = Self::format_literal(literal, symbols)?;
                     self.push_expr(expr.clone());
@@ -98,7 +97,6 @@ impl StackExpressionTracker {
             // ============================================================
             // VARIABLE ACCESS - LOCAL
             // ============================================================
-            
             OpCode::GetLocal => {
                 let local_index = (bytecode.obj as u32 / multiplier) as usize;
                 let name = handler
@@ -130,7 +128,6 @@ impl StackExpressionTracker {
             // ============================================================
             // VARIABLE ACCESS - PARAMETER
             // ============================================================
-            
             OpCode::GetParam => {
                 let param_index = (bytecode.obj as u32 / multiplier) as usize;
                 let name = handler
@@ -162,7 +159,6 @@ impl StackExpressionTracker {
             // ============================================================
             // VARIABLE ACCESS - GLOBAL
             // ============================================================
-            
             OpCode::GetGlobal | OpCode::GetGlobal2 => {
                 if let Some(name) = lctx.names.get(bytecode.obj as usize) {
                     self.push_expr(name.to_string());
@@ -188,7 +184,6 @@ impl StackExpressionTracker {
             // ============================================================
             // PROPERTY ACCESS
             // ============================================================
-            
             OpCode::GetProp => {
                 // GetProp ALWAYS gets property from 'me' (scope receiver)
                 if let Some(name) = lctx.names.get(bytecode.obj as usize) {
@@ -335,9 +330,10 @@ impl StackExpressionTracker {
             // ============================================================
             // THE BUILTIN & MOVIE PROPERTIES
             // ============================================================
-            
             OpCode::TheBuiltin => {
-                let prop_name = lctx.names.get(bytecode.obj as usize)
+                let prop_name = lctx
+                    .names
+                    .get(bytecode.obj as usize)
                     .cloned()
                     .unwrap_or_else(|| format!("builtin{}", bytecode.obj));
                 let expr = format!("the {}", prop_name);
@@ -346,7 +342,9 @@ impl StackExpressionTracker {
             }
 
             OpCode::GetMovieProp => {
-                let prop_name = lctx.names.get(bytecode.obj as usize)
+                let prop_name = lctx
+                    .names
+                    .get(bytecode.obj as usize)
                     .cloned()
                     .unwrap_or_else(|| format!("movieProp{}", bytecode.obj));
                 let expr = format!("the {}", prop_name);
@@ -355,7 +353,9 @@ impl StackExpressionTracker {
             }
 
             OpCode::SetMovieProp => {
-                let prop_name = lctx.names.get(bytecode.obj as usize)
+                let prop_name = lctx
+                    .names
+                    .get(bytecode.obj as usize)
                     .cloned()
                     .unwrap_or_else(|| format!("movieProp{}", bytecode.obj));
                 if let Some(value) = self.stack.last() {
@@ -368,13 +368,12 @@ impl StackExpressionTracker {
             // ============================================================
             // ARITHMETIC OPERATIONS
             // ============================================================
-            
             OpCode::Add => self.binary_op("+"),
             OpCode::Sub => self.binary_op("-"),
             OpCode::Mul => self.binary_op("*"),
             OpCode::Div => self.binary_op("/"),
             OpCode::Mod => self.binary_op("mod"),
-            
+
             OpCode::Inv => {
                 if let Some(a) = self.stack.pop() {
                     let expr = format!("-({})", a);
@@ -388,12 +387,11 @@ impl StackExpressionTracker {
             // ============================================================
             // STRING OPERATIONS
             // ============================================================
-            
             OpCode::JoinStr => self.binary_op("&"),
             OpCode::JoinPadStr => self.binary_op("&&"),
             OpCode::ContainsStr => self.binary_op("contains"),
             OpCode::Contains0Str => self.binary_op("starts"),
-            
+
             OpCode::GetChunk => {
                 // Pop chunk expression components
                 if self.stack.len() >= 3 {
@@ -441,7 +439,6 @@ impl StackExpressionTracker {
             // ============================================================
             // COMPARISON OPERATIONS
             // ============================================================
-            
             OpCode::Eq => self.binary_op("="),
             OpCode::NtEq => self.binary_op("<>"),
             OpCode::Lt => self.binary_op("<"),
@@ -452,10 +449,9 @@ impl StackExpressionTracker {
             // ============================================================
             // LOGICAL OPERATIONS
             // ============================================================
-            
             OpCode::And => self.binary_op("and"),
             OpCode::Or => self.binary_op("or"),
-            
+
             OpCode::Not => {
                 if let Some(a) = self.stack.pop() {
                     let expr = format!("not ({})", a);
@@ -469,7 +465,6 @@ impl StackExpressionTracker {
             // ============================================================
             // LIST OPERATIONS
             // ============================================================
-            
             OpCode::PushList => {
                 let count = self.last_arg_count;
                 let mut items = Vec::new();
@@ -513,7 +508,6 @@ impl StackExpressionTracker {
             // ============================================================
             // FUNCTION CALLS
             // ============================================================
-            
             OpCode::ExtCall => {
                 if let Some(name) = lctx.names.get(bytecode.obj as usize) {
                     let count = self.last_arg_count;
@@ -574,7 +568,6 @@ impl StackExpressionTracker {
             // ============================================================
             // OBJECT CREATION
             // ============================================================
-            
             OpCode::NewObj => {
                 if let Some(obj_type) = self.stack.pop() {
                     let count = self.last_arg_count;
@@ -600,10 +593,7 @@ impl StackExpressionTracker {
             // ============================================================
             // CONTROL FLOW
             // ============================================================
-            
-            OpCode::Ret => {
-                "exit".to_string()
-            }
+            OpCode::Ret => "exit".to_string(),
 
             OpCode::JmpIfZ => {
                 if let Some(condition) = self.stack.last() {
@@ -613,18 +603,13 @@ impl StackExpressionTracker {
                 }
             }
 
-            OpCode::Jmp => {
-                String::new()
-            }
+            OpCode::Jmp => String::new(),
 
-            OpCode::EndRepeat => {
-                String::new()
-            }
+            OpCode::EndRepeat => String::new(),
 
             // ============================================================
             // STACK MANIPULATION
             // ============================================================
-            
             OpCode::Pop => {
                 let count = bytecode.obj as usize;
                 for _ in 0..count {
@@ -659,7 +644,6 @@ impl StackExpressionTracker {
             // ============================================================
             // FIELD OPERATIONS
             // ============================================================
-            
             OpCode::GetField => {
                 // This is complex - field references
                 String::new()
@@ -684,7 +668,6 @@ impl StackExpressionTracker {
             // ============================================================
             // SPRITE OPERATIONS
             // ============================================================
-            
             OpCode::OntoSpr => {
                 if self.stack.len() >= 2 {
                     let sprite = self.stack.pop().unwrap();
@@ -722,7 +705,6 @@ impl StackExpressionTracker {
             // ============================================================
             // CHUNK VARIABLE REFERENCES
             // ============================================================
-            
             OpCode::PushChunkVarRef => {
                 // Push a reference to a chunk for later assignment
                 if self.stack.len() >= 3 {
@@ -740,7 +722,6 @@ impl StackExpressionTracker {
             // ============================================================
             // DEFAULT - UNHANDLED OPCODES
             // ============================================================
-            
             _ => {
                 // For any unhandled opcode, just show the opcode name
                 String::new()

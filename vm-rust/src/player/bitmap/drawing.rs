@@ -8,12 +8,20 @@ use crate::{
         lingo::datum::Datum,
     },
     player::{
-        Score, Sprite, ScriptError, bitmap::bitmap::{PaletteRef, BuiltInPalette, get_system_default_palette}, font::{BitmapFont, bitmap_font_copy_char}, geometry::IntRect, sprite::{ColorRef, is_skew_flip}, symbols::{builtin::BuiltInSymbol, symbol_table::SymbolTable}
+        bitmap::bitmap::{get_system_default_palette, BuiltInPalette, PaletteRef},
+        font::{bitmap_font_copy_char, BitmapFont},
+        geometry::IntRect,
+        sprite::{is_skew_flip, ColorRef},
+        symbols::{builtin::BuiltInSymbol, symbol_table::SymbolTable},
+        Score, ScriptError, Sprite,
     },
 };
 
 use super::{
-    bitmap::{resolve_color_ref, resolve_palette_quantizer, resolve_palette_table, Bitmap, PaletteQuantizer},
+    bitmap::{
+        resolve_color_ref, resolve_palette_quantizer, resolve_palette_table, Bitmap,
+        PaletteQuantizer,
+    },
     mask::BitmapMask,
     palette_map::PaletteMap,
 };
@@ -92,7 +100,14 @@ fn blend_color_alpha(dst: (u8, u8, u8), src: (u8, u8, u8), alpha: f32) -> (u8, u
 }
 
 pub fn should_matte_sprite(ink: u32) -> bool {
-    ink == 2 || ink == 36 || ink == 33 || ink == 37 || ink == 39 || ink == 41 || ink == 8 || ink == 7
+    ink == 2
+        || ink == 36
+        || ink == 33
+        || ink == 37
+        || ink == 39
+        || ink == 41
+        || ink == 8
+        || ink == 7
 }
 
 /// Only ink 8 (Matte) uses pixel-level hit testing for mouse clicks.
@@ -121,9 +136,15 @@ fn director_blend_ink0(
     let eff = (src_alpha * blend).clamp(0.0, 1.0);
     let inv = 1.0 - eff;
     (
-        (dst.0 as f32 * inv + src.0 as f32 * eff).round().clamp(0.0, 255.0) as u8,
-        (dst.1 as f32 * inv + src.1 as f32 * eff).round().clamp(0.0, 255.0) as u8,
-        (dst.2 as f32 * inv + src.2 as f32 * eff).round().clamp(0.0, 255.0) as u8,
+        (dst.0 as f32 * inv + src.0 as f32 * eff)
+            .round()
+            .clamp(0.0, 255.0) as u8,
+        (dst.1 as f32 * inv + src.1 as f32 * eff)
+            .round()
+            .clamp(0.0, 255.0) as u8,
+        (dst.2 as f32 * inv + src.2 as f32 * eff)
+            .round()
+            .clamp(0.0, 255.0) as u8,
     )
 }
 
@@ -134,8 +155,8 @@ fn blend_pixel(
     bg_color: (u8, u8, u8),
     fg_color: (u8, u8, u8),
     src_indexed: bool, // an indexed (1 to 8 bit) source keeps its colours under Lighten
-    blend_alpha: f32, // This is params.blend / 100.0
-    src_alpha: f32,   // Alpha from the source pixel (0.0 to 1.0)
+    blend_alpha: f32,  // This is params.blend / 100.0
+    src_alpha: f32,    // Alpha from the source pixel (0.0 to 1.0)
 ) -> (u8, u8, u8) {
     // Calculate the effective alpha: combination of native source alpha and blend parameter
     let effective_alpha = src_alpha * blend_alpha;
@@ -160,9 +181,7 @@ fn blend_pixel(
         // Approximation: similar to copy but skip bg_color (like ink 36),
         // many implementations treat this as a matte-related/alpha-preserving ink.
         // We'll behave like "if src == bg_color -> dst, else blend normally".
-        7 => {
-            blend_color_alpha(dst, src, effective_alpha)
-        }
+        7 => blend_color_alpha(dst, src, effective_alpha),
         // 8 = Matte
         // Transparency is decided BEFORE blending.
         // At this point, the pixel is opaque (or partially via src_alpha).
@@ -232,9 +251,7 @@ fn blend_pixel(
         }
         // 36 = Background Transparent
         // If the source equals the bg_color, skip; otherwise blend normally.
-        36 => {
-            blend_color_alpha(dst, src, effective_alpha)
-        }
+        36 => blend_color_alpha(dst, src, effective_alpha),
         // 37 = Lightest
         // Compares the *whole* RGB pixels in src and dst by luminance and
         // returns the brighter pixel intact — NOT a per-channel max (that
@@ -245,12 +262,8 @@ fn blend_pixel(
             if src == bg_color {
                 dst
             } else {
-                let src_luma = (src.0 as u32) * 299
-                    + (src.1 as u32) * 587
-                    + (src.2 as u32) * 114; // 0..255_000
-                let dst_luma = (dst.0 as u32) * 299
-                    + (dst.1 as u32) * 587
-                    + (dst.2 as u32) * 114;
+                let src_luma = (src.0 as u32) * 299 + (src.1 as u32) * 587 + (src.2 as u32) * 114; // 0..255_000
+                let dst_luma = (dst.0 as u32) * 299 + (dst.1 as u32) * 587 + (dst.2 as u32) * 114;
                 let chosen = if src_luma >= dst_luma { src } else { dst };
                 if blend_alpha >= 0.999 {
                     chosen
@@ -269,12 +282,8 @@ fn blend_pixel(
             if src == bg_color {
                 dst
             } else {
-                let src_luma = (src.0 as u32) * 299
-                    + (src.1 as u32) * 587
-                    + (src.2 as u32) * 114;
-                let dst_luma = (dst.0 as u32) * 299
-                    + (dst.1 as u32) * 587
-                    + (dst.2 as u32) * 114;
+                let src_luma = (src.0 as u32) * 299 + (src.1 as u32) * 587 + (src.2 as u32) * 114;
+                let dst_luma = (dst.0 as u32) * 299 + (dst.1 as u32) * 587 + (dst.2 as u32) * 114;
                 let chosen = if src_luma <= dst_luma { src } else { dst };
                 if blend_alpha >= 0.999 {
                     chosen
@@ -307,7 +316,9 @@ fn blend_pixel(
         41 => {
             let mix = |s: u8, fg: u8, bg: u8| {
                 let t = s as f32 / 255.0;
-                (fg as f32 * (1.0 - t) + bg as f32 * t).round().clamp(0.0, 255.0) as u8
+                (fg as f32 * (1.0 - t) + bg as f32 * t)
+                    .round()
+                    .clamp(0.0, 255.0) as u8
             };
             let color = (
                 mix(src.0, fg_color.0, bg_color.0),
@@ -527,7 +538,13 @@ impl Bitmap {
     /// Like `set_pixel`, but uses a pre-resolved palette table for indexed formats.
     /// For 4-bit/8-bit bitmaps, this avoids calling `resolve_color_ref` 16/256 times per pixel.
     /// The 8-bit nearest-colour search is memoised by `PaletteQuantizer`.
-    pub fn set_pixel_fast(&mut self, x: i32, y: i32, color: (u8, u8, u8), palette_cache: &PaletteQuantizer) {
+    pub fn set_pixel_fast(
+        &mut self,
+        x: i32,
+        y: i32,
+        color: (u8, u8, u8),
+        palette_cache: &PaletteQuantizer,
+    ) {
         if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
             return;
         }
@@ -661,7 +678,12 @@ impl Bitmap {
 
     /// Like `get_pixel_color`, but uses a pre-resolved palette table for indexed formats.
     #[inline]
-    pub fn get_pixel_color_fast(&self, palette_cache: &[(u8, u8, u8)], x: u16, y: u16) -> (u8, u8, u8) {
+    pub fn get_pixel_color_fast(
+        &self,
+        palette_cache: &[(u8, u8, u8)],
+        x: u16,
+        y: u16,
+    ) -> (u8, u8, u8) {
         let color_ref = self.get_pixel_color_ref(x, y);
         match color_ref {
             ColorRef::PaletteIndex(i) => palette_cache[i as usize],
@@ -1008,7 +1030,9 @@ impl Bitmap {
         palettes: &PaletteMap,
         alpha: f32,
     ) {
-        if alpha == 0.0 { return; }
+        if alpha == 0.0 {
+            return;
+        }
         let w = (x2 - x1).max(1);
         let h = (y2 - y1).max(1);
         // Center coordinates (doubled to avoid fractions)
@@ -1027,9 +1051,13 @@ impl Bitmap {
             // Ellipse equation: (dx/(w/2))^2 + (dy/(h/2))^2 <= 1
             // In doubled coords: (dx2/a)^2 + (dy2/b)^2 <= 1
             // => dx2^2 <= a^2 * (1 - dy2^2/b^2) = a^2 * (b^2 - dy2^2) / b^2
-            if b2 == 0 { continue; }
+            if b2 == 0 {
+                continue;
+            }
             let dx2_sq_max = a2 * (b2 - dy2_sq) / b2;
-            if dx2_sq_max < 0 { continue; }
+            if dx2_sq_max < 0 {
+                continue;
+            }
             let dx2_max = (dx2_sq_max as f64).sqrt() as i32;
             let px_left = (cx2 - dx2_max) / 2;
             let px_right = (cx2 + dx2_max + 1) / 2; // +1 for ceiling
@@ -1058,7 +1086,9 @@ impl Bitmap {
         alpha: f32,
         thickness: i32,
     ) {
-        if alpha == 0.0 || thickness <= 0 { return; }
+        if alpha == 0.0 || thickness <= 0 {
+            return;
+        }
         // Draw by filling outer ellipse minus inner ellipse
         // For thickness=1, just plot boundary pixels
         let w = (x2 - x1).max(1);
@@ -1079,9 +1109,13 @@ impl Bitmap {
             let dy2_sq = (dy2 as i64) * (dy2 as i64);
 
             // Outer ellipse x range
-            if b_outer2 == 0 { continue; }
+            if b_outer2 == 0 {
+                continue;
+            }
             let dx2_sq_outer = a_outer2 * (b_outer2 - dy2_sq) / b_outer2;
-            if dx2_sq_outer < 0 { continue; }
+            if dx2_sq_outer < 0 {
+                continue;
+            }
             let dx2_outer = (dx2_sq_outer as f64).sqrt() as i32;
             let outer_left = (cx2 - dx2_outer) / 2;
             let outer_right = (cx2 + dx2_outer + 1) / 2;
@@ -1093,7 +1127,11 @@ impl Bitmap {
                     let dx2_inner = (dx2_sq_inner as f64).sqrt() as i32;
                     let il = (cx2 - dx2_inner) / 2 + thickness;
                     let ir = (cx2 + dx2_inner + 1) / 2 - thickness;
-                    if ir > il { (il, ir) } else { (outer_right, outer_left) } // no inner gap
+                    if ir > il {
+                        (il, ir)
+                    } else {
+                        (outer_right, outer_left)
+                    } // no inner gap
                 } else {
                     (outer_right, outer_left) // no inner gap at this y
                 }
@@ -1133,7 +1171,9 @@ impl Bitmap {
         palettes: &PaletteMap,
         alpha: f32,
     ) {
-        if alpha == 0.0 { return; }
+        if alpha == 0.0 {
+            return;
+        }
         let w = x2 - x1;
         let h = y2 - y1;
         let r = radius.min(w / 2).min(h / 2).max(0);
@@ -1176,7 +1216,9 @@ impl Bitmap {
         alpha: f32,
         thickness: i32,
     ) {
-        if alpha == 0.0 || thickness <= 0 { return; }
+        if alpha == 0.0 || thickness <= 0 {
+            return;
+        }
         let w = x2 - x1;
         let h = y2 - y1;
         let r_outer = radius.min(w / 2).min(h / 2).max(0);
@@ -1258,7 +1300,9 @@ impl Bitmap {
         alpha: f32,
         thickness: i32,
     ) {
-        if alpha == 0.0 || thickness <= 0 { return; }
+        if alpha == 0.0 || thickness <= 0 {
+            return;
+        }
         let half = thickness / 2;
 
         let dx = (x2 - x1).abs();
@@ -1301,15 +1345,21 @@ impl Bitmap {
                 }
             }
 
-            if cx == x2 && cy == y2 { break; }
+            if cx == x2 && cy == y2 {
+                break;
+            }
             let e2 = 2 * err;
             if e2 >= dy {
-                if cx == x2 { break; }
+                if cx == x2 {
+                    break;
+                }
                 err += dy;
                 cx += sx;
             }
             if e2 <= dx {
-                if cy == y2 { break; }
+                if cy == y2 {
+                    break;
+                }
                 err += dx;
                 cy += sy;
             }
@@ -1380,10 +1430,14 @@ impl Bitmap {
             return;
         }
         let idx = (py as usize * self.width as usize + px as usize) * 4;
-        if idx + 3 >= self.data.len() { return; }
+        if idx + 3 >= self.data.len() {
+            return;
+        }
 
         let src_a = (coverage * 255.0 + 0.5) as u8;
-        if src_a == 0 { return; }
+        if src_a == 0 {
+            return;
+        }
 
         let dst_r = self.data[idx] as u16;
         let dst_g = self.data[idx + 1] as u16;
@@ -1393,7 +1447,7 @@ impl Bitmap {
         let sa = src_a as u16;
         let inv_sa = 255 - sa;
 
-        self.data[idx]     = ((color.0 as u16 * sa + dst_r * inv_sa) / 255) as u8;
+        self.data[idx] = ((color.0 as u16 * sa + dst_r * inv_sa) / 255) as u8;
         self.data[idx + 1] = ((color.1 as u16 * sa + dst_g * inv_sa) / 255) as u8;
         self.data[idx + 2] = ((color.2 as u16 * sa + dst_b * inv_sa) / 255) as u8;
         self.data[idx + 3] = (dst_a + (sa * (255 - dst_a)) / 255).min(255) as u8;
@@ -1402,8 +1456,10 @@ impl Bitmap {
     /// Draw an anti-aliased thick line segment using signed distance from the line.
     pub(crate) fn draw_line_aa(
         &mut self,
-        x1: f32, y1: f32,
-        x2: f32, y2: f32,
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
         half_width: f32,
         color: (u8, u8, u8),
         _palettes: &PaletteMap,
@@ -1412,7 +1468,9 @@ impl Bitmap {
         let dx = x2 - x1;
         let dy = y2 - y1;
         let seg_len = (dx * dx + dy * dy).sqrt();
-        if seg_len < 0.001 { return; }
+        if seg_len < 0.001 {
+            return;
+        }
 
         // Bounding box of the thick line
         let expand = half_width + 1.0;
@@ -1447,7 +1505,8 @@ impl Bitmap {
     /// Draw an anti-aliased filled circle for round line joins/caps.
     pub(crate) fn draw_circle_aa(
         &mut self,
-        cx: f32, cy: f32,
+        cx: f32,
+        cy: f32,
         radius: f32,
         color: (u8, u8, u8),
         _palettes: &PaletteMap,
@@ -1618,8 +1677,11 @@ impl Bitmap {
             let w = dst_rect.width().max(1);
             let h = dst_rect.height().max(1);
             let mut temp = Bitmap::new(
-                w as u16, h as u16,
-                32, 32, 0,
+                w as u16,
+                h as u16,
+                32,
+                32,
+                0,
                 super::bitmap::PaletteRef::BuiltIn(get_system_default_palette()),
             );
             // Start fully transparent
@@ -1700,7 +1762,9 @@ impl Bitmap {
             let dx2 = (cx - min_x).abs();
             let dy1 = (max_y - cy).abs();
             let dy2 = (cy - min_y).abs();
-            (dx1.max(dx2).powi(2) + dy1.max(dy2).powi(2)).sqrt().max(1.0)
+            (dx1.max(dx2).powi(2) + dy1.max(dy2).powi(2))
+                .sqrt()
+                .max(1.0)
         };
 
         let y_start = min_y.floor() as i32;
@@ -1825,8 +1889,12 @@ impl Bitmap {
         // copyPixels with [#ink: #blend, #blendLevel: N]
         if let Some(blend_level) = param_list.get("blendLevel") {
             if let Ok(level) = blend_level.int_value() {
-                blend = ((level as f64 * 100.0 / 255.0).round() as i32).max(0).min(100);
-                if ink == 0 { ink = 32; } // auto-set blend ink when blendLevel is specified
+                blend = ((level as f64 * 100.0 / 255.0).round() as i32)
+                    .max(0)
+                    .min(100);
+                if ink == 0 {
+                    ink = 32;
+                } // auto-set blend ink when blendLevel is specified
             }
         }
         let bg_color_explicit = param_list.get("bgColor").is_some();
@@ -1882,11 +1950,15 @@ impl Bitmap {
                 .and_then(|sprite_num| score.get_sprite(sprite_num))
         });
 
-        let original_dst_rect: Option<IntRect> = param_list
-            .get("original_dst_rect")
-            .and_then(|datum| {
+        let original_dst_rect: Option<IntRect> =
+            param_list.get("original_dst_rect").and_then(|datum| {
                 if let Datum::Rect(vals, _flags) = datum {
-                    Some(IntRect::from(vals[0] as i32, vals[1] as i32, vals[2] as i32, vals[3] as i32))
+                    Some(IntRect::from(
+                        vals[0] as i32,
+                        vals[1] as i32,
+                        vals[2] as i32,
+                        vals[3] as i32,
+                    ))
                 } else {
                     None
                 }
@@ -1955,10 +2027,22 @@ impl Bitmap {
     ) {
         // Bounding box of the quad.
         let min_x = quad.iter().map(|p| p.0).min().unwrap_or(0).max(0);
-        let max_x = quad.iter().map(|p| p.0).max().unwrap_or(0).min(self.width as i32 - 1);
+        let max_x = quad
+            .iter()
+            .map(|p| p.0)
+            .max()
+            .unwrap_or(0)
+            .min(self.width as i32 - 1);
         let min_y = quad.iter().map(|p| p.1).min().unwrap_or(0).max(0);
-        let max_y = quad.iter().map(|p| p.1).max().unwrap_or(0).min(self.height as i32 - 1);
-        if min_x > max_x || min_y > max_y { return; }
+        let max_y = quad
+            .iter()
+            .map(|p| p.1)
+            .max()
+            .unwrap_or(0)
+            .min(self.height as i32 - 1);
+        if min_x > max_x || min_y > max_y {
+            return;
+        }
 
         // Bilinear parameters: P(u,v) = a + b*u + c*v + d*u*v
         let p0 = (quad[0].0 as f32, quad[0].1 as f32);
@@ -1972,7 +2056,9 @@ impl Bitmap {
 
         let src_w = (src_rect.right - src_rect.left) as f32;
         let src_h = (src_rect.bottom - src_rect.top) as f32;
-        if src_w <= 0.0 || src_h <= 0.0 { return; }
+        if src_w <= 0.0 || src_h <= 0.0 {
+            return;
+        }
         let src_x0 = src_rect.left as f32;
         let src_y0 = src_rect.top as f32;
 
@@ -1997,7 +2083,9 @@ impl Bitmap {
                     let j21 = b.1 + d.1 * v;
                     let j22 = c.1 + d.1 * u;
                     let det = j11 * j22 - j12 * j21;
-                    if det.abs() < 1e-7 { break; }
+                    if det.abs() < 1e-7 {
+                        break;
+                    }
                     let inv = 1.0 / det;
                     let du = (j22 * fx - j12 * fy) * inv;
                     let dv = (j11 * fy - j21 * fx) * inv;
@@ -2017,10 +2105,18 @@ impl Bitmap {
                 if !converged || u < -0.001 || u > 1.001 || v < -0.001 || v > 1.001 {
                     continue;
                 }
-                if u < 0.0 { u = 0.0; }
-                if u > 1.0 { u = 1.0; }
-                if v < 0.0 { v = 0.0; }
-                if v > 1.0 { v = 1.0; }
+                if u < 0.0 {
+                    u = 0.0;
+                }
+                if u > 1.0 {
+                    u = 1.0;
+                }
+                if v < 0.0 {
+                    v = 0.0;
+                }
+                if v > 1.0 {
+                    v = 1.0;
+                }
 
                 // u/v reach exactly 1.0 on the quad's far edge, where
                 // `src_x0 + u * src_w` lands on src_rect.right — one pixel PAST
@@ -2086,11 +2182,11 @@ impl Bitmap {
         let theta = rotation_degrees * std::f64::consts::PI / 180.0;
         let cos_theta = theta.cos();
         let sin_theta = theta.sin();
-        
+
         // Registration point in sprite-local coordinates
         let pivot_x = pivot_x as f64;
         let pivot_y = pivot_y as f64;
-            
+
         // Define the 4 corners of the original rectangle
         let corners = [
             (rect.left as f64, rect.top as f64),
@@ -2098,32 +2194,41 @@ impl Bitmap {
             (rect.right as f64, rect.bottom as f64),
             (rect.left as f64, rect.bottom as f64),
         ];
-        
+
         // Rotate each corner around the pivot point
         let mut rotated_corners = Vec::new();
         for (x, y) in corners.iter() {
             let dx = x - pivot_x as f64;
             let dy = y - pivot_y as f64;
-            
+
             let rotated_x = pivot_x as f64 + (dx * cos_theta - dy * sin_theta);
             let rotated_y = pivot_y as f64 + (dx * sin_theta + dy * cos_theta);
-            
+
             rotated_corners.push((rotated_x, rotated_y));
         }
-        
+
         // Find the bounding box of rotated corners
-        let min_x = rotated_corners.iter().map(|(x, _)| *x).fold(f64::INFINITY, f64::min) as i32;
-        let max_x = rotated_corners.iter().map(|(x, _)| *x).fold(f64::NEG_INFINITY, f64::max) as i32;
-        let min_y = rotated_corners.iter().map(|(_, y)| *y).fold(f64::INFINITY, f64::min) as i32;
-        let max_y = rotated_corners.iter().map(|(_, y)| *y).fold(f64::NEG_INFINITY, f64::max) as i32;
-        
+        let min_x = rotated_corners
+            .iter()
+            .map(|(x, _)| *x)
+            .fold(f64::INFINITY, f64::min) as i32;
+        let max_x = rotated_corners
+            .iter()
+            .map(|(x, _)| *x)
+            .fold(f64::NEG_INFINITY, f64::max) as i32;
+        let min_y = rotated_corners
+            .iter()
+            .map(|(_, y)| *y)
+            .fold(f64::INFINITY, f64::min) as i32;
+        let max_y = rotated_corners
+            .iter()
+            .map(|(_, y)| *y)
+            .fold(f64::NEG_INFINITY, f64::max) as i32;
+
         IntRect::from(min_x, min_y, max_x, max_y)
     }
 
-    fn apply_forecolor_tint(
-        src: (u8, u8, u8),
-        fore: (u8, u8, u8),
-    ) -> (u8, u8, u8) {
+    fn apply_forecolor_tint(src: (u8, u8, u8), fore: (u8, u8, u8)) -> (u8, u8, u8) {
         (
             ((src.0 as u16 * fore.0 as u16) / 255) as u8,
             ((src.1 as u16 * fore.1 as u16) / 255) as u8,
@@ -2137,8 +2242,8 @@ impl Bitmap {
         }
 
         match (depth, ink) {
-            (32, 0) => true,            // grayscale remap
-            (32, 8) | (32, 9) => true,  // foreColor only
+            (32, 0) => true,           // grayscale remap
+            (32, 8) | (32, 9) => true, // foreColor only
             (d, 0) if d <= 8 => true,
             (d, 8) | (d, 9) if d <= 8 => true,
             _ => false, // ink 36, 7, 33, 40, etc
@@ -2193,7 +2298,11 @@ impl Bitmap {
         // Pre-resolve palettes into lookup tables to avoid per-pixel resolve_color_ref calls.
         // Source table: used for reading indexed source pixels without calling resolve_color_ref.
         let src_palette_cache: Option<Vec<(u8, u8, u8)>> = if is_indexed {
-            Some(resolve_palette_table(palettes, &src.palette_ref, src.original_bit_depth))
+            Some(resolve_palette_table(
+                palettes,
+                &src.palette_ref,
+                src.original_bit_depth,
+            ))
         } else {
             None
         };
@@ -2209,16 +2318,12 @@ impl Bitmap {
         let bg_index = match &params.bg_color {
             ColorRef::PaletteIndex(i) => *i,
             _ => 0, // Director default
-        }; 
+        };
 
-        let is_matte_bitmap =
-            src.trim_white_space
-            || params.is_text_rendering;
+        let is_matte_bitmap = src.trim_white_space || params.is_text_rendering;
 
         let use_grayscale_as_alpha = match src.palette_ref {
-            PaletteRef::BuiltIn(palette) => {
-                palette.symbol() == BuiltInSymbol::Grayscale
-            }
+            PaletteRef::BuiltIn(palette) => palette.symbol() == BuiltInSymbol::Grayscale,
             _ => false, // Any other palette → not grayscale
         };
 
@@ -2299,20 +2404,35 @@ impl Bitmap {
         // blank photo). For an opaque source we fall through to the colour path, which
         // maps each pixel to the nearest grayscale index — what real Director does for
         // an opaque 32→8 grayscale copy (and what makes the camera photo render).
-        if ink == 0 && !has_sprite_rotation && !has_skew_flip
+        if ink == 0
+            && !has_sprite_rotation
+            && !has_skew_flip
             && self.bit_depth == 8
-            && matches!(self.palette_ref, PaletteRef::BuiltIn(BuiltInPalette::GrayScale))
+            && matches!(
+                self.palette_ref,
+                PaletteRef::BuiltIn(BuiltInPalette::GrayScale)
+            )
             && src.bit_depth == 32
         {
             let dw = self.width as usize;
             // Map a destination pixel back to its source pixel index (respecting flip
             // and scale), or None if it samples outside the source.
             let src_index = |dx: i32, dy: i32| -> Option<usize> {
-                let rel_x = if flip_x { (max_dst_x - 1 - dx) - min_dst_x } else { dx - min_dst_x } as f64;
-                let rel_y = if flip_y { (max_dst_y - 1 - dy) - min_dst_y } else { dy - min_dst_y } as f64;
+                let rel_x = if flip_x {
+                    (max_dst_x - 1 - dx) - min_dst_x
+                } else {
+                    dx - min_dst_x
+                } as f64;
+                let rel_y = if flip_y {
+                    (max_dst_y - 1 - dy) - min_dst_y
+                } else {
+                    dy - min_dst_y
+                } as f64;
                 let sx = (src_left_f + rel_x * scale_x).floor() as i32;
                 let sy = (src_top_f + rel_y * scale_y).floor() as i32;
-                if sx < 0 || sy < 0 || sx >= src.width as i32 || sy >= src.height as i32 { return None; }
+                if sx < 0 || sy < 0 || sx >= src.width as i32 || sy >= src.height as i32 {
+                    return None;
+                }
                 Some(((sy as usize) * src.width as usize + sx as usize) * 4)
             };
             // Only take the alpha-mask fast path if the copied source region is
@@ -2324,16 +2444,22 @@ impl Bitmap {
             let mut src_has_alpha = false;
             let mut src_is_gray = true;
             'scan: for dy in min_dst_y..max_dst_y {
-                if dy < 0 || dy >= self.height as i32 { continue; }
+                if dy < 0 || dy >= self.height as i32 {
+                    continue;
+                }
                 for dx in min_dst_x..max_dst_x {
-                    if dx < 0 || dx >= self.width as i32 { continue; }
+                    if dx < 0 || dx >= self.width as i32 {
+                        continue;
+                    }
                     if let Some(si) = src_index(dx, dy) {
                         if si + 3 < src.data.len() {
                             if src.data[si + 3] < 255 {
                                 src_has_alpha = true;
                                 break 'scan;
                             }
-                            if src.data[si] != src.data[si + 1] || src.data[si + 1] != src.data[si + 2] {
+                            if src.data[si] != src.data[si + 1]
+                                || src.data[si + 1] != src.data[si + 2]
+                            {
                                 src_is_gray = false;
                             }
                         }
@@ -2342,9 +2468,13 @@ impl Bitmap {
             }
             if src_has_alpha || src_is_gray {
                 for dy in min_dst_y..max_dst_y {
-                    if dy < 0 || dy >= self.height as i32 { continue; }
+                    if dy < 0 || dy >= self.height as i32 {
+                        continue;
+                    }
                     for dx in min_dst_x..max_dst_x {
-                        if dx < 0 || dx >= self.width as i32 { continue; }
+                        if dx < 0 || dx >= self.width as i32 {
+                            continue;
+                        }
                         if let Some(si) = src_index(dx, dy) {
                             if si + 3 < src.data.len() {
                                 // Transparency-bearing source: its ALPHA is the mask
@@ -2370,36 +2500,34 @@ impl Bitmap {
         // ----------------------------------------------------------
         // Director-style draw bounds (allow rotated overflow)
         // ----------------------------------------------------------
-        let (draw_min_x, draw_max_x, draw_min_y, draw_max_y) =
-            if has_sprite_rotation {
-                if let (Some(orig_rect), Some(sprite)) =
-                    (&params.original_dst_rect, params.sprite)
-                {
-                    let expanded = Self::calculate_rotated_bounding_box(
-                        orig_rect,
-                        params.rotation,
-                        sprite.loc_h,
-                        sprite.loc_v,
-                    );
+        let (draw_min_x, draw_max_x, draw_min_y, draw_max_y) = if has_sprite_rotation {
+            if let (Some(orig_rect), Some(sprite)) = (&params.original_dst_rect, params.sprite) {
+                let expanded = Self::calculate_rotated_bounding_box(
+                    orig_rect,
+                    params.rotation,
+                    sprite.loc_h,
+                    sprite.loc_v,
+                );
 
-                    (
-                        expanded.left.min(expanded.right),
-                        expanded.left.max(expanded.right),
-                        expanded.top.min(expanded.bottom),
-                        expanded.top.max(expanded.bottom),
-                    )
-                } else {
-                    (min_dst_x, max_dst_x, min_dst_y, max_dst_y)
-                }
+                (
+                    expanded.left.min(expanded.right),
+                    expanded.left.max(expanded.right),
+                    expanded.top.min(expanded.bottom),
+                    expanded.top.max(expanded.bottom),
+                )
             } else {
                 (min_dst_x, max_dst_x, min_dst_y, max_dst_y)
-            };
+            }
+        } else {
+            (min_dst_x, max_dst_x, min_dst_y, max_dst_y)
+        };
 
-        let needs_matte_mask =
-            !params.is_text_rendering
+        let needs_matte_mask = !params.is_text_rendering
             && is_matte_bitmap
             && ((ink == 0 && src.original_bit_depth <= 8)
-                || (ink == 8 && (src.original_bit_depth <= 8 || (src.original_bit_depth == 32 && !src.use_alpha))));
+                || (ink == 8
+                    && (src.original_bit_depth <= 8
+                        || (src.original_bit_depth == 32 && !src.use_alpha))));
 
         let mut matte_mask: Option<Vec<Vec<bool>>> = None;
 
@@ -2410,8 +2538,7 @@ impl Bitmap {
         // ----------------------------------------------------------
         let edge_matte_color: Option<(u8, u8, u8)> =
             if src.original_bit_depth == 32 && !src.use_alpha {
-                let (r, g, b, _) =
-                    src.get_pixel_color_with_alpha(palettes, 0, 0);
+                let (r, g, b, _) = src.get_pixel_color_with_alpha(palettes, 0, 0);
                 Some((r, g, b))
             } else {
                 None
@@ -2430,7 +2557,12 @@ impl Bitmap {
                 if let (ColorRef::PaletteIndex(i), Some(cache)) = (&color_ref, &src_palette_cache) {
                     cache[*i as usize]
                 } else {
-                    resolve_color_ref(palettes, &color_ref, &src.palette_ref, src.original_bit_depth)
+                    resolve_color_ref(
+                        palettes,
+                        &color_ref,
+                        &src.palette_ref,
+                        src.original_bit_depth,
+                    )
                 }
             };
 
@@ -2467,10 +2599,18 @@ impl Bitmap {
 
                 mask[y][x] = true;
 
-                if x > 0 { stack.push((x - 1, y)); }
-                if x + 1 < width { stack.push((x + 1, y)); }
-                if y > 0 { stack.push((x, y - 1)); }
-                if y + 1 < height { stack.push((x, y + 1)); }
+                if x > 0 {
+                    stack.push((x - 1, y));
+                }
+                if x + 1 < width {
+                    stack.push((x + 1, y));
+                }
+                if y > 0 {
+                    stack.push((x, y - 1));
+                }
+                if y + 1 < height {
+                    stack.push((x, y + 1));
+                }
             }
 
             matte_mask = Some(mask);
@@ -2486,14 +2626,11 @@ impl Bitmap {
         {
             let sprite_bg = params.sprite.map_or(false, |sp| sp.has_back_color);
             let sprite_fg = params.sprite.map_or(false, |sp| sp.has_fore_color);
-            let no_colorize = !(sprite_bg
-                || sprite_fg
-                || params.bg_color_explicit
-                || params.fore_color_explicit);
+            let no_colorize =
+                !(sprite_bg || sprite_fg || params.bg_color_explicit || params.fore_color_explicit);
             let dst_span_w = max_dst_x - min_dst_x;
             let dst_span_h = max_dst_y - min_dst_y;
-            let unscaled =
-                dst_span_w == src_rect.width() && dst_span_h == src_rect.height();
+            let unscaled = dst_span_w == src_rect.width() && dst_span_h == src_rect.height();
             if self.bit_depth == 8
                 && src.bit_depth == 8
                 && src.palette_ref == self.palette_ref
@@ -2535,10 +2672,7 @@ impl Bitmap {
                 let dx1 = max_dst_x.min(dst_w);
                 let src_x_start = src_rect.left + (dx0 - min_dst_x);
                 let row_len = (dx1 - dx0).max(0) as usize;
-                if row_len > 0
-                    && src_x_start >= 0
-                    && src_x_start + row_len as i32 <= sw
-                {
+                if row_len > 0 && src_x_start >= 0 && src_x_start + row_len as i32 <= sw {
                     self.matte = None;
                     let width = self.width as usize;
                     let s_width = src.width as usize;
@@ -2583,10 +2717,8 @@ impl Bitmap {
         {
             let sprite_bg = params.sprite.map_or(false, |sp| sp.has_back_color);
             let sprite_fg = params.sprite.map_or(false, |sp| sp.has_fore_color);
-            let no_colorize = !(sprite_bg
-                || sprite_fg
-                || params.bg_color_explicit
-                || params.fore_color_explicit);
+            let no_colorize =
+                !(sprite_bg || sprite_fg || params.bg_color_explicit || params.fore_color_explicit);
             let unscaled = (max_dst_x - min_dst_x) == src_rect.width()
                 && (max_dst_y - min_dst_y) == src_rect.height();
             if self.bit_depth == src.bit_depth
@@ -2690,7 +2822,12 @@ impl Bitmap {
                 // Floor rule (phase 0) only for an authored bitmap scaling down;
                 // see the shader.
                 let scaling_up = scale_x < 1.0 || scale_y < 1.0;
-                let phase = if has_sprite_rotation || has_skew_flip || scaling_up || !params.floor_rule { 0.5 } else { 0.0 };
+                let phase =
+                    if has_sprite_rotation || has_skew_flip || scaling_up || !params.floor_rule {
+                        0.5
+                    } else {
+                        0.0
+                    };
                 let src_f_x = src_left_f + (dst_x_idx + phase) * scale_x;
                 let src_f_y = src_top_f + (dst_y_idx + phase) * scale_y;
 
@@ -2742,10 +2879,17 @@ impl Bitmap {
                     }
 
                     let color_ref = src.get_pixel_color_ref(sx, sy);
-                    let (mut sr, mut sg, mut sb) = if let (ColorRef::PaletteIndex(i), Some(cache)) = (&color_ref, &src_palette_cache) {
+                    let (mut sr, mut sg, mut sb) = if let (ColorRef::PaletteIndex(i), Some(cache)) =
+                        (&color_ref, &src_palette_cache)
+                    {
                         cache[*i as usize]
                     } else {
-                        resolve_color_ref(palettes, &color_ref, &src.palette_ref, src.original_bit_depth)
+                        resolve_color_ref(
+                            palettes,
+                            &color_ref,
+                            &src.palette_ref,
+                            src.original_bit_depth,
+                        )
                     };
 
                     // Bitmap ink=0 colorization: mirrors the WebGL2 shader logic.
@@ -2777,8 +2921,16 @@ impl Bitmap {
                         let min_c = sr.min(sg).min(sb);
                         let near_grayscale = max_c - min_c <= 16;
                         if near_grayscale {
-                            let eff_fg = if apply_fg { fg_color_resolved } else { (0u8, 0u8, 0u8) };
-                            let eff_bg = if apply_bg { bg_color_resolved } else { (255u8, 255u8, 255u8) };
+                            let eff_fg = if apply_fg {
+                                fg_color_resolved
+                            } else {
+                                (0u8, 0u8, 0u8)
+                            };
+                            let eff_bg = if apply_bg {
+                                bg_color_resolved
+                            } else {
+                                (255u8, 255u8, 255u8)
+                            };
                             if eff_fg != (0, 0, 0) || eff_bg != (255, 255, 255) {
                                 let gray = ((sr as u16 + sg as u16 + sb as u16) / 3) as u8;
                                 let t = gray as f32 / 255.0;
@@ -2801,7 +2953,11 @@ impl Bitmap {
                         (sr, sg, sb)
                     } else {
                         let dst_color = if !dst_palette_cache.is_empty() {
-                            self.get_pixel_color_fast(dst_palette_cache.table(), dst_x as u16, dst_y as u16)
+                            self.get_pixel_color_fast(
+                                dst_palette_cache.table(),
+                                dst_x as u16,
+                                dst_y as u16,
+                            )
                         } else {
                             self.get_pixel_color(palettes, dst_x as u16, dst_y as u16)
                         };
@@ -2822,7 +2978,15 @@ impl Bitmap {
                         if (sr, sg, sb) == bg_color_resolved {
                             continue;
                         }
-                        let dst_color = if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(dst_palette_cache.table(), dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
+                        let dst_color = if !dst_palette_cache.is_empty() {
+                            self.get_pixel_color_fast(
+                                dst_palette_cache.table(),
+                                dst_x as u16,
+                                dst_y as u16,
+                            )
+                        } else {
+                            self.get_pixel_color(palettes, dst_x as u16, dst_y as u16)
+                        };
                         let blended = if alpha >= 0.999 {
                             (sr, sg, sb)
                         } else {
@@ -2843,7 +3007,15 @@ impl Bitmap {
                         }
                         // Foreground bit → render with foreColor
                         let src_color = fg_color_resolved;
-                        let dst_color = if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(dst_palette_cache.table(), dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
+                        let dst_color = if !dst_palette_cache.is_empty() {
+                            self.get_pixel_color_fast(
+                                dst_palette_cache.table(),
+                                dst_x as u16,
+                                dst_y as u16,
+                            )
+                        } else {
+                            self.get_pixel_color(palettes, dst_x as u16, dst_y as u16)
+                        };
 
                         let blended = if alpha >= 0.999 {
                             src_color
@@ -2865,7 +3037,12 @@ impl Bitmap {
                     let (r, g, b) = if let Some(cache) = &src_palette_cache {
                         cache[i as usize]
                     } else {
-                        resolve_color_ref(palettes, &ColorRef::PaletteIndex(i), &src.palette_ref, src.original_bit_depth)
+                        resolve_color_ref(
+                            palettes,
+                            &ColorRef::PaletteIndex(i),
+                            &src.palette_ref,
+                            src.original_bit_depth,
+                        )
                     };
 
                     // Fast path: check index match first
@@ -2891,7 +3068,15 @@ impl Bitmap {
                         (r, g, b) // Keep original color
                     };
 
-                    let dst_color = if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(dst_palette_cache.table(), dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
+                    let dst_color = if !dst_palette_cache.is_empty() {
+                        self.get_pixel_color_fast(
+                            dst_palette_cache.table(),
+                            dst_x as u16,
+                            dst_y as u16,
+                        )
+                    } else {
+                        self.get_pixel_color(palettes, dst_x as u16, dst_y as u16)
+                    };
 
                     let blended = if src_alpha >= 0.999 && alpha >= 0.999 {
                         src_color
@@ -2910,7 +3095,8 @@ impl Bitmap {
 
                     // Skip pixel if it matches the sprite's bgColor (with tolerance
                     // for RGB565 quantization — pixel values may differ by up to ~4 from bgColor)
-                    let max_diff = (r as i16 - bg_color_resolved.0 as i16).unsigned_abs()
+                    let max_diff = (r as i16 - bg_color_resolved.0 as i16)
+                        .unsigned_abs()
                         .max((g as i16 - bg_color_resolved.1 as i16).unsigned_abs())
                         .max((b as i16 - bg_color_resolved.2 as i16).unsigned_abs());
                     if max_diff <= 4 {
@@ -2918,7 +3104,15 @@ impl Bitmap {
                     }
 
                     let src_color = (r, g, b);
-                    let dst_color = if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(dst_palette_cache.table(), dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
+                    let dst_color = if !dst_palette_cache.is_empty() {
+                        self.get_pixel_color_fast(
+                            dst_palette_cache.table(),
+                            dst_x as u16,
+                            dst_y as u16,
+                        )
+                    } else {
+                        self.get_pixel_color(palettes, dst_x as u16, dst_y as u16)
+                    };
 
                     let blended = if alpha >= 0.999 {
                         src_color
@@ -2955,8 +3149,13 @@ impl Bitmap {
                     // For text rendering to intermediate bitmap: write colorized RGB with
                     // per-pixel alpha directly. set_pixel always writes alpha=255 which
                     // destroys anti-aliasing information needed by WebGL2 compositing.
-                    if params.is_text_rendering && src.use_alpha && a < 255 && self.bit_depth == 32 {
-                        if dst_x >= 0 && dst_y >= 0 && dst_x < self.width as i32 && dst_y < self.height as i32 {
+                    if params.is_text_rendering && src.use_alpha && a < 255 && self.bit_depth == 32
+                    {
+                        if dst_x >= 0
+                            && dst_y >= 0
+                            && dst_x < self.width as i32
+                            && dst_y < self.height as i32
+                        {
                             let idx = (dst_y as usize * self.width as usize + dst_x as usize) * 4;
                             if idx + 3 < self.data.len() {
                                 let (sr, sg, sb) = src_color;
@@ -2972,13 +3171,20 @@ impl Bitmap {
                                     let da = dest_a as f32 / 255.0;
                                     let out_a = sa + da * (1.0 - sa);
                                     if out_a > 0.001 {
-                                        let out_r = (sr as f32 * sa + self.data[idx] as f32 * da * (1.0 - sa)) / out_a;
-                                        let out_g = (sg as f32 * sa + self.data[idx + 1] as f32 * da * (1.0 - sa)) / out_a;
-                                        let out_b = (sb as f32 * sa + self.data[idx + 2] as f32 * da * (1.0 - sa)) / out_a;
+                                        let out_r = (sr as f32 * sa
+                                            + self.data[idx] as f32 * da * (1.0 - sa))
+                                            / out_a;
+                                        let out_g = (sg as f32 * sa
+                                            + self.data[idx + 1] as f32 * da * (1.0 - sa))
+                                            / out_a;
+                                        let out_b = (sb as f32 * sa
+                                            + self.data[idx + 2] as f32 * da * (1.0 - sa))
+                                            / out_a;
                                         self.data[idx] = out_r.round().min(255.0) as u8;
                                         self.data[idx + 1] = out_g.round().min(255.0) as u8;
                                         self.data[idx + 2] = out_b.round().min(255.0) as u8;
-                                        self.data[idx + 3] = (out_a * 255.0).round().min(255.0) as u8;
+                                        self.data[idx + 3] =
+                                            (out_a * 255.0).round().min(255.0) as u8;
                                     }
                                 }
                             }
@@ -2986,7 +3192,15 @@ impl Bitmap {
                         continue;
                     }
 
-                    let dst_color = if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(dst_palette_cache.table(), dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
+                    let dst_color = if !dst_palette_cache.is_empty() {
+                        self.get_pixel_color_fast(
+                            dst_palette_cache.table(),
+                            dst_x as u16,
+                            dst_y as u16,
+                        )
+                    } else {
+                        self.get_pixel_color(palettes, dst_x as u16, dst_y as u16)
+                    };
 
                     // Honor the per-pixel source alpha for use_alpha bitmaps,
                     // combined with the #blend factor. Without this a soft
@@ -3025,7 +3239,15 @@ impl Bitmap {
                     let (r, g, b, _) = src.get_pixel_color_with_alpha(palettes, sx, sy);
 
                     let src_color = (r, g, b);
-                    let dst_color = if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(dst_palette_cache.table(), dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
+                    let dst_color = if !dst_palette_cache.is_empty() {
+                        self.get_pixel_color_fast(
+                            dst_palette_cache.table(),
+                            dst_x as u16,
+                            dst_y as u16,
+                        )
+                    } else {
+                        self.get_pixel_color(palettes, dst_x as u16, dst_y as u16)
+                    };
 
                     let blended = if alpha >= 0.999 {
                         src_color
@@ -3040,10 +3262,17 @@ impl Bitmap {
                 // Indexed bitmap (1-8 bit) ink 8
                 if ink == 8 && is_indexed {
                     let color_ref = src.get_pixel_color_ref(sx, sy);
-                    let (sr, sg, sb) = if let (ColorRef::PaletteIndex(i), Some(cache)) = (&color_ref, &src_palette_cache) {
+                    let (sr, sg, sb) = if let (ColorRef::PaletteIndex(i), Some(cache)) =
+                        (&color_ref, &src_palette_cache)
+                    {
                         cache[*i as usize]
                     } else {
-                        resolve_color_ref(palettes, &color_ref, &src.palette_ref, src.original_bit_depth)
+                        resolve_color_ref(
+                            palettes,
+                            &color_ref,
+                            &src.palette_ref,
+                            src.original_bit_depth,
+                        )
                     };
 
                     // Check matte mask - only edge-connected bg pixels are transparent
@@ -3069,7 +3298,15 @@ impl Bitmap {
                         src_color = Self::apply_forecolor_tint(src_color, fg_color_resolved);
                     }
 
-                    let dst_color = if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(dst_palette_cache.table(), dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
+                    let dst_color = if !dst_palette_cache.is_empty() {
+                        self.get_pixel_color_fast(
+                            dst_palette_cache.table(),
+                            dst_x as u16,
+                            dst_y as u16,
+                        )
+                    } else {
+                        self.get_pixel_color(palettes, dst_x as u16, dst_y as u16)
+                    };
 
                     let blended = if src_alpha >= 0.999 && alpha >= 0.999 {
                         src_color
@@ -3146,17 +3383,31 @@ impl Bitmap {
                                     self.data[idx + 3] = 0;
                                 } else {
                                     let inv = 1.0 / out_a;
-                                    self.data[idx]     = ((sr as f32 * sa_f + dr * da * one_minus_sa) * inv).clamp(0.0, 255.0) as u8;
-                                    self.data[idx + 1] = ((sg as f32 * sa_f + dg * da * one_minus_sa) * inv).clamp(0.0, 255.0) as u8;
-                                    self.data[idx + 2] = ((sb as f32 * sa_f + db * da * one_minus_sa) * inv).clamp(0.0, 255.0) as u8;
-                                    self.data[idx + 3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
+                                    self.data[idx] = ((sr as f32 * sa_f + dr * da * one_minus_sa)
+                                        * inv)
+                                        .clamp(0.0, 255.0)
+                                        as u8;
+                                    self.data[idx + 1] =
+                                        ((sg as f32 * sa_f + dg * da * one_minus_sa) * inv)
+                                            .clamp(0.0, 255.0)
+                                            as u8;
+                                    self.data[idx + 2] =
+                                        ((sb as f32 * sa_f + db * da * one_minus_sa) * inv)
+                                            .clamp(0.0, 255.0)
+                                            as u8;
+                                    self.data[idx + 3] =
+                                        (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
                                 }
                             }
                             continue;
                         }
 
                         let dst_color = if !dst_palette_cache.is_empty() {
-                            self.get_pixel_color_fast(dst_palette_cache.table(), dst_x as u16, dst_y as u16)
+                            self.get_pixel_color_fast(
+                                dst_palette_cache.table(),
+                                dst_x as u16,
+                                dst_y as u16,
+                            )
                         } else {
                             self.get_pixel_color(palettes, dst_x as u16, dst_y as u16)
                         };
@@ -3180,8 +3431,13 @@ impl Bitmap {
                 // skip — fall through so the ink 0 path below writes the
                 // transparent pixel verbatim, which erases stale content
                 // (required for chat buffer scrolling with shifted-slice blits).
-                if src.original_bit_depth == 32 && src.use_alpha && sa == 0
-                    && !(self.bit_depth == 32 && self.use_alpha && ink == 0 && !params.is_text_rendering)
+                if src.original_bit_depth == 32
+                    && src.use_alpha
+                    && sa == 0
+                    && !(self.bit_depth == 32
+                        && self.use_alpha
+                        && ink == 0
+                        && !params.is_text_rendering)
                 {
                     continue;
                 }
@@ -3232,8 +3488,16 @@ impl Bitmap {
                             // take on the chest colour.
                             if (has_fg || has_bg) && Self::uses_back_color(32, ink) {
                                 let gray = ((sr as u16 + sg as u16 + sb as u16) / 3) as u8;
-                                let eff_fg = if has_fg { fg_color_resolved } else { (0u8, 0u8, 0u8) };
-                                let eff_bg = if has_bg { bg_color_resolved } else { (255u8, 255u8, 255u8) };
+                                let eff_fg = if has_fg {
+                                    fg_color_resolved
+                                } else {
+                                    (0u8, 0u8, 0u8)
+                                };
+                                let eff_bg = if has_bg {
+                                    bg_color_resolved
+                                } else {
+                                    (255u8, 255u8, 255u8)
+                                };
                                 let t = gray as f32 / 255.0;
                                 src_color = (
                                     ((1.0 - t) * eff_fg.0 as f32 + t * eff_bg.0 as f32) as u8,
@@ -3257,14 +3521,20 @@ impl Bitmap {
                                 let max = (1 << src.original_bit_depth) - 1;
                                 let t = i as f32 / max as f32;
 
-                                if has_fg && has_bg && Self::uses_back_color(src.original_bit_depth, ink) {
+                                if has_fg
+                                    && has_bg
+                                    && Self::uses_back_color(src.original_bit_depth, ink)
+                                {
                                     src_color = (
                                         ((1.0 - t) * fg_color_resolved.0 as f32
-                                            + t * bg_color_resolved.0 as f32) as u8,
+                                            + t * bg_color_resolved.0 as f32)
+                                            as u8,
                                         ((1.0 - t) * fg_color_resolved.1 as f32
-                                            + t * bg_color_resolved.1 as f32) as u8,
+                                            + t * bg_color_resolved.1 as f32)
+                                            as u8,
                                         ((1.0 - t) * fg_color_resolved.2 as f32
-                                            + t * bg_color_resolved.2 as f32) as u8,
+                                            + t * bg_color_resolved.2 as f32)
+                                            as u8,
                                     );
                                 } else if has_fg && i == 0 {
                                     src_color = fg_color_resolved;
@@ -3325,8 +3595,15 @@ impl Bitmap {
                         src_color = Self::apply_forecolor_tint(src_color, fg_color_resolved);
                     }
 
-                    let dst_color =
-                        if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(dst_palette_cache.table(), dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
+                    let dst_color = if !dst_palette_cache.is_empty() {
+                        self.get_pixel_color_fast(
+                            dst_palette_cache.table(),
+                            dst_x as u16,
+                            dst_y as u16,
+                        )
+                    } else {
+                        self.get_pixel_color(palettes, dst_x as u16, dst_y as u16)
+                    };
 
                     let blended = if src_alpha >= 0.999 && alpha >= 0.999 {
                         src_color
@@ -3376,8 +3653,7 @@ impl Bitmap {
                 // pulls toward white/the hue, which matches Add Pin's
                 // saturate-to-white behaviour visually without needing a
                 // real additive composite path.
-                if !params.is_text_rendering && ink == 33
-                    && self.bit_depth == 32 && self.use_alpha
+                if !params.is_text_rendering && ink == 33 && self.bit_depth == 32 && self.use_alpha
                 {
                     let src_max = sr.max(sg).max(sb);
                     if src_max == 0 {
@@ -3435,8 +3711,7 @@ impl Bitmap {
                 // so the eventual stage composite produces the correct
                 // translucent fade (white spotlight at 30% opacity = white
                 // at α=0.3, not opaque grey).
-                if !params.is_text_rendering && ink == 32
-                    && self.bit_depth == 32 && self.use_alpha
+                if !params.is_text_rendering && ink == 32 && self.bit_depth == 32 && self.use_alpha
                 {
                     let src_a = sa as f32 / 255.0;
                     let sa_f = src_a * alpha;
@@ -3458,9 +3733,15 @@ impl Bitmap {
                             self.data[idx + 3] = 0;
                         } else {
                             let inv = 1.0 / out_a;
-                            self.data[idx]     = ((sr as f32 * sa_f + dr * da * one_minus_sa) * inv).clamp(0.0, 255.0) as u8;
-                            self.data[idx + 1] = ((sg as f32 * sa_f + dg * da * one_minus_sa) * inv).clamp(0.0, 255.0) as u8;
-                            self.data[idx + 2] = ((sb as f32 * sa_f + db * da * one_minus_sa) * inv).clamp(0.0, 255.0) as u8;
+                            self.data[idx] = ((sr as f32 * sa_f + dr * da * one_minus_sa) * inv)
+                                .clamp(0.0, 255.0)
+                                as u8;
+                            self.data[idx + 1] = ((sg as f32 * sa_f + dg * da * one_minus_sa) * inv)
+                                .clamp(0.0, 255.0)
+                                as u8;
+                            self.data[idx + 2] = ((sb as f32 * sa_f + db * da * one_minus_sa) * inv)
+                                .clamp(0.0, 255.0)
+                                as u8;
                             self.data[idx + 3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
                         }
                     }
@@ -3470,10 +3751,7 @@ impl Bitmap {
                 // Ink 36/37/39 with auto-detected edge bg: skip when src
                 // matches the most common edge color (handles custom-palette
                 // bitmaps where bg_color_resolved is wrong).
-                if !params.is_text_rendering
-                    && (ink == 36 || ink == 37 || ink == 39)
-                    && sa == 255
-                {
+                if !params.is_text_rendering && (ink == 36 || ink == 37 || ink == 39) && sa == 255 {
                     if let Some(edge_bg) = edge_matte_color {
                         if (sr, sg, sb) == edge_bg {
                             continue;
@@ -3499,8 +3777,15 @@ impl Bitmap {
                 if params.is_text_rendering {
                     // Black pixel → foreground color
                     if (sr, sg, sb) == (0, 0, 0) {
-                        let dst_color =
-                            if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(dst_palette_cache.table(), dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
+                        let dst_color = if !dst_palette_cache.is_empty() {
+                            self.get_pixel_color_fast(
+                                dst_palette_cache.table(),
+                                dst_x as u16,
+                                dst_y as u16,
+                            )
+                        } else {
+                            self.get_pixel_color(palettes, dst_x as u16, dst_y as u16)
+                        };
                         let blended = blend_pixel(
                             dst_color,
                             fg_color_resolved,
@@ -3538,7 +3823,11 @@ impl Bitmap {
                     let mb = ((sb as u16 * bg_color_resolved.2 as u16) / 255) as u8;
                     let multiplied = (mr, mg, mb);
                     let dst = if !dst_palette_cache.is_empty() {
-                        self.get_pixel_color_fast(dst_palette_cache.table(), dst_x as u16, dst_y as u16)
+                        self.get_pixel_color_fast(
+                            dst_palette_cache.table(),
+                            dst_x as u16,
+                            dst_y as u16,
+                        )
                     } else {
                         self.get_pixel_color(palettes, dst_x as u16, dst_y as u16)
                     };
@@ -3557,7 +3846,11 @@ impl Bitmap {
                 // 4. NON-TEXT normal rendering
                 // ----------------------------------------------------------
                 let src_alpha = sa as f32 / 255.0;
-                let dst_color = if !dst_palette_cache.is_empty() { self.get_pixel_color_fast(dst_palette_cache.table(), dst_x as u16, dst_y as u16) } else { self.get_pixel_color(palettes, dst_x as u16, dst_y as u16) };
+                let dst_color = if !dst_palette_cache.is_empty() {
+                    self.get_pixel_color_fast(dst_palette_cache.table(), dst_x as u16, dst_y as u16)
+                } else {
+                    self.get_pixel_color(palettes, dst_x as u16, dst_y as u16)
+                };
 
                 let blended = blend_pixel(
                     dst_color,
@@ -3702,7 +3995,8 @@ impl Bitmap {
         };
         for line in &lines {
             // Calculate x based on alignment
-            let line_w: i32 = line.chars()
+            let line_w: i32 = line
+                .chars()
                 .map(|ch| font.get_char_advance_for(ch) as i32)
                 .sum();
             let x = match alignment {
@@ -3715,8 +4009,14 @@ impl Bitmap {
             let mut cx = x;
             for ch in line.chars() {
                 bitmap_font_copy_char(
-                    font, font_bitmap, crate::io::encoding::glyph_byte_for(ch),
-                    self, cx, y, palettes, &params,
+                    font,
+                    font_bitmap,
+                    crate::io::encoding::glyph_byte_for(ch),
+                    self,
+                    cx,
+                    y,
+                    palettes,
+                    &params,
                 );
                 cx += font.get_char_advance_for(ch) as i32;
             }
@@ -3838,7 +4138,11 @@ impl Bitmap {
         }
 
         if lines.is_empty() {
-            lines.push(LineSpan { start: 0, end: 0, text: String::new() });
+            lines.push(LineSpan {
+                start: 0,
+                end: 0,
+                text: String::new(),
+            });
         }
         lines
     }
@@ -3887,7 +4191,11 @@ impl Bitmap {
         // .bytes() loop counted each lead+continuation byte of an umlaut
         // as separate glyph advances, producing 4 phantom advances for
         // "öäüß" (8 UTF-8 bytes → 8 advances instead of 4).
-        let line_w: i32 = line.text.chars().map(|c| font.get_char_advance(c as u8) as i32).sum();
+        let line_w: i32 = line
+            .text
+            .chars()
+            .map(|c| font.get_char_advance(c as u8) as i32)
+            .sum();
         let x_offset = if max_width > 0 {
             match alignment {
                 BuiltInSymbol::Center => ((max_width - line_w) / 2).max(0),
@@ -3904,7 +4212,9 @@ impl Bitmap {
         let mut x = x_offset;
         let mut byte_pos = 0usize;
         for c in line.text.chars() {
-            if byte_pos >= col { break; }
+            if byte_pos >= col {
+                break;
+            }
             x += font.get_char_advance(c as u8) as i32;
             byte_pos += c.len_utf8();
         }
@@ -3935,9 +4245,16 @@ impl Bitmap {
         // also keeps the returned caret index aligned to char boundaries
         // (was bug source for the byte-index-7-mid-of-ß slice panic
         // observed in get_focused_field_selected_text / pixel_x_for_byte).
-        let line_w: i32 = line.text.chars().map(|c| font.get_char_advance(c as u8) as i32).sum();
+        let line_w: i32 = line
+            .text
+            .chars()
+            .map(|c| font.get_char_advance(c as u8) as i32)
+            .sum();
         let x_offset = if max_width > 0 {
-            let key = alignment.trim().trim_start_matches('#').to_ascii_lowercase();
+            let key = alignment
+                .trim()
+                .trim_start_matches('#')
+                .to_ascii_lowercase();
             match key.as_str() {
                 "center" => ((max_width - line_w) / 2).max(0),
                 "right" => (max_width - line_w).max(0),
@@ -4197,21 +4514,42 @@ impl Bitmap {
                         // Director shape patterns: 1-56 = 1-bit QuickDraw patterns
                         // (recoloured fore/back; 1 = solid), 57-64 = tiled bitmaps
                         // (thead's pattern-63 background). 0/other = solid foreColor.
-                        if let Some(tile) =
-                            crate::player::bitmap::builtin_tiles::tile_for_pattern(shape_info.pattern)
-                        {
-                            self.fill_rect_tiled(x1, y1, x2, y2, tile, palettes, palette_ref, alpha);
+                        if let Some(tile) = crate::player::bitmap::builtin_tiles::tile_for_pattern(
+                            shape_info.pattern,
+                        ) {
+                            self.fill_rect_tiled(
+                                x1,
+                                y1,
+                                x2,
+                                y2,
+                                tile,
+                                palettes,
+                                palette_ref,
+                                alpha,
+                            );
                         } else if let Some(pat) =
-                            crate::player::bitmap::quickdraw_patterns::quickdraw_pattern(shape_info.pattern)
+                            crate::player::bitmap::quickdraw_patterns::quickdraw_pattern(
+                                shape_info.pattern,
+                            )
                         {
-                            self.fill_rect_pattern_1bit(x1, y1, x2, y2, pat, fg_rgb, bg_rgb, palettes, alpha);
+                            self.fill_rect_pattern_1bit(
+                                x1, y1, x2, y2, pat, fg_rgb, bg_rgb, palettes, alpha,
+                            );
                         } else {
                             self.fill_rect(x1, y1, x2, y2, fg_rgb, palettes, alpha);
                         }
                     }
                     if thickness > 0 {
                         for t in 0..thickness {
-                            self.stroke_rect(x1 + t, y1 + t, x2 - t, y2 - t, fg_rgb, palettes, alpha);
+                            self.stroke_rect(
+                                x1 + t,
+                                y1 + t,
+                                x2 - t,
+                                y2 - t,
+                                fg_rgb,
+                                palettes,
+                                alpha,
+                            );
                         }
                     }
                 }
@@ -4221,7 +4559,9 @@ impl Bitmap {
                         self.fill_round_rect(x1, y1, x2, y2, radius, fg_rgb, palettes, alpha);
                     }
                     if thickness > 0 {
-                        self.stroke_round_rect(x1, y1, x2, y2, radius, fg_rgb, palettes, alpha, thickness);
+                        self.stroke_round_rect(
+                            x1, y1, x2, y2, radius, fg_rgb, palettes, alpha, thickness,
+                        );
                     }
                 }
                 ShapeType::Oval => {
@@ -4252,8 +4592,11 @@ impl Bitmap {
             let w = (x2 - x1).max(1);
             let h = (y2 - y1).max(1);
             let mut temp = Bitmap::new(
-                w as u16, h as u16,
-                self.bit_depth, self.original_bit_depth, 0,
+                w as u16,
+                h as u16,
+                self.bit_depth,
+                self.original_bit_depth,
+                0,
                 self.palette_ref.clone(),
             );
 
@@ -4274,7 +4617,9 @@ impl Bitmap {
                         temp.fill_round_rect(0, 0, w, h, radius, fg_rgb, palettes, 1.0);
                     }
                     if thickness > 0 {
-                        temp.stroke_round_rect(0, 0, w, h, radius, fg_rgb, palettes, 1.0, thickness);
+                        temp.stroke_round_rect(
+                            0, 0, w, h, radius, fg_rgb, palettes, 1.0, thickness,
+                        );
                     }
                 }
                 ShapeType::Oval => {
@@ -4350,12 +4695,34 @@ mod shrink_sampling_tests {
     // keeps columns 0 and 1 (floor(0 * 1.5), floor(1 * 1.5)); the centre rule
     // keeps 0 and 2 (floor(0.75), floor(2.25)).
     fn shrink(floor_rule: bool) -> Vec<u8> {
-        let mut src = Bitmap::new(3, 1, 32, 32, 0, PaletteRef::BuiltIn(BuiltInPalette::SystemWin));
-        for x in 0..3 { src.data[x * 4..x * 4 + 4].copy_from_slice(&[10 * (x as u8 + 1), 0, 0, 255]); }
-        let mut dst = Bitmap::new(2, 1, 32, 32, 0, PaletteRef::BuiltIn(BuiltInPalette::SystemWin));
+        let mut src = Bitmap::new(
+            3,
+            1,
+            32,
+            32,
+            0,
+            PaletteRef::BuiltIn(BuiltInPalette::SystemWin),
+        );
+        for x in 0..3 {
+            src.data[x * 4..x * 4 + 4].copy_from_slice(&[10 * (x as u8 + 1), 0, 0, 255]);
+        }
+        let mut dst = Bitmap::new(
+            2,
+            1,
+            32,
+            32,
+            0,
+            PaletteRef::BuiltIn(BuiltInPalette::SystemWin),
+        );
         let mut params = CopyPixelsParams::default(&src);
         params.floor_rule = floor_rule;
-        dst.copy_pixels_with_params(&PaletteMap::new(), &src, IntRect::from(0, 0, 2, 1), IntRect::from(0, 0, 3, 1), &params);
+        dst.copy_pixels_with_params(
+            &PaletteMap::new(),
+            &src,
+            IntRect::from(0, 0, 2, 1),
+            IntRect::from(0, 0, 3, 1),
+            &params,
+        );
         vec![dst.data[0], dst.data[4]]
     }
 
@@ -4379,24 +4746,70 @@ mod ink_colour_tests {
     #[test]
     fn lighten_adds_the_fore_colour() {
         let src = (100, 100, 100);
-        assert_eq!(blend_pixel((0, 0, 0), src, 40, WHITE, (50, 25, 0), false, 1.0, 1.0), (150, 125, 100));
-        assert_eq!(blend_pixel((0, 0, 0), src, 40, WHITE, BLACK, false, 1.0, 1.0), src, "the default foreColor changes nothing");
-        assert_eq!(blend_pixel((0, 0, 0), (250, 250, 250), 40, WHITE, (50, 25, 0), false, 1.0, 1.0), (255, 255, 250), "pinned at 255");
-        assert_eq!(blend_pixel((0, 0, 0), src, 40, WHITE, (50, 25, 0), true, 1.0, 1.0), src, "an indexed bitmap keeps its palette colours");
+        assert_eq!(
+            blend_pixel((0, 0, 0), src, 40, WHITE, (50, 25, 0), false, 1.0, 1.0),
+            (150, 125, 100)
+        );
+        assert_eq!(
+            blend_pixel((0, 0, 0), src, 40, WHITE, BLACK, false, 1.0, 1.0),
+            src,
+            "the default foreColor changes nothing"
+        );
+        assert_eq!(
+            blend_pixel(
+                (0, 0, 0),
+                (250, 250, 250),
+                40,
+                WHITE,
+                (50, 25, 0),
+                false,
+                1.0,
+                1.0
+            ),
+            (255, 255, 250),
+            "pinned at 255"
+        );
+        assert_eq!(
+            blend_pixel((0, 0, 0), src, 40, WHITE, (50, 25, 0), true, 1.0, 1.0),
+            src,
+            "an indexed bitmap keeps its palette colours"
+        );
     }
 
     #[test]
     fn lighten_still_keys_the_background_colour() {
         let dst = (7, 8, 9);
-        assert_eq!(blend_pixel(dst, WHITE, 40, WHITE, (50, 25, 0), false, 1.0, 1.0), dst);
+        assert_eq!(
+            blend_pixel(dst, WHITE, 40, WHITE, (50, 25, 0), false, 1.0, 1.0),
+            dst
+        );
     }
 
     #[test]
     fn darken_remaps_black_to_fore_and_white_to_back() {
         let fg = (50, 25, 0);
         let bg = (200, 220, 240);
-        assert_eq!(blend_pixel((0, 0, 0), (0, 0, 0), 41, bg, fg, false, 1.0, 1.0), fg);
-        assert_eq!(blend_pixel((0, 0, 0), (255, 255, 255), 41, bg, fg, false, 1.0, 1.0), bg);
-        assert_eq!(blend_pixel((0, 0, 0), (100, 100, 100), 41, WHITE, BLACK, false, 1.0, 1.0), (100, 100, 100), "defaults are the identity");
+        assert_eq!(
+            blend_pixel((0, 0, 0), (0, 0, 0), 41, bg, fg, false, 1.0, 1.0),
+            fg
+        );
+        assert_eq!(
+            blend_pixel((0, 0, 0), (255, 255, 255), 41, bg, fg, false, 1.0, 1.0),
+            bg
+        );
+        assert_eq!(
+            blend_pixel(
+                (0, 0, 0),
+                (100, 100, 100),
+                41,
+                WHITE,
+                BLACK,
+                false,
+                1.0,
+                1.0
+            ),
+            (100, 100, 100),
+            "defaults are the identity"
+        );
     }
 }

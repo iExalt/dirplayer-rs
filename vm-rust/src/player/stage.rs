@@ -1,4 +1,14 @@
-use crate::{director::lingo::datum::Datum, player::{allocator::ScriptInstanceAllocatorTrait, bitmap::bitmap::PaletteRef, symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable}, ScriptErrorCode}, rendering::{render_stage_to_bitmap, with_renderer_mut}, rendering_gpu::Renderer};
+use crate::{
+    director::lingo::datum::Datum,
+    player::{
+        allocator::ScriptInstanceAllocatorTrait,
+        bitmap::bitmap::PaletteRef,
+        symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable},
+        ScriptErrorCode,
+    },
+    rendering::{render_stage_to_bitmap, with_renderer_mut},
+    rendering_gpu::Renderer,
+};
 
 use super::{
     bitmap::bitmap::{get_system_default_palette, Bitmap},
@@ -68,7 +78,10 @@ fn compute_stage_layout(
 
     match style {
         StretchStyle::Meet => {
-            let scale = f64::min(stage_width as f64 / movie_width, stage_height as f64 / movie_height);
+            let scale = f64::min(
+                stage_width as f64 / movie_width,
+                stage_height as f64 / movie_height,
+            );
             let draw_width = movie_width * scale;
             let draw_height = movie_height * scale;
             let left = ((stage_width as f64 - draw_width) / 2.0).max(0.0);
@@ -135,7 +148,9 @@ pub fn stage_scale(player: &DirPlayer) -> (f64, f64) {
     let layout = stage_layout(player);
     let movie_w = player.movie.rect.width() as f64;
     let movie_h = player.movie.rect.height() as f64;
-    if movie_w <= 0.0 || movie_h <= 0.0 { return (1.0, 1.0); }
+    if movie_w <= 0.0 || movie_h <= 0.0 {
+        return (1.0, 1.0);
+    }
     let sx = layout.scale_x(movie_w);
     let sy = layout.scale_y(movie_h);
     if (sx - 1.0).abs() < 1e-3 && (sy - 1.0).abs() < 1e-3 {
@@ -182,9 +197,7 @@ pub fn canvas_to_movie_coords(player: &DirPlayer, x: f64, y: f64) -> (f64, f64) 
     let draw_h = (layout.draw_rect[3] - layout.draw_rect[1]).max(1.0);
     let movie_w = player.movie.rect.width() as f64;
     let movie_h = player.movie.rect.height() as f64;
-    if draw_w > 0.0 && draw_h > 0.0
-        && movie_w > 0.0 && movie_h > 0.0
-    {
+    if draw_w > 0.0 && draw_h > 0.0 && movie_w > 0.0 && movie_h > 0.0 {
         (
             (x - layout.draw_rect[0]) * movie_w / draw_w,
             (y - layout.draw_rect[1]) * movie_h / draw_h,
@@ -214,7 +227,15 @@ pub fn get_stage_prop(
         Some(BuiltInSymbol::DrawRect) => Ok(Datum::Rect(stage_layout(player).draw_rect, 0)),
         Some(BuiltInSymbol::SourceRect) => {
             // TODO where does this come from?
-            Ok(Datum::Rect([0.0, 0.0, player.movie.rect.width() as f64, player.movie.rect.height() as f64], 0))
+            Ok(Datum::Rect(
+                [
+                    0.0,
+                    0.0,
+                    player.movie.rect.width() as f64,
+                    player.movie.rect.height() as f64,
+                ],
+                0,
+            ))
         }
         Some(BuiltInSymbol::BgColor) => Ok(Datum::ColorRef(player.bg_color.clone())),
         Some(BuiltInSymbol::Image) => {
@@ -233,8 +254,7 @@ pub fn get_stage_prop(
             // alone here.
             let has_clean_existing = match player.stage_image {
                 Some(existing) => {
-                    player.bitmap_manager.get_bitmap(existing).is_some()
-                        && player.stage_image_dirty
+                    player.bitmap_manager.get_bitmap(existing).is_some() && player.stage_image_dirty
                 }
                 None => false,
             };
@@ -301,10 +321,12 @@ pub fn get_stage_prop(
             }
         }
         Some(BuiltInSymbol::Name) => Ok(Datum::String("stage".to_string())),
-        _ => return Err(ScriptError::new(format!(
-            "Invalid stage property {}",
-            symbols.display(&prop).unwrap_or("<foreign symbol>")
-        ))),
+        _ => {
+            return Err(ScriptError::new(format!(
+                "Invalid stage property {}",
+                symbols.display(&prop).unwrap_or("<foreign symbol>")
+            )))
+        }
     }
 }
 
@@ -376,23 +398,24 @@ fn checked_stage_datum<'a>(
 ) -> Result<&'a Datum, ScriptError> {
     let datum = match datum_ref {
         DatumRef::Void => &Datum::Void,
-        _ => player
-            .allocator
-            .try_get_datum(datum_ref)
-            .ok_or_else(|| ScriptError::new_code(
+        _ => player.allocator.try_get_datum(datum_ref).ok_or_else(|| {
+            ScriptError::new_code(
                 ScriptErrorCode::InvalidReference,
                 format!("invalid datum reference {datum_ref}"),
-            ))?,
+            )
+        })?,
     };
     crate::player::compare::validate_direct_symbol_fields(datum, symbols)?;
     if let Datum::ScriptInstanceRef(instance_ref) = datum {
         player
             .allocator
             .get_script_instance_opt(instance_ref)
-            .ok_or_else(|| ScriptError::new_code(
-                ScriptErrorCode::InvalidReference,
-                "foreign or stale ScriptInstanceRef".to_owned(),
-            ))?;
+            .ok_or_else(|| {
+                ScriptError::new_code(
+                    ScriptErrorCode::InvalidReference,
+                    "foreign or stale ScriptInstanceRef".to_owned(),
+                )
+            })?;
     }
     Ok(datum)
 }
@@ -400,15 +423,13 @@ fn checked_stage_datum<'a>(
 #[cfg(test)]
 mod tests {
     use super::{compute_stage_layout, get_stage_prop, set_stage_prop, StretchStyle};
-    use async_std::channel;
-    use crate::player::{
-        DirPlayer, ScriptErrorCode,
-        allocator::ScriptInstanceAllocatorTrait,
-        cast_lib::CastMemberRef,
-        script::ScriptInstance,
-    };
     use crate::player::ownership::OwnerToken;
     use crate::player::symbols::symbol_table::SymbolTable;
+    use crate::player::{
+        allocator::ScriptInstanceAllocatorTrait, cast_lib::CastMemberRef, script::ScriptInstance,
+        DirPlayer, ScriptErrorCode,
+    };
+    use async_std::channel;
 
     #[test]
     fn stretch_meet_letterboxes_inside_stage() {
@@ -466,17 +487,20 @@ mod tests {
         let (tx, _rx) = channel::unbounded();
         let mut player = DirPlayer::new_with_owner(tx, OwnerToken::transitional());
         let symbols = SymbolTable::new();
-        let mut foreign_player = DirPlayer::new_with_owner(
-            channel::unbounded().0,
-            OwnerToken::transitional(),
-        );
-        let foreign_instance = foreign_player.allocator.alloc_script_instance(ScriptInstance {
-            instance_id: 1,
-            script: CastMemberRef { cast_lib: 1, cast_member: 1 },
-            ancestor: None,
-            properties: Default::default(),
-            begin_sprite_called: false,
-        });
+        let mut foreign_player =
+            DirPlayer::new_with_owner(channel::unbounded().0, OwnerToken::transitional());
+        let foreign_instance = foreign_player
+            .allocator
+            .alloc_script_instance(ScriptInstance {
+                instance_id: 1,
+                script: CastMemberRef {
+                    cast_lib: 1,
+                    cast_member: 1,
+                },
+                ancestor: None,
+                properties: Default::default(),
+                begin_sprite_called: false,
+            });
         let foreign_value = foreign_player.alloc_datum(
             crate::director::lingo::datum::Datum::ScriptInstanceRef(foreign_instance),
         );
@@ -484,7 +508,9 @@ mod tests {
         set_stage_prop(
             &mut player,
             &symbols,
-            crate::player::symbols::symbol::Symbol::builtin(crate::player::symbols::builtin::BuiltInSymbol::SourceRect),
+            crate::player::symbols::symbol::Symbol::builtin(
+                crate::player::symbols::builtin::BuiltInSymbol::SourceRect,
+            ),
             &foreign_value,
         )
         .expect("SourceRect writes are ignored before value inspection");

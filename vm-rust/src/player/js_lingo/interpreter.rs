@@ -21,7 +21,9 @@ use super::value::{
     JsArray, JsArrayRef, JsError, JsFunction, JsFunctionRef, JsObject, JsObjectRef, JsValue,
     NativeFn,
 };
-use super::variable_length::{read_i16_operand, read_i32_operand, read_u16_operand, read_u32_operand};
+use super::variable_length::{
+    read_i16_operand, read_i32_operand, read_u16_operand, read_u32_operand,
+};
 use super::xdr::{
     iter_ops, JsAtom, JsBindingKind, JsFunctionAtom, JsFunctionBinding, JsScriptIR, JsTryNote,
 };
@@ -145,7 +147,9 @@ impl JsRuntime {
             if args.len() == 1 {
                 let len_hint = match &args[0] {
                     JsValue::Int(i) if *i >= 0 => Some(*i as usize),
-                    JsValue::Number(n) if *n >= 0.0 && *n == n.trunc() && n.is_finite() => Some(*n as usize),
+                    JsValue::Number(n) if *n >= 0.0 && *n == n.trunc() && n.is_finite() => {
+                        Some(*n as usize)
+                    }
                     _ => None,
                 };
                 if let Some(n) = len_hint {
@@ -190,13 +194,21 @@ impl JsRuntime {
         name: &'static str,
         f: impl Fn(&[JsValue]) -> Result<JsValue, JsError> + 'static,
     ) {
-        let native = NativeFn { name, call: Box::new(f) };
-        self.global.borrow_mut().set_own(name, JsValue::Native(Rc::new(native)));
+        let native = NativeFn {
+            name,
+            call: Box::new(f),
+        };
+        self.global
+            .borrow_mut()
+            .set_own(name, JsValue::Native(Rc::new(native)));
     }
 
     /// Swap in a real Director bridge. Call before `run_program` for the
     /// bridge to be available to handlers.
-    pub fn set_bridge(&mut self, bridge: std::rc::Rc<std::cell::RefCell<dyn super::host_bridge::JsHostBridge>>) {
+    pub fn set_bridge(
+        &mut self,
+        bridge: std::rc::Rc<std::cell::RefCell<dyn super::host_bridge::JsHostBridge>>,
+    ) {
         self.bridge = bridge;
     }
 
@@ -223,17 +235,15 @@ impl JsRuntime {
             Ok(b.borrow_mut().sprite(channel))
         });
         let b = bridge.clone();
-        self.define_native("member", move |args| {
-            Ok(b.borrow_mut().member(args))
-        });
+        self.define_native("member", move |args| Ok(b.borrow_mut().member(args)));
         let b = bridge.clone();
-        self.define_native("castLib", move |args| {
-            Ok(b.borrow_mut().cast_lib(args))
-        });
+        self.define_native("castLib", move |args| Ok(b.borrow_mut().cast_lib(args)));
         let b = bridge.clone();
         self.define_native("go", move |args| b.borrow_mut().go(args));
         let b = bridge.clone();
-        self.define_native("puppetSprite", move |args| b.borrow_mut().puppet_sprite(args));
+        self.define_native("puppetSprite", move |args| {
+            b.borrow_mut().puppet_sprite(args)
+        });
         let b = bridge.clone();
         self.define_native("updateStage", move |_args| b.borrow_mut().update_stage());
     }
@@ -335,7 +345,12 @@ impl JsRuntime {
             let byte = frame.bytecode[pc];
             let op = match JsOp::from_byte(byte) {
                 Some(o) => o,
-                None => return Err(JsError::new(format!("unknown opcode 0x{:02x} at pc={}", byte, pc))),
+                None => {
+                    return Err(JsError::new(format!(
+                        "unknown opcode 0x{:02x} at pc={}",
+                        byte, pc
+                    )))
+                }
             };
             let info = op.info();
             let op_len = if info.length < 0 {
@@ -350,7 +365,10 @@ impl JsRuntime {
             let operand: &[u8] = unsafe {
                 // We need a separate non-overlapping borrow over the bytecode for the operand.
                 // Since we mutate frame.pc and frame.stack but not frame.bytecode, this is safe.
-                std::slice::from_raw_parts(frame.bytecode.as_ptr().add(operand_slice_start), operand_slice_end - operand_slice_start)
+                std::slice::from_raw_parts(
+                    frame.bytecode.as_ptr().add(operand_slice_start),
+                    operand_slice_end - operand_slice_start,
+                )
             };
             // Default advance — overridden by jumps / CALL.
             frame.pc = operand_slice_end;
@@ -434,7 +452,10 @@ impl JsRuntime {
                     // Top-level RETRVAL: don't abort the script init.
                     return Ok(StepOutcome::Continue);
                 }
-                Ok(StepOutcome::Return(std::mem::replace(&mut frame.rval, JsValue::Undefined)))
+                Ok(StepOutcome::Return(std::mem::replace(
+                    &mut frame.rval,
+                    JsValue::Undefined,
+                )))
             }
             JsOp::Return => {
                 // SpiderMonkey 1.5 normally aborts the script on top-level
@@ -453,29 +474,66 @@ impl JsRuntime {
             }
 
             // ===== Constant pushes =====
-            JsOp::Push => { frame.stack.push(JsValue::Undefined); Ok(StepOutcome::Continue) }
-            JsOp::Zero => { frame.stack.push(JsValue::Int(0)); Ok(StepOutcome::Continue) }
-            JsOp::One => { frame.stack.push(JsValue::Int(1)); Ok(StepOutcome::Continue) }
-            JsOp::Null => { frame.stack.push(JsValue::Null); Ok(StepOutcome::Continue) }
-            JsOp::This => { frame.stack.push(frame.this_value.clone()); Ok(StepOutcome::Continue) }
-            JsOp::False => { frame.stack.push(JsValue::Bool(false)); Ok(StepOutcome::Continue) }
-            JsOp::True => { frame.stack.push(JsValue::Bool(true)); Ok(StepOutcome::Continue) }
+            JsOp::Push => {
+                frame.stack.push(JsValue::Undefined);
+                Ok(StepOutcome::Continue)
+            }
+            JsOp::Zero => {
+                frame.stack.push(JsValue::Int(0));
+                Ok(StepOutcome::Continue)
+            }
+            JsOp::One => {
+                frame.stack.push(JsValue::Int(1));
+                Ok(StepOutcome::Continue)
+            }
+            JsOp::Null => {
+                frame.stack.push(JsValue::Null);
+                Ok(StepOutcome::Continue)
+            }
+            JsOp::This => {
+                frame.stack.push(frame.this_value.clone());
+                Ok(StepOutcome::Continue)
+            }
+            JsOp::False => {
+                frame.stack.push(JsValue::Bool(false));
+                Ok(StepOutcome::Continue)
+            }
+            JsOp::True => {
+                frame.stack.push(JsValue::Bool(true));
+                Ok(StepOutcome::Continue)
+            }
             JsOp::String => {
                 let idx = read_u16_operand(operand).map_err(JsError::new)? as usize;
-                let atom = frame.atoms.get(idx).ok_or_else(|| JsError::new("string atom oob"))?;
+                let atom = frame
+                    .atoms
+                    .get(idx)
+                    .ok_or_else(|| JsError::new("string atom oob"))?;
                 match atom {
                     JsAtom::String(s) => frame.stack.push(JsValue::String(Rc::new(s.clone()))),
-                    other => return Err(JsError::new(format!("STRING atom is not a string: {:?}", other))),
+                    other => {
+                        return Err(JsError::new(format!(
+                            "STRING atom is not a string: {:?}",
+                            other
+                        )))
+                    }
                 }
                 Ok(StepOutcome::Continue)
             }
             JsOp::Number => {
                 let idx = read_u16_operand(operand).map_err(JsError::new)? as usize;
-                let atom = frame.atoms.get(idx).ok_or_else(|| JsError::new("number atom oob"))?;
+                let atom = frame
+                    .atoms
+                    .get(idx)
+                    .ok_or_else(|| JsError::new("number atom oob"))?;
                 match atom {
                     JsAtom::Int(i) => frame.stack.push(JsValue::Int(*i)),
                     JsAtom::Double(d) => frame.stack.push(JsValue::Number(*d)),
-                    other => return Err(JsError::new(format!("NUMBER atom is not numeric: {:?}", other))),
+                    other => {
+                        return Err(JsError::new(format!(
+                            "NUMBER atom is not numeric: {:?}",
+                            other
+                        )))
+                    }
                 }
                 Ok(StepOutcome::Continue)
             }
@@ -611,14 +669,23 @@ impl JsRuntime {
                 if slot < frame.args.len() {
                     frame.args[slot] = v.clone();
                 }
-                if let Some(name) = nth_binding_name(&frame.atoms, &frame.atom_to_slot, JsBindingKind::Argument, slot) {
+                if let Some(name) = nth_binding_name(
+                    &frame.atoms,
+                    &frame.atom_to_slot,
+                    JsBindingKind::Argument,
+                    slot,
+                ) {
                     frame.scope.borrow_mut().set_own(&name, v);
                 }
                 Ok(StepOutcome::Continue)
             }
             JsOp::Getvar => {
                 let slot = read_u16_operand(operand).map_err(JsError::new)? as usize;
-                let v = frame.locals.get(slot).cloned().unwrap_or(JsValue::Undefined);
+                let v = frame
+                    .locals
+                    .get(slot)
+                    .cloned()
+                    .unwrap_or(JsValue::Undefined);
                 frame.stack.push(v);
                 Ok(StepOutcome::Continue)
             }
@@ -630,9 +697,20 @@ impl JsRuntime {
                 }
                 // Mirror to frame.scope so NAME-based reads of the same
                 // var see the latest write. Map slot -> binding name.
-                if let Some(name) = nth_binding_name(&frame.atoms, &frame.atom_to_slot, JsBindingKind::Variable, slot)
-                    .or_else(|| nth_binding_name(&frame.atoms, &frame.atom_to_slot, JsBindingKind::Constant, slot))
-                {
+                if let Some(name) = nth_binding_name(
+                    &frame.atoms,
+                    &frame.atom_to_slot,
+                    JsBindingKind::Variable,
+                    slot,
+                )
+                .or_else(|| {
+                    nth_binding_name(
+                        &frame.atoms,
+                        &frame.atom_to_slot,
+                        JsBindingKind::Constant,
+                        slot,
+                    )
+                }) {
                     frame.scope.borrow_mut().set_own(&name, v);
                 }
                 Ok(StepOutcome::Continue)
@@ -707,7 +785,10 @@ impl JsRuntime {
             }
             JsOp::Deffun => {
                 let idx = read_u16_operand(operand).map_err(JsError::new)? as usize;
-                let atom = frame.atoms.get(idx).cloned()
+                let atom = frame
+                    .atoms
+                    .get(idx)
+                    .cloned()
                     .ok_or_else(|| JsError::new("DEFFUN atom oob"))?;
                 if let JsAtom::Function(fa) = atom {
                     if let Some(name) = fa.name.clone() {
@@ -828,7 +909,9 @@ impl JsRuntime {
                     if e.message.starts_with("not callable") {
                         let hint = guess_callee_source(&frame.bytecode, &frame.atoms, op_pc);
                         JsError::new(format!("{} (callee was {})", e.message, hint))
-                    } else { e }
+                    } else {
+                        e
+                    }
                 })?;
                 frame.stack.push(result);
                 Ok(StepOutcome::Continue)
@@ -874,21 +957,67 @@ impl JsRuntime {
             }
 
             // ===== Increment / decrement (name and slot variants) =====
-            JsOp::Incname | JsOp::Nameinc => incdec_name(frame, &self.global, operand, 1, op == JsOp::Nameinc),
-            JsOp::Decname | JsOp::Namedec => incdec_name(frame, &self.global, operand, -1, op == JsOp::Namedec),
-            JsOp::Incarg | JsOp::Arginc   => incdec_slot(frame, operand, 1,  /*arg*/ true,  /*post*/ op == JsOp::Arginc),
-            JsOp::Decarg | JsOp::Argdec   => incdec_slot(frame, operand, -1, /*arg*/ true,  /*post*/ op == JsOp::Argdec),
-            JsOp::Incvar | JsOp::Varinc   => incdec_slot(frame, operand, 1,  /*arg*/ false, /*post*/ op == JsOp::Varinc),
-            JsOp::Decvar | JsOp::Vardec   => incdec_slot(frame, operand, -1, /*arg*/ false, /*post*/ op == JsOp::Vardec),
-            JsOp::Incprop | JsOp::Propinc => incdec_prop(&self.bridge, frame, operand, 1,  /*post*/ op == JsOp::Propinc),
-            JsOp::Decprop | JsOp::Propdec => incdec_prop(&self.bridge, frame, operand, -1, /*post*/ op == JsOp::Propdec),
-            JsOp::Incelem | JsOp::Eleminc => incdec_elem(&self.bridge, frame, 1,  /*post*/ op == JsOp::Eleminc),
-            JsOp::Decelem | JsOp::Elemdec => incdec_elem(&self.bridge, frame, -1, /*post*/ op == JsOp::Elemdec),
+            JsOp::Incname | JsOp::Nameinc => {
+                incdec_name(frame, &self.global, operand, 1, op == JsOp::Nameinc)
+            }
+            JsOp::Decname | JsOp::Namedec => {
+                incdec_name(frame, &self.global, operand, -1, op == JsOp::Namedec)
+            }
+            JsOp::Incarg | JsOp::Arginc => incdec_slot(
+                frame,
+                operand,
+                1,
+                /*arg*/ true,
+                /*post*/ op == JsOp::Arginc,
+            ),
+            JsOp::Decarg | JsOp::Argdec => incdec_slot(
+                frame,
+                operand,
+                -1,
+                /*arg*/ true,
+                /*post*/ op == JsOp::Argdec,
+            ),
+            JsOp::Incvar | JsOp::Varinc => incdec_slot(
+                frame,
+                operand,
+                1,
+                /*arg*/ false,
+                /*post*/ op == JsOp::Varinc,
+            ),
+            JsOp::Decvar | JsOp::Vardec => incdec_slot(
+                frame,
+                operand,
+                -1,
+                /*arg*/ false,
+                /*post*/ op == JsOp::Vardec,
+            ),
+            JsOp::Incprop | JsOp::Propinc => incdec_prop(
+                &self.bridge,
+                frame,
+                operand,
+                1,
+                /*post*/ op == JsOp::Propinc,
+            ),
+            JsOp::Decprop | JsOp::Propdec => incdec_prop(
+                &self.bridge,
+                frame,
+                operand,
+                -1,
+                /*post*/ op == JsOp::Propdec,
+            ),
+            JsOp::Incelem | JsOp::Eleminc => {
+                incdec_elem(&self.bridge, frame, 1, /*post*/ op == JsOp::Eleminc)
+            }
+            JsOp::Decelem | JsOp::Elemdec => {
+                incdec_elem(&self.bridge, frame, -1, /*post*/ op == JsOp::Elemdec)
+            }
 
             // ===== Misc =====
             JsOp::Typeof => {
                 let v = pop(frame)?;
-                frame.stack.push(JsValue::String(Rc::new(v.type_of().into())));
+                frame
+                    .stack
+                    .push(JsValue::String(Rc::new(v.type_of().into())));
                 Ok(StepOutcome::Continue)
             }
             JsOp::Void => {
@@ -902,8 +1031,12 @@ impl JsRuntime {
                 let name = key.to_string();
                 let present = match &obj {
                     JsValue::Object(o) => o.borrow().has_own(&name),
-                    JsValue::Array(a) => name == "length"
-                        || name.parse::<usize>().map_or(false, |i| i < a.borrow().items.len()),
+                    JsValue::Array(a) => {
+                        name == "length"
+                            || name
+                                .parse::<usize>()
+                                .map_or(false, |i| i < a.borrow().items.len())
+                    }
                     _ => false,
                 };
                 frame.stack.push(JsValue::Bool(present));
@@ -963,8 +1096,12 @@ impl JsRuntime {
                             if i < b.items.len() {
                                 b.items[i] = JsValue::Undefined;
                                 true
-                            } else { false }
-                        } else { false }
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
                     }
                     _ => false,
                 };
@@ -981,27 +1118,37 @@ impl JsRuntime {
             JsOp::Ifeqx => {
                 let v = pop(frame)?;
                 let delta = read_i32_operand(operand).map_err(JsError::new)?;
-                if !v.to_bool() { frame.pc = (op_pc as i32 + delta) as usize; }
+                if !v.to_bool() {
+                    frame.pc = (op_pc as i32 + delta) as usize;
+                }
                 Ok(StepOutcome::Continue)
             }
             JsOp::Ifnex => {
                 let v = pop(frame)?;
                 let delta = read_i32_operand(operand).map_err(JsError::new)?;
-                if v.to_bool() { frame.pc = (op_pc as i32 + delta) as usize; }
+                if v.to_bool() {
+                    frame.pc = (op_pc as i32 + delta) as usize;
+                }
                 Ok(StepOutcome::Continue)
             }
             JsOp::Andx => {
                 let v = peek(frame)?.clone();
                 let delta = read_i32_operand(operand).map_err(JsError::new)?;
-                if !v.to_bool() { frame.pc = (op_pc as i32 + delta) as usize; }
-                else { frame.stack.pop(); }
+                if !v.to_bool() {
+                    frame.pc = (op_pc as i32 + delta) as usize;
+                } else {
+                    frame.stack.pop();
+                }
                 Ok(StepOutcome::Continue)
             }
             JsOp::Orx => {
                 let v = peek(frame)?.clone();
                 let delta = read_i32_operand(operand).map_err(JsError::new)?;
-                if v.to_bool() { frame.pc = (op_pc as i32 + delta) as usize; }
-                else { frame.stack.pop(); }
+                if v.to_bool() {
+                    frame.pc = (op_pc as i32 + delta) as usize;
+                } else {
+                    frame.stack.pop();
+                }
                 Ok(StepOutcome::Continue)
             }
 
@@ -1043,17 +1190,25 @@ impl JsRuntime {
             }
             JsOp::Tableswitch => {
                 let disc = pop(frame)?;
-                let i = if let JsValue::Int(v) = disc { v }
-                        else if let JsValue::Number(d) = disc {
-                            if d == d.trunc() && d.is_finite() { d as i32 } else { return Ok(StepOutcome::Continue); }
-                        } else { return Ok(StepOutcome::Continue); }; // non-int falls through default
+                let i = if let JsValue::Int(v) = disc {
+                    v
+                } else if let JsValue::Number(d) = disc {
+                    if d == d.trunc() && d.is_finite() {
+                        d as i32
+                    } else {
+                        return Ok(StepOutcome::Continue);
+                    }
+                } else {
+                    return Ok(StepOutcome::Continue);
+                }; // non-int falls through default
                 let default_delta = read_i16_operand(&operand[0..]).map_err(JsError::new)? as i32;
                 let low = read_i16_operand(&operand[2..]).map_err(JsError::new)? as i32;
                 let high = read_i16_operand(&operand[4..]).map_err(JsError::new)? as i32;
                 let idx = i - low;
                 if idx >= 0 && idx <= high - low {
                     let case_off_pos = 6 + (idx as usize) * 2;
-                    let case_delta = read_i16_operand(&operand[case_off_pos..]).map_err(JsError::new)? as i32;
+                    let case_delta =
+                        read_i16_operand(&operand[case_off_pos..]).map_err(JsError::new)? as i32;
                     if case_delta != 0 {
                         frame.pc = (op_pc as i32 + case_delta) as usize;
                         return Ok(StepOutcome::Continue);
@@ -1064,17 +1219,25 @@ impl JsRuntime {
             }
             JsOp::Tableswitchx => {
                 let disc = pop(frame)?;
-                let i = if let JsValue::Int(v) = disc { v }
-                        else if let JsValue::Number(d) = disc {
-                            if d == d.trunc() && d.is_finite() { d as i32 } else { return Ok(StepOutcome::Continue); }
-                        } else { return Ok(StepOutcome::Continue); };
+                let i = if let JsValue::Int(v) = disc {
+                    v
+                } else if let JsValue::Number(d) = disc {
+                    if d == d.trunc() && d.is_finite() {
+                        d as i32
+                    } else {
+                        return Ok(StepOutcome::Continue);
+                    }
+                } else {
+                    return Ok(StepOutcome::Continue);
+                };
                 let default_delta = read_i32_operand(&operand[0..]).map_err(JsError::new)?;
                 let low = read_i32_operand(&operand[4..]).map_err(JsError::new)?;
                 let high = read_i32_operand(&operand[8..]).map_err(JsError::new)?;
                 let idx = i - low;
                 if idx >= 0 && idx <= high - low {
                     let case_off_pos = 12 + (idx as usize) * 4;
-                    let case_delta = read_i32_operand(&operand[case_off_pos..]).map_err(JsError::new)?;
+                    let case_delta =
+                        read_i32_operand(&operand[case_off_pos..]).map_err(JsError::new)?;
                     if case_delta != 0 {
                         frame.pc = (op_pc as i32 + case_delta) as usize;
                         return Ok(StepOutcome::Continue);
@@ -1089,8 +1252,10 @@ impl JsRuntime {
                 let npairs = read_u16_operand(&operand[2..]).map_err(JsError::new)? as usize;
                 let mut pos = 4;
                 for _ in 0..npairs {
-                    let atom_idx = read_u16_operand(&operand[pos..]).map_err(JsError::new)? as usize;
-                    let case_delta = read_i16_operand(&operand[pos + 2..]).map_err(JsError::new)? as i32;
+                    let atom_idx =
+                        read_u16_operand(&operand[pos..]).map_err(JsError::new)? as usize;
+                    let case_delta =
+                        read_i16_operand(&operand[pos + 2..]).map_err(JsError::new)? as i32;
                     let atom_val = atom_to_value(&frame.atoms, atom_idx)?;
                     if loose_equal(&disc, &atom_val) {
                         frame.pc = (op_pc as i32 + case_delta) as usize;
@@ -1107,7 +1272,8 @@ impl JsRuntime {
                 let npairs = read_u32_operand(&operand[4..]).map_err(JsError::new)? as usize;
                 let mut pos = 8;
                 for _ in 0..npairs {
-                    let atom_idx = read_u32_operand(&operand[pos..]).map_err(JsError::new)? as usize;
+                    let atom_idx =
+                        read_u32_operand(&operand[pos..]).map_err(JsError::new)? as usize;
                     let case_delta = read_i32_operand(&operand[pos + 4..]).map_err(JsError::new)?;
                     let atom_val = atom_to_value(&frame.atoms, atom_idx)?;
                     if loose_equal(&disc, &atom_val) {
@@ -1177,7 +1343,10 @@ impl JsRuntime {
             // ===== Closures and function expressions =====
             JsOp::Closure | JsOp::Anonfunobj | JsOp::Namedfunobj => {
                 let idx = read_u16_operand(operand).map_err(JsError::new)? as usize;
-                let atom = frame.atoms.get(idx).cloned()
+                let atom = frame
+                    .atoms
+                    .get(idx)
+                    .cloned()
                     .ok_or_else(|| JsError::new("function atom oob"))?;
                 let JsAtom::Function(fa) = atom else {
                     return Err(JsError::new("function-atom-op expected JsAtom::Function"));
@@ -1205,14 +1374,19 @@ impl JsRuntime {
                 // DEFLOCALFUN: VARNO_LEN + ATOM_INDEX_LEN. var slot, then atom idx.
                 let slot = read_u16_operand(&operand[0..]).map_err(JsError::new)? as usize;
                 let atom_idx = read_u16_operand(&operand[2..]).map_err(JsError::new)? as usize;
-                let atom = frame.atoms.get(atom_idx).cloned()
+                let atom = frame
+                    .atoms
+                    .get(atom_idx)
+                    .cloned()
                     .ok_or_else(|| JsError::new("DEFLOCALFUN atom oob"))?;
                 if let JsAtom::Function(fa) = atom {
                     let f = JsValue::Function(Rc::new(JsFunction {
                         atom: Rc::new((*fa).clone()),
                         captured_scope: Some(frame.scope.clone()),
                     }));
-                    if slot < frame.locals.len() { frame.locals[slot] = f; }
+                    if slot < frame.locals.len() {
+                        frame.locals[slot] = f;
+                    }
                 }
                 Ok(StepOutcome::Continue)
             }
@@ -1233,7 +1407,9 @@ impl JsRuntime {
             }
             JsOp::Leavewith => {
                 let parent = frame.scope.borrow().proto.clone();
-                if let Some(p) = parent { frame.scope = p; }
+                if let Some(p) = parent {
+                    frame.scope = p;
+                }
                 Ok(StepOutcome::Continue)
             }
 
@@ -1279,9 +1455,20 @@ impl JsRuntime {
                     if slot < frame.locals.len() {
                         frame.locals[slot] = v.clone();
                     }
-                    if let Some(name) = nth_binding_name(&frame.atoms, &frame.atom_to_slot, JsBindingKind::Variable, slot)
-                        .or_else(|| nth_binding_name(&frame.atoms, &frame.atom_to_slot, JsBindingKind::Constant, slot))
-                    {
+                    if let Some(name) = nth_binding_name(
+                        &frame.atoms,
+                        &frame.atom_to_slot,
+                        JsBindingKind::Variable,
+                        slot,
+                    )
+                    .or_else(|| {
+                        nth_binding_name(
+                            &frame.atoms,
+                            &frame.atom_to_slot,
+                            JsBindingKind::Constant,
+                            slot,
+                        )
+                    }) {
                         frame.scope.borrow_mut().set_own(&name, v);
                     }
                     frame.stack.push(JsValue::Bool(true));
@@ -1298,7 +1485,12 @@ impl JsRuntime {
                     if slot < frame.args.len() {
                         frame.args[slot] = v.clone();
                     }
-                    if let Some(name) = nth_binding_name(&frame.atoms, &frame.atom_to_slot, JsBindingKind::Argument, slot) {
+                    if let Some(name) = nth_binding_name(
+                        &frame.atoms,
+                        &frame.atom_to_slot,
+                        JsBindingKind::Argument,
+                        slot,
+                    ) {
                         frame.scope.borrow_mut().set_own(&name, v);
                     }
                     frame.stack.push(JsValue::Bool(true));
@@ -1364,12 +1556,16 @@ impl JsRuntime {
 
             // ===== Arguments object — Phase 6 (needs an `arguments` reflection) =====
             JsOp::Arguments | JsOp::Argsub | JsOp::Argcnt => Err(JsError::new(format!(
-                "arguments-object op {:?} needs Phase 6 reflection", op
+                "arguments-object op {:?} needs Phase 6 reflection",
+                op
             ))),
 
             // ===== Module system (Mozilla-only, never seen in DCRs) =====
-            JsOp::Exportall | JsOp::Exportname | JsOp::Importall
-            | JsOp::Importprop | JsOp::Importelem => Ok(StepOutcome::Continue),
+            JsOp::Exportall
+            | JsOp::Exportname
+            | JsOp::Importall
+            | JsOp::Importprop
+            | JsOp::Importelem => Ok(StepOutcome::Continue),
 
             // ===== Object literal accessors / getters/setters =====
             JsOp::Getter | JsOp::Setter => {
@@ -1386,7 +1582,10 @@ impl JsRuntime {
             // ===== Regex / object literal atom =====
             JsOp::Object => {
                 let idx = read_u16_operand(operand).map_err(JsError::new)? as usize;
-                let atom = frame.atoms.get(idx).cloned()
+                let atom = frame
+                    .atoms
+                    .get(idx)
+                    .cloned()
                     .ok_or_else(|| JsError::new("Object atom oob"))?;
                 let v = match atom {
                     JsAtom::Function(fa) => JsValue::Function(Rc::new(JsFunction {
@@ -1403,8 +1602,8 @@ impl JsRuntime {
             // parser; treat the eval source as a string and warn. =====
             JsOp::Eval => {
                 let _ = pop(frame)?; // pop the source string (or function value)
-                // CALL semantics swallow trailing args; we already are past those
-                // (eval is dispatched after argument push by the surrounding CALL).
+                                     // CALL semantics swallow trailing args; we already are past those
+                                     // (eval is dispatched after argument push by the surrounding CALL).
                 frame.stack.push(JsValue::Undefined);
                 Ok(StepOutcome::Continue)
             }
@@ -1416,12 +1615,17 @@ impl JsRuntime {
             // ===== Backpatch markers — compile-time placeholders that the
             // emitter rewrites before script serialisation. They must not
             // appear at runtime; if one does, it's a compiler bug. =====
-            JsOp::Backpatch | JsOp::BackpatchPop | JsOp::BackpatchPush => Err(JsError::new(format!(
-                "compile-time backpatch op {:?} should never execute", op
-            ))),
+            JsOp::Backpatch | JsOp::BackpatchPop | JsOp::BackpatchPush => Err(JsError::new(
+                format!("compile-time backpatch op {:?} should never execute", op),
+            )),
 
             // Catch-all for anything we missed.
-            other => Err(JsError::new(format!("unimplemented opcode {:?} (0x{:02x}) at pc={}", other, byte_of(other), op_pc))),
+            other => Err(JsError::new(format!(
+                "unimplemented opcode {:?} (0x{:02x}) at pc={}",
+                other,
+                byte_of(other),
+                op_pc
+            ))),
         }
     }
 
@@ -1485,7 +1689,9 @@ impl Drop for InvocationScope<'_> {
     }
 }
 
-fn byte_of(op: JsOp) -> u8 { op as u8 }
+fn byte_of(op: JsOp) -> u8 {
+    op as u8
+}
 
 /// Step the for-in iterator that sits underneath the object being
 /// iterated. `obj_at` is the negative stack index of the object
@@ -1498,7 +1704,8 @@ fn byte_of(op: JsOp) -> u8 { op as u8 }
 fn forin_advance(frame: &mut JsFrame, obj_at: isize) -> Result<Option<String>, JsError> {
     let n = frame.stack.len();
     let obj_idx = (n as isize + obj_at) as usize;
-    let iter_idx = obj_idx.checked_sub(1)
+    let iter_idx = obj_idx
+        .checked_sub(1)
         .ok_or_else(|| JsError::new("for-in: missing iter slot under object"))?;
 
     // First-call init: snapshot keys from the object and install an iterator
@@ -1510,9 +1717,7 @@ fn forin_advance(frame: &mut JsFrame, obj_at: isize) -> Result<Option<String>, J
                 JsValue::Object(obj_ref) => {
                     super::value::JsIterator::from_object(&obj_ref.borrow())
                 }
-                JsValue::Array(arr_ref) => {
-                    super::value::JsIterator::from_array(&arr_ref.borrow())
-                }
+                JsValue::Array(arr_ref) => super::value::JsIterator::from_array(&arr_ref.borrow()),
                 JsValue::Null | JsValue::Undefined => {
                     // ECMA: for-in over null/undefined enumerates nothing.
                     super::value::JsIterator::default()
@@ -1531,7 +1736,8 @@ fn forin_advance(frame: &mut JsFrame, obj_at: isize) -> Result<Option<String>, J
         }
         other => {
             return Err(JsError::new(format!(
-                "for-in: iter slot holds unexpected {:?}", other
+                "for-in: iter slot holds unexpected {:?}",
+                other
             )));
         }
     };
@@ -1581,16 +1787,30 @@ fn guess_callee_source(bytecode: &[u8], atoms: &[JsAtom], call_pc: usize) -> Str
     let mut argc_at_call: u16 = 0;
     while scan < bytecode.len() {
         let byte = bytecode[scan];
-        let op = match JsOp::from_byte(byte) { Some(o) => o, None => { scan += 1; continue; } };
+        let op = match JsOp::from_byte(byte) {
+            Some(o) => o,
+            None => {
+                scan += 1;
+                continue;
+            }
+        };
         let info = op.info();
-        let len = if info.length > 0 { info.length as usize } else { 1 };
+        let len = if info.length > 0 {
+            info.length as usize
+        } else {
+            1
+        };
         let uses = if info.uses >= 0 {
             info.uses as i32
         } else if matches!(op, JsOp::Call | JsOp::New) {
             if scan + 3 <= bytecode.len() {
                 read_u16_operand(&bytecode[scan + 1..]).unwrap_or(0) as i32 + 2
-            } else { 2 }
-        } else { 0 };
+            } else {
+                2
+            }
+        } else {
+            0
+        };
         let defs = info.defs as i32;
         depth = depth - uses + defs;
         history.push((scan, op, depth));
@@ -1621,10 +1841,22 @@ fn guess_callee_source(bytecode: &[u8], atoms: &[JsAtom], call_pc: usize) -> Str
     // equals target_depth.
     let mut found: Option<(JsOp, usize)> = None;
     for (off, op, d) in history.iter().rev() {
-        if *off >= call_pc { continue; }
-        if *d != target_depth { continue; }
-        if matches!(op, JsOp::Name | JsOp::Getprop | JsOp::Getelem
-            | JsOp::Getarg | JsOp::Getvar | JsOp::This | JsOp::Bindname) {
+        if *off >= call_pc {
+            continue;
+        }
+        if *d != target_depth {
+            continue;
+        }
+        if matches!(
+            op,
+            JsOp::Name
+                | JsOp::Getprop
+                | JsOp::Getelem
+                | JsOp::Getarg
+                | JsOp::Getvar
+                | JsOp::This
+                | JsOp::Bindname
+        ) {
             found = Some((*op, *off));
             break;
         }
@@ -1662,16 +1894,24 @@ fn guess_callee_source(bytecode: &[u8], atoms: &[JsAtom], call_pc: usize) -> Str
 }
 
 fn pop(frame: &mut JsFrame) -> Result<JsValue, JsError> {
-    frame.stack.pop().ok_or_else(|| JsError::new("stack underflow"))
+    frame
+        .stack
+        .pop()
+        .ok_or_else(|| JsError::new("stack underflow"))
 }
 
 fn peek(frame: &JsFrame) -> Result<&JsValue, JsError> {
-    frame.stack.last().ok_or_else(|| JsError::new("stack underflow (peek)"))
+    frame
+        .stack
+        .last()
+        .ok_or_else(|| JsError::new("stack underflow (peek)"))
 }
 
 fn peek_at(frame: &JsFrame, depth: usize) -> Result<&JsValue, JsError> {
     let n = frame.stack.len();
-    if depth + 1 > n { return Err(JsError::new("stack underflow (peek_at)")); }
+    if depth + 1 > n {
+        return Err(JsError::new("stack underflow (peek_at)"));
+    }
     Ok(&frame.stack[n - 1 - depth])
 }
 
@@ -1679,7 +1919,10 @@ fn atom_string(atoms: &[JsAtom], idx: usize) -> Result<String, JsError> {
     match atoms.get(idx) {
         Some(JsAtom::String(s)) => Ok(s.clone()),
         Some(JsAtom::Function(f)) => Ok(f.name.clone().unwrap_or_default()),
-        Some(other) => Err(JsError::new(format!("atom #{} is not a name: {:?}", idx, other))),
+        Some(other) => Err(JsError::new(format!(
+            "atom #{} is not a name: {:?}",
+            idx, other
+        ))),
         None => Err(JsError::new(format!("atom #{} out of bounds", idx))),
     }
 }
@@ -1736,10 +1979,14 @@ fn store_name(frame: &mut JsFrame, name: &str, value: JsValue, global: &JsObject
                     if let Some(Some((kind, slot))) = frame.atom_to_slot.get(i).cloned() {
                         match kind {
                             JsBindingKind::Argument => {
-                                if slot < frame.args.len() { frame.args[slot] = value.clone(); }
+                                if slot < frame.args.len() {
+                                    frame.args[slot] = value.clone();
+                                }
                             }
                             JsBindingKind::Variable | JsBindingKind::Constant => {
-                                if slot < frame.locals.len() { frame.locals[slot] = value.clone(); }
+                                if slot < frame.locals.len() {
+                                    frame.locals[slot] = value.clone();
+                                }
                             }
                         }
                         return;
@@ -1785,7 +2032,10 @@ fn binop_int(frame: &mut JsFrame, f: fn(i32, i32) -> i32) -> Result<StepOutcome,
     Ok(StepOutcome::Continue)
 }
 
-fn cmpop(frame: &mut JsFrame, pred: fn(std::cmp::Ordering) -> bool) -> Result<StepOutcome, JsError> {
+fn cmpop(
+    frame: &mut JsFrame,
+    pred: fn(std::cmp::Ordering) -> bool,
+) -> Result<StepOutcome, JsError> {
     let b = pop(frame)?;
     let a = pop(frame)?;
     let order = compare(&a, &b);
@@ -1826,7 +2076,9 @@ fn get_property(bridge: &HostBridge, obj: &JsValue, name: &str) -> JsValue {
     match obj {
         JsValue::Object(o) => {
             let b = o.borrow();
-            if let Some(v) = b.get_own(name) { return v.clone(); }
+            if let Some(v) = b.get_own(name) {
+                return v.clone();
+            }
             if let Some(p) = b.proto.clone() {
                 drop(b);
                 return get_property(bridge, &JsValue::Object(p), name);
@@ -1835,9 +2087,13 @@ fn get_property(bridge: &HostBridge, obj: &JsValue, name: &str) -> JsValue {
         }
         JsValue::Array(a) => {
             let b = a.borrow();
-            if name == "length" { return JsValue::Int(b.items.len() as i32); }
+            if name == "length" {
+                return JsValue::Int(b.items.len() as i32);
+            }
             if let Ok(i) = name.parse::<usize>() {
-                if i < b.items.len() { return b.items[i].clone(); }
+                if i < b.items.len() {
+                    return b.items[i].clone();
+                }
             }
             drop(b);
             // Array.prototype.* methods, dispatched as bound natives.
@@ -1847,10 +2103,14 @@ fn get_property(bridge: &HostBridge, obj: &JsValue, name: &str) -> JsValue {
             JsValue::Undefined
         }
         JsValue::String(s) => {
-            if name == "length" { return JsValue::Int(s.chars().count() as i32); }
+            if name == "length" {
+                return JsValue::Int(s.chars().count() as i32);
+            }
             // Numeric indexing on strings returns a 1-char string per ECMA-262.
             if let Ok(i) = name.parse::<usize>() {
-                return s.chars().nth(i)
+                return s
+                    .chars()
+                    .nth(i)
                     .map(|c| JsValue::String(Rc::new(c.to_string())))
                     .unwrap_or(JsValue::Undefined);
             }
@@ -1879,7 +2139,9 @@ fn array_method(arr: super::value::JsArrayRef, name: &str) -> Option<JsValue> {
             let a = arr.clone();
             bind!("push", move |args| {
                 let mut b = a.borrow_mut();
-                for v in args { b.items.push(v.clone()); }
+                for v in args {
+                    b.items.push(v.clone());
+                }
                 Ok(JsValue::Int(b.items.len() as i32))
             })
         }
@@ -1893,7 +2155,11 @@ fn array_method(arr: super::value::JsArrayRef, name: &str) -> Option<JsValue> {
             let a = arr.clone();
             bind!("shift", move |_| {
                 let mut b = a.borrow_mut();
-                if b.items.is_empty() { Ok(JsValue::Undefined) } else { Ok(b.items.remove(0)) }
+                if b.items.is_empty() {
+                    Ok(JsValue::Undefined)
+                } else {
+                    Ok(b.items.remove(0))
+                }
             })
         }
         "unshift" => {
@@ -1909,13 +2175,20 @@ fn array_method(arr: super::value::JsArrayRef, name: &str) -> Option<JsValue> {
         "join" => {
             let a = arr.clone();
             bind!("join", move |args| {
-                let sep = args.get(0).map(|v| v.to_string()).unwrap_or_else(|| ",".into());
+                let sep = args
+                    .get(0)
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| ",".into());
                 let b = a.borrow();
                 Ok(JsValue::String(Rc::new(
-                    b.items.iter().map(|v| match v {
-                        JsValue::Undefined | JsValue::Null => String::new(),
-                        other => other.to_string(),
-                    }).collect::<Vec<_>>().join(&sep)
+                    b.items
+                        .iter()
+                        .map(|v| match v {
+                            JsValue::Undefined | JsValue::Null => String::new(),
+                            other => other.to_string(),
+                        })
+                        .collect::<Vec<_>>()
+                        .join(&sep),
                 )))
             })
         }
@@ -1933,12 +2206,22 @@ fn array_method(arr: super::value::JsArrayRef, name: &str) -> Option<JsValue> {
                 let len = b.items.len() as i32;
                 let mut start = args.get(0).map(|v| v.to_int32()).unwrap_or(0);
                 let mut end = args.get(1).map(|v| v.to_int32()).unwrap_or(len);
-                if start < 0 { start = (len + start).max(0); }
-                if end < 0 { end = (len + end).max(0); }
+                if start < 0 {
+                    start = (len + start).max(0);
+                }
+                if end < 0 {
+                    end = (len + end).max(0);
+                }
                 let start = start.min(len) as usize;
                 let end = end.min(len) as usize;
-                let out: Vec<JsValue> = if start < end { b.items[start..end].to_vec() } else { Vec::new() };
-                Ok(JsValue::Array(Rc::new(std::cell::RefCell::new(super::value::JsArray { items: out }))))
+                let out: Vec<JsValue> = if start < end {
+                    b.items[start..end].to_vec()
+                } else {
+                    Vec::new()
+                };
+                Ok(JsValue::Array(Rc::new(std::cell::RefCell::new(
+                    super::value::JsArray { items: out },
+                ))))
             })
         }
         "concat" => {
@@ -1952,7 +2235,9 @@ fn array_method(arr: super::value::JsArrayRef, name: &str) -> Option<JsValue> {
                         out.push(v.clone());
                     }
                 }
-                Ok(JsValue::Array(Rc::new(std::cell::RefCell::new(super::value::JsArray { items: out }))))
+                Ok(JsValue::Array(Rc::new(std::cell::RefCell::new(
+                    super::value::JsArray { items: out },
+                ))))
             })
         }
         "indexOf" => {
@@ -1985,7 +2270,10 @@ fn string_method(s: Rc<String>, name: &str) -> Option<JsValue> {
     use super::value::NativeFn;
     macro_rules! bind {
         ($n:expr, $f:expr) => {
-            Some(JsValue::Native(Rc::new(NativeFn { name: $n, call: Box::new($f) })))
+            Some(JsValue::Native(Rc::new(NativeFn {
+                name: $n,
+                call: Box::new($f),
+            })))
         };
     }
     match name {
@@ -1993,15 +2281,23 @@ fn string_method(s: Rc<String>, name: &str) -> Option<JsValue> {
             let s = s.clone();
             bind!("charAt", move |args| {
                 let i = args.get(0).map(|v| v.to_int32()).unwrap_or(0);
-                let ch = if i < 0 { None } else { s.chars().nth(i as usize) };
-                Ok(JsValue::String(Rc::new(ch.map(|c| c.to_string()).unwrap_or_default())))
+                let ch = if i < 0 {
+                    None
+                } else {
+                    s.chars().nth(i as usize)
+                };
+                Ok(JsValue::String(Rc::new(
+                    ch.map(|c| c.to_string()).unwrap_or_default(),
+                )))
             })
         }
         "charCodeAt" => {
             let s = s.clone();
             bind!("charCodeAt", move |args| {
                 let i = args.get(0).map(|v| v.to_int32()).unwrap_or(0);
-                if i < 0 { return Ok(JsValue::Number(f64::NAN)); }
+                if i < 0 {
+                    return Ok(JsValue::Number(f64::NAN));
+                }
                 Ok(match s.chars().nth(i as usize) {
                     Some(c) => JsValue::Int(c as i32),
                     None => JsValue::Number(f64::NAN),
@@ -2040,11 +2336,19 @@ fn string_method(s: Rc<String>, name: &str) -> Option<JsValue> {
                 let len = chars.len() as i32;
                 let mut start = args.get(0).map(|v| v.to_int32()).unwrap_or(0);
                 let mut end = args.get(1).map(|v| v.to_int32()).unwrap_or(len);
-                if start < 0 { start = (len + start).max(0); }
-                if end < 0 { end = (len + end).max(0); }
+                if start < 0 {
+                    start = (len + start).max(0);
+                }
+                if end < 0 {
+                    end = (len + end).max(0);
+                }
                 let start = start.min(len) as usize;
                 let end = end.min(len) as usize;
-                let (a, b) = if start <= end { (start, end) } else { (end, start) };
+                let (a, b) = if start <= end {
+                    (start, end)
+                } else {
+                    (end, start)
+                };
                 Ok(JsValue::String(Rc::new(chars[a..b].iter().collect())))
             })
         }
@@ -2055,29 +2359,51 @@ fn string_method(s: Rc<String>, name: &str) -> Option<JsValue> {
                 let len = chars.len() as i32;
                 let mut start = args.get(0).map(|v| v.to_int32()).unwrap_or(0);
                 let count = args.get(1).map(|v| v.to_int32()).unwrap_or(len);
-                if start < 0 { start = (len + start).max(0); }
+                if start < 0 {
+                    start = (len + start).max(0);
+                }
                 let start = start.min(len) as usize;
                 let end = (start as i32 + count.max(0)).min(len) as usize;
                 Ok(JsValue::String(Rc::new(chars[start..end].iter().collect())))
             })
         }
-        "toUpperCase" => { let s = s.clone(); bind!("toUpperCase", move |_| Ok(JsValue::String(Rc::new(s.to_uppercase())))) }
-        "toLowerCase" => { let s = s.clone(); bind!("toLowerCase", move |_| Ok(JsValue::String(Rc::new(s.to_lowercase())))) }
+        "toUpperCase" => {
+            let s = s.clone();
+            bind!("toUpperCase", move |_| Ok(JsValue::String(Rc::new(
+                s.to_uppercase()
+            ))))
+        }
+        "toLowerCase" => {
+            let s = s.clone();
+            bind!("toLowerCase", move |_| Ok(JsValue::String(Rc::new(
+                s.to_lowercase()
+            ))))
+        }
         "split" => {
             let s = s.clone();
             bind!("split", move |args| {
                 let sep = match args.get(0) {
                     Some(v) => v.to_string(),
-                    None => return Ok(JsValue::Array(Rc::new(std::cell::RefCell::new(
-                        super::value::JsArray { items: vec![JsValue::String(s.clone())] }
-                    )))),
+                    None => {
+                        return Ok(JsValue::Array(Rc::new(std::cell::RefCell::new(
+                            super::value::JsArray {
+                                items: vec![JsValue::String(s.clone())],
+                            },
+                        ))))
+                    }
                 };
                 let items: Vec<JsValue> = if sep.is_empty() {
-                    s.chars().map(|c| JsValue::String(Rc::new(c.to_string()))).collect()
+                    s.chars()
+                        .map(|c| JsValue::String(Rc::new(c.to_string())))
+                        .collect()
                 } else {
-                    s.split(&sep).map(|p| JsValue::String(Rc::new(p.to_string()))).collect()
+                    s.split(&sep)
+                        .map(|p| JsValue::String(Rc::new(p.to_string())))
+                        .collect()
                 };
-                Ok(JsValue::Array(Rc::new(std::cell::RefCell::new(super::value::JsArray { items }))))
+                Ok(JsValue::Array(Rc::new(std::cell::RefCell::new(
+                    super::value::JsArray { items },
+                ))))
             })
         }
         "replace" => {
@@ -2092,7 +2418,9 @@ fn string_method(s: Rc<String>, name: &str) -> Option<JsValue> {
             let s = s.clone();
             bind!("concat", move |args| {
                 let mut out = (*s).clone();
-                for v in args { out.push_str(&v.to_string()); }
+                for v in args {
+                    out.push_str(&v.to_string());
+                }
                 Ok(JsValue::String(Rc::new(out)))
             })
         }
@@ -2109,12 +2437,22 @@ fn loose_equal_pub(a: &JsValue, b: &JsValue) -> bool {
     loose_equal(a, b)
 }
 
-fn set_property(bridge: &HostBridge, obj: &JsValue, name: &str, value: JsValue) -> Result<(), JsError> {
+fn set_property(
+    bridge: &HostBridge,
+    obj: &JsValue,
+    name: &str,
+    value: JsValue,
+) -> Result<(), JsError> {
     if let JsValue::DirectorRef(kind) = obj {
-        return bridge.borrow_mut().director_ref_set_property(kind, name, value);
+        return bridge
+            .borrow_mut()
+            .director_ref_set_property(kind, name, value);
     }
     match obj {
-        JsValue::Object(o) => { o.borrow_mut().set_own(name, value); Ok(()) }
+        JsValue::Object(o) => {
+            o.borrow_mut().set_own(name, value);
+            Ok(())
+        }
         JsValue::Array(a) => {
             if name == "length" {
                 let n = value.to_int32().max(0) as usize;
@@ -2124,7 +2462,9 @@ fn set_property(bridge: &HostBridge, obj: &JsValue, name: &str, value: JsValue) 
             }
             if let Ok(i) = name.parse::<usize>() {
                 let mut b = a.borrow_mut();
-                if i >= b.items.len() { b.items.resize(i + 1, JsValue::Undefined); }
+                if i >= b.items.len() {
+                    b.items.resize(i + 1, JsValue::Undefined);
+                }
                 b.items[i] = value;
                 return Ok(());
             }
@@ -2146,7 +2486,12 @@ fn get_element(bridge: &HostBridge, obj: &JsValue, key: &JsValue) -> JsValue {
     get_property(bridge, obj, &name)
 }
 
-fn set_element(bridge: &HostBridge, obj: &JsValue, key: &JsValue, value: JsValue) -> Result<(), JsError> {
+fn set_element(
+    bridge: &HostBridge,
+    obj: &JsValue,
+    key: &JsValue,
+    value: JsValue,
+) -> Result<(), JsError> {
     let name = key.to_string();
     set_property(bridge, obj, &name, value)
 }
@@ -2170,7 +2515,11 @@ fn incdec_name(
     };
     store_name(frame, &name, new_v.clone(), global);
     frame.stack.push(if post {
-        if n == n.trunc() && n.abs() < i32::MAX as f64 { JsValue::Int(n as i32) } else { JsValue::Number(n) }
+        if n == n.trunc() && n.abs() < i32::MAX as f64 {
+            JsValue::Int(n as i32)
+        } else {
+            JsValue::Number(n)
+        }
     } else {
         new_v
     });
@@ -2186,9 +2535,18 @@ fn incdec_slot(
 ) -> Result<StepOutcome, JsError> {
     let slot = read_u16_operand(operand).map_err(JsError::new)? as usize;
     let kind = if is_arg { "arg" } else { "var" };
-    let slots = if is_arg { &mut frame.args } else { &mut frame.locals };
+    let slots = if is_arg {
+        &mut frame.args
+    } else {
+        &mut frame.locals
+    };
     if slot >= slots.len() {
-        return Err(JsError::new(format!("{}-slot {} out of bounds (len={})", kind, slot, slots.len())));
+        return Err(JsError::new(format!(
+            "{}-slot {} out of bounds (len={})",
+            kind,
+            slot,
+            slots.len()
+        )));
     }
     let old_n = slots[slot].to_number();
     let new_n = old_n + delta as f64;
@@ -2199,17 +2557,35 @@ fn incdec_slot(
     // also resolvable via the scope chain from nested call sites) see the
     // updated counter. Without this, loop counters appear frozen and the
     // loop never terminates. Same pattern as SETVAR / SETARG.
-    let binding_kind = if is_arg { JsBindingKind::Argument } else { JsBindingKind::Variable };
-    let name_opt = nth_binding_name(&frame.atoms, &frame.atom_to_slot, binding_kind, slot)
-        .or_else(|| if is_arg { None } else { nth_binding_name(&frame.atoms, &frame.atom_to_slot, JsBindingKind::Constant, slot) });
+    let binding_kind = if is_arg {
+        JsBindingKind::Argument
+    } else {
+        JsBindingKind::Variable
+    };
+    let name_opt =
+        nth_binding_name(&frame.atoms, &frame.atom_to_slot, binding_kind, slot).or_else(|| {
+            if is_arg {
+                None
+            } else {
+                nth_binding_name(
+                    &frame.atoms,
+                    &frame.atom_to_slot,
+                    JsBindingKind::Constant,
+                    slot,
+                )
+            }
+        });
     if let Some(name) = name_opt {
         frame.scope.borrow_mut().set_own(&name, new_v.clone());
     }
-    frame.stack.push(if post { num_to_value(old_n) } else { new_v });
+    frame
+        .stack
+        .push(if post { num_to_value(old_n) } else { new_v });
     Ok(StepOutcome::Continue)
 }
 
-fn incdec_prop(bridge: &HostBridge,
+fn incdec_prop(
+    bridge: &HostBridge,
     frame: &mut JsFrame,
     operand: &[u8],
     delta: i32,
@@ -2222,18 +2598,27 @@ fn incdec_prop(bridge: &HostBridge,
     let old_n = old.to_number();
     let new_v = num_to_value(old_n + delta as f64);
     set_property(bridge, &obj, &name, new_v.clone())?;
-    frame.stack.push(if post { num_to_value(old_n) } else { new_v });
+    frame
+        .stack
+        .push(if post { num_to_value(old_n) } else { new_v });
     Ok(StepOutcome::Continue)
 }
 
-fn incdec_elem(bridge: &HostBridge, frame: &mut JsFrame, delta: i32, post: bool) -> Result<StepOutcome, JsError> {
+fn incdec_elem(
+    bridge: &HostBridge,
+    frame: &mut JsFrame,
+    delta: i32,
+    post: bool,
+) -> Result<StepOutcome, JsError> {
     let key = pop(frame)?;
     let obj = pop(frame)?;
     let old = get_element(bridge, &obj, &key);
     let old_n = old.to_number();
     let new_v = num_to_value(old_n + delta as f64);
     set_element(bridge, &obj, &key, new_v.clone())?;
-    frame.stack.push(if post { num_to_value(old_n) } else { new_v });
+    frame
+        .stack
+        .push(if post { num_to_value(old_n) } else { new_v });
     Ok(StepOutcome::Continue)
 }
 
@@ -2247,9 +2632,12 @@ fn loose_equal(a: &JsValue, b: &JsValue) -> bool {
         (Int(x), Int(y)) => x == y,
         (Number(x), Number(y)) => x == y,
         (String(x), String(y)) => **x == **y,
-        (Int(_), Number(_)) | (Number(_), Int(_))
-        | (Int(_), String(_)) | (String(_), Int(_))
-        | (Number(_), String(_)) | (String(_), Number(_)) => a.to_number() == b.to_number(),
+        (Int(_), Number(_))
+        | (Number(_), Int(_))
+        | (Int(_), String(_))
+        | (String(_), Int(_))
+        | (Number(_), String(_))
+        | (String(_), Number(_)) => a.to_number() == b.to_number(),
         (Bool(_), _) | (_, Bool(_)) => a.to_number() == b.to_number(),
         // Object identity comparison via Rc::ptr_eq.
         (Object(x), Object(y)) => Rc::ptr_eq(x, y),
@@ -2261,7 +2649,9 @@ fn loose_equal(a: &JsValue, b: &JsValue) -> bool {
 }
 
 fn atom_to_value(atoms: &[JsAtom], idx: usize) -> Result<JsValue, JsError> {
-    let a = atoms.get(idx).ok_or_else(|| JsError::new("atom_to_value: oob"))?;
+    let a = atoms
+        .get(idx)
+        .ok_or_else(|| JsError::new("atom_to_value: oob"))?;
     Ok(match a {
         JsAtom::Null => JsValue::Null,
         JsAtom::Void => JsValue::Undefined,
@@ -2344,7 +2734,10 @@ fn build_function_frame(
                 let mut walk = Some(captured.clone());
                 let mut found_program = false;
                 while let Some(s) = walk {
-                    if Rc::ptr_eq(&s, &program_scope) { found_program = true; break; }
+                    if Rc::ptr_eq(&s, &program_scope) {
+                        found_program = true;
+                        break;
+                    }
                     let next = s.borrow().proto.clone();
                     walk = next;
                 }
@@ -2395,14 +2788,25 @@ fn build_function_frame(
 /// slot index. The actual arg/var slot is the binding's POSITION among
 /// same-kind bindings (the order spvec[] was filled by the SpiderMonkey
 /// encoder, which is the order the bytecode's getarg/getvar operands use).
-fn build_atom_slot_map(atoms: &[JsAtom], bindings: &[JsFunctionBinding]) -> Vec<Option<(JsBindingKind, usize)>> {
+fn build_atom_slot_map(
+    atoms: &[JsAtom],
+    bindings: &[JsFunctionBinding],
+) -> Vec<Option<(JsBindingKind, usize)>> {
     let mut map = vec![None; atoms.len()];
     let mut arg_slot = 0usize;
     let mut var_slot = 0usize;
     for b in bindings {
         let slot = match b.kind {
-            JsBindingKind::Argument => { let s = arg_slot; arg_slot += 1; s }
-            JsBindingKind::Variable | JsBindingKind::Constant => { let s = var_slot; var_slot += 1; s }
+            JsBindingKind::Argument => {
+                let s = arg_slot;
+                arg_slot += 1;
+                s
+            }
+            JsBindingKind::Variable | JsBindingKind::Constant => {
+                let s = var_slot;
+                var_slot += 1;
+                s
+            }
         };
         for (i, a) in atoms.iter().enumerate() {
             if let JsAtom::String(s) = a {

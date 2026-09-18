@@ -26,7 +26,9 @@ pub fn vec3_cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
 }
 
 #[inline]
-pub fn vec3_length_sq(a: [f64; 3]) -> f64 { vec3_dot(a, a) }
+pub fn vec3_length_sq(a: [f64; 3]) -> f64 {
+    vec3_dot(a, a)
+}
 
 /// Smallest enclosing ball — direct port of `CPhysicsWorldAGEIA`'s
 /// embedded Welzl/Gärtner `Miniball` class.
@@ -42,7 +44,12 @@ pub struct Miniball {
 }
 
 impl Miniball {
-    pub fn empty() -> Self { Self { center: [0.0; 3], radius_sq: 0.0 } }
+    pub fn empty() -> Self {
+        Self {
+            center: [0.0; 3],
+            radius_sq: 0.0,
+        }
+    }
 
     /// Squared distance from the ball's center to a point.
     /// Mirrors `Miniball::d2(p)` — returns *signed* distance² (negative ⇒ inside).

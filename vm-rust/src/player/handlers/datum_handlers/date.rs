@@ -3,8 +3,8 @@ use crate::{
     player::{
         compare::validate_direct_symbol_fields,
         session::ExecutionContext,
-        DatumRef, DirPlayer, ScriptError,
         symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable},
+        DatumRef, DirPlayer, ScriptError,
     },
 };
 
@@ -257,18 +257,34 @@ impl DateDatumHandlers {
         // members (`hour`, `minute`, `seconds`) work alongside the existing
         // method accessors (`getHours`, …).
         match prop_builtin {
-            Some(BuiltInSymbol::Day) => Ok(player.alloc_datum(Datum::Int(js_date.get_date() as i32))),
-            Some(BuiltInSymbol::Month) => Ok(player.alloc_datum(Datum::Int(js_date.get_month() as i32 + 1))),
-            Some(BuiltInSymbol::Year) => Ok(player.alloc_datum(Datum::Int(js_date.get_full_year() as i32))),
-            Some(BuiltInSymbol::Hour | BuiltInSymbol::Hours) => Ok(player.alloc_datum(Datum::Int(js_date.get_hours() as i32))),
-            Some(BuiltInSymbol::Minute | BuiltInSymbol::Minutes) => Ok(player.alloc_datum(Datum::Int(js_date.get_minutes() as i32))),
-            Some(BuiltInSymbol::Second | BuiltInSymbol::Seconds) => Ok(player.alloc_datum(Datum::Int(js_date.get_seconds() as i32))),
-            Some(BuiltInSymbol::MilliSeconds) => Ok(player.alloc_datum(Datum::Int(js_date.get_milliseconds() as i32))),
+            Some(BuiltInSymbol::Day) => {
+                Ok(player.alloc_datum(Datum::Int(js_date.get_date() as i32)))
+            }
+            Some(BuiltInSymbol::Month) => {
+                Ok(player.alloc_datum(Datum::Int(js_date.get_month() as i32 + 1)))
+            }
+            Some(BuiltInSymbol::Year) => {
+                Ok(player.alloc_datum(Datum::Int(js_date.get_full_year() as i32)))
+            }
+            Some(BuiltInSymbol::Hour | BuiltInSymbol::Hours) => {
+                Ok(player.alloc_datum(Datum::Int(js_date.get_hours() as i32)))
+            }
+            Some(BuiltInSymbol::Minute | BuiltInSymbol::Minutes) => {
+                Ok(player.alloc_datum(Datum::Int(js_date.get_minutes() as i32)))
+            }
+            Some(BuiltInSymbol::Second | BuiltInSymbol::Seconds) => {
+                Ok(player.alloc_datum(Datum::Int(js_date.get_seconds() as i32)))
+            }
+            Some(BuiltInSymbol::MilliSeconds) => {
+                Ok(player.alloc_datum(Datum::Int(js_date.get_milliseconds() as i32)))
+            }
             Some(BuiltInSymbol::WeekDay) => {
                 // Lingo's `the weekday of date()` is 1=Sunday … 7=Saturday.
                 Ok(player.alloc_datum(Datum::Int(js_date.get_day() as i32 + 1)))
-            },
-            Some(BuiltInSymbol::Time) => Ok(player.alloc_datum(Datum::Float(date_obj.timestamp_ms as f64))),
+            }
+            Some(BuiltInSymbol::Time) => {
+                Ok(player.alloc_datum(Datum::Float(date_obj.timestamp_ms as f64)))
+            }
             _ => Err(ScriptError::new(format!(
                 "Cannot get date property {}",
                 prop_name
@@ -294,24 +310,40 @@ impl DateDatumHandlers {
         let value_datum = player.get_datum(value);
 
         match prop.into_builtin() {
-            Some(BuiltInSymbol::Day) => { js_date.set_date(value_datum.int_value()? as u32); }
+            Some(BuiltInSymbol::Day) => {
+                js_date.set_date(value_datum.int_value()? as u32);
+            }
             // Lingo months are 1-based; JS months are 0-based.
-            Some(BuiltInSymbol::Month) => { js_date.set_month((value_datum.int_value()? - 1).max(0) as u32); }
-            Some(BuiltInSymbol::Year) => { js_date.set_full_year(value_datum.int_value()? as u32); }
-            Some(BuiltInSymbol::Hour | BuiltInSymbol::Hours) => { js_date.set_hours(value_datum.int_value()? as u32); }
-            Some(BuiltInSymbol::Minute | BuiltInSymbol::Minutes) => { js_date.set_minutes(value_datum.int_value()? as u32); }
-            Some(BuiltInSymbol::Second | BuiltInSymbol::Seconds) => { js_date.set_seconds(value_datum.int_value()? as u32); }
-            Some(BuiltInSymbol::MilliSeconds) => { js_date.set_milliseconds(value_datum.int_value()? as u32); }
+            Some(BuiltInSymbol::Month) => {
+                js_date.set_month((value_datum.int_value()? - 1).max(0) as u32);
+            }
+            Some(BuiltInSymbol::Year) => {
+                js_date.set_full_year(value_datum.int_value()? as u32);
+            }
+            Some(BuiltInSymbol::Hour | BuiltInSymbol::Hours) => {
+                js_date.set_hours(value_datum.int_value()? as u32);
+            }
+            Some(BuiltInSymbol::Minute | BuiltInSymbol::Minutes) => {
+                js_date.set_minutes(value_datum.int_value()? as u32);
+            }
+            Some(BuiltInSymbol::Second | BuiltInSymbol::Seconds) => {
+                js_date.set_seconds(value_datum.int_value()? as u32);
+            }
+            Some(BuiltInSymbol::MilliSeconds) => {
+                js_date.set_milliseconds(value_datum.int_value()? as u32);
+            }
             Some(BuiltInSymbol::Time) => {
                 let new_ms = value_datum.float_value()? as i64;
                 let obj = player.date_objects.get_mut(&date_id).unwrap();
                 obj.timestamp_ms = new_ms;
                 return Ok(());
             }
-            _ => return Err(ScriptError::new(format!(
-                "Cannot set date property {}",
-                symbols.display(&prop).unwrap_or("<foreign symbol>")
-            ))),
+            _ => {
+                return Err(ScriptError::new(format!(
+                    "Cannot set date property {}",
+                    symbols.display(&prop).unwrap_or("<foreign symbol>")
+                )))
+            }
         };
 
         let obj = player.date_objects.get_mut(&date_id).unwrap();

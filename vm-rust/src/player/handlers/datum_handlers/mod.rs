@@ -4,42 +4,42 @@ pub mod cast_member;
 pub mod cast_member_ref;
 pub mod color;
 pub mod date;
+pub mod flash_object;
+pub mod float;
+pub mod havok_object;
 pub mod int;
 pub mod js_object;
 pub mod list_handlers;
 pub mod math;
+pub mod physx_object;
 pub mod player;
 pub mod point;
 pub mod prop_list;
 pub mod rect;
 pub mod script;
 pub mod script_instance;
+pub mod shockwave3d_object;
 pub mod sound_channel;
 pub mod sprite;
 pub mod string;
 pub mod string_chunk;
 pub mod symbol;
 pub mod timeout;
+pub mod transform3d;
 pub mod vector;
 pub mod void;
 pub mod xml;
-pub mod flash_object;
-pub mod float;
-pub mod shockwave3d_object;
-pub mod transform3d;
-pub mod havok_object;
-pub mod physx_object;
 
-use self::date::DateDatumHandlers;
 use self::cast_lib::CastLibDatumHandlers;
+use self::date::DateDatumHandlers;
 use self::math::MathDatumHandlers;
 use self::vector::VectorDatumHandlers;
 use self::void::VoidDatumHandlers;
 use self::{
     bitmap::BitmapDatumHandlers, list_handlers::ListDatumHandlers, point::PointDatumHandlers,
-    prop_list::PropListDatumHandlers, rect::RectDatumHandlers, sprite::SpriteDatumHandlers,
+    prop_list::PropListDatumHandlers, rect::RectDatumHandlers, script::ScriptDatumHandlers,
+    script_instance::ScriptInstanceDatumHandlers, sprite::SpriteDatumHandlers,
     string::StringDatumHandlers, string_chunk::StringChunkHandlers, timeout::TimeoutDatumHandlers,
-    script::ScriptDatumHandlers, script_instance::ScriptInstanceDatumHandlers,
 };
 
 use crate::player::symbols::builtin::BuiltInSymbol;
@@ -47,11 +47,9 @@ use crate::player::symbols::symbol::Symbol;
 use crate::{
     director::lingo::datum::{Datum, DatumType},
     player::{
-        compare::validate_direct_symbol_fields,
-        driver::checked_internal_datum,
-        session::ExecutionContext,
-        xtra::manager::call_instance_handler_explicit,
-        DatumRef, ScriptError, ScriptErrorCode,
+        compare::validate_direct_symbol_fields, driver::checked_internal_datum,
+        session::ExecutionContext, xtra::manager::call_instance_handler_explicit, DatumRef,
+        ScriptError, ScriptErrorCode,
     },
 };
 
@@ -582,31 +580,47 @@ pub(crate) fn player_call_datum_handler(
     match try_call_datum_handler_sync(runtime, obj_ref, handler_name.clone(), args) {
         SyncDatumCall::Handled(result) => DatumDispatch::Sync(result),
         SyncDatumCall::Pending { request, reason } => DatumDispatch::Pending { request, reason },
-        SyncDatumCall::Child { receiver, handler_ref, args } => DatumDispatch::Child {
+        SyncDatumCall::Child {
+            receiver,
+            handler_ref,
+            args,
+        } => DatumDispatch::Child {
             receiver,
             handler_ref,
             args,
             reason: "script-instance handler requires an owned child continuation".to_owned(),
         },
-        SyncDatumCall::ChildWithCompletion { receiver, handler_ref, args, completion } => DatumDispatch::ChildWithCompletion {
+        SyncDatumCall::ChildWithCompletion {
+            receiver,
+            handler_ref,
+            args,
+            completion,
+        } => DatumDispatch::ChildWithCompletion {
             receiver,
             handler_ref,
             args,
             completion,
         },
         SyncDatumCall::Unsupported => {
+            let request = match crate::player::driver::classify_async_object(
+                runtime,
+                obj_ref,
+                &handler_name,
+                args,
+            ) {
+                Ok(request) => request,
+                Err(error) => return DatumDispatch::Sync(Err(error)),
+            };
             let display = runtime
                 .symbols
                 .display(&handler_name)
                 .map(str::to_owned)
                 .unwrap_or_else(|_| "<foreign-handler>".to_owned());
             DatumDispatch::Pending {
-                request: crate::player::driver::InternalVmRequest::Object {
-                    receiver: obj_ref.clone(),
-                    name: handler_name,
-                    args: args.clone(),
-                },
-                reason: format!("datum handler {display} requires deferred dispatch"),
+                reason: crate::player::driver::async_request_reason(&request).unwrap_or_else(
+                    || format!("datum handler {display} requires deferred dispatch"),
+                ),
+                request,
             }
         }
     }
@@ -615,14 +629,17 @@ pub(crate) fn player_call_datum_handler(
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod sync_dispatch_tests {
     use super::*;
-    use async_std::channel;
     use crate::director::lingo::datum::Datum;
     use crate::player::cast_lib::CastMemberRef;
     use crate::player::session::RuntimeSession;
     use crate::player::symbols::symbol_table::SymbolOwner;
+    use async_std::channel;
 
     fn local_session() -> RuntimeSession {
-        let mut session = RuntimeSession::new(SymbolOwner { session: 71, generation: 1 });
+        let mut session = RuntimeSession::new(SymbolOwner {
+            session: 71,
+            generation: 1,
+        });
         let (tx, _rx) = channel::unbounded();
         assert!(session.add_player(1, tx));
         session
@@ -639,12 +656,8 @@ mod sync_dispatch_tests {
                         cast_lib: 1,
                         cast_member: 1,
                     }));
-                    let result = try_call_datum_handler_sync(
-                        &mut runtime,
-                        &datum,
-                        handler,
-                        &Vec::new(),
-                    );
+                    let result =
+                        try_call_datum_handler_sync(&mut runtime, &datum, handler, &Vec::new());
                     assert_eq!(runtime.player.handler_stack_depth, 0);
                     result
                 })
@@ -660,12 +673,8 @@ mod sync_dispatch_tests {
         let result = session
             .with_player(1, |mut runtime| {
                 let datum = runtime.player.alloc_datum(Datum::SpriteRef(1));
-                let result = try_call_datum_handler_sync(
-                    &mut runtime,
-                    &datum,
-                    handler,
-                    &Vec::new(),
-                );
+                let result =
+                    try_call_datum_handler_sync(&mut runtime, &datum, handler, &Vec::new());
                 assert_eq!(runtime.player.handler_stack_depth, 0);
                 result
             })
@@ -675,7 +684,10 @@ mod sync_dispatch_tests {
 
     #[test]
     fn foreign_handler_and_receiver_are_typed_invalid_references() {
-        let mut foreign = RuntimeSession::new(SymbolOwner { session: 72, generation: 1 });
+        let mut foreign = RuntimeSession::new(SymbolOwner {
+            session: 72,
+            generation: 1,
+        });
         let foreign_handler = foreign.symbols_mut().intern("foreignOnlyHandler");
         let (tx, _rx) = channel::unbounded();
         assert!(foreign.add_player(1, tx));
@@ -687,12 +699,8 @@ mod sync_dispatch_tests {
         let foreign_handler_result = local
             .with_player(1, |mut runtime| {
                 let datum = DatumRef::Void;
-                let result = try_call_datum_handler_sync(
-                    &mut runtime,
-                    &datum,
-                    foreign_handler,
-                    &Vec::new(),
-                );
+                let result =
+                    try_call_datum_handler_sync(&mut runtime, &datum, foreign_handler, &Vec::new());
                 assert_eq!(runtime.player.handler_stack_depth, 0);
                 result
             })

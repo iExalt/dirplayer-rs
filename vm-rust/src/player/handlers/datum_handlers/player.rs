@@ -1,17 +1,21 @@
+use super::super::types::TypeHandlers;
 use crate::{
     director::lingo::datum::Datum,
     player::{
-        DatumRef,
-        ScriptError, ScriptErrorCode, session::ExecutionContext,
+        session::ExecutionContext,
         symbols::{builtin::BuiltInSymbol, symbol::Symbol},
+        DatumRef, ScriptError, ScriptErrorCode,
     },
 };
-use super::super::types::TypeHandlers;
 
 pub struct PlayerDatumHandlers {}
 
 impl PlayerDatumHandlers {
-    pub fn call(runtime: &mut ExecutionContext<'_>, handler_name: Symbol, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn call(
+        runtime: &mut ExecutionContext<'_>,
+        handler_name: Symbol,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
         match handler_name.into_builtin() {
             Some(BuiltInSymbol::Count) => Self::count(runtime, args),
             Some(BuiltInSymbol::Cursor) => TypeHandlers::cursor(runtime, args),
@@ -28,7 +32,9 @@ impl PlayerDatumHandlers {
                         Ok(player.alloc_datum(Datum::String(k)))
                     })
                 } else {
-                    crate::player::handlers::manager::BuiltInHandlerManager::key_pressed(runtime, args)
+                    crate::player::handlers::manager::BuiltInHandlerManager::key_pressed(
+                        runtime, args,
+                    )
                 }
             }
             // `_player.getPref(name)` / `_player.setPref(name, value)` — the Player
@@ -50,29 +56,40 @@ impl PlayerDatumHandlers {
             // AreaZero's `[M] Main.InitGlobals` does
             // `gSystem[#parent] = _player.windowList[1].movie`, which compiles to
             // getPropRef(_player, "windowList", 1) and previously raised.
-            Some(BuiltInSymbol::GetProp) | Some(BuiltInSymbol::GetAt) | Some(BuiltInSymbol::GetPropRef) => runtime.with_player_and_symbols(|player, symbols| {
-                let subject = player.get_datum(&args[0]).string_value(symbols)?;
-                if subject.eq_ignore_ascii_case("windowList") {
-                    let index = args.get(1)
-                        .map(|a| player.get_datum(a).int_value())
-                        .transpose()?
-                        .unwrap_or(1);
-                    return Ok(if index == 1 {
-                        player.alloc_datum(Datum::Stage)
-                    } else {
-                        DatumRef::Void
-                    });
-                }
-                let handler_text = symbols.display(&handler_name).map_err(|_| {
-                    ScriptError::new_code(ScriptErrorCode::InvalidReference, "foreign player handler symbol".to_string())
-                })?;
-                Err(ScriptError::new(format!(
-                    "Invalid call _player.{handler_text}({subject})"
-                )))
-            }),
+            Some(BuiltInSymbol::GetProp)
+            | Some(BuiltInSymbol::GetAt)
+            | Some(BuiltInSymbol::GetPropRef) => {
+                runtime.with_player_and_symbols(|player, symbols| {
+                    let subject = player.get_datum(&args[0]).string_value(symbols)?;
+                    if subject.eq_ignore_ascii_case("windowList") {
+                        let index = args
+                            .get(1)
+                            .map(|a| player.get_datum(a).int_value())
+                            .transpose()?
+                            .unwrap_or(1);
+                        return Ok(if index == 1 {
+                            player.alloc_datum(Datum::Stage)
+                        } else {
+                            DatumRef::Void
+                        });
+                    }
+                    let handler_text = symbols.display(&handler_name).map_err(|_| {
+                        ScriptError::new_code(
+                            ScriptErrorCode::InvalidReference,
+                            "foreign player handler symbol".to_string(),
+                        )
+                    })?;
+                    Err(ScriptError::new(format!(
+                        "Invalid call _player.{handler_text}({subject})"
+                    )))
+                })
+            }
             _ => runtime.with_player_and_symbols(|_player, symbols| {
                 let handler_text = symbols.display(&handler_name).map_err(|_| {
-                    ScriptError::new_code(ScriptErrorCode::InvalidReference, "foreign player handler symbol".to_string())
+                    ScriptError::new_code(
+                        ScriptErrorCode::InvalidReference,
+                        "foreign player handler symbol".to_string(),
+                    )
                 })?;
                 Err(ScriptError::new_code(
                     ScriptErrorCode::HandlerNotFound,
@@ -82,10 +99,14 @@ impl PlayerDatumHandlers {
         }
     }
 
-    fn get_pref(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    fn get_pref(
+        runtime: &mut ExecutionContext<'_>,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
         runtime.with_player_and_symbols(|player, symbols| {
             let pref_name = player.get_datum(&args[0]).string_value(symbols)?;
-            let storage = web_sys::window().and_then(|window| window.local_storage().ok().flatten());
+            let storage =
+                web_sys::window().and_then(|window| window.local_storage().ok().flatten());
             if let Some(storage) = storage {
                 let key = format!("dirplayer_pref_{pref_name}");
                 if let Ok(Some(value)) = storage.get_item(&key) {
@@ -96,11 +117,15 @@ impl PlayerDatumHandlers {
         })
     }
 
-    fn set_pref(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    fn set_pref(
+        runtime: &mut ExecutionContext<'_>,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
         runtime.with_player_and_symbols(|player, symbols| {
             let pref_name = player.get_datum(&args[0]).string_value(symbols)?;
             let pref_value = player.get_datum(&args[1]).string_value(symbols)?;
-            let storage = web_sys::window().and_then(|window| window.local_storage().ok().flatten());
+            let storage =
+                web_sys::window().and_then(|window| window.local_storage().ok().flatten());
             if let Some(storage) = storage {
                 let key = format!("dirplayer_pref_{pref_name}");
                 let _ = storage.set_item(&key, &pref_value);
@@ -109,7 +134,10 @@ impl PlayerDatumHandlers {
         })
     }
 
-    fn count(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    fn count(
+        runtime: &mut ExecutionContext<'_>,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
         runtime.with_player_and_symbols(|player, symbols| {
             let subject = player.get_datum(&args[0]).string_value(symbols).unwrap();
             // `_player.count(#windowList)` — the symbol arrives as its display

@@ -14,10 +14,7 @@ use base64::Engine;
 
 use crate::{
     director::lingo::datum::{Datum, DatumType},
-    player::{
-        symbols::symbol_table::SymbolTable, DatumRef, DirPlayer,
-        ScriptError,
-    },
+    player::{symbols::symbol_table::SymbolTable, DatumRef, DirPlayer, ScriptError},
 };
 
 const BUDAPI_VERSION: &str = "5.0";
@@ -39,10 +36,21 @@ pub(crate) struct BudApiState {
 
 #[derive(Clone, Debug)]
 pub(crate) enum BudApiHostIntent {
-    Open { owner: crate::player::ownership::OwnerToken, target: String },
-    Alert { owner: crate::player::ownership::OwnerToken, text: String },
-    ClipboardWrite { owner: crate::player::ownership::OwnerToken, text: String },
-    ClipboardRead { owner: crate::player::ownership::OwnerToken },
+    Open {
+        owner: crate::player::ownership::OwnerToken,
+        target: String,
+    },
+    Alert {
+        owner: crate::player::ownership::OwnerToken,
+        text: String,
+    },
+    ClipboardWrite {
+        owner: crate::player::ownership::OwnerToken,
+        text: String,
+    },
+    ClipboardRead {
+        owner: crate::player::ownership::OwnerToken,
+    },
 }
 
 impl BudApiHostIntent {
@@ -115,7 +123,11 @@ impl BudApiXtra {
                 } else {
                     String::new()
                 };
-                let text = if caption.is_empty() { message } else { format!("{}\n\n{}", caption, message) };
+                let text = if caption.is_empty() {
+                    message
+                } else {
+                    format!("{}\n\n{}", caption, message)
+                };
                 Some(BudApiHostIntent::Alert { owner, text })
             }
             "bacopytext" => Some(BudApiHostIntent::ClipboardWrite {
@@ -312,20 +324,32 @@ fn string_arg(
 /// verbatim when the underlying read fails. In WASM the read effectively
 /// always fails, so we just echo the default back. Default is in arg[2] for
 /// baReadRegString-style calls, and arg[0] for shortname-style getters.
-fn default_string(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+fn default_string(
+    player: &mut DirPlayer,
+    args: &Vec<DatumRef>,
+    symbols: &SymbolTable,
+) -> Result<DatumRef, ScriptError> {
     let default_idx = if args.len() >= 3 { 2 } else { 0 };
     let s = string_arg(player, args, default_idx, symbols)?;
     Ok(player.alloc_datum(Datum::String(s)))
 }
 
-fn default_int(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+fn default_int(
+    player: &mut DirPlayer,
+    args: &Vec<DatumRef>,
+    symbols: &SymbolTable,
+) -> Result<DatumRef, ScriptError> {
     let n = int_arg_or(player, args, 2, 0, symbols)?;
     Ok(player.alloc_datum(Datum::Int(n)))
 }
 
 // -- Information ------------------------------------------------------------
 
-fn ba_sys_folder(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+fn ba_sys_folder(
+    player: &mut DirPlayer,
+    args: &Vec<DatumRef>,
+    symbols: &SymbolTable,
+) -> Result<DatumRef, ScriptError> {
     let kind = string_arg(player, args, 0, symbols)?;
     let path = match kind.to_ascii_lowercase().as_str() {
         "temp" | "windows" | "system" | "program files" | "appdata" | "localappdata" => "/",
@@ -334,7 +358,11 @@ fn ba_sys_folder(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &SymbolT
     ok_string(player, path)
 }
 
-fn ba_cpu_info(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+fn ba_cpu_info(
+    player: &mut DirPlayer,
+    args: &Vec<DatumRef>,
+    symbols: &SymbolTable,
+) -> Result<DatumRef, ScriptError> {
     let kind = string_arg(player, args, 0, symbols)?;
     let value = match kind.to_ascii_lowercase().as_str() {
         "vendor" => "WebAssembly",
@@ -349,7 +377,11 @@ fn ba_cpu_info(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &SymbolTab
     ok_string(player, value)
 }
 
-fn ba_screen_info(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+fn ba_screen_info(
+    player: &mut DirPlayer,
+    args: &Vec<DatumRef>,
+    symbols: &SymbolTable,
+) -> Result<DatumRef, ScriptError> {
     let kind = string_arg(player, args, 0, symbols)?;
     let screen = web_sys::window().and_then(|w| w.screen().ok());
     let result = match kind.to_ascii_lowercase().as_str() {
@@ -368,7 +400,11 @@ fn ba_screen_info(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &Symbol
     ok_int(player, result)
 }
 
-fn ba_font_installed(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+fn ba_font_installed(
+    player: &mut DirPlayer,
+    args: &Vec<DatumRef>,
+    symbols: &SymbolTable,
+) -> Result<DatumRef, ScriptError> {
     let name = string_arg(player, args, 0, symbols)?;
     if name.is_empty() {
         return ok_int(player, 0);
@@ -410,7 +446,11 @@ fn ba_font_installed(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &Sym
     ok_int(player, if installed { 1 } else { 0 })
 }
 
-fn ba_font_list(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+fn ba_font_list(
+    player: &mut DirPlayer,
+    args: &Vec<DatumRef>,
+    symbols: &SymbolTable,
+) -> Result<DatumRef, ScriptError> {
     // Browsers don't expose a font enumeration API on the open web (FontFace
     // API is privacy-gated). Always return the canonical web-safe set.
     let _ = string_arg(player, args, 0, symbols)?;
@@ -438,7 +478,11 @@ use wasm_bindgen::JsCast;
 
 // -- System / clipboard / time ---------------------------------------------
 
-fn ba_environment(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+fn ba_environment(
+    player: &mut DirPlayer,
+    args: &Vec<DatumRef>,
+    symbols: &SymbolTable,
+) -> Result<DatumRef, ScriptError> {
     let name = string_arg(player, args, 0, symbols)?;
     let value = match name.to_ascii_uppercase().as_str() {
         "USERLANGUAGE" | "LANG" => web_sys::window()
@@ -452,7 +496,11 @@ fn ba_environment(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &Symbol
     ok_string(player, &value)
 }
 
-fn ba_sleep(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+fn ba_sleep(
+    player: &mut DirPlayer,
+    args: &Vec<DatumRef>,
+    symbols: &SymbolTable,
+) -> Result<DatumRef, ScriptError> {
     // We can't block the WASM thread; busy-wait `Date.now()` instead so
     // callers get the time delay they asked for (without making the page
     // unresponsive — we cap at 500ms to avoid runaway scripts).
@@ -466,7 +514,11 @@ fn ba_sleep(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &SymbolTable)
     ok_int(player, 0)
 }
 
-fn ba_system_time(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+fn ba_system_time(
+    player: &mut DirPlayer,
+    args: &Vec<DatumRef>,
+    symbols: &SymbolTable,
+) -> Result<DatumRef, ScriptError> {
     use chrono::{Datelike, Local, Timelike};
     let format = string_arg(player, args, 0, symbols)?;
     let now = Local::now();
@@ -489,46 +541,96 @@ fn ba_system_time(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &Symbol
 
 // -- File ops via FileIO virtual filesystem --------------------------------
 
-fn ba_file_exists(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+fn ba_file_exists(
+    player: &mut DirPlayer,
+    args: &Vec<DatumRef>,
+    symbols: &SymbolTable,
+) -> Result<DatumRef, ScriptError> {
     let path = string_arg_explicit(player, args, 0, symbols)?;
     let exists = player.with_xtra_manager_state(|state, _| {
         state.fileio.virtual_fs.contains_key(&path)
-            || state.fileio.virtual_fs.contains_key(path.trim_start_matches('/'))
+            || state
+                .fileio
+                .virtual_fs
+                .contains_key(path.trim_start_matches('/'))
     });
     Ok(player.alloc_datum(Datum::Int(if exists { 1 } else { 0 })))
 }
 
-fn ba_folder_exists(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+fn ba_folder_exists(
+    player: &mut DirPlayer,
+    args: &Vec<DatumRef>,
+    symbols: &SymbolTable,
+) -> Result<DatumRef, ScriptError> {
     let path = string_arg_explicit(player, args, 0, symbols)?;
-    let prefix = if path.ends_with('/') { path } else { format!("{}/", path) };
+    let prefix = if path.ends_with('/') {
+        path
+    } else {
+        format!("{}/", path)
+    };
     let exists = player.with_xtra_manager_state(|state, _| {
-        state.fileio.virtual_fs.keys().any(|k| k.starts_with(&prefix))
+        state
+            .fileio
+            .virtual_fs
+            .keys()
+            .any(|k| k.starts_with(&prefix))
     });
     Ok(player.alloc_datum(Datum::Int(if exists { 1 } else { 0 })))
 }
 
-fn ba_file_size(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+fn ba_file_size(
+    player: &mut DirPlayer,
+    args: &Vec<DatumRef>,
+    symbols: &SymbolTable,
+) -> Result<DatumRef, ScriptError> {
     let path = string_arg_explicit(player, args, 0, symbols)?;
     let size = player.with_xtra_manager_state(|state, _| {
-        state.fileio.virtual_fs.get(&path)
+        state
+            .fileio
+            .virtual_fs
+            .get(&path)
             .or_else(|| state.fileio.virtual_fs.get(path.trim_start_matches('/')))
-            .map(|d| d.len() as i32).unwrap_or(-1)
+            .map(|d| d.len() as i32)
+            .unwrap_or(-1)
     });
     Ok(player.alloc_datum(Datum::Int(size)))
 }
 
-fn ba_file_list(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+fn ba_file_list(
+    player: &mut DirPlayer,
+    args: &Vec<DatumRef>,
+    symbols: &SymbolTable,
+) -> Result<DatumRef, ScriptError> {
     let folder = string_arg_explicit(player, args, 0, symbols)?;
     let _pattern = string_arg_explicit(player, args, 1, symbols)?;
-    let prefix = if folder.is_empty() { String::new() } else if folder.ends_with('/') { folder } else { format!("{}/", folder) };
+    let prefix = if folder.is_empty() {
+        String::new()
+    } else if folder.ends_with('/') {
+        folder
+    } else {
+        format!("{}/", folder)
+    };
     let files = player.with_xtra_manager_state(|state, _| {
-        state.fileio.virtual_fs.keys().filter(|k| k.starts_with(&prefix)).cloned().collect::<Vec<_>>()
+        state
+            .fileio
+            .virtual_fs
+            .keys()
+            .filter(|k| k.starts_with(&prefix))
+            .cloned()
+            .collect::<Vec<_>>()
     });
-    let refs: std::collections::VecDeque<DatumRef> = files.into_iter().map(|f| player.alloc_datum(Datum::String(f))).collect();
+    let refs: std::collections::VecDeque<DatumRef> = files
+        .into_iter()
+        .map(|f| player.alloc_datum(Datum::String(f)))
+        .collect();
     Ok(player.alloc_datum(Datum::List(DatumType::List, refs, false)))
 }
 
-fn ba_temp_file_name(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+fn ba_temp_file_name(
+    player: &mut DirPlayer,
+    args: &Vec<DatumRef>,
+    symbols: &SymbolTable,
+) -> Result<DatumRef, ScriptError> {
     let prefix = string_arg(player, args, 0, symbols)?;
     let mut raw = [0u8; 8];
     let _ = getrandom::fill(&mut raw);
@@ -553,7 +655,11 @@ fn xor_with_key(data: &[u8], key: &[u8]) -> Vec<u8> {
         .collect()
 }
 
-fn ba_encrypt_text(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+fn ba_encrypt_text(
+    player: &mut DirPlayer,
+    args: &Vec<DatumRef>,
+    symbols: &SymbolTable,
+) -> Result<DatumRef, ScriptError> {
     let text = string_arg(player, args, 0, symbols)?;
     let key = string_arg(player, args, 1, symbols)?;
     let bytes: Vec<u8> = text.chars().map(|c| c as u8).collect();
@@ -563,7 +669,11 @@ fn ba_encrypt_text(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &Symbo
     ok_string(player, &encoded)
 }
 
-fn ba_decrypt_text(player: &mut DirPlayer, args: &Vec<DatumRef>, symbols: &SymbolTable) -> Result<DatumRef, ScriptError> {
+fn ba_decrypt_text(
+    player: &mut DirPlayer,
+    args: &Vec<DatumRef>,
+    symbols: &SymbolTable,
+) -> Result<DatumRef, ScriptError> {
     let text = string_arg(player, args, 0, symbols)?;
     let key = string_arg(player, args, 1, symbols)?;
     let cipher = match base64::engine::general_purpose::STANDARD.decode(text.as_bytes()) {

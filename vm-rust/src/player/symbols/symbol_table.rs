@@ -1,6 +1,9 @@
 use std::{collections::HashMap, rc::Rc};
 
-use crate::player::symbols::{builtin::{BuiltInSymbol, BUILTIN_SPECS}, symbol::Symbol};
+use crate::player::symbols::{
+    builtin::{BuiltInSymbol, BUILTIN_SPECS},
+    symbol::Symbol,
+};
 
 /// Diagnostic metadata only. Rc identity is the actual authority.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
@@ -32,7 +35,9 @@ pub struct SymbolTable {
 
 impl SymbolTable {
     /// A fresh Rc owner is created on every call, even for equal metadata.
-    pub fn new() -> Self { Self::with_owner(SymbolOwner::default()) }
+    pub fn new() -> Self {
+        Self::with_owner(SymbolOwner::default())
+    }
 
     pub fn with_owner(key: SymbolOwner) -> Self {
         let owner = Rc::new(SymbolOwnerInner { key });
@@ -40,9 +45,14 @@ impl SymbolTable {
         let mut builtin_display = HashMap::new();
         for (spelling, builtin) in BUILTIN_SPECS.iter().copied() {
             builtin_by_lower.insert(spelling.to_lowercase(), builtin.canonical());
-            builtin_display.entry(builtin.canonical()).or_insert_with(|| spelling.to_owned());
+            builtin_display
+                .entry(builtin.canonical())
+                .or_insert_with(|| spelling.to_owned());
         }
-        let builtin_lower = builtin_display.iter().map(|(b, s)| (*b, s.to_ascii_lowercase())).collect();
+        let builtin_lower = builtin_display
+            .iter()
+            .map(|(b, s)| (*b, s.to_ascii_lowercase()))
+            .collect();
         let builtin_display_baseline = builtin_display.clone();
         Self {
             owner,
@@ -58,10 +68,14 @@ impl SymbolTable {
         }
     }
 
-    pub fn owner(&self) -> SymbolOwner { self.owner.key }
+    pub fn owner(&self) -> SymbolOwner {
+        self.owner.key
+    }
 
     pub(crate) fn owns(&self, symbol: &Symbol) -> bool {
-        symbol.owner_identity().map_or(true, |owner| Rc::ptr_eq(owner, &self.owner))
+        symbol
+            .owner_identity()
+            .map_or(true, |owner| Rc::ptr_eq(owner, &self.owner))
     }
 
     pub fn intern(&mut self, string: &str) -> Symbol {
@@ -102,22 +116,40 @@ impl SymbolTable {
 
     pub fn display<'a>(&'a self, symbol: &Symbol) -> Result<&'a str, ForeignSymbol> {
         match symbol.builtin_variant() {
-            Some(builtin) => self.builtin_display.get(&builtin).map(String::as_str).ok_or(ForeignSymbol),
+            Some(builtin) => self
+                .builtin_display
+                .get(&builtin)
+                .map(String::as_str)
+                .ok_or(ForeignSymbol),
             None => {
                 let id = symbol.dynamic_id().ok_or(ForeignSymbol)? as usize;
-                if !self.owns(symbol) { return Err(ForeignSymbol); }
-                self.dynamic_display.get(id).map(String::as_str).ok_or(ForeignSymbol)
+                if !self.owns(symbol) {
+                    return Err(ForeignSymbol);
+                }
+                self.dynamic_display
+                    .get(id)
+                    .map(String::as_str)
+                    .ok_or(ForeignSymbol)
             }
         }
     }
 
     pub fn lower<'a>(&'a self, symbol: &Symbol) -> Result<&'a str, ForeignSymbol> {
         match symbol.builtin_variant() {
-            Some(builtin) => self.builtin_lower.get(&builtin).map(String::as_str).ok_or(ForeignSymbol),
+            Some(builtin) => self
+                .builtin_lower
+                .get(&builtin)
+                .map(String::as_str)
+                .ok_or(ForeignSymbol),
             None => {
                 let id = symbol.dynamic_id().ok_or(ForeignSymbol)? as usize;
-                if !self.owns(symbol) { return Err(ForeignSymbol); }
-                self.dynamic_lower.get(id).map(String::as_str).ok_or(ForeignSymbol)
+                if !self.owns(symbol) {
+                    return Err(ForeignSymbol);
+                }
+                self.dynamic_lower
+                    .get(id)
+                    .map(String::as_str)
+                    .ok_or(ForeignSymbol)
             }
         }
     }
@@ -125,10 +157,10 @@ impl SymbolTable {
     pub fn reset_movie_display_claims(&mut self) {
         self.movie_claimed_dynamic.fill(false);
         self.movie_claimed_builtins.clear();
-        self.builtin_display.clone_from(&self.builtin_display_baseline);
+        self.builtin_display
+            .clone_from(&self.builtin_display_baseline);
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -136,11 +168,17 @@ mod tests {
 
     #[test]
     fn builtin_alias_keeps_stable_ids_and_first_display() {
-        let mut table = SymbolTable::with_owner(SymbolOwner { session: 7, generation: 1 });
+        let mut table = SymbolTable::with_owner(SymbolOwner {
+            session: 7,
+            generation: 1,
+        });
         let short = table.intern("editShortCutsEnabled");
         let canonical = table.intern("EDITSHORTCUTSENABLED");
         assert_eq!(short, canonical);
-        assert_eq!(short.into_builtin(), Some(BuiltInSymbol::EditShortcutsEnabled));
+        assert_eq!(
+            short.into_builtin(),
+            Some(BuiltInSymbol::EditShortcutsEnabled)
+        );
         assert_eq!(table.display(&short), Ok("editShortCutsEnabled"));
     }
 
@@ -161,7 +199,10 @@ mod tests {
 
     #[test]
     fn equal_numeric_owner_keys_do_not_cross_validate() {
-        let key = SymbolOwner { session: 11, generation: 3 };
+        let key = SymbolOwner {
+            session: 11,
+            generation: 3,
+        };
         let mut first = SymbolTable::with_owner(key);
         let mut second = SymbolTable::with_owner(key);
         let a = first.intern("firstOnly");
@@ -187,12 +228,18 @@ mod tests {
     #[test]
     fn parallel_tables_are_independent_without_global_state() {
         let first = std::thread::spawn(|| {
-            let mut table = SymbolTable::with_owner(SymbolOwner { session: 1, generation: 0 });
+            let mut table = SymbolTable::with_owner(SymbolOwner {
+                session: 1,
+                generation: 0,
+            });
             let symbol = table.intern_authoritative("First");
             table.display(&symbol).unwrap().to_owned()
         });
         let second = std::thread::spawn(|| {
-            let mut table = SymbolTable::with_owner(SymbolOwner { session: 2, generation: 0 });
+            let mut table = SymbolTable::with_owner(SymbolOwner {
+                session: 2,
+                generation: 0,
+            });
             let symbol = table.intern_authoritative("Second");
             table.display(&symbol).unwrap().to_owned()
         });
@@ -214,8 +261,10 @@ mod hash_tests {
         let mut b = SymbolTable::new();
         let first = a.intern("same");
         let second = b.intern("same");
-        let mut ha = DefaultHasher::new(); first.hash(&mut ha);
-        let mut hb = DefaultHasher::new(); second.hash(&mut hb);
+        let mut ha = DefaultHasher::new();
+        first.hash(&mut ha);
+        let mut hb = DefaultHasher::new();
+        second.hash(&mut hb);
         assert_eq!(ha.finish(), hb.finish());
         assert_ne!(first, second);
         assert!(a.lower(&second).is_err());
@@ -227,14 +276,20 @@ mod hash_tests {
         let barrier = Arc::new(Barrier::new(2));
         let left_barrier = barrier.clone();
         let left = std::thread::spawn(move || {
-            let mut table = SymbolTable::with_owner(SymbolOwner { session: 101, generation: 0 });
+            let mut table = SymbolTable::with_owner(SymbolOwner {
+                session: 101,
+                generation: 0,
+            });
             let symbol = table.intern_authoritative("Left");
             left_barrier.wait();
             table.display(&symbol).unwrap().to_owned()
         });
         let right_barrier = barrier;
         let right = std::thread::spawn(move || {
-            let mut table = SymbolTable::with_owner(SymbolOwner { session: 202, generation: 0 });
+            let mut table = SymbolTable::with_owner(SymbolOwner {
+                session: 202,
+                generation: 0,
+            });
             let symbol = table.intern_authoritative("Right");
             right_barrier.wait();
             table.display(&symbol).unwrap().to_owned()

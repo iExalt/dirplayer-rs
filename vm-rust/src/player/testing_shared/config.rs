@@ -1,9 +1,9 @@
-use std::collections::HashMap;
+use crate::player::reserve_player_mut;
 use indexmap::IndexMap;
+use serde::Deserialize;
+use std::collections::HashMap;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::OnceLock;
-use serde::Deserialize;
-use crate::player::reserve_player_mut;
 
 const DEFAULT_TIMEOUT_SECS: f64 = 30.0;
 
@@ -94,7 +94,9 @@ impl Default for TestSection {
 }
 
 impl TestSection {
-    fn default_timeout() -> f64 { DEFAULT_TIMEOUT_SECS }
+    fn default_timeout() -> f64 {
+        DEFAULT_TIMEOUT_SECS
+    }
 }
 
 impl TestConfig {
@@ -104,15 +106,20 @@ impl TestConfig {
     /// - `${VAR}` — replaced by the env var `VAR`; or an empty string if unset.
     /// - `${VAR:fallback}` — replaced by `VAR` if set, otherwise `fallback`.
     pub fn from_toml(toml_str: &str) -> Self {
-        let mut cfg: TestConfig = toml::from_str(toml_str).expect("Failed to parse test config TOML");
+        let mut cfg: TestConfig =
+            toml::from_str(toml_str).expect("Failed to parse test config TOML");
         cfg.movie.path = Self::resolve_env(&cfg.movie.path);
         cfg.movie.startup_do = Self::resolve_env(&cfg.movie.startup_do);
         cfg.movie.startup_do_before = Self::resolve_env(&cfg.movie.startup_do_before);
         cfg.test.suite = Self::resolve_env(&cfg.test.suite);
-        cfg.external_params = cfg.external_params.into_iter()
+        cfg.external_params = cfg
+            .external_params
+            .into_iter()
             .map(|(k, v)| (k, Self::resolve_env(&v)))
             .collect();
-        cfg.params = cfg.params.into_iter()
+        cfg.params = cfg
+            .params
+            .into_iter()
             .map(|(k, v)| (k, Self::resolve_env(&v)))
             .collect();
         cfg
@@ -125,7 +132,8 @@ impl TestConfig {
 
     /// Get a param value, panicking if not found.
     pub fn param(&self, key: &str) -> &str {
-        self.params.get(key)
+        self.params
+            .get(key)
             .unwrap_or_else(|| panic!("Missing required test param '{}'", key))
     }
 
@@ -180,11 +188,13 @@ impl TestConfig {
                 let default = &token[colon + 1..];
                 Self::get_env(var).unwrap_or_else(|| default.to_string())
             } else {
-                Self::get_env(token)
-                    .unwrap_or_else(|| {
-                        log::warn!("Env var '{}' not set and no default provided; using empty string", token);
-                        String::new()
-                    })
+                Self::get_env(token).unwrap_or_else(|| {
+                    log::warn!(
+                        "Env var '{}' not set and no default provided; using empty string",
+                        token
+                    );
+                    String::new()
+                })
             };
             result.push_str(&resolved);
             rest = &after[end + 1..];
@@ -206,7 +216,9 @@ impl TestConfig {
         {
             let window = web_sys::window()?;
             let test_env = js_sys::Reflect::get(&window, &"__testEnv".into()).ok()?;
-            if test_env.is_undefined() || test_env.is_null() { return None; }
+            if test_env.is_undefined() || test_env.is_null() {
+                return None;
+            }
             let val = js_sys::Reflect::get(&test_env, &name.into()).ok()?;
             val.as_string()
         }

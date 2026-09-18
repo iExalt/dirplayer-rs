@@ -5,11 +5,11 @@ use crate::{
         Datum, DatumType, StringChunkExpr, StringChunkSource, StringChunkType,
     },
     player::{
-        DatumRef, DirPlayer, ScriptError,
         compare::validate_direct_symbol_fields,
         eval::try_eval_lingo_expr_static,
         session::ExecutionContext,
         symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable},
+        DatumRef, DirPlayer, ScriptError,
     },
 };
 
@@ -33,7 +33,12 @@ impl StringDatumUtils {
         let datum = checked_datum(player, symbols, datum_ref)?;
         if let Datum::String(str_val) = datum {
             match prop_name.into_builtin() {
-                Some(BuiltInSymbol::Item | BuiltInSymbol::Word | BuiltInSymbol::Char | BuiltInSymbol::Line) => {
+                Some(
+                    BuiltInSymbol::Item
+                    | BuiltInSymbol::Word
+                    | BuiltInSymbol::Char
+                    | BuiltInSymbol::Line,
+                ) => {
                     let chunk_expr = StringChunkExpr {
                         chunk_type: StringChunkType::from_symbol(&prop_name, symbols)?,
                         start,
@@ -77,7 +82,9 @@ impl StringDatumUtils {
             // itself — same as `.string`. spectral-wizard's
             // getDefaultFixedLineSpace reads `member(..).char[1..1].ref.text`
             // to copy a character into a probe field.
-            Some(BuiltInSymbol::String | BuiltInSymbol::Text) => Ok(Datum::String(value.to_owned())),
+            Some(BuiltInSymbol::String | BuiltInSymbol::Text) => {
+                Ok(Datum::String(value.to_owned()))
+            }
             Some(BuiltInSymbol::Value) => {
                 // Normalise (strip comments + trim unbalanced brackets) before
                 // parsing, then evaluate as a Lingo expression.
@@ -93,11 +100,10 @@ impl StringDatumUtils {
                 // fell back to the raw string, and `count(movie)` then raised
                 // "Cannot get count of non-list (type: string)". The `value()`
                 // FUNCTION path already did this — the property path did not.
-                let cleaned = crate::player::handlers::types::truncate_to_first_balanced_list(&cleaned);
+                let cleaned =
+                    crate::player::handlers::types::truncate_to_first_balanced_list(&cleaned);
                 match try_eval_lingo_expr_static(cleaned.clone(), player, symbols) {
-                    Ok(datum_ref) => {
-                        Ok(checked_datum(player, symbols, &datum_ref)?.clone())
-                    }
+                    Ok(datum_ref) => Ok(checked_datum(player, symbols, &datum_ref)?.clone()),
                     Err(err) if err.code == crate::player::ScriptErrorCode::InvalidReference => {
                         return Err(err);
                     }
@@ -166,21 +172,36 @@ impl StringDatumUtils {
 }
 
 impl StringDatumHandlers {
-    pub fn count(player: &mut DirPlayer, symbols: &SymbolTable, datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn count(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
         let value = checked_datum(player, symbols, datum)?.string_value(symbols)?;
         let operand = checked_datum(player, symbols, &args[0])?.string_value(symbols)?;
         let count = string_get_count(&value, &operand, player.movie.item_delimiter)?;
         Ok(player.alloc_datum(Datum::Int(count as i32)))
     }
 
-    pub fn get_at(player: &mut DirPlayer, symbols: &SymbolTable, datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn get_at(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
         let value = checked_datum(player, symbols, datum)?.string_value(symbols)?;
         let index = checked_datum(player, symbols, &args[0])?.int_value()? as usize;
         let ch = value.chars().nth(index.wrapping_sub(1)).unwrap_or(' ');
         Ok(player.alloc_datum(Datum::String(ch.to_string())))
     }
 
-    pub fn duplicate(player: &mut DirPlayer, symbols: &SymbolTable, datum: &DatumRef, _args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn duplicate(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        _args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
         let value = checked_datum(player, symbols, datum)?.string_value(symbols)?;
         Ok(player.alloc_datum(Datum::String(value)))
     }
@@ -193,23 +214,51 @@ impl StringDatumHandlers {
     ) -> Result<DatumRef, ScriptError> {
         let prop_name = checked_datum(player, symbols, &args[0])?.symbol_value(symbols)?;
         let start = checked_datum(player, symbols, &args[1])?.int_value()?;
-        let end = if args.len() > 2 { checked_datum(player, symbols, &args[2])?.int_value()? } else { start };
-        let prop_ref = StringDatumUtils::get_prop_ref(player, symbols, datum, prop_name, start, end)?;
+        let end = if args.len() > 2 {
+            checked_datum(player, symbols, &args[2])?.int_value()?
+        } else {
+            start
+        };
+        let prop_ref =
+            StringDatumUtils::get_prop_ref(player, symbols, datum, prop_name, start, end)?;
         Ok(player.alloc_datum(prop_ref))
     }
 
-    pub fn get_chunk_prop(player: &mut DirPlayer, symbols: &mut SymbolTable, datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn get_chunk_prop(
+        player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
         let prop_name = checked_datum(player, symbols, &args[0])?.symbol_value(symbols)?;
         let start = checked_datum(player, symbols, &args[1])?.int_value()?;
-        let end = if args.len() > 2 { checked_datum(player, symbols, &args[2])?.int_value()? } else { start };
-        let str_value = StringDatumUtils::get_prop_ref(player, symbols, datum, prop_name, start, end)?.string_value(symbols)?;
+        let end = if args.len() > 2 {
+            checked_datum(player, symbols, &args[2])?.int_value()?
+        } else {
+            start
+        };
+        let str_value =
+            StringDatumUtils::get_prop_ref(player, symbols, datum, prop_name, start, end)?
+                .string_value(symbols)?;
         Ok(player.alloc_datum(Datum::String(str_value)))
     }
 
-    pub fn split(player: &mut DirPlayer, symbols: &SymbolTable, datum: &DatumRef, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn split(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
         let value = checked_datum(player, symbols, datum)?.string_value(symbols)?;
-        let delimiter = if args.is_empty() { "&".to_string() } else { checked_datum(player, symbols, &args[0])?.string_value(symbols)? };
-        let parts: VecDeque<DatumRef> = value.split(&delimiter).map(|s| player.alloc_datum(Datum::String(s.to_string()))).collect();
+        let delimiter = if args.is_empty() {
+            "&".to_string()
+        } else {
+            checked_datum(player, symbols, &args[0])?.string_value(symbols)?
+        };
+        let parts: VecDeque<DatumRef> = value
+            .split(&delimiter)
+            .map(|s| player.alloc_datum(Datum::String(s.to_string())))
+            .collect();
         Ok(player.alloc_datum(Datum::List(DatumType::String, parts, false)))
     }
 
@@ -227,7 +276,9 @@ impl StringDatumHandlers {
             Some(BuiltInSymbol::Count) => Self::count(player, symbols, datum, args),
             Some(BuiltInSymbol::GetAt) => Self::get_at(player, symbols, datum, args),
             Some(BuiltInSymbol::Duplicate) => Self::duplicate(player, symbols, datum, args),
-            Some(BuiltInSymbol::GetPropRef) => Self::get_chunk_prop_ref(player, symbols, datum, args),
+            Some(BuiltInSymbol::GetPropRef) => {
+                Self::get_chunk_prop_ref(player, symbols, datum, args)
+            }
             Some(BuiltInSymbol::GetProp) => Self::get_chunk_prop(player, symbols, datum, args),
             Some(BuiltInSymbol::Split) => Self::split(player, symbols, datum, args),
             _ => Err(ScriptError::new(format!(
@@ -245,23 +296,18 @@ fn checked_datum<'a>(
 ) -> Result<&'a Datum, ScriptError> {
     let datum = match datum_ref {
         DatumRef::Void => &Datum::Void,
-        _ => player
-            .allocator
-            .try_get_datum(datum_ref)
-            .ok_or_else(|| ScriptError::new_code(
+        _ => player.allocator.try_get_datum(datum_ref).ok_or_else(|| {
+            ScriptError::new_code(
                 crate::player::ScriptErrorCode::InvalidReference,
                 format!("invalid datum reference {datum_ref}"),
-            ))?,
+            )
+        })?,
     };
     validate_direct_symbol_fields(datum, symbols)?;
     Ok(datum)
 }
 
-pub fn string_get_count(
-    value: &str,
-    operand: &str,
-    delimiter: char,
-) -> Result<u32, ScriptError> {
+pub fn string_get_count(value: &str, operand: &str, delimiter: char) -> Result<u32, ScriptError> {
     match operand {
         "char" | "chars" => Ok(value.chars().count() as u32),
         "item" | "items" => Ok(string_get_items(value, delimiter).len() as u32),
@@ -360,7 +406,9 @@ fn trim_unbalanced_brackets(input: &str) -> String {
 
     for (i, ch) in input.char_indices() {
         if in_string {
-            if ch == '"' { in_string = false; }
+            if ch == '"' {
+                in_string = false;
+            }
         } else {
             match ch {
                 '"' => in_string = true,

@@ -40,13 +40,12 @@ fn checked_datum<'a>(
 ) -> Result<&'a Datum, ScriptError> {
     match datum_ref {
         DatumRef::Void => Ok(&Datum::Void),
-        _ => player
-            .allocator
-            .try_get_datum(datum_ref)
-            .ok_or_else(|| ScriptError::new_code(
+        _ => player.allocator.try_get_datum(datum_ref).ok_or_else(|| {
+            ScriptError::new_code(
                 crate::player::ScriptErrorCode::InvalidReference,
                 format!("invalid datum reference {datum_ref}"),
-            )),
+            )
+        }),
     }
 }
 
@@ -56,10 +55,12 @@ fn checked_arg<'a>(
     index: usize,
 ) -> Result<&'a Datum, ScriptError> {
     args.get(index)
-        .ok_or_else(|| ScriptError::new_code(
-            crate::player::ScriptErrorCode::InvalidReference,
-            format!("missing Transform3d argument {index}"),
-        ))
+        .ok_or_else(|| {
+            ScriptError::new_code(
+                crate::player::ScriptErrorCode::InvalidReference,
+                format!("missing Transform3d argument {index}"),
+            )
+        })
         .and_then(|datum_ref| checked_datum(player, datum_ref))
 }
 
@@ -89,7 +90,11 @@ fn prepare_axis_angle(
     }
     let axis = match checked_datum(player, &items[0])? {
         Datum::Vector(axis) => *axis,
-        _ => return Err(ScriptError::new("axisAngle: expected vector for axis".into())),
+        _ => {
+            return Err(ScriptError::new(
+                "axisAngle: expected vector for axis".into(),
+            ))
+        }
     };
     let angle = checked_datum(player, &items[1])?.to_float()?;
     Ok(Some((axis, angle)))
@@ -100,10 +105,7 @@ enum RotatePreparation {
     Euler(f64, f64, f64),
 }
 
-fn prepare_rotate(
-    player: &DirPlayer,
-    args: &[DatumRef],
-) -> Result<RotatePreparation, ScriptError> {
+fn prepare_rotate(player: &DirPlayer, args: &[DatumRef]) -> Result<RotatePreparation, ScriptError> {
     if args.len() >= 3 {
         if matches!(checked_arg(player, args, 0)?, Datum::Vector(_)) {
             let pivot = match checked_arg(player, args, 0)? {
@@ -124,20 +126,26 @@ fn prepare_rotate(
 
 use crate::{
     director::lingo::datum::Datum,
-    player::{DatumRef, DirPlayer, ScriptError, session::ExecutionContext, symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable}},
+    player::{
+        session::ExecutionContext,
+        symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable},
+        DatumRef, DirPlayer, ScriptError,
+    },
 };
 
 const IDENTITY: [f64; 16] = [
-    1.0, 0.0, 0.0, 0.0,
-    0.0, 1.0, 0.0, 0.0,
-    0.0, 0.0, 1.0, 0.0,
-    0.0, 0.0, 0.0, 1.0,
+    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
 ];
 
 pub struct Transform3dDatumHandlers;
 
 impl Transform3dDatumHandlers {
-    pub fn get_prop(player: &mut DirPlayer, symbols: &SymbolTable, datum: &DatumRef, prop: Symbol) -> Result<Datum, ScriptError> {
+    pub fn get_prop(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        prop: Symbol,
+    ) -> Result<Datum, ScriptError> {
         let datum = match datum {
             DatumRef::Void => &Datum::Void,
             _ => player
@@ -160,9 +168,9 @@ impl Transform3dDatumHandlers {
                 Ok(Datum::Vector([rx, ry, rz]))
             }
             Some(BuiltInSymbol::Scale) => {
-                let sx = (m[0]*m[0] + m[1]*m[1] + m[2]*m[2]).sqrt();
-                let sy = (m[4]*m[4] + m[5]*m[5] + m[6]*m[6]).sqrt();
-                let sz = (m[8]*m[8] + m[9]*m[9] + m[10]*m[10]).sqrt();
+                let sx = (m[0] * m[0] + m[1] * m[1] + m[2] * m[2]).sqrt();
+                let sy = (m[4] * m[4] + m[5] * m[5] + m[6] * m[6]).sqrt();
+                let sz = (m[8] * m[8] + m[9] * m[9] + m[10] * m[10]).sqrt();
                 Ok(Datum::Vector([sx, sy, sz]))
             }
             // Director returns the rotation basis as UNIT vectors (scale removed).
@@ -185,7 +193,9 @@ impl Transform3dDatumHandlers {
                     false,
                 ))
             }
-            _ => Err(ScriptError::new(format!("Unknown transform property '{prop_name}'"))),
+            _ => Err(ScriptError::new(format!(
+                "Unknown transform property '{prop_name}'"
+            ))),
         }
     }
 
@@ -217,12 +227,19 @@ impl Transform3dDatumHandlers {
             Some(BuiltInSymbol::Position) => {
                 if let Datum::Vector(v) = val {
                     // Guard: only set finite values
-                    if v[0].is_finite() { m[12] = v[0]; }
-                    if v[1].is_finite() { m[13] = v[1]; }
-                    if v[2].is_finite() { m[14] = v[2]; }
+                    if v[0].is_finite() {
+                        m[12] = v[0];
+                    }
+                    if v[1].is_finite() {
+                        m[13] = v[1];
+                    }
+                    if v[2].is_finite() {
+                        m[14] = v[2];
+                    }
                     // Debug: log position sets with large Z (overlay models at Z≈-500)
                     if v[2].abs() > 400.0 {
-                        static T3D_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                        static T3D_LOG: std::sync::atomic::AtomicU32 =
+                            std::sync::atomic::AtomicU32::new(0);
                         if T3D_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 3 {
                             debug!(
                                 "[T3D-POS] transform.position = ({:.1},{:.1},{:.1}) datum_id={:?}",
@@ -237,7 +254,8 @@ impl Transform3dDatumHandlers {
                 if let Datum::Vector(v) = val {
                     // Log non-zero Z rotation (steering)
                     if v[2].abs() > 0.1 {
-                        static ROT_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                        static ROT_LOG: std::sync::atomic::AtomicU32 =
+                            std::sync::atomic::AtomicU32::new(0);
                         if ROT_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 5 {
                             debug!(
                                 "[T3D-ROT] transform.rotation = ({:.1},{:.1},{:.1}) pos=({:.1},{:.1},{:.1})",
@@ -252,30 +270,65 @@ impl Transform3dDatumHandlers {
                         if m[14].is_finite() { m[14] } else { 0.0 },
                     ];
                     // Guard: if current matrix has NaN, use scale 1.0
-                    let sx = (m[0]*m[0] + m[1]*m[1] + m[2]*m[2]).sqrt();
-                    let sy = (m[4]*m[4] + m[5]*m[5] + m[6]*m[6]).sqrt();
-                    let sz = (m[8]*m[8] + m[9]*m[9] + m[10]*m[10]).sqrt();
-                    let sx = if sx.is_finite() && sx > 1e-10 { sx } else { 1.0 };
-                    let sy = if sy.is_finite() && sy > 1e-10 { sy } else { 1.0 };
-                    let sz = if sz.is_finite() && sz > 1e-10 { sz } else { 1.0 };
+                    let sx = (m[0] * m[0] + m[1] * m[1] + m[2] * m[2]).sqrt();
+                    let sy = (m[4] * m[4] + m[5] * m[5] + m[6] * m[6]).sqrt();
+                    let sz = (m[8] * m[8] + m[9] * m[9] + m[10] * m[10]).sqrt();
+                    let sx = if sx.is_finite() && sx > 1e-10 {
+                        sx
+                    } else {
+                        1.0
+                    };
+                    let sy = if sy.is_finite() && sy > 1e-10 {
+                        sy
+                    } else {
+                        1.0
+                    };
+                    let sz = if sz.is_finite() && sz > 1e-10 {
+                        sz
+                    } else {
+                        1.0
+                    };
                     let rot = euler_to_matrix(v[0], v[1], v[2]);
                     // Apply scale to rotation columns
-                    m[0] = rot[0]*sx;  m[1] = rot[1]*sx;  m[2] = rot[2]*sx;
-                    m[4] = rot[4]*sy;  m[5] = rot[5]*sy;  m[6] = rot[6]*sy;
-                    m[8] = rot[8]*sz;  m[9] = rot[9]*sz;  m[10] = rot[10]*sz;
-                    m[12] = pos[0]; m[13] = pos[1]; m[14] = pos[2];
+                    m[0] = rot[0] * sx;
+                    m[1] = rot[1] * sx;
+                    m[2] = rot[2] * sx;
+                    m[4] = rot[4] * sy;
+                    m[5] = rot[5] * sy;
+                    m[6] = rot[6] * sy;
+                    m[8] = rot[8] * sz;
+                    m[9] = rot[9] * sz;
+                    m[10] = rot[10] * sz;
+                    m[12] = pos[0];
+                    m[13] = pos[1];
+                    m[14] = pos[2];
                 }
                 Ok(())
             }
             Some(BuiltInSymbol::Scale) => {
                 if let Datum::Vector(v) = val {
                     // Normalize existing rotation columns, then apply new scale
-                    let cur_sx = (m[0]*m[0] + m[1]*m[1] + m[2]*m[2]).sqrt();
-                    let cur_sy = (m[4]*m[4] + m[5]*m[5] + m[6]*m[6]).sqrt();
-                    let cur_sz = (m[8]*m[8] + m[9]*m[9] + m[10]*m[10]).sqrt();
-                    if cur_sx > 0.0 { let s = v[0] / cur_sx; m[0] *= s; m[1] *= s; m[2] *= s; }
-                    if cur_sy > 0.0 { let s = v[1] / cur_sy; m[4] *= s; m[5] *= s; m[6] *= s; }
-                    if cur_sz > 0.0 { let s = v[2] / cur_sz; m[8] *= s; m[9] *= s; m[10] *= s; }
+                    let cur_sx = (m[0] * m[0] + m[1] * m[1] + m[2] * m[2]).sqrt();
+                    let cur_sy = (m[4] * m[4] + m[5] * m[5] + m[6] * m[6]).sqrt();
+                    let cur_sz = (m[8] * m[8] + m[9] * m[9] + m[10] * m[10]).sqrt();
+                    if cur_sx > 0.0 {
+                        let s = v[0] / cur_sx;
+                        m[0] *= s;
+                        m[1] *= s;
+                        m[2] *= s;
+                    }
+                    if cur_sy > 0.0 {
+                        let s = v[1] / cur_sy;
+                        m[4] *= s;
+                        m[5] *= s;
+                        m[6] *= s;
+                    }
+                    if cur_sz > 0.0 {
+                        let s = v[2] / cur_sz;
+                        m[8] *= s;
+                        m[9] *= s;
+                        m[10] *= s;
+                    }
                 }
                 Ok(())
             }
@@ -291,21 +344,47 @@ impl Transform3dDatumHandlers {
                         _ => return Err(ScriptError::new("Expected Transform3d".into())),
                     };
                     let pos = [m[12], m[13], m[14]];
-                    let sx = (m[0]*m[0] + m[1]*m[1] + m[2]*m[2]).sqrt();
-                    let sy = (m[4]*m[4] + m[5]*m[5] + m[6]*m[6]).sqrt();
-                    let sz = (m[8]*m[8] + m[9]*m[9] + m[10]*m[10]).sqrt();
-                    let sx = if sx.is_finite() && sx > 1e-10 { sx } else { 1.0 };
-                    let sy = if sy.is_finite() && sy > 1e-10 { sy } else { 1.0 };
-                    let sz = if sz.is_finite() && sz > 1e-10 { sz } else { 1.0 };
+                    let sx = (m[0] * m[0] + m[1] * m[1] + m[2] * m[2]).sqrt();
+                    let sy = (m[4] * m[4] + m[5] * m[5] + m[6] * m[6]).sqrt();
+                    let sz = (m[8] * m[8] + m[9] * m[9] + m[10] * m[10]).sqrt();
+                    let sx = if sx.is_finite() && sx > 1e-10 {
+                        sx
+                    } else {
+                        1.0
+                    };
+                    let sy = if sy.is_finite() && sy > 1e-10 {
+                        sy
+                    } else {
+                        1.0
+                    };
+                    let sz = if sz.is_finite() && sz > 1e-10 {
+                        sz
+                    } else {
+                        1.0
+                    };
                     let rot = axis_angle_to_matrix(&axis, angle_deg);
-                    m[0] = rot[0]*sx;  m[1] = rot[1]*sx;  m[2] = rot[2]*sx;  m[3] = 0.0;
-                    m[4] = rot[4]*sy;  m[5] = rot[5]*sy;  m[6] = rot[6]*sy;  m[7] = 0.0;
-                    m[8] = rot[8]*sz;  m[9] = rot[9]*sz;  m[10] = rot[10]*sz; m[11] = 0.0;
-                    m[12] = pos[0]; m[13] = pos[1]; m[14] = pos[2]; m[15] = 1.0;
+                    m[0] = rot[0] * sx;
+                    m[1] = rot[1] * sx;
+                    m[2] = rot[2] * sx;
+                    m[3] = 0.0;
+                    m[4] = rot[4] * sy;
+                    m[5] = rot[5] * sy;
+                    m[6] = rot[6] * sy;
+                    m[7] = 0.0;
+                    m[8] = rot[8] * sz;
+                    m[9] = rot[9] * sz;
+                    m[10] = rot[10] * sz;
+                    m[11] = 0.0;
+                    m[12] = pos[0];
+                    m[13] = pos[1];
+                    m[14] = pos[2];
+                    m[15] = 1.0;
                 }
                 Ok(())
             }
-            _ => Err(ScriptError::new(format!("Cannot set transform property '{prop_name}'"))),
+            _ => Err(ScriptError::new(format!(
+                "Cannot set transform property '{prop_name}'"
+            ))),
         }
     }
 
@@ -351,13 +430,19 @@ impl Transform3dDatumHandlers {
                     match prop_val {
                         Datum::Vector(v) => {
                             let idx = (index as usize).saturating_sub(1);
-                            if idx < 3 { Ok(player.alloc_datum(Datum::Float(v[idx]))) }
-                            else { Ok(player.alloc_datum(Datum::Float(0.0))) }
+                            if idx < 3 {
+                                Ok(player.alloc_datum(Datum::Float(v[idx])))
+                            } else {
+                                Ok(player.alloc_datum(Datum::Float(0.0)))
+                            }
                         }
                         Datum::List(_, items, _) => {
                             let idx = (index as usize).saturating_sub(1);
-                            if idx < items.len() { Ok(items[idx].clone()) }
-                            else { Ok(DatumRef::Void) }
+                            if idx < items.len() {
+                                Ok(items[idx].clone())
+                            } else {
+                                Ok(DatumRef::Void)
+                            }
                         }
                         other => Ok(player.alloc_datum(other)),
                     }
@@ -375,7 +460,10 @@ impl Transform3dDatumHandlers {
                 };
                 Ok(player.alloc_datum(Datum::Int(count)))
             }
-            _ => Err(ScriptError::new(format!("No handler '{}' for transform", handler_name_display))),
+            _ => Err(ScriptError::new(format!(
+                "No handler '{}' for transform",
+                handler_name_display
+            ))),
         }
     }
 
@@ -385,27 +473,38 @@ impl Transform3dDatumHandlers {
         Ok(DatumRef::Void)
     }
 
-    fn translate(player: &mut DirPlayer, datum: &DatumRef, args: &[DatumRef], pre: bool) -> Result<DatumRef, ScriptError> {
-            let xyz = Self::read_xyz(player, args);
-            let (dx, dy, dz) = mark_after_prepare(player, datum, xyz)?;
-            let m = match player.get_datum(datum) {
-                Datum::Transform3d(m) => **m,
-                _ => return Err(ScriptError::new("Expected Transform3d".into())),
-            };
-    
-            let t = [
-                1.0, 0.0, 0.0, 0.0,
-                0.0, 1.0, 0.0, 0.0,
-                0.0, 0.0, 1.0, 0.0,
-                dx,  dy,  dz,  1.0,
-            ];
-    
-            let result = if pre { mat4_mul(&t, &m) } else { mat4_mul(&m, &t) };
-            player.allocator.replace_transform3d(datum, result)?;
-            Ok(DatumRef::Void)
+    fn translate(
+        player: &mut DirPlayer,
+        datum: &DatumRef,
+        args: &[DatumRef],
+        pre: bool,
+    ) -> Result<DatumRef, ScriptError> {
+        let xyz = Self::read_xyz(player, args);
+        let (dx, dy, dz) = mark_after_prepare(player, datum, xyz)?;
+        let m = match player.get_datum(datum) {
+            Datum::Transform3d(m) => **m,
+            _ => return Err(ScriptError::new("Expected Transform3d".into())),
+        };
+
+        let t = [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, dx, dy, dz, 1.0,
+        ];
+
+        let result = if pre {
+            mat4_mul(&t, &m)
+        } else {
+            mat4_mul(&m, &t)
+        };
+        player.allocator.replace_transform3d(datum, result)?;
+        Ok(DatumRef::Void)
     }
-    
-    fn rotate(player: &mut DirPlayer, datum: &DatumRef, args: &[DatumRef], pre: bool) -> Result<DatumRef, ScriptError> {
+
+    fn rotate(
+        player: &mut DirPlayer,
+        datum: &DatumRef,
+        args: &[DatumRef],
+        pre: bool,
+    ) -> Result<DatumRef, ScriptError> {
         let prepared = checked_datum(player, datum).and_then(|receiver| {
             let m = match receiver {
                 Datum::Transform3d(m) => **m,
@@ -414,12 +513,12 @@ impl Transform3dDatumHandlers {
             prepare_rotate(player, args).map(|args| (m, args))
         });
         let (m, prepared) = mark_after_prepare(player, datum, prepared)?;
-    
-            // Two forms:
-            // 1. rotate(rx, ry, rz) or rotate(vector) — Euler angles
-            // 2. rotate(point, axis, angle) — rotate around point by angle about axis
-            let result = match prepared {
-                RotatePreparation::Pivot(pivot, axis, angle_deg) => {
+
+        // Two forms:
+        // 1. rotate(rx, ry, rz) or rotate(vector) — Euler angles
+        // 2. rotate(point, axis, angle) — rotate around point by angle about axis
+        let result = match prepared {
+            RotatePreparation::Pivot(pivot, axis, angle_deg) => {
                 let r = axis_angle_to_matrix(&axis, angle_deg);
                 // P = T(pivot) * R * T(-pivot) — the rotation about `pivot`.
                 // rotate(pivot,...)    : world-frame pivot → P * M
@@ -433,94 +532,120 @@ impl Transform3dDatumHandlers {
                 let t_neg = translation_matrix(-pivot[0], -pivot[1], -pivot[2]);
                 let t_pos = translation_matrix(pivot[0], pivot[1], pivot[2]);
                 let p = mat4_mul(&t_pos, &mat4_mul(&r, &t_neg));
-                if pre { mat4_mul(&p, &m) } else { mat4_mul(&m, &p) }
+                if pre {
+                    mat4_mul(&p, &m)
+                } else {
+                    mat4_mul(&m, &p)
                 }
-                RotatePreparation::Euler(rx, ry, rz) => {
+            }
+            RotatePreparation::Euler(rx, ry, rz) => {
                 let r = euler_to_matrix(rx, ry, rz);
-                if pre { mat4_mul(&r, &m) } else { mat4_mul(&m, &r) }
+                if pre {
+                    mat4_mul(&r, &m)
+                } else {
+                    mat4_mul(&m, &r)
                 }
-            };
-    
-            player.allocator.replace_transform3d(datum, result)?;
-            Ok(DatumRef::Void)
+            }
+        };
+
+        player.allocator.replace_transform3d(datum, result)?;
+        Ok(DatumRef::Void)
     }
-    
-    fn scale(player: &mut DirPlayer, datum: &DatumRef, args: &[DatumRef], pre: bool) -> Result<DatumRef, ScriptError> {
-            let xyz = Self::read_xyz(player, args);
-            let (sx, sy, sz) = mark_after_prepare(player, datum, xyz)?;
-            let m = match player.get_datum(datum) {
-                Datum::Transform3d(m) => **m,
-                _ => return Err(ScriptError::new("Expected Transform3d".into())),
-            };
-    
-            let s = [
-                sx,  0.0, 0.0, 0.0,
-                0.0, sy,  0.0, 0.0,
-                0.0, 0.0, sz,  0.0,
-                0.0, 0.0, 0.0, 1.0,
-            ];
-    
-            let result = if pre { mat4_mul(&s, &m) } else { mat4_mul(&m, &s) };
-            player.allocator.replace_transform3d(datum, result)?;
-            Ok(DatumRef::Void)
+
+    fn scale(
+        player: &mut DirPlayer,
+        datum: &DatumRef,
+        args: &[DatumRef],
+        pre: bool,
+    ) -> Result<DatumRef, ScriptError> {
+        let xyz = Self::read_xyz(player, args);
+        let (sx, sy, sz) = mark_after_prepare(player, datum, xyz)?;
+        let m = match player.get_datum(datum) {
+            Datum::Transform3d(m) => **m,
+            _ => return Err(ScriptError::new("Expected Transform3d".into())),
+        };
+
+        let s = [
+            sx, 0.0, 0.0, 0.0, 0.0, sy, 0.0, 0.0, 0.0, 0.0, sz, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ];
+
+        let result = if pre {
+            mat4_mul(&s, &m)
+        } else {
+            mat4_mul(&m, &s)
+        };
+        player.allocator.replace_transform3d(datum, result)?;
+        Ok(DatumRef::Void)
     }
-    
+
     fn inverse(player: &mut DirPlayer, datum: &DatumRef) -> Result<DatumRef, ScriptError> {
-            let m = match player.get_datum(datum) {
-                Datum::Transform3d(m) => **m,
-                _ => return Err(ScriptError::new("Expected Transform3d".into())),
-            };
-            let inv = mat4_invert_affine(&m);
-            Ok(player.alloc_datum(Datum::transform3d(inv)))
+        let m = match player.get_datum(datum) {
+            Datum::Transform3d(m) => **m,
+            _ => return Err(ScriptError::new("Expected Transform3d".into())),
+        };
+        let inv = mat4_invert_affine(&m);
+        Ok(player.alloc_datum(Datum::transform3d(inv)))
     }
-    
+
     /// invert() inverts the transform IN PLACE (mutates the original), unlike
     /// inverse() which returns a copy (Director Scripting Dictionary).
     fn invert(player: &mut DirPlayer, datum: &DatumRef) -> Result<DatumRef, ScriptError> {
-            mark_transform_dirty(player, datum)?;
-            let m = match player.get_datum(datum) {
-                Datum::Transform3d(m) => **m,
-                _ => return Err(ScriptError::new("Expected Transform3d".into())),
-            };
-            let inv = mat4_invert_affine(&m);
-            player.allocator.replace_transform3d(datum, inv)?;
-            Ok(DatumRef::Void)
+        mark_transform_dirty(player, datum)?;
+        let m = match player.get_datum(datum) {
+            Datum::Transform3d(m) => **m,
+            _ => return Err(ScriptError::new("Expected Transform3d".into())),
+        };
+        let inv = mat4_invert_affine(&m);
+        player.allocator.replace_transform3d(datum, inv)?;
+        Ok(DatumRef::Void)
     }
-    
+
     fn duplicate(player: &mut DirPlayer, datum: &DatumRef) -> Result<DatumRef, ScriptError> {
-            let m = match player.get_datum(datum) {
-                Datum::Transform3d(m) => **m,
-                _ => return Err(ScriptError::new("Expected Transform3d".into())),
-            };
-            Ok(player.alloc_datum(Datum::transform3d(m)))
+        let m = match player.get_datum(datum) {
+            Datum::Transform3d(m) => **m,
+            _ => return Err(ScriptError::new("Expected Transform3d".into())),
+        };
+        Ok(player.alloc_datum(Datum::transform3d(m)))
     }
-    
-    fn multiply(player: &mut DirPlayer, datum: &DatumRef, args: &[DatumRef]) -> Result<DatumRef, ScriptError> {
-            let m = match player.get_datum(datum) {
-                Datum::Transform3d(m) => **m,
-                _ => return Err(ScriptError::new("Expected Transform3d".into())),
-            };
-            let other = match checked_arg(player, args, 0)? {
-                Datum::Transform3d(m) => **m,
-                _ => return Err(ScriptError::new("Expected Transform3d argument".into())),
-            };
-            let result = mat4_mul(&m, &other);
-            Ok(player.alloc_datum(Datum::transform3d(result)))
+
+    fn multiply(
+        player: &mut DirPlayer,
+        datum: &DatumRef,
+        args: &[DatumRef],
+    ) -> Result<DatumRef, ScriptError> {
+        let m = match player.get_datum(datum) {
+            Datum::Transform3d(m) => **m,
+            _ => return Err(ScriptError::new("Expected Transform3d".into())),
+        };
+        let other = match checked_arg(player, args, 0)? {
+            Datum::Transform3d(m) => **m,
+            _ => return Err(ScriptError::new("Expected Transform3d argument".into())),
+        };
+        let result = mat4_mul(&m, &other);
+        Ok(player.alloc_datum(Datum::transform3d(result)))
     }
-    
-    fn interpolate(player: &mut DirPlayer, datum: &DatumRef, args: &[DatumRef]) -> Result<DatumRef, ScriptError> {
-            let m = match player.get_datum(datum) {
-                Datum::Transform3d(m) => **m,
-                _ => return Err(ScriptError::new("Expected Transform3d".into())),
-            };
-            let (target, t) = Self::prepare_interpolate(player, args)?;
-            // Lerp position/scale, SLERP rotation (Director 11.5 interpolate():
-            // "position and rotation"). Element-wise matrix lerp shears rotation.
-            let result = interpolate_transform(&m, &target, t);
-            Ok(player.alloc_datum(Datum::Transform3d(Box::new(result))))
+
+    fn interpolate(
+        player: &mut DirPlayer,
+        datum: &DatumRef,
+        args: &[DatumRef],
+    ) -> Result<DatumRef, ScriptError> {
+        let m = match player.get_datum(datum) {
+            Datum::Transform3d(m) => **m,
+            _ => return Err(ScriptError::new("Expected Transform3d".into())),
+        };
+        let (target, t) = Self::prepare_interpolate(player, args)?;
+        // Lerp position/scale, SLERP rotation (Director 11.5 interpolate():
+        // "position and rotation"). Element-wise matrix lerp shears rotation.
+        let result = interpolate_transform(&m, &target, t);
+        Ok(player.alloc_datum(Datum::Transform3d(Box::new(result))))
     }
-    
-    fn interpolate_to(player: &mut DirPlayer, datum: &DatumRef, args: &[DatumRef]) -> Result<DatumRef, ScriptError> {
+
+    fn interpolate_to(
+        player: &mut DirPlayer,
+        datum: &DatumRef,
+        args: &[DatumRef],
+    ) -> Result<DatumRef, ScriptError> {
         let prepared = checked_datum(player, datum).and_then(|receiver| {
             let m = match receiver {
                 Datum::Transform3d(m) => **m,
@@ -529,34 +654,42 @@ impl Transform3dDatumHandlers {
             Self::prepare_interpolate(player, args).map(|args| (m, args))
         });
         let (m, (target, t)) = mark_after_prepare(player, datum, prepared)?;
-            // interpolateTo modifies transform1 in place (Director 11.5).
-            let result = interpolate_transform(&m, &target, t);
-            player.allocator.replace_transform3d(datum, result)?;
-            Ok(DatumRef::Void)
+        // interpolateTo modifies transform1 in place (Director 11.5).
+        let result = interpolate_transform(&m, &target, t);
+        player.allocator.replace_transform3d(datum, result)?;
+        Ok(DatumRef::Void)
     }
-    
-    fn get_at(player: &mut DirPlayer, datum: &DatumRef, args: &[DatumRef]) -> Result<DatumRef, ScriptError> {
-            let m = match player.get_datum(datum) {
-                Datum::Transform3d(m) => **m,
-                _ => return Err(ScriptError::new("Expected Transform3d".into())),
-            };
-            let index = (checked_arg(player, args, 0)?.int_value()? - 1) as usize;
-            if index >= 16 {
-                return Err(ScriptError::new("Transform index out of range".into()));
-            }
-            Ok(player.alloc_datum(Datum::Float(m[index])))
+
+    fn get_at(
+        player: &mut DirPlayer,
+        datum: &DatumRef,
+        args: &[DatumRef],
+    ) -> Result<DatumRef, ScriptError> {
+        let m = match player.get_datum(datum) {
+            Datum::Transform3d(m) => **m,
+            _ => return Err(ScriptError::new("Expected Transform3d".into())),
+        };
+        let index = (checked_arg(player, args, 0)?.int_value()? - 1) as usize;
+        if index >= 16 {
+            return Err(ScriptError::new("Transform index out of range".into()));
+        }
+        Ok(player.alloc_datum(Datum::Float(m[index])))
     }
-    
-    fn set_at(player: &mut DirPlayer, datum: &DatumRef, args: &[DatumRef]) -> Result<DatumRef, ScriptError> {
-            let prepared = Self::prepare_set_at(player, args);
-            let (index, value) = mark_after_prepare(player, datum, prepared)?;
-            if index >= 16 {
-                return Err(ScriptError::new("Transform index out of range".into()));
-            }
-            if let Datum::Transform3d(m) = player.get_datum_mut(datum) {
-                m[index] = value;
-            }
-            Ok(DatumRef::Void)
+
+    fn set_at(
+        player: &mut DirPlayer,
+        datum: &DatumRef,
+        args: &[DatumRef],
+    ) -> Result<DatumRef, ScriptError> {
+        let prepared = Self::prepare_set_at(player, args);
+        let (index, value) = mark_after_prepare(player, datum, prepared)?;
+        if index >= 16 {
+            return Err(ScriptError::new("Transform index out of range".into()));
+        }
+        if let Datum::Transform3d(m) = player.get_datum_mut(datum) {
+            m[index] = value;
+        }
+        Ok(DatumRef::Void)
     }
 
     /// Read (x, y, z) from args - either 3 separate floats or a single vector
@@ -591,10 +724,7 @@ impl Transform3dDatumHandlers {
         Ok((target, percent / 100.0))
     }
 
-    fn prepare_set_at(
-        player: &DirPlayer,
-        args: &[DatumRef],
-    ) -> Result<(usize, f64), ScriptError> {
+    fn prepare_set_at(player: &DirPlayer, args: &[DatumRef]) -> Result<(usize, f64), ScriptError> {
         let index = (checked_arg(player, args, 0)?.int_value()? - 1) as usize;
         let value = checked_arg(player, args, 1)?.float_value()?;
         Ok((index, value))
@@ -608,11 +738,10 @@ fn mat4_mul(a: &[f64; 16], b: &[f64; 16]) -> [f64; 16] {
     let mut r = [0.0f64; 16];
     for col in 0..4 {
         for row in 0..4 {
-            r[col * 4 + row] =
-                a[0 * 4 + row] * b[col * 4 + 0] +
-                a[1 * 4 + row] * b[col * 4 + 1] +
-                a[2 * 4 + row] * b[col * 4 + 2] +
-                a[3 * 4 + row] * b[col * 4 + 3];
+            r[col * 4 + row] = a[0 * 4 + row] * b[col * 4 + 0]
+                + a[1 * 4 + row] * b[col * 4 + 1]
+                + a[2 * 4 + row] * b[col * 4 + 2]
+                + a[3 * 4 + row] * b[col * 4 + 3];
         }
     }
     r
@@ -627,20 +756,17 @@ fn mat4_invert_affine(m: &[f64; 16]) -> [f64; 16] {
     let ity = -(m[4] * tx + m[5] * ty + m[6] * tz);
     let itz = -(m[8] * tx + m[9] * ty + m[10] * tz);
     [
-        m[0], m[4], m[8],  0.0,  // R^T col 0
-        m[1], m[5], m[9],  0.0,  // R^T col 1
-        m[2], m[6], m[10], 0.0,  // R^T col 2
-        itx,  ity,  itz,   1.0,
+        m[0], m[4], m[8], 0.0, // R^T col 0
+        m[1], m[5], m[9], 0.0, // R^T col 1
+        m[2], m[6], m[10], 0.0, // R^T col 2
+        itx, ity, itz, 1.0,
     ]
 }
 
 /// Pure translation matrix (column-major).
 fn translation_matrix(tx: f64, ty: f64, tz: f64) -> [f64; 16] {
     [
-        1.0, 0.0, 0.0, 0.0,
-        0.0, 1.0, 0.0, 0.0,
-        0.0, 0.0, 1.0, 0.0,
-        tx,  ty,  tz,  1.0,
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, tx, ty, tz, 1.0,
     ]
 }
 
@@ -664,8 +790,16 @@ fn interpolate_transform(m: &[f64; 16], target: &[f64; 16], t: f64) -> [f64; 16]
     let t = t.clamp(0.0, 1.0);
     let (p1, s1, q1) = decompose_transform(m);
     let (p2, s2, q2) = decompose_transform(target);
-    let pos = [p1[0] + (p2[0]-p1[0])*t, p1[1] + (p2[1]-p1[1])*t, p1[2] + (p2[2]-p1[2])*t];
-    let scale = [s1[0] + (s2[0]-s1[0])*t, s1[1] + (s2[1]-s1[1])*t, s1[2] + (s2[2]-s1[2])*t];
+    let pos = [
+        p1[0] + (p2[0] - p1[0]) * t,
+        p1[1] + (p2[1] - p1[1]) * t,
+        p1[2] + (p2[2] - p1[2]) * t,
+    ];
+    let scale = [
+        s1[0] + (s2[0] - s1[0]) * t,
+        s1[1] + (s2[1] - s1[1]) * t,
+        s1[2] + (s2[2] - s1[2]) * t,
+    ];
     let q = quat_slerp(q1, q2, t);
     recompose_transform(pos, scale, q)
 }
@@ -674,23 +808,29 @@ fn interpolate_transform(m: &[f64; 16], target: &[f64; 16], t: f64) -> [f64; 16]
 /// quaternion [x,y,z,w]). Scale = column lengths; rotation = normalized columns.
 fn decompose_transform(m: &[f64; 16]) -> ([f64; 3], [f64; 3], [f64; 4]) {
     let pos = [m[12], m[13], m[14]];
-    let s0 = (m[0]*m[0] + m[1]*m[1] + m[2]*m[2]).sqrt();
-    let s1 = (m[4]*m[4] + m[5]*m[5] + m[6]*m[6]).sqrt();
-    let s2 = (m[8]*m[8] + m[9]*m[9] + m[10]*m[10]).sqrt();
+    let s0 = (m[0] * m[0] + m[1] * m[1] + m[2] * m[2]).sqrt();
+    let s1 = (m[4] * m[4] + m[5] * m[5] + m[6] * m[6]).sqrt();
+    let s2 = (m[8] * m[8] + m[9] * m[9] + m[10] * m[10]).sqrt();
     let (i0, i1, i2) = (s0.max(1e-10), s1.max(1e-10), s2.max(1e-10));
     // r_{row,col} from normalized columns
-    let (r00, r10, r20) = (m[0]/i0, m[1]/i0, m[2]/i0);
-    let (r01, r11, r21) = (m[4]/i1, m[5]/i1, m[6]/i1);
-    let (r02, r12, r22) = (m[8]/i2, m[9]/i2, m[10]/i2);
+    let (r00, r10, r20) = (m[0] / i0, m[1] / i0, m[2] / i0);
+    let (r01, r11, r21) = (m[4] / i1, m[5] / i1, m[6] / i1);
+    let (r02, r12, r22) = (m[8] / i2, m[9] / i2, m[10] / i2);
     let q = mat3_to_quat(r00, r10, r20, r01, r11, r21, r02, r12, r22);
     (pos, [s0, s1, s2], q)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn mat3_to_quat(
-    r00: f64, r10: f64, r20: f64,
-    r01: f64, r11: f64, r21: f64,
-    r02: f64, r12: f64, r22: f64,
+    r00: f64,
+    r10: f64,
+    r20: f64,
+    r01: f64,
+    r11: f64,
+    r21: f64,
+    r02: f64,
+    r12: f64,
+    r22: f64,
 ) -> [f64; 4] {
     let trace = r00 + r11 + r22;
     if trace > 0.0 {
@@ -710,28 +850,56 @@ fn mat3_to_quat(
 
 fn recompose_transform(pos: [f64; 3], scale: [f64; 3], q: [f64; 4]) -> [f64; 16] {
     let (x, y, z, w) = (q[0], q[1], q[2], q[3]);
-    let (r00, r10, r20) = (1.0 - 2.0*(y*y + z*z), 2.0*(x*y + z*w), 2.0*(x*z - y*w));
-    let (r01, r11, r21) = (2.0*(x*y - z*w), 1.0 - 2.0*(x*x + z*z), 2.0*(y*z + x*w));
-    let (r02, r12, r22) = (2.0*(x*z + y*w), 2.0*(y*z - x*w), 1.0 - 2.0*(x*x + y*y));
+    let (r00, r10, r20) = (
+        1.0 - 2.0 * (y * y + z * z),
+        2.0 * (x * y + z * w),
+        2.0 * (x * z - y * w),
+    );
+    let (r01, r11, r21) = (
+        2.0 * (x * y - z * w),
+        1.0 - 2.0 * (x * x + z * z),
+        2.0 * (y * z + x * w),
+    );
+    let (r02, r12, r22) = (
+        2.0 * (x * z + y * w),
+        2.0 * (y * z - x * w),
+        1.0 - 2.0 * (x * x + y * y),
+    );
     [
-        r00*scale[0], r10*scale[0], r20*scale[0], 0.0,
-        r01*scale[1], r11*scale[1], r21*scale[1], 0.0,
-        r02*scale[2], r12*scale[2], r22*scale[2], 0.0,
-        pos[0], pos[1], pos[2], 1.0,
+        r00 * scale[0],
+        r10 * scale[0],
+        r20 * scale[0],
+        0.0,
+        r01 * scale[1],
+        r11 * scale[1],
+        r21 * scale[1],
+        0.0,
+        r02 * scale[2],
+        r12 * scale[2],
+        r22 * scale[2],
+        0.0,
+        pos[0],
+        pos[1],
+        pos[2],
+        1.0,
     ]
 }
 
 fn quat_slerp(q1: [f64; 4], mut q2: [f64; 4], t: f64) -> [f64; 4] {
-    let mut dot = q1[0]*q2[0] + q1[1]*q2[1] + q1[2]*q2[2] + q1[3]*q2[3];
+    let mut dot = q1[0] * q2[0] + q1[1] * q2[1] + q1[2] * q2[2] + q1[3] * q2[3];
     if dot < 0.0 {
-        for i in 0..4 { q2[i] = -q2[i]; }
+        for i in 0..4 {
+            q2[i] = -q2[i];
+        }
         dot = -dot;
     }
     if dot > 0.9995 {
         // nearly parallel → lerp + normalize (avoids sin(0) blow-up)
         return normalize_quat([
-            q1[0] + (q2[0]-q1[0])*t, q1[1] + (q2[1]-q1[1])*t,
-            q1[2] + (q2[2]-q1[2])*t, q1[3] + (q2[3]-q1[3])*t,
+            q1[0] + (q2[0] - q1[0]) * t,
+            q1[1] + (q2[1] - q1[1]) * t,
+            q1[2] + (q2[2] - q1[2]) * t,
+            q1[3] + (q2[3] - q1[3]) * t,
         ]);
     }
     let theta = dot.clamp(-1.0, 1.0).acos();
@@ -739,14 +907,20 @@ fn quat_slerp(q1: [f64; 4], mut q2: [f64; 4], t: f64) -> [f64; 4] {
     let a = ((1.0 - t) * theta).sin() / s;
     let b = (t * theta).sin() / s;
     normalize_quat([
-        q1[0]*a + q2[0]*b, q1[1]*a + q2[1]*b,
-        q1[2]*a + q2[2]*b, q1[3]*a + q2[3]*b,
+        q1[0] * a + q2[0] * b,
+        q1[1] * a + q2[1] * b,
+        q1[2] * a + q2[2] * b,
+        q1[3] * a + q2[3] * b,
     ])
 }
 
 fn normalize_quat(q: [f64; 4]) -> [f64; 4] {
-    let len = (q[0]*q[0] + q[1]*q[1] + q[2]*q[2] + q[3]*q[3]).sqrt();
-    if len > 1e-10 { [q[0]/len, q[1]/len, q[2]/len, q[3]/len] } else { [0.0, 0.0, 0.0, 1.0] }
+    let len = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
+    if len > 1e-10 {
+        [q[0] / len, q[1] / len, q[2] / len, q[3] / len]
+    } else {
+        [0.0, 0.0, 0.0, 1.0]
+    }
 }
 
 pub fn euler_to_matrix(rx_deg: f64, ry_deg: f64, rz_deg: f64) -> [f64; 16] {
@@ -761,23 +935,51 @@ pub fn euler_to_matrix(rx_deg: f64, ry_deg: f64, rz_deg: f64) -> [f64; 16] {
 
     // R = Rz * Ry * Rx, true column-major: m[col*4+row]
     [
-        cy*cz,                     cy*sz,                     -sy,                     0.0,  // col 0
-        sx*sy*cz - cx*sz,          sx*sy*sz + cx*cz,          sx*cy,                   0.0,  // col 1
-        cx*sy*cz + sx*sz,          cx*sy*sz - sx*cz,          cx*cy,                   0.0,  // col 2
-        0.0,                       0.0,                       0.0,                     1.0,  // col 3
+        cy * cz,
+        cy * sz,
+        -sy,
+        0.0, // col 0
+        sx * sy * cz - cx * sz,
+        sx * sy * sz + cx * cz,
+        sx * cy,
+        0.0, // col 1
+        cx * sy * cz + sx * sz,
+        cx * sy * sz - sx * cz,
+        cx * cy,
+        0.0, // col 2
+        0.0,
+        0.0,
+        0.0,
+        1.0, // col 3
     ]
 }
 
 /// Extract euler angles from rotation matrix (matching euler_to_matrix convention)
 fn matrix_to_euler(m: &[f64; 16]) -> (f64, f64, f64) {
     // Normalize rotation columns to remove scale before extracting angles
-    let s0 = (m[0]*m[0] + m[1]*m[1] + m[2]*m[2]).sqrt().max(1e-10);
-    let s1 = (m[4]*m[4] + m[5]*m[5] + m[6]*m[6]).sqrt().max(1e-10);
-    let s2 = (m[8]*m[8] + m[9]*m[9] + m[10]*m[10]).sqrt().max(1e-10);
-    let n = [m[0]/s0, m[1]/s0, m[2]/s0, 0.0,
-             m[4]/s1, m[5]/s1, m[6]/s1, 0.0,
-             m[8]/s2, m[9]/s2, m[10]/s2, 0.0,
-             0.0, 0.0, 0.0, 1.0];
+    let s0 = (m[0] * m[0] + m[1] * m[1] + m[2] * m[2]).sqrt().max(1e-10);
+    let s1 = (m[4] * m[4] + m[5] * m[5] + m[6] * m[6]).sqrt().max(1e-10);
+    let s2 = (m[8] * m[8] + m[9] * m[9] + m[10] * m[10])
+        .sqrt()
+        .max(1e-10);
+    let n = [
+        m[0] / s0,
+        m[1] / s0,
+        m[2] / s0,
+        0.0,
+        m[4] / s1,
+        m[5] / s1,
+        m[6] / s1,
+        0.0,
+        m[8] / s2,
+        m[9] / s2,
+        m[10] / s2,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+    ];
 
     // Guard: if matrix contains NaN, return zero rotation
     if !n[0].is_finite() || !n[2].is_finite() || !n[10].is_finite() {
@@ -804,12 +1006,20 @@ fn matrix_to_euler(m: &[f64; 16]) -> (f64, f64, f64) {
 /// Returns (axis [f64; 3], angle_degrees f64).
 fn matrix_to_axis_angle(m: &[f64; 16]) -> ([f64; 3], f64) {
     // Normalize rotation columns to remove scale
-    let s0 = (m[0]*m[0] + m[1]*m[1] + m[2]*m[2]).sqrt().max(1e-10);
-    let s1 = (m[4]*m[4] + m[5]*m[5] + m[6]*m[6]).sqrt().max(1e-10);
-    let s2 = (m[8]*m[8] + m[9]*m[9] + m[10]*m[10]).sqrt().max(1e-10);
-    let r00 = m[0]/s0; let r01 = m[1]/s0; let r02 = m[2]/s0;
-    let r10 = m[4]/s1; let r11 = m[5]/s1; let r12 = m[6]/s1;
-    let r20 = m[8]/s2; let r21 = m[9]/s2; let r22 = m[10]/s2;
+    let s0 = (m[0] * m[0] + m[1] * m[1] + m[2] * m[2]).sqrt().max(1e-10);
+    let s1 = (m[4] * m[4] + m[5] * m[5] + m[6] * m[6]).sqrt().max(1e-10);
+    let s2 = (m[8] * m[8] + m[9] * m[9] + m[10] * m[10])
+        .sqrt()
+        .max(1e-10);
+    let r00 = m[0] / s0;
+    let r01 = m[1] / s0;
+    let r02 = m[2] / s0;
+    let r10 = m[4] / s1;
+    let r11 = m[5] / s1;
+    let r12 = m[6] / s1;
+    let r20 = m[8] / s2;
+    let r21 = m[9] / s2;
+    let r22 = m[10] / s2;
 
     // trace = 1 + 2*cos(angle)
     let trace = r00 + r11 + r22;
@@ -824,11 +1034,7 @@ fn matrix_to_axis_angle(m: &[f64; 16]) -> ([f64; 3], f64) {
     let sin_a = angle.sin();
     if sin_a.abs() > 1e-10 {
         let k = 1.0 / (2.0 * sin_a);
-        let axis = [
-            (r21 - r12) * k,
-            (r02 - r20) * k,
-            (r10 - r01) * k,
-        ];
+        let axis = [(r21 - r12) * k, (r02 - r20) * k, (r10 - r01) * k];
         (axis, angle.to_degrees())
     } else {
         // angle ≈ 180°, need to extract axis from the matrix diagonal
@@ -848,19 +1054,33 @@ fn matrix_to_axis_angle(m: &[f64; 16]) -> ([f64; 3], f64) {
 
 /// Build a 4x4 rotation matrix from axis-angle (angle in degrees).
 fn axis_angle_to_matrix(axis: &[f64; 3], angle_deg: f64) -> [f64; 16] {
-    let len = (axis[0]*axis[0] + axis[1]*axis[1] + axis[2]*axis[2]).sqrt();
+    let len = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
     if len < 1e-10 {
-        return [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0];
+        return [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ];
     }
-    let (x, y, z) = (axis[0]/len, axis[1]/len, axis[2]/len);
+    let (x, y, z) = (axis[0] / len, axis[1] / len, axis[2] / len);
     let a = angle_deg.to_radians();
     let c = a.cos();
     let s = a.sin();
     let t = 1.0 - c;
     [
-        t*x*x + c,    t*x*y + s*z,  t*x*z - s*y,  0.0,
-        t*x*y - s*z,  t*y*y + c,    t*y*z + s*x,  0.0,
-        t*x*z + s*y,  t*y*z - s*x,  t*z*z + c,    0.0,
-        0.0,          0.0,          0.0,           1.0,
+        t * x * x + c,
+        t * x * y + s * z,
+        t * x * z - s * y,
+        0.0,
+        t * x * y - s * z,
+        t * y * y + c,
+        t * y * z + s * x,
+        0.0,
+        t * x * z + s * y,
+        t * y * z - s * x,
+        t * z * z + c,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
     ]
 }

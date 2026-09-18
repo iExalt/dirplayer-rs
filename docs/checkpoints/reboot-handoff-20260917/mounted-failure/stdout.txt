@@ -1,0 +1,11 @@
+
+running 1 test
+test player::nested::tests::owned_nested_start_mounts_d5_channel_one_in_child_context ... FAILED
+
+failures:
+
+failures:
+    player::nested::tests::owned_nested_start_mounts_d5_channel_one_in_child_context
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 595 filtered out; finished in 0.00s
+

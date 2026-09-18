@@ -1,8 +1,9 @@
 use crate::{
     director::lingo::datum::Datum,
     player::{
-        DatumRef, DirPlayer, ScriptError, ScriptErrorCode, cast_lib::CastMemberRef,
+        cast_lib::CastMemberRef,
         symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable},
+        DatumRef, DirPlayer, ScriptError, ScriptErrorCode,
     },
 };
 
@@ -11,15 +12,12 @@ pub struct CastLibDatumHandlers {}
 fn checked_datum<'a>(player: &'a DirPlayer, datum: &DatumRef) -> Result<&'a Datum, ScriptError> {
     match datum {
         DatumRef::Void => Ok(&Datum::Void),
-        _ => player
-            .allocator
-            .try_get_datum(datum)
-            .ok_or_else(|| {
-                ScriptError::new_code(
-                    ScriptErrorCode::InvalidReference,
-                    format!("invalid datum reference {datum}"),
-                )
-            }),
+        _ => player.allocator.try_get_datum(datum).ok_or_else(|| {
+            ScriptError::new_code(
+                ScriptErrorCode::InvalidReference,
+                format!("invalid datum reference {datum}"),
+            )
+        }),
     }
 }
 
@@ -57,7 +55,11 @@ impl CastLibDatumHandlers {
     ) -> Result<DatumRef, ScriptError> {
         let cast_lib_num = match checked_datum(player, datum)? {
             Datum::CastLib(num) => *num,
-            _ => return Err(ScriptError::new("count: datum is not a castLib".to_string())),
+            _ => {
+                return Err(ScriptError::new(
+                    "count: datum is not a castLib".to_string(),
+                ))
+            }
         };
 
         // count(#member) returns the number of cast members
@@ -125,10 +127,11 @@ impl CastLibDatumHandlers {
                         })
                     }
                     Datum::Int(num) => {
-                        cast.find_member_by_number(*num as u32).map(|member| CastMemberRef {
-                            cast_lib: cast_lib_num as i32,
-                            cast_member: member.number as i32,
-                        })
+                        cast.find_member_by_number(*num as u32)
+                            .map(|member| CastMemberRef {
+                                cast_lib: cast_lib_num as i32,
+                                cast_member: member.number as i32,
+                            })
                     }
                     _ => {
                         return Err(ScriptError::new(format!(
@@ -174,7 +177,11 @@ impl CastLibDatumHandlers {
 
         let (c_start, c_end) = match &player.movie.file {
             Some(file) => (file.config.min_member as u32, file.config.max_member as u32),
-            None => return Err(ScriptError::new("findEmpty: no movie file loaded".to_string())),
+            None => {
+                return Err(ScriptError::new(
+                    "findEmpty: no movie file loaded".to_string(),
+                ))
+            }
         };
 
         let start = if !args.is_empty() {
@@ -183,7 +190,11 @@ impl CastLibDatumHandlers {
             if member_num > c_end {
                 return Ok(player.alloc_datum(Datum::Int(member_num as i32)));
             }
-            if member_num > c_start { member_num } else { c_start }
+            if member_num > c_start {
+                member_num
+            } else {
+                c_start
+            }
         } else {
             c_start
         };
@@ -201,14 +212,17 @@ impl CastLibDatumHandlers {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_std::channel;
     use crate::director::lingo::datum::Datum;
     use crate::player::cast_lib::CastLib;
     use crate::player::session::RuntimeSession;
     use crate::player::symbols::symbol_table::SymbolOwner;
+    use async_std::channel;
 
     fn test_session() -> RuntimeSession {
-        let mut session = RuntimeSession::new(SymbolOwner { session: 81, generation: 1 });
+        let mut session = RuntimeSession::new(SymbolOwner {
+            session: 81,
+            generation: 1,
+        });
         assert!(session.add_player(1, channel::unbounded().0));
         session
     }
@@ -225,7 +239,9 @@ mod tests {
                     .casts
                     .push(CastLib::test_external(1, 0));
                 let receiver = context.player.alloc_datum(Datum::CastLib(1));
-                let member_name = context.player.alloc_datum(Datum::String("missing".to_owned()));
+                let member_name = context
+                    .player
+                    .alloc_datum(Datum::String("missing".to_owned()));
                 (receiver, member_name)
             })
             .unwrap();
@@ -238,9 +254,9 @@ mod tests {
                 let mut foreign = test_session();
                 let ignored_foreign_argument = foreign
                     .with_player(1, |mut foreign_context| {
-                        foreign_context.player.alloc_datum(Datum::Symbol(
-                            Symbol::builtin(BuiltInSymbol::Member),
-                        ))
+                        foreign_context
+                            .player
+                            .alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Member)))
                     })
                     .unwrap();
                 let args = vec![member_property, ignored_foreign_argument];
@@ -259,7 +275,9 @@ mod tests {
 
         let missing = session
             .with_player(1, |mut context| {
-                let property = context.player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Member)));
+                let property = context
+                    .player
+                    .alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Member)));
                 let args = vec![property, member_name.clone()];
                 let result = CastLibDatumHandlers::call(
                     context.player,
@@ -285,7 +303,9 @@ mod tests {
     fn foreign_receiver_and_consumed_argument_are_typed_invalid_references() {
         let mut foreign = test_session();
         let foreign_receiver = foreign
-            .with_player(1, |mut context| context.player.alloc_datum(Datum::CastLib(1)))
+            .with_player(1, |mut context| {
+                context.player.alloc_datum(Datum::CastLib(1))
+            })
             .unwrap();
         let mut local = test_session();
         local
@@ -309,9 +329,9 @@ mod tests {
                 let receiver = context.player.alloc_datum(Datum::CastLib(1));
                 let foreign_arg = foreign
                     .with_player(1, |mut foreign_context| {
-                        foreign_context.player.alloc_datum(Datum::Symbol(
-                            Symbol::builtin(BuiltInSymbol::Member),
-                        ))
+                        foreign_context
+                            .player
+                            .alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Member)))
                     })
                     .unwrap();
                 let error = CastLibDatumHandlers::call(

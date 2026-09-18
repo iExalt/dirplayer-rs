@@ -27,19 +27,13 @@ impl JsObjectDatumHandlers {
         }
     }
 
-    pub(crate) fn name(
-        symbols: &mut SymbolTable,
-        name: Symbol,
-    ) -> Result<String, ScriptError> {
-        symbols
-            .display(&name)
-            .map(str::to_owned)
-            .map_err(|_| {
-                ScriptError::new_code(
-                    ScriptErrorCode::InvalidReference,
-                    "foreign JS object property symbol".to_owned(),
-                )
-            })
+    pub(crate) fn name(symbols: &mut SymbolTable, name: Symbol) -> Result<String, ScriptError> {
+        symbols.display(&name).map(str::to_owned).map_err(|_| {
+            ScriptError::new_code(
+                ScriptErrorCode::InvalidReference,
+                "foreign JS object property symbol".to_owned(),
+            )
+        })
     }
 
     pub(crate) fn prepare_call(
@@ -68,7 +62,10 @@ impl JsObjectDatumHandlers {
         datum: &DatumRef,
         prop_name: Symbol,
     ) -> Result<(JsObjectHandle, String), ScriptError> {
-        Ok((Self::handle_of(player, datum)?, Self::name(symbols, prop_name)?))
+        Ok((
+            Self::handle_of(player, datum)?,
+            Self::name(symbols, prop_name)?,
+        ))
     }
 
     pub(crate) fn prepare_set(

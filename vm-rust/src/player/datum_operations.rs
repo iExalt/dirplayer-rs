@@ -3,7 +3,13 @@ use std::collections::VecDeque;
 
 use crate::{
     director::lingo::datum::{Datum, DatumType},
-    player::{compare::validate_direct_symbol_fields, datum_formatting::{datum_to_string_for_concat, format_datum}, datum_ref::DatumRef, handlers::types::TypeHandlers, symbols::symbol_table::SymbolTable},
+    player::{
+        compare::validate_direct_symbol_fields,
+        datum_formatting::{datum_to_string_for_concat, format_datum},
+        datum_ref::DatumRef,
+        handlers::types::TypeHandlers,
+        symbols::symbol_table::SymbolTable,
+    },
 };
 
 use super::{sprite::ColorRef, DirPlayer, ScriptError, ScriptErrorCode};
@@ -16,13 +22,12 @@ fn checked_datum<'a>(
 ) -> Result<&'a Datum, ScriptError> {
     let datum = match datum_ref {
         DatumRef::Void => &Datum::Void,
-        _ => player
-            .allocator
-            .try_get_datum(datum_ref)
-            .ok_or_else(|| ScriptError::new_code(
+        _ => player.allocator.try_get_datum(datum_ref).ok_or_else(|| {
+            ScriptError::new_code(
                 ScriptErrorCode::InvalidReference,
                 format!("invalid datum reference {datum_ref}"),
-            ))?,
+            )
+        })?,
     };
     validate_direct_symbol_fields(datum, symbols)?;
     Ok(datum)
@@ -54,9 +59,8 @@ fn shift_date_by_days(
         .timestamp_ms;
     let new_ms = src_ms + days_delta * 24 * 60 * 60 * 1000;
     let new_id = player.allocator.get_free_script_instance_id();
-    let new_obj = crate::player::handlers::datum_handlers::date::DateObject::from_timestamp(
-        new_id, new_ms,
-    );
+    let new_obj =
+        crate::player::handlers::datum_handlers::date::DateObject::from_timestamp(new_id, new_ms);
     player.date_objects.insert(new_id, new_obj);
     Ok(new_id)
 }
@@ -64,8 +68,10 @@ fn shift_date_by_days(
 /// Perform a binary op on two inline components, preserving int/float semantics.
 /// If either operand is float, result is float.
 fn inline_binop_2(
-    a: [f64; 2], af: u8,
-    b: [f64; 2], bf: u8,
+    a: [f64; 2],
+    af: u8,
+    b: [f64; 2],
+    bf: u8,
     op: fn(f64, f64) -> f64,
 ) -> ([f64; 2], u8) {
     let vals = [op(a[0], b[0]), op(a[1], b[1])];
@@ -74,11 +80,18 @@ fn inline_binop_2(
 }
 
 fn inline_binop_4(
-    a: [f64; 4], af: u8,
-    b: [f64; 4], bf: u8,
+    a: [f64; 4],
+    af: u8,
+    b: [f64; 4],
+    bf: u8,
     op: fn(f64, f64) -> f64,
 ) -> ([f64; 4], u8) {
-    let vals = [op(a[0], b[0]), op(a[1], b[1]), op(a[2], b[2]), op(a[3], b[3])];
+    let vals = [
+        op(a[0], b[0]),
+        op(a[1], b[1]),
+        op(a[2], b[2]),
+        op(a[3], b[3]),
+    ];
     let flags = af | bf;
     (vals, flags)
 }
@@ -86,8 +99,10 @@ fn inline_binop_4(
 /// Apply a scalar op to each component of an inline point.
 /// Result type: if scalar is float OR component is float, result is float.
 fn inline_scalar_2(
-    a: [f64; 2], af: u8,
-    scalar: f64, scalar_is_float: bool,
+    a: [f64; 2],
+    af: u8,
+    scalar: f64,
+    scalar_is_float: bool,
     op: fn(f64, f64) -> f64,
 ) -> ([f64; 2], u8) {
     let vals = [op(a[0], scalar), op(a[1], scalar)];
@@ -96,19 +111,33 @@ fn inline_scalar_2(
 }
 
 fn inline_scalar_4(
-    a: [f64; 4], af: u8,
-    scalar: f64, scalar_is_float: bool,
+    a: [f64; 4],
+    af: u8,
+    scalar: f64,
+    scalar_is_float: bool,
     op: fn(f64, f64) -> f64,
 ) -> ([f64; 4], u8) {
-    let vals = [op(a[0], scalar), op(a[1], scalar), op(a[2], scalar), op(a[3], scalar)];
+    let vals = [
+        op(a[0], scalar),
+        op(a[1], scalar),
+        op(a[2], scalar),
+        op(a[3], scalar),
+    ];
     let flags = if scalar_is_float { 0b1111 } else { af };
     (vals, flags)
 }
 
 /// Extract point components from a list datum (for Point + List ops).
-fn list_to_point_vals(player: &DirPlayer, symbols: &SymbolTable, list: &VecDeque<DatumRef>) -> Result<([f64; 2], u8), ScriptError> {
+fn list_to_point_vals(
+    player: &DirPlayer,
+    symbols: &SymbolTable,
+    list: &VecDeque<DatumRef>,
+) -> Result<([f64; 2], u8), ScriptError> {
     if list.len() != 2 {
-        return Err(ScriptError::new(format!("Invalid list length for point op: {}", list.len())));
+        return Err(ScriptError::new(format!(
+            "Invalid list length for point op: {}",
+            list.len()
+        )));
     }
     let (v0, f0) = Datum::datum_to_inline_component(checked_datum(player, symbols, &list[0])?)?;
     let (v1, f1) = Datum::datum_to_inline_component(checked_datum(player, symbols, &list[1])?)?;
@@ -116,16 +145,25 @@ fn list_to_point_vals(player: &DirPlayer, symbols: &SymbolTable, list: &VecDeque
     Ok(([v0, v1], flags))
 }
 
-fn list_to_rect_vals(player: &DirPlayer, symbols: &SymbolTable, list: &VecDeque<DatumRef>) -> Result<([f64; 4], u8), ScriptError> {
+fn list_to_rect_vals(
+    player: &DirPlayer,
+    symbols: &SymbolTable,
+    list: &VecDeque<DatumRef>,
+) -> Result<([f64; 4], u8), ScriptError> {
     if list.len() != 4 {
-        return Err(ScriptError::new(format!("Invalid list length for rect op: {}", list.len())));
+        return Err(ScriptError::new(format!(
+            "Invalid list length for rect op: {}",
+            list.len()
+        )));
     }
     let mut vals = [0.0; 4];
     let mut flags = 0u8;
     for i in 0..4 {
         let (v, f) = Datum::datum_to_inline_component(checked_datum(player, symbols, &list[i])?)?;
         vals[i] = v;
-        if f { flags |= 1 << i; }
+        if f {
+            flags |= 1 << i;
+        }
     }
     Ok((vals, flags))
 }
@@ -148,10 +186,14 @@ fn list_to_rect_vals(player: &DirPlayer, symbols: &SymbolTable, list: &VecDeque<
 /// to the way < and > operators work with strings" (dictionary, `max()`), and
 /// `#none > 0` is true, so max returns the symbol and min the integer, leaving
 /// `#none - 0` to evaluate.
-fn symbol_as_arithmetic_operand(datum: &Datum, symbols: &SymbolTable) -> Result<Option<Datum>, ScriptError> {
+fn symbol_as_arithmetic_operand(
+    datum: &Datum,
+    symbols: &SymbolTable,
+) -> Result<Option<Datum>, ScriptError> {
     match datum {
         Datum::Symbol(name) => Ok(Some(Datum::String(
-            symbols.display(name)
+            symbols
+                .display(name)
                 .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
                 .to_owned(),
         ))),
@@ -159,7 +201,12 @@ fn symbol_as_arithmetic_operand(datum: &Datum, symbols: &SymbolTable) -> Result<
     }
 }
 
-pub fn add_datums(left: Datum, right: Datum, player: &mut DirPlayer, symbols: &SymbolTable) -> Result<Datum, ScriptError> {
+pub fn add_datums(
+    left: Datum,
+    right: Datum,
+    player: &mut DirPlayer,
+    symbols: &SymbolTable,
+) -> Result<Datum, ScriptError> {
     if let Some(left) = symbol_as_arithmetic_operand(&left, symbols)? {
         return add_datums(left, right, player, symbols);
     }
@@ -335,7 +382,9 @@ pub fn add_datums(left: Datum, right: Datum, player: &mut DirPlayer, symbols: &S
         (Datum::String(s), Datum::List(_, list, _)) => {
             let formatted = list
                 .iter()
-                .map(|r| datum_to_string_for_concat(checked_datum(player, symbols, r)?, symbols, player))
+                .map(|r| {
+                    datum_to_string_for_concat(checked_datum(player, symbols, r)?, symbols, player)
+                })
                 .collect::<Result<Vec<_>, ScriptError>>()?
                 .join(", ");
             Ok(Datum::String(format!("{}{}", s, formatted)))
@@ -343,7 +392,9 @@ pub fn add_datums(left: Datum, right: Datum, player: &mut DirPlayer, symbols: &S
         (Datum::List(_, list, _), Datum::String(s)) => {
             let formatted = list
                 .iter()
-                .map(|r| datum_to_string_for_concat(checked_datum(player, symbols, r)?, symbols, player))
+                .map(|r| {
+                    datum_to_string_for_concat(checked_datum(player, symbols, r)?, symbols, player)
+                })
                 .collect::<Result<Vec<_>, ScriptError>>()?
                 .join(", ");
             Ok(Datum::String(format!("{}{}", formatted, s)))
@@ -396,12 +447,16 @@ pub fn add_datums(left: Datum, right: Datum, player: &mut DirPlayer, symbols: &S
         // Director date arithmetic: `date + N` returns a new date N days
         // later (and `N + date` is symmetric). Used by ClubMarian's daily
         // login window check (`if NetDate = ParamDate or NetDate = ParamDate + 1`).
-        (Datum::DateRef(date_id), Datum::Int(days)) => {
-            Ok(Datum::DateRef(shift_date_by_days(*date_id, *days as i64, player)?))
-        }
-        (Datum::Int(days), Datum::DateRef(date_id)) => {
-            Ok(Datum::DateRef(shift_date_by_days(*date_id, *days as i64, player)?))
-        }
+        (Datum::DateRef(date_id), Datum::Int(days)) => Ok(Datum::DateRef(shift_date_by_days(
+            *date_id,
+            *days as i64,
+            player,
+        )?)),
+        (Datum::Int(days), Datum::DateRef(date_id)) => Ok(Datum::DateRef(shift_date_by_days(
+            *date_id,
+            *days as i64,
+            player,
+        )?)),
         (Datum::String(left), Datum::Int(right)) => {
             let left_float = TypeHandlers::float_impl(left).unwrap_or(0.0);
             Ok(Datum::Float(left_float + (*right as f64)))
@@ -668,18 +723,26 @@ pub fn subtract_datums(
             Ok(Datum::Float((*left as f64) - right_float))
         }
         (Datum::DateRef(a_id), Datum::DateRef(b_id)) => {
-            let a_ms = player.date_objects.get(a_id)
-                .ok_or_else(|| ScriptError::new(format!("Date object {} not found", a_id)))?.timestamp_ms;
-            let b_ms = player.date_objects.get(b_id)
-                .ok_or_else(|| ScriptError::new(format!("Date object {} not found", b_id)))?.timestamp_ms;
+            let a_ms = player
+                .date_objects
+                .get(a_id)
+                .ok_or_else(|| ScriptError::new(format!("Date object {} not found", a_id)))?
+                .timestamp_ms;
+            let b_ms = player
+                .date_objects
+                .get(b_id)
+                .ok_or_else(|| ScriptError::new(format!("Date object {} not found", b_id)))?
+                .timestamp_ms;
             let diff_days = (a_ms - b_ms) / (1000 * 60 * 60 * 24);
             Ok(Datum::Int(diff_days as i32))
         }
         // Director date arithmetic: `date - N` returns a new date N days
         // earlier. Mirrors `date + N` in `add_datums`.
-        (Datum::DateRef(date_id), Datum::Int(days)) => {
-            Ok(Datum::DateRef(shift_date_by_days(*date_id, -(*days as i64), player)?))
-        }
+        (Datum::DateRef(date_id), Datum::Int(days)) => Ok(Datum::DateRef(shift_date_by_days(
+            *date_id,
+            -(*days as i64),
+            player,
+        )?)),
         (Datum::Void, Datum::Int(r)) => Ok(Datum::Float(0.0 - (*r as f64))),
         (Datum::Void, Datum::Float(r)) => Ok(Datum::Float(0.0 - r)),
         (Datum::Void, Datum::Void) => Ok(Datum::Int(0)),
@@ -709,14 +772,12 @@ pub fn multiply_datums(
 
     let result = match (&left, &right) {
         (Datum::Void, Datum::Void) => Datum::Int(0),
-        (Datum::Void, Datum::Int(_))
-        | (Datum::Int(_), Datum::Void) => Datum::Int(0),
-        (Datum::Void, Datum::Float(_))
-        | (Datum::Float(_), Datum::Void) => Datum::Float(0.0),
-        (Datum::Vector(_), Datum::Void)
-        | (Datum::Void, Datum::Vector(_)) => Datum::Vector([0.0, 0.0, 0.0]),
-        (Datum::Point(..), Datum::Void)
-        | (Datum::Void, Datum::Point(..)) => {
+        (Datum::Void, Datum::Int(_)) | (Datum::Int(_), Datum::Void) => Datum::Int(0),
+        (Datum::Void, Datum::Float(_)) | (Datum::Float(_), Datum::Void) => Datum::Float(0.0),
+        (Datum::Vector(_), Datum::Void) | (Datum::Void, Datum::Vector(_)) => {
+            Datum::Vector([0.0, 0.0, 0.0])
+        }
+        (Datum::Point(..), Datum::Void) | (Datum::Void, Datum::Point(..)) => {
             Datum::Point([0.0, 0.0], 0)
         }
         (Datum::Int(left), Datum::Int(right)) => Datum::Int(left * right),
@@ -724,23 +785,27 @@ pub fn multiply_datums(
         (Datum::Float(left), Datum::Int(right)) => Datum::Float(*left * (*right as f64)),
         (Datum::Float(left), Datum::Float(right)) => Datum::Float(left * right),
         // Vector * scalar
-        (Datum::Vector(v), Datum::Int(s)) => Datum::Vector([v[0] * *s as f64, v[1] * *s as f64, v[2] * *s as f64]),
+        (Datum::Vector(v), Datum::Int(s)) => {
+            Datum::Vector([v[0] * *s as f64, v[1] * *s as f64, v[2] * *s as f64])
+        }
         (Datum::Vector(v), Datum::Float(s)) => Datum::Vector([v[0] * s, v[1] * s, v[2] * s]),
-        (Datum::Int(s), Datum::Vector(v)) => Datum::Vector([*s as f64 * v[0], *s as f64 * v[1], *s as f64 * v[2]]),
+        (Datum::Int(s), Datum::Vector(v)) => {
+            Datum::Vector([*s as f64 * v[0], *s as f64 * v[1], *s as f64 * v[2]])
+        }
         (Datum::Float(s), Datum::Vector(v)) => Datum::Vector([s * v[0], s * v[1], s * v[2]]),
         // Vector * Vector = dot product (Director Lingo convention)
-        (Datum::Vector(a), Datum::Vector(b)) => Datum::Float(a[0]*b[0] + a[1]*b[1] + a[2]*b[2]),
-        // Color * scalar
-        (Datum::ColorRef(c), Datum::Float(s)) => {
-            match c {
-                ColorRef::Rgb(r, g, b) => Datum::ColorRef(ColorRef::Rgb(
-                    (*r as f64 * s).clamp(0.0, 255.0) as u8,
-                    (*g as f64 * s).clamp(0.0, 255.0) as u8,
-                    (*b as f64 * s).clamp(0.0, 255.0) as u8,
-                )),
-                _ => Datum::ColorRef(c.clone()),
-            }
+        (Datum::Vector(a), Datum::Vector(b)) => {
+            Datum::Float(a[0] * b[0] + a[1] * b[1] + a[2] * b[2])
         }
+        // Color * scalar
+        (Datum::ColorRef(c), Datum::Float(s)) => match c {
+            ColorRef::Rgb(r, g, b) => Datum::ColorRef(ColorRef::Rgb(
+                (*r as f64 * s).clamp(0.0, 255.0) as u8,
+                (*g as f64 * s).clamp(0.0, 255.0) as u8,
+                (*b as f64 * s).clamp(0.0, 255.0) as u8,
+            )),
+            _ => Datum::ColorRef(c.clone()),
+        },
         (Datum::ColorRef(c), Datum::Int(s)) => {
             let sf = *s as f64;
             match c {
@@ -752,16 +817,14 @@ pub fn multiply_datums(
                 _ => Datum::ColorRef(c.clone()),
             }
         }
-        (Datum::Float(s), Datum::ColorRef(c)) => {
-            match c {
-                ColorRef::Rgb(r, g, b) => Datum::ColorRef(ColorRef::Rgb(
-                    (s * *r as f64).clamp(0.0, 255.0) as u8,
-                    (s * *g as f64).clamp(0.0, 255.0) as u8,
-                    (s * *b as f64).clamp(0.0, 255.0) as u8,
-                )),
-                _ => Datum::ColorRef(c.clone()),
-            }
-        }
+        (Datum::Float(s), Datum::ColorRef(c)) => match c {
+            ColorRef::Rgb(r, g, b) => Datum::ColorRef(ColorRef::Rgb(
+                (s * *r as f64).clamp(0.0, 255.0) as u8,
+                (s * *g as f64).clamp(0.0, 255.0) as u8,
+                (s * *b as f64).clamp(0.0, 255.0) as u8,
+            )),
+            _ => Datum::ColorRef(c.clone()),
+        },
         (Datum::Int(s), Datum::ColorRef(c)) => {
             let sf = *s as f64;
             match c {
@@ -822,7 +885,8 @@ pub fn multiply_datums(
             let n = min(a_refs.len(), b_refs.len());
             let mut result = VecDeque::with_capacity(n);
             for i in 0..n {
-                let product = multiply_datums(a_refs[i].clone(), b_refs[i].clone(), player, symbols)?;
+                let product =
+                    multiply_datums(a_refs[i].clone(), b_refs[i].clone(), player, symbols)?;
                 result.push_back(player.alloc_datum(product));
             }
             Datum::List(DatumType::List, result, false)
@@ -930,7 +994,8 @@ pub fn multiply_datums(
             let pair_refs: Vec<(DatumRef, DatumRef)> = pairs.iter().cloned().collect();
             let mut result_pairs = VecDeque::new();
             for (key_ref, value_ref) in &pair_refs {
-                let scaled = multiply_datums(value_ref.clone(), right_ref.clone(), player, symbols)?;
+                let scaled =
+                    multiply_datums(value_ref.clone(), right_ref.clone(), player, symbols)?;
                 let scaled_ref = player.alloc_datum(scaled);
                 result_pairs.push_back((key_ref.clone(), scaled_ref));
             }
@@ -951,9 +1016,9 @@ pub fn multiply_datums(
 
         // Transform3d * Vector = apply transform to point
         (Datum::Transform3d(m), Datum::Vector(v)) => {
-            let x = m[0]*v[0] + m[4]*v[1] + m[8]*v[2]  + m[12];
-            let y = m[1]*v[0] + m[5]*v[1] + m[9]*v[2]  + m[13];
-            let z = m[2]*v[0] + m[6]*v[1] + m[10]*v[2] + m[14];
+            let x = m[0] * v[0] + m[4] * v[1] + m[8] * v[2] + m[12];
+            let y = m[1] * v[0] + m[5] * v[1] + m[9] * v[2] + m[13];
+            let z = m[2] * v[0] + m[6] * v[1] + m[10] * v[2] + m[14];
             Datum::Vector([x, y, z])
         }
         // Transform3d * Transform3d = matrix multiply.
@@ -966,11 +1031,10 @@ pub fn multiply_datums(
             let mut r = [0.0f64; 16];
             for col in 0..4 {
                 for row in 0..4 {
-                    r[col * 4 + row] =
-                        a[row] * b[col*4]
-                        + a[4 + row] * b[col*4 + 1]
-                        + a[8 + row] * b[col*4 + 2]
-                        + a[12 + row] * b[col*4 + 3];
+                    r[col * 4 + row] = a[row] * b[col * 4]
+                        + a[4 + row] * b[col * 4 + 1]
+                        + a[8 + row] * b[col * 4 + 2]
+                        + a[12 + row] * b[col * 4 + 3];
                 }
             }
             Datum::transform3d(r)
@@ -1019,16 +1083,37 @@ pub fn divide_datums(
             Datum::Float(left / d)
         }
         // Vector / scalar
-        (Datum::Vector(v), Datum::Int(s)) => { let s = *s as f64; if s == 0.0 { Datum::Vector([0.0, 0.0, 0.0]) } else { Datum::Vector([v[0] / s, v[1] / s, v[2] / s]) } }
-        (Datum::Vector(v), Datum::Float(s)) => if *s == 0.0 { Datum::Vector([0.0, 0.0, 0.0]) } else { Datum::Vector([v[0] / s, v[1] / s, v[2] / s]) },
+        (Datum::Vector(v), Datum::Int(s)) => {
+            let s = *s as f64;
+            if s == 0.0 {
+                Datum::Vector([0.0, 0.0, 0.0])
+            } else {
+                Datum::Vector([v[0] / s, v[1] / s, v[2] / s])
+            }
+        }
+        (Datum::Vector(v), Datum::Float(s)) => {
+            if *s == 0.0 {
+                Datum::Vector([0.0, 0.0, 0.0])
+            } else {
+                Datum::Vector([v[0] / s, v[1] / s, v[2] / s])
+            }
+        }
         (Datum::Point(a, af), Datum::Int(right)) => {
             // Int / Int = Int (truncating), preserving int type per-component
             let d = if *right == 0 { 1 } else { *right };
             let vals = [a[0] / d as f64, a[1] / d as f64];
             // For int/int division, result components that were int stay int (truncated)
             let result_vals = [
-                if Datum::inline_is_float(*af, 0) { vals[0] } else { (a[0] as i32 / d) as f64 },
-                if Datum::inline_is_float(*af, 1) { vals[1] } else { (a[1] as i32 / d) as f64 },
+                if Datum::inline_is_float(*af, 0) {
+                    vals[0]
+                } else {
+                    (a[0] as i32 / d) as f64
+                },
+                if Datum::inline_is_float(*af, 1) {
+                    vals[1]
+                } else {
+                    (a[1] as i32 / d) as f64
+                },
             ];
             Datum::Point(result_vals, *af)
         }
@@ -1049,12 +1134,20 @@ pub fn divide_datums(
             // at that index, do float division; else integer truncating division.
             let flags = *af | *bf;
             let vals = [
-                if b[0] == 0.0 { 0.0 }
-                else if Datum::inline_is_float(flags, 0) { a[0] / b[0] }
-                else { (a[0] as i32 / b[0] as i32) as f64 },
-                if b[1] == 0.0 { 0.0 }
-                else if Datum::inline_is_float(flags, 1) { a[1] / b[1] }
-                else { (a[1] as i32 / b[1] as i32) as f64 },
+                if b[0] == 0.0 {
+                    0.0
+                } else if Datum::inline_is_float(flags, 0) {
+                    a[0] / b[0]
+                } else {
+                    (a[0] as i32 / b[0] as i32) as f64
+                },
+                if b[1] == 0.0 {
+                    0.0
+                } else if Datum::inline_is_float(flags, 1) {
+                    a[1] / b[1]
+                } else {
+                    (a[1] as i32 / b[1] as i32) as f64
+                },
             ];
             Datum::Point(vals, flags)
         }
@@ -1062,22 +1155,46 @@ pub fn divide_datums(
             let (bv, bf) = list_to_point_vals(player, symbols, ref_list)?;
             let flags = *af | bf;
             let vals = [
-                if bv[0] == 0.0 { 0.0 }
-                else if Datum::inline_is_float(flags, 0) { a[0] / bv[0] }
-                else { (a[0] as i32 / bv[0] as i32) as f64 },
-                if bv[1] == 0.0 { 0.0 }
-                else if Datum::inline_is_float(flags, 1) { a[1] / bv[1] }
-                else { (a[1] as i32 / bv[1] as i32) as f64 },
+                if bv[0] == 0.0 {
+                    0.0
+                } else if Datum::inline_is_float(flags, 0) {
+                    a[0] / bv[0]
+                } else {
+                    (a[0] as i32 / bv[0] as i32) as f64
+                },
+                if bv[1] == 0.0 {
+                    0.0
+                } else if Datum::inline_is_float(flags, 1) {
+                    a[1] / bv[1]
+                } else {
+                    (a[1] as i32 / bv[1] as i32) as f64
+                },
             ];
             Datum::Point(vals, flags)
         }
         (Datum::Rect(a, af), Datum::Int(right)) => {
             let d = if *right == 0 { 1 } else { *right };
             let result_vals = [
-                if Datum::inline_is_float(*af, 0) { a[0] / d as f64 } else { (a[0] as i32 / d) as f64 },
-                if Datum::inline_is_float(*af, 1) { a[1] / d as f64 } else { (a[1] as i32 / d) as f64 },
-                if Datum::inline_is_float(*af, 2) { a[2] / d as f64 } else { (a[2] as i32 / d) as f64 },
-                if Datum::inline_is_float(*af, 3) { a[3] / d as f64 } else { (a[3] as i32 / d) as f64 },
+                if Datum::inline_is_float(*af, 0) {
+                    a[0] / d as f64
+                } else {
+                    (a[0] as i32 / d) as f64
+                },
+                if Datum::inline_is_float(*af, 1) {
+                    a[1] / d as f64
+                } else {
+                    (a[1] as i32 / d) as f64
+                },
+                if Datum::inline_is_float(*af, 2) {
+                    a[2] / d as f64
+                } else {
+                    (a[2] as i32 / d) as f64
+                },
+                if Datum::inline_is_float(*af, 3) {
+                    a[3] / d as f64
+                } else {
+                    (a[3] as i32 / d) as f64
+                },
             ];
             Datum::Rect(result_vals, *af)
         }
@@ -1107,7 +1224,8 @@ pub fn divide_datums(
             Datum::Float(left_float / right)
         }
         // List / scalar: element-wise division
-        (Datum::List(list_type, items, sorted), Datum::Int(_)) | (Datum::List(list_type, items, sorted), Datum::Float(_)) => {
+        (Datum::List(list_type, items, sorted), Datum::Int(_))
+        | (Datum::List(list_type, items, sorted), Datum::Float(_)) => {
             let scalar_ref = player.alloc_datum(right.clone());
             let mut result_items = VecDeque::with_capacity(items.len());
             for item_ref in items {
@@ -1128,12 +1246,20 @@ pub fn divide_datums(
         // terrainPreview samples a heightmap via `getPixel(x,y) / 65536.0` (no
         // #integer) and relies on this to pull the red channel out of the packed RGB.
         (Datum::ColorRef(c), Datum::Int(r)) => {
-            if *r == 0 { Datum::Int(0) } else { Datum::Int(color_ref_to_i32(c) / *r) }
+            if *r == 0 {
+                Datum::Int(0)
+            } else {
+                Datum::Int(color_ref_to_i32(c) / *r)
+            }
         }
         (Datum::ColorRef(c), Datum::Float(r)) => Datum::Float(color_ref_to_i32(c) as f64 / *r),
         (Datum::Int(l), Datum::ColorRef(c)) => {
             let d = color_ref_to_i32(c);
-            if d == 0 { Datum::Int(0) } else { Datum::Int(*l / d) }
+            if d == 0 {
+                Datum::Int(0)
+            } else {
+                Datum::Int(*l / d)
+            }
         }
         (Datum::Float(l), Datum::ColorRef(c)) => Datum::Float(l / color_ref_to_i32(c) as f64),
         (Datum::List(_, list, _), Datum::Int(_) | Datum::Float(_)) => {
@@ -1167,10 +1293,10 @@ pub fn concat_datums(
     right: Datum,
     player: &mut DirPlayer,
     symbols: &SymbolTable,
-) -> Result<Datum, ScriptError> {   
+) -> Result<Datum, ScriptError> {
     let left_str = datum_to_string_for_concat(&left, symbols, player)?;
     let right_str = datum_to_string_for_concat(&right, symbols, player)?;
-    
+
     Ok(Datum::String(format!("{}{}", left_str, right_str)))
 }
 
@@ -1205,27 +1331,32 @@ mod tests {
             Datum::Int(1),
             &mut player,
             &local,
-        ).is_err());
+        )
+        .is_err());
         assert!(subtract_datums(
             Datum::Symbol(foreign.clone()),
             Datum::Int(1),
             &mut player,
             &local,
-        ).is_err());
+        )
+        .is_err());
         let foreign_ref = player.alloc_datum(Datum::Symbol(foreign.clone()));
         let integer_ref = player.alloc_datum(Datum::Int(1));
         assert!(multiply_datums(
-            foreign_ref.clone(), integer_ref.clone(), &mut player, &local
-        ).is_err());
-        assert!(divide_datums(
-            foreign_ref, integer_ref, &mut player, &local
-        ).is_err());
+            foreign_ref.clone(),
+            integer_ref.clone(),
+            &mut player,
+            &local
+        )
+        .is_err());
+        assert!(divide_datums(foreign_ref, integer_ref, &mut player, &local).is_err());
         assert!(concat_datums(
             Datum::Symbol(foreign),
             Datum::String("suffix".to_string()),
             &mut player,
             &local,
-        ).is_err());
+        )
+        .is_err());
     }
 
     #[test]
@@ -1238,7 +1369,8 @@ mod tests {
             Datum::Symbol(symbol),
             &mut player,
             &symbols,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(matches!(result, Datum::String(value) if value == "prefixMiXeDName"));
     }
 }

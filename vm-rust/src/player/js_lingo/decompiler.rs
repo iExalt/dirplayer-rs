@@ -139,7 +139,10 @@ enum BlockKind {
 #[derive(Debug, Clone)]
 enum Region {
     /// `if (cond) { then }` -- terminates at `cont_idx` (no else block).
-    IfOnly { then_range: (usize, usize), cont_idx: usize },
+    IfOnly {
+        then_range: (usize, usize),
+        cont_idx: usize,
+    },
     /// `if (cond) { then } else { else }` -- the `then` ends with a GOTO that
     /// jumps past the else block to `cont_idx`.
     IfElse {
@@ -167,16 +170,29 @@ impl<'a> DecompState<'a> {
         let mut offset_to_idx = std::collections::HashMap::new();
         for (i, ins) in iter_ops(&ir.bytecode).enumerate() {
             match ins {
-                Ok(JsInstruction { offset, op, operand, length }) => {
+                Ok(JsInstruction {
+                    offset,
+                    op,
+                    operand,
+                    length,
+                }) => {
                     offset_to_idx.insert(offset, i);
-                    instructions.push(DecodedIns { offset, op, operand: operand.to_vec(), length });
+                    instructions.push(DecodedIns {
+                        offset,
+                        op,
+                        operand: operand.to_vec(),
+                        length,
+                    });
                 }
                 Err(_) => break,
             }
         }
         // Sentinel: a jump that targets one byte past the last instruction is
         // really `end of script`. Map that virtual offset to instructions.len().
-        let end_offset = instructions.last().map(|i| i.offset + i.length).unwrap_or(0);
+        let end_offset = instructions
+            .last()
+            .map(|i| i.offset + i.length)
+            .unwrap_or(0);
         offset_to_idx.insert(end_offset, instructions.len());
         Self {
             ir,
@@ -205,16 +221,25 @@ impl<'a> DecompState<'a> {
     fn precompute_while_true(&mut self) {
         let mut found = std::collections::HashMap::new();
         for (k, ins) in self.instructions.iter().enumerate() {
-            if !matches!(ins.op, JsOp::Goto | JsOp::Gotox) { continue; }
+            if !matches!(ins.op, JsOp::Goto | JsOp::Gotox) {
+                continue;
+            }
             let delta = if ins.op == JsOp::Gotox {
                 super::variable_length::read_i32_operand(&ins.operand).unwrap_or(0)
             } else {
                 read_i16_operand(&ins.operand).unwrap_or(0) as i32
             };
-            if delta >= 0 { continue; }
+            if delta >= 0 {
+                continue;
+            }
             let target_off = (ins.offset as i32 + delta) as usize;
-            let header_idx = match self.offset_to_idx.get(&target_off) { Some(&t) => t, None => continue };
-            if header_idx > k { continue; }
+            let header_idx = match self.offset_to_idx.get(&target_off) {
+                Some(&t) => t,
+                None => continue,
+            };
+            if header_idx > k {
+                continue;
+            }
             // do-while back-edge? (IFEQ at k-1 targets k+1, GOTO at k targets header)
             if k > 0 {
                 let prev = &self.instructions[k - 1];
@@ -226,7 +251,9 @@ impl<'a> DecompState<'a> {
                     };
                     let prev_target_off = (prev.offset as i32 + prev_delta) as usize;
                     if let Some(&pt) = self.offset_to_idx.get(&prev_target_off) {
-                        if pt == k + 1 { continue; }
+                        if pt == k + 1 {
+                            continue;
+                        }
                     }
                 }
             }
@@ -247,7 +274,9 @@ impl<'a> DecompState<'a> {
                 } else {
                     read_i16_operand(&cand.operand).unwrap_or(0) as i32
                 };
-                if cd <= 0 { continue; }
+                if cd <= 0 {
+                    continue;
+                }
                 let ct_off = (cand.offset as i32 + cd) as usize;
                 if let Some(&ct_idx) = self.offset_to_idx.get(&ct_off) {
                     if ct_idx == cont_target {
@@ -256,7 +285,9 @@ impl<'a> DecompState<'a> {
                     }
                 }
             }
-            if is_top_ifeq_loop { continue; }
+            if is_top_ifeq_loop {
+                continue;
+            }
             // Otherwise this is a while-true back-edge. Innermost (highest
             // header_idx) wins per header.
             found.entry(header_idx).or_insert(WhileTrueLoop {
@@ -275,18 +306,30 @@ impl<'a> DecompState<'a> {
     fn precompute_do_while(&mut self) {
         let mut found = std::collections::HashMap::new();
         for (k, ins) in self.instructions.iter().enumerate() {
-            if !matches!(ins.op, JsOp::Ifeq | JsOp::Ifeqx) { continue; }
-            let next = match self.instructions.get(k + 1) { Some(n) => n, None => continue };
-            if !matches!(next.op, JsOp::Goto | JsOp::Gotox) { continue; }
+            if !matches!(ins.op, JsOp::Ifeq | JsOp::Ifeqx) {
+                continue;
+            }
+            let next = match self.instructions.get(k + 1) {
+                Some(n) => n,
+                None => continue,
+            };
+            if !matches!(next.op, JsOp::Goto | JsOp::Gotox) {
+                continue;
+            }
             let next_delta = if next.op == JsOp::Gotox {
                 super::variable_length::read_i32_operand(&next.operand).unwrap_or(0)
             } else {
                 read_i16_operand(&next.operand).unwrap_or(0) as i32
             };
             let next_target = (next.offset as i32 + next_delta) as usize;
-            let header_idx = match self.offset_to_idx.get(&next_target) { Some(&t) => t, None => continue };
-            if header_idx > k { continue; } // not backward → not a do-while
-            // Only the innermost (largest header_idx) loop wins for each header.
+            let header_idx = match self.offset_to_idx.get(&next_target) {
+                Some(&t) => t,
+                None => continue,
+            };
+            if header_idx > k {
+                continue;
+            } // not backward → not a do-while
+              // Only the innermost (largest header_idx) loop wins for each header.
             found.entry(header_idx).or_insert(DoWhileLoop {
                 header_idx,
                 ifeq_idx: k,
@@ -350,7 +393,8 @@ impl<'a> DecompState<'a> {
             }
             // Do-while header: wrap [i, ifeq_idx) in `do { ... } while (cond);`.
             if let Some(dw) = self.do_while_at.remove(&i) {
-                if dw.cont_idx <= end + 1 {  // sanity: don't escape range
+                if dw.cont_idx <= end + 1 {
+                    // sanity: don't escape range
                     self.emit_line_with_idx("do {".into(), vec![]);
                     self.indent += 1;
                     self.loop_stack.push(LoopCtx {
@@ -370,7 +414,11 @@ impl<'a> DecompState<'a> {
             }
             if let Some(region) = self.classify_branch(i, end) {
                 match region {
-                    Region::IfElse { then_range, else_range, cont_idx } => {
+                    Region::IfElse {
+                        then_range,
+                        else_range,
+                        cont_idx,
+                    } => {
                         // Ternary `?:` and `if-else` compile to the same
                         // opcode shape. Distinguish by trying to render both
                         // branches as pure expressions; if both succeed
@@ -382,12 +430,8 @@ impl<'a> DecompState<'a> {
                             self.render_branch_as_expr(else_range.0, else_range.1),
                         ) {
                             let cond = self.consume_cond_at(i);
-                            let text = format!(
-                                "{} ? {} : {}",
-                                paren_if_le(&cond, 4),
-                                then_e,
-                                else_e,
-                            );
+                            let text =
+                                format!("{} ? {} : {}", paren_if_le(&cond, 4), then_e, else_e,);
                             let mut bc = cond.bc_idx;
                             bc.push(i);
                             self.push_entry(text, 4, bc);
@@ -406,7 +450,10 @@ impl<'a> DecompState<'a> {
                         self.emit_line_with_idx("}".into(), vec![]);
                         i = cont_idx;
                     }
-                    Region::IfOnly { then_range, cont_idx } => {
+                    Region::IfOnly {
+                        then_range,
+                        cont_idx,
+                    } => {
                         let cond = self.consume_cond_at(i);
                         self.emit_line_with_idx(format!("if ({}) {{", cond.text), cond.bc_idx);
                         self.indent += 1;
@@ -415,7 +462,12 @@ impl<'a> DecompState<'a> {
                         self.emit_line_with_idx("}".into(), vec![]);
                         i = cont_idx;
                     }
-                    Region::Loop { body_range, step_range, header_idx, cont_idx } => {
+                    Region::Loop {
+                        body_range,
+                        step_range,
+                        header_idx,
+                        cont_idx,
+                    } => {
                         let cond = self.consume_cond_at(i);
                         let step_text = if let Some(sr) = step_range {
                             self.render_inline(sr.0, sr.1)
@@ -447,7 +499,10 @@ impl<'a> DecompState<'a> {
                             Some((s, _)) => s,
                             None => body_range.1,
                         };
-                        self.loop_stack.push(LoopCtx { header_idx, cont_idx });
+                        self.loop_stack.push(LoopCtx {
+                            header_idx,
+                            cont_idx,
+                        });
                         self.emit_range(body_range.0, body_emit_end);
                         self.loop_stack.pop();
                         self.indent -= 1;
@@ -498,7 +553,9 @@ impl<'a> DecompState<'a> {
             JsOp::Ifne | JsOp::Ifnex => (true, true),
             _ => (false, false),
         };
-        if !is_if { return None; }
+        if !is_if {
+            return None;
+        }
 
         let delta = if matches!(ins.op, JsOp::Ifeqx | JsOp::Ifnex) {
             super::variable_length::read_i32_operand(&ins.operand).ok()?
@@ -594,19 +651,36 @@ impl<'a> DecompState<'a> {
     /// the value-computation wasn't captured) or too much (the whole loop
     /// body got swallowed into the step when there was no preceding POP).
     fn detect_for_step(&self, body_start: usize, body_end: usize) -> Option<(usize, usize)> {
-        if body_end == 0 || body_end <= body_start { return None; }
+        if body_end == 0 || body_end <= body_start {
+            return None;
+        }
         let mut step_end = body_end;
         while step_end > body_start && matches!(self.instructions[step_end - 1].op, JsOp::Pop) {
             step_end -= 1;
         }
-        if step_end <= body_start { return None; }
+        if step_end <= body_start {
+            return None;
+        }
         let last = &self.instructions[step_end - 1];
-        let is_stepish = matches!(last.op,
-            JsOp::Varinc | JsOp::Vardec | JsOp::Arginc | JsOp::Argdec
-            | JsOp::Incvar | JsOp::Decvar | JsOp::Incarg | JsOp::Decarg
-            | JsOp::Setvar | JsOp::Setarg | JsOp::Setname
-            | JsOp::Setprop | JsOp::Setelem);
-        if !is_stepish { return None; }
+        let is_stepish = matches!(
+            last.op,
+            JsOp::Varinc
+                | JsOp::Vardec
+                | JsOp::Arginc
+                | JsOp::Argdec
+                | JsOp::Incvar
+                | JsOp::Decvar
+                | JsOp::Incarg
+                | JsOp::Decarg
+                | JsOp::Setvar
+                | JsOp::Setarg
+                | JsOp::Setname
+                | JsOp::Setprop
+                | JsOp::Setelem
+        );
+        if !is_stepish {
+            return None;
+        }
         // Walk back, tracking stack net effect. We start from one past the
         // trailing POP and accumulate the net effect of each op as we
         // include it. The shortest suffix where total == 0 is the
@@ -630,7 +704,9 @@ impl<'a> DecompState<'a> {
                 return None;
             }
         }
-        if total != 0 { return None; }
+        if total != 0 {
+            return None;
+        }
         Some((step_start, body_end))
     }
 
@@ -646,7 +722,11 @@ impl<'a> DecompState<'a> {
         let cond = self.pop_or_undef();
         let mut bc = cond.bc_idx.clone();
         bc.push(ifeq_idx);
-        StackEntry { text: cond.text, prec: cond.prec, bc_idx: bc }
+        StackEntry {
+            text: cond.text,
+            prec: cond.prec,
+            bc_idx: bc,
+        }
     }
 
     /// Steal the most-recently-emitted line as a for-loop init statement.
@@ -668,7 +748,11 @@ impl<'a> DecompState<'a> {
                         matches!(b.kind, JsBindingKind::Variable | JsBindingKind::Constant)
                             && b.name == name
                     });
-                    if is_local { format!("var {}", text) } else { text }
+                    if is_local {
+                        format!("var {}", text)
+                    } else {
+                        text
+                    }
                 } else {
                     text
                 };
@@ -684,7 +768,9 @@ impl<'a> DecompState<'a> {
     /// the right-hand side of `&&` / `||`. Returns None otherwise (range
     /// contains statements, multiple value pushes, or no value at all).
     fn render_branch_as_expr(&self, start: usize, end: usize) -> Option<String> {
-        if start >= end { return None; }
+        if start >= end {
+            return None;
+        }
         let mut child = DecompState {
             ir: self.ir,
             bindings: self.bindings,
@@ -711,7 +797,9 @@ impl<'a> DecompState<'a> {
             return None;
         }
         let top = child.stack.pop().unwrap();
-        if top.text.starts_with('<') { return None; } // bind/this marker, not a real expr
+        if top.text.starts_with('<') {
+            return None;
+        } // bind/this marker, not a real expr
         Some(top.text)
     }
 
@@ -730,8 +818,11 @@ impl<'a> DecompState<'a> {
         let end = end.min(self.instructions.len());
         let start = start.min(end);
         let sub: Vec<DecodedIns> = self.instructions[start..end].to_vec();
-        let mut sub_map: std::collections::HashMap<usize, usize> =
-            sub.iter().enumerate().map(|(k, ins)| (ins.offset, k)).collect();
+        let mut sub_map: std::collections::HashMap<usize, usize> = sub
+            .iter()
+            .enumerate()
+            .map(|(k, ins)| (ins.offset, k))
+            .collect();
         if let Some(boundary) = self.instructions.get(end) {
             sub_map.insert(boundary.offset, sub.len());
         }
@@ -770,11 +861,19 @@ impl<'a> DecompState<'a> {
         let mut lines = Vec::new();
         // Emit any function-local var declarations first (mirrors the
         // function-statement emitter).
-        for b in fa.bindings.iter().filter(|b| b.kind != JsBindingKind::Argument) {
+        for b in fa
+            .bindings
+            .iter()
+            .filter(|b| b.kind != JsBindingKind::Argument)
+        {
             lines.push(format!("  var {};", b.name));
         }
         for line in &dec.lines {
-            lines.push(format!("{}{}", "  ".repeat(line.indent as usize + 1), line.text));
+            lines.push(format!(
+                "{}{}",
+                "  ".repeat(line.indent as usize + 1),
+                line.text
+            ));
         }
         format!("{{\n{}\n}}", lines.join("\n"))
     }
@@ -806,8 +905,12 @@ impl<'a> DecompState<'a> {
         }
         // The "step" lines we just emitted include the trailing semicolon.
         // For an inline expression we want a single ;-joined fragment.
-        child.out.into_iter().map(|l| l.text.trim_end_matches(';').to_string())
-            .collect::<Vec<_>>().join(", ")
+        child
+            .out
+            .into_iter()
+            .map(|l| l.text.trim_end_matches(';').to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     /// Process one instruction, return the next instruction index.
@@ -818,7 +921,11 @@ impl<'a> DecompState<'a> {
             JsOp::Defvar | JsOp::Defconst => {
                 let idx = read_u16_operand(&ins.operand).unwrap_or(0) as usize;
                 let name = atom_name(self.ir, idx);
-                let kw = if ins.op == JsOp::Defconst { "const" } else { "var" };
+                let kw = if ins.op == JsOp::Defconst {
+                    "const"
+                } else {
+                    "var"
+                };
                 self.emit_line_with_idx(format!("{} {};", kw, name), vec![i]);
                 i + 1
             }
@@ -842,16 +949,38 @@ impl<'a> DecompState<'a> {
             }
 
             // ===== Pure pushes =====
-            JsOp::Zero  => { self.push("0", 100, vec![i]); i + 1 }
-            JsOp::One   => { self.push("1", 100, vec![i]); i + 1 }
-            JsOp::Null  => { self.push("null", 100, vec![i]); i + 1 }
-            JsOp::This  => { self.push("this", 100, vec![i]); i + 1 }
-            JsOp::True  => { self.push("true", 100, vec![i]); i + 1 }
-            JsOp::False => { self.push("false", 100, vec![i]); i + 1 }
-            JsOp::Push  => { self.push("undefined", 100, vec![i]); i + 1 }
+            JsOp::Zero => {
+                self.push("0", 100, vec![i]);
+                i + 1
+            }
+            JsOp::One => {
+                self.push("1", 100, vec![i]);
+                i + 1
+            }
+            JsOp::Null => {
+                self.push("null", 100, vec![i]);
+                i + 1
+            }
+            JsOp::This => {
+                self.push("this", 100, vec![i]);
+                i + 1
+            }
+            JsOp::True => {
+                self.push("true", 100, vec![i]);
+                i + 1
+            }
+            JsOp::False => {
+                self.push("false", 100, vec![i]);
+                i + 1
+            }
+            JsOp::Push => {
+                self.push("undefined", 100, vec![i]);
+                i + 1
+            }
             JsOp::Uint16 => {
                 let v = read_u16_operand(&ins.operand).unwrap_or(0);
-                self.push(&v.to_string(), 100, vec![i]); i + 1
+                self.push(&v.to_string(), 100, vec![i]);
+                i + 1
             }
             JsOp::String => {
                 let idx = read_u16_operand(&ins.operand).unwrap_or(0) as usize;
@@ -859,7 +988,8 @@ impl<'a> DecompState<'a> {
                     Some(JsAtom::String(s)) => format!("{:?}", s),
                     other => format!("/* string #{} = {:?} */", idx, other),
                 };
-                self.push(&s, 100, vec![i]); i + 1
+                self.push(&s, 100, vec![i]);
+                i + 1
             }
             JsOp::Number => {
                 let idx = read_u16_operand(&ins.operand).unwrap_or(0) as usize;
@@ -868,7 +998,8 @@ impl<'a> DecompState<'a> {
                     Some(JsAtom::Double(v)) => format!("{}", v),
                     other => format!("/* number #{} = {:?} */", idx, other),
                 };
-                self.push(&s, 100, vec![i]); i + 1
+                self.push(&s, 100, vec![i]);
+                i + 1
             }
 
             // ===== Local / arg / scope reads =====
@@ -894,7 +1025,11 @@ impl<'a> DecompState<'a> {
                 // grabbing this sentinel — which in JS is `this(args)`
                 // (calling whatever `this` refers to). Either way, "this"
                 // is the right text.
-                self.stack.push(StackEntry { text: "this".into(), prec: 100, bc_idx: vec![i] });
+                self.stack.push(StackEntry {
+                    text: "this".into(),
+                    prec: 100,
+                    bc_idx: vec![i],
+                });
                 i + 1
             }
             JsOp::Bindname => {
@@ -1009,54 +1144,133 @@ impl<'a> DecompState<'a> {
             }
 
             // ===== Binary operators =====
-            JsOp::Add => { self.binop(" + ", 13, i); i + 1 }
-            JsOp::Sub => { self.binop(" - ", 13, i); i + 1 }
-            JsOp::Mul => { self.binop(" * ", 14, i); i + 1 }
-            JsOp::Div => { self.binop(" / ", 14, i); i + 1 }
-            JsOp::Mod => { self.binop(" % ", 14, i); i + 1 }
-            JsOp::Eq  => { self.binop(" == ", 10, i); i + 1 }
-            JsOp::Ne  => { self.binop(" != ", 10, i); i + 1 }
-            JsOp::Lt  => { self.binop(" < ", 11, i); i + 1 }
-            JsOp::Le  => { self.binop(" <= ", 11, i); i + 1 }
-            JsOp::Gt  => { self.binop(" > ", 11, i); i + 1 }
-            JsOp::Ge  => { self.binop(" >= ", 11, i); i + 1 }
-            JsOp::NewEq => { self.binop(" === ", 10, i); i + 1 }
-            JsOp::NewNe => { self.binop(" !== ", 10, i); i + 1 }
-            JsOp::Bitor  => { self.binop(" | ", 7, i); i + 1 }
-            JsOp::Bitxor => { self.binop(" ^ ", 8, i); i + 1 }
-            JsOp::Bitand => { self.binop(" & ", 9, i); i + 1 }
-            JsOp::Lsh    => { self.binop(" << ", 12, i); i + 1 }
-            JsOp::Rsh    => { self.binop(" >> ", 12, i); i + 1 }
-            JsOp::Ursh   => { self.binop(" >>> ", 12, i); i + 1 }
+            JsOp::Add => {
+                self.binop(" + ", 13, i);
+                i + 1
+            }
+            JsOp::Sub => {
+                self.binop(" - ", 13, i);
+                i + 1
+            }
+            JsOp::Mul => {
+                self.binop(" * ", 14, i);
+                i + 1
+            }
+            JsOp::Div => {
+                self.binop(" / ", 14, i);
+                i + 1
+            }
+            JsOp::Mod => {
+                self.binop(" % ", 14, i);
+                i + 1
+            }
+            JsOp::Eq => {
+                self.binop(" == ", 10, i);
+                i + 1
+            }
+            JsOp::Ne => {
+                self.binop(" != ", 10, i);
+                i + 1
+            }
+            JsOp::Lt => {
+                self.binop(" < ", 11, i);
+                i + 1
+            }
+            JsOp::Le => {
+                self.binop(" <= ", 11, i);
+                i + 1
+            }
+            JsOp::Gt => {
+                self.binop(" > ", 11, i);
+                i + 1
+            }
+            JsOp::Ge => {
+                self.binop(" >= ", 11, i);
+                i + 1
+            }
+            JsOp::NewEq => {
+                self.binop(" === ", 10, i);
+                i + 1
+            }
+            JsOp::NewNe => {
+                self.binop(" !== ", 10, i);
+                i + 1
+            }
+            JsOp::Bitor => {
+                self.binop(" | ", 7, i);
+                i + 1
+            }
+            JsOp::Bitxor => {
+                self.binop(" ^ ", 8, i);
+                i + 1
+            }
+            JsOp::Bitand => {
+                self.binop(" & ", 9, i);
+                i + 1
+            }
+            JsOp::Lsh => {
+                self.binop(" << ", 12, i);
+                i + 1
+            }
+            JsOp::Rsh => {
+                self.binop(" >> ", 12, i);
+                i + 1
+            }
+            JsOp::Ursh => {
+                self.binop(" >>> ", 12, i);
+                i + 1
+            }
 
             // ===== Unary operators =====
-            JsOp::Neg => { self.unop("-", 15, i); i + 1 }
-            JsOp::Pos => { self.unop("+", 15, i); i + 1 }
-            JsOp::Not => { self.unop("!", 15, i); i + 1 }
-            JsOp::Bitnot => { self.unop("~", 15, i); i + 1 }
-            JsOp::Typeof => { self.unop_named("typeof ", 15, i); i + 1 }
-            JsOp::Void => { self.unop_named("void ", 15, i); i + 1 }
+            JsOp::Neg => {
+                self.unop("-", 15, i);
+                i + 1
+            }
+            JsOp::Pos => {
+                self.unop("+", 15, i);
+                i + 1
+            }
+            JsOp::Not => {
+                self.unop("!", 15, i);
+                i + 1
+            }
+            JsOp::Bitnot => {
+                self.unop("~", 15, i);
+                i + 1
+            }
+            JsOp::Typeof => {
+                self.unop_named("typeof ", 15, i);
+                i + 1
+            }
+            JsOp::Void => {
+                self.unop_named("void ", 15, i);
+                i + 1
+            }
 
             // ===== Increment / decrement =====
             JsOp::Incarg | JsOp::Incvar => {
                 let slot = read_u16_operand(&ins.operand).unwrap_or(0);
                 let n = local_name(self.bindings, slot, ins.op == JsOp::Incarg);
-                self.push_entry(format!("++{}", n), 15, vec![i]); i + 1
+                self.push_entry(format!("++{}", n), 15, vec![i]);
+                i + 1
             }
             JsOp::Decarg | JsOp::Decvar => {
                 let slot = read_u16_operand(&ins.operand).unwrap_or(0);
                 let n = local_name(self.bindings, slot, ins.op == JsOp::Decarg);
-                self.push_entry(format!("--{}", n), 15, vec![i]); i + 1
+                self.push_entry(format!("--{}", n), 15, vec![i]);
+                i + 1
             }
             JsOp::Arginc | JsOp::Varinc => {
                 let slot = read_u16_operand(&ins.operand).unwrap_or(0);
                 let n = local_name(self.bindings, slot, ins.op == JsOp::Arginc);
-                self.push_entry(format!("{}++", n), 15, vec![i]); i + 1
+                self.push_entry(format!("{}++", n), 15, vec![i]);
+                i + 1
             }
             JsOp::Argdec | JsOp::Vardec => {
                 let slot = read_u16_operand(&ins.operand).unwrap_or(0);
                 let n = local_name(self.bindings, slot, ins.op == JsOp::Argdec);
-                self.push_entry(format!("{}--", n), 15, vec![i]); i + 1
+                self.push_entry(format!("{}--", n), 15, vec![i]);
+                i + 1
             }
             JsOp::Incname | JsOp::Nameinc | JsOp::Decname | JsOp::Namedec => {
                 let idx = read_u16_operand(&ins.operand).unwrap_or(0) as usize;
@@ -1065,9 +1279,10 @@ impl<'a> DecompState<'a> {
                     JsOp::Incname => format!("++{}", n),
                     JsOp::Nameinc => format!("{}++", n),
                     JsOp::Decname => format!("--{}", n),
-                    _             => format!("{}--", n),
+                    _ => format!("{}--", n),
                 };
-                self.push_entry(s, 15, vec![i]); i + 1
+                self.push_entry(s, 15, vec![i]);
+                i + 1
             }
             JsOp::Incprop | JsOp::Propinc | JsOp::Decprop | JsOp::Propdec => {
                 let idx = read_u16_operand(&ins.operand).unwrap_or(0) as usize;
@@ -1082,9 +1297,10 @@ impl<'a> DecompState<'a> {
                     JsOp::Incprop => format!("++{}", target),
                     JsOp::Propinc => format!("{}++", target),
                     JsOp::Decprop => format!("--{}", target),
-                    _             => format!("{}--", target),
+                    _ => format!("{}--", target),
                 };
-                self.push_entry(s, 15, vec![i]); i + 1
+                self.push_entry(s, 15, vec![i]);
+                i + 1
             }
             JsOp::Incelem | JsOp::Eleminc | JsOp::Decelem | JsOp::Elemdec => {
                 let key = self.pop_or_undef();
@@ -1098,9 +1314,10 @@ impl<'a> DecompState<'a> {
                     JsOp::Incelem => format!("++{}", target),
                     JsOp::Eleminc => format!("{}++", target),
                     JsOp::Decelem => format!("--{}", target),
-                    _             => format!("{}--", target),
+                    _ => format!("{}--", target),
                 };
-                self.push_entry(s, 15, vec![i]); i + 1
+                self.push_entry(s, 15, vec![i]);
+                i + 1
             }
 
             // ===== Calls =====
@@ -1114,9 +1331,15 @@ impl<'a> DecompState<'a> {
                 let _this_marker = self.pop_or_undef();
                 let callee = self.pop_or_undef();
                 let mut bc = callee.bc_idx.clone();
-                for a in &args { bc.extend(&a.bc_idx); }
+                for a in &args {
+                    bc.extend(&a.bc_idx);
+                }
                 bc.push(i);
-                let args_str = args.iter().map(|a| a.text.as_str()).collect::<Vec<_>>().join(", ");
+                let args_str = args
+                    .iter()
+                    .map(|a| a.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 let text = format!("{}({})", paren_if_lt(&callee, 95), args_str);
                 self.push_entry(text, 95, bc);
                 i + 1
@@ -1131,9 +1354,15 @@ impl<'a> DecompState<'a> {
                 let _this = self.pop_or_undef();
                 let callee = self.pop_or_undef();
                 let mut bc = callee.bc_idx.clone();
-                for a in &args { bc.extend(&a.bc_idx); }
+                for a in &args {
+                    bc.extend(&a.bc_idx);
+                }
                 bc.push(i);
-                let args_str = args.iter().map(|a| a.text.as_str()).collect::<Vec<_>>().join(", ");
+                let args_str = args
+                    .iter()
+                    .map(|a| a.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 let text = format!("new {}({})", paren_if_lt(&callee, 95), args_str);
                 self.push_entry(text, 95, bc);
                 i + 1
@@ -1144,7 +1373,11 @@ impl<'a> DecompState<'a> {
                 // Decide kind by what's at stack[-2] (the constructor NAME).
                 let kind = if self.stack.len() >= 2 {
                     let nm = &self.stack[self.stack.len() - 2].text;
-                    if nm == "Array" { "[]" } else { "{}" }
+                    if nm == "Array" {
+                        "[]"
+                    } else {
+                        "{}"
+                    }
                 } else {
                     "{}"
                 };
@@ -1162,9 +1395,11 @@ impl<'a> DecompState<'a> {
                 let val = self.pop_or_undef();
                 // Append into the topmost <newinit:...> marker.
                 if let Some(top) = self.stack.last_mut() {
-                    let body = top.text.trim_start_matches("<newinit:{}>")
-                                       .trim_start_matches("<newinit:[]>")
-                                       .to_string();
+                    let body = top
+                        .text
+                        .trim_start_matches("<newinit:{}>")
+                        .trim_start_matches("<newinit:[]>")
+                        .to_string();
                     top.text = if body.is_empty() {
                         format!("<newinit:{{}}>{}: {}", key, val.text)
                     } else {
@@ -1179,9 +1414,11 @@ impl<'a> DecompState<'a> {
                 let val = self.pop_or_undef();
                 let _key = self.pop_or_undef(); // numeric index — order is implied
                 if let Some(top) = self.stack.last_mut() {
-                    let body = top.text.trim_start_matches("<newinit:[]>")
-                                       .trim_start_matches("<newinit:{}>")
-                                       .to_string();
+                    let body = top
+                        .text
+                        .trim_start_matches("<newinit:[]>")
+                        .trim_start_matches("<newinit:{}>")
+                        .to_string();
                     top.text = if body.is_empty() {
                         format!("<newinit:[]>{}", val.text)
                     } else {
@@ -1208,7 +1445,8 @@ impl<'a> DecompState<'a> {
                     if self.stack.len() >= 2 {
                         // peek last two
                         let n = self.stack.len();
-                        let drop_this = self.stack[n - 1].text == "<this>" || self.stack[n - 1].text == "<bind>";
+                        let drop_this = self.stack[n - 1].text == "<this>"
+                            || self.stack[n - 1].text == "<bind>";
                         if drop_this {
                             self.stack.pop();
                             self.stack.pop();
@@ -1233,10 +1471,13 @@ impl<'a> DecompState<'a> {
             // structured. Better than dropping them entirely.
             JsOp::Tableswitch => {
                 let disc = self.pop_or_undef();
-                let low  = read_i16_operand(&ins.operand[2..]).unwrap_or(0) as i32;
+                let low = read_i16_operand(&ins.operand[2..]).unwrap_or(0) as i32;
                 let high = read_i16_operand(&ins.operand[4..]).unwrap_or(0) as i32;
                 self.emit_line_with_idx(
-                    format!("switch ({}) {{  // tableswitch low={} high={}", disc.text, low, high),
+                    format!(
+                        "switch ({}) {{  // tableswitch low={} high={}",
+                        disc.text, low, high
+                    ),
                     vec![i],
                 );
                 i + 1
@@ -1245,7 +1486,10 @@ impl<'a> DecompState<'a> {
                 let disc = self.pop_or_undef();
                 let npairs = read_u16_operand(&ins.operand[2..]).unwrap_or(0);
                 self.emit_line_with_idx(
-                    format!("switch ({}) {{  // lookupswitch npairs={}", disc.text, npairs),
+                    format!(
+                        "switch ({}) {{  // lookupswitch npairs={}",
+                        disc.text, npairs
+                    ),
                     vec![i],
                 );
                 i + 1
@@ -1277,13 +1521,17 @@ impl<'a> DecompState<'a> {
                 let idx = read_u16_operand(&ins.operand).unwrap_or(0) as usize;
                 if let Some(JsAtom::Function(fa)) = self.ir.atoms.get(idx) {
                     let body = self.render_function_body(fa);
-                    let args: Vec<&str> = fa.bindings.iter()
+                    let args: Vec<&str> = fa
+                        .bindings
+                        .iter()
                         .filter(|b| b.kind == JsBindingKind::Argument)
                         .map(|b| b.name.as_str())
                         .collect();
                     let name = if ins.op == JsOp::Namedfunobj || ins.op == JsOp::Closure {
                         fa.name.as_deref().unwrap_or("")
-                    } else { "" };
+                    } else {
+                        ""
+                    };
                     let text = format!("function {}({}) {}", name, args.join(", "), body);
                     self.push_entry(text, 100, vec![i]);
                 } else {
@@ -1383,7 +1631,9 @@ impl<'a> DecompState<'a> {
             }
             JsOp::Swap => {
                 let n = self.stack.len();
-                if n >= 2 { self.stack.swap(n - 1, n - 2); }
+                if n >= 2 {
+                    self.stack.swap(n - 1, n - 2);
+                }
                 i + 1
             }
             // `group` is a SpiderMonkey marker tracking grouped sub-expressions
@@ -1448,7 +1698,10 @@ impl<'a> DecompState<'a> {
                             }
                         }
                         let kw = if is_inverted { "if-true" } else { "if-false" };
-                        self.emit_line_with_idx(format!("/* {} ({}) -> {} */", kw, cond.text, target_off), bc);
+                        self.emit_line_with_idx(
+                            format!("/* {} ({}) -> {} */", kw, cond.text, target_off),
+                            bc,
+                        );
                     }
                 }
                 i + 1
@@ -1473,7 +1726,9 @@ impl<'a> DecompState<'a> {
                 i + 1
             }
             JsOp::Finally => {
-                if self.indent > 0 { self.indent -= 1; }
+                if self.indent > 0 {
+                    self.indent -= 1;
+                }
                 self.emit_line_with_idx("} finally {".into(), vec![i]);
                 self.indent += 1;
                 i + 1
@@ -1484,7 +1739,9 @@ impl<'a> DecompState<'a> {
                 // matching `catch (e) {`.
                 let idx = read_u16_operand(&ins.operand).unwrap_or(0) as usize;
                 let name = atom_name(self.ir, idx);
-                if self.indent > 0 { self.indent -= 1; }
+                if self.indent > 0 {
+                    self.indent -= 1;
+                }
                 self.emit_line_with_idx(format!("}} catch ({}) {{", name), vec![i]);
                 self.indent += 1;
                 // INITCATCHVAR's value-pop and `obj` peek are the engine's
@@ -1521,11 +1778,18 @@ impl<'a> DecompState<'a> {
             other => {
                 let info = other.info();
                 let operand_str = match info.format {
-                    JsOpFormat::Const => format!(" #{}", read_u16_operand(&ins.operand).unwrap_or(0)),
-                    JsOpFormat::Uint16 | JsOpFormat::Qarg | JsOpFormat::Qvar | JsOpFormat::Local => {
+                    JsOpFormat::Const => {
+                        format!(" #{}", read_u16_operand(&ins.operand).unwrap_or(0))
+                    }
+                    JsOpFormat::Uint16
+                    | JsOpFormat::Qarg
+                    | JsOpFormat::Qvar
+                    | JsOpFormat::Local => {
                         format!(" {}", read_u16_operand(&ins.operand).unwrap_or(0))
                     }
-                    JsOpFormat::Jump => format!(" {:+}", read_i16_operand(&ins.operand).unwrap_or(0)),
+                    JsOpFormat::Jump => {
+                        format!(" {:+}", read_i16_operand(&ins.operand).unwrap_or(0))
+                    }
                     _ => String::new(),
                 };
                 self.emit_line_with_idx(format!("/* {}{} */", info.mnemonic, operand_str), vec![i]);
@@ -1537,7 +1801,11 @@ impl<'a> DecompState<'a> {
     // ===== Helpers =====
 
     fn push(&mut self, text: &str, prec: u8, bc_idx: Vec<usize>) {
-        self.stack.push(StackEntry { text: text.to_string(), prec, bc_idx });
+        self.stack.push(StackEntry {
+            text: text.to_string(),
+            prec,
+            bc_idx,
+        });
     }
 
     fn push_entry(&mut self, text: String, prec: u8, bc_idx: Vec<usize>) {
@@ -1597,19 +1865,32 @@ impl<'a> DecompState<'a> {
     }
 
     fn emit_function_decl(&mut self, fa: &JsFunctionAtom, bc_indices: Vec<usize>) {
-        let args: Vec<&str> = fa.bindings.iter()
+        let args: Vec<&str> = fa
+            .bindings
+            .iter()
             .filter(|b| b.kind == JsBindingKind::Argument)
             .map(|b| b.name.as_str())
             .collect();
         let name = fa.name.as_deref().unwrap_or("");
-        self.emit_line_with_idx(format!("function {}({}) {{", name, args.join(", ")), bc_indices.clone());
+        self.emit_line_with_idx(
+            format!("function {}({}) {{", name, args.join(", ")),
+            bc_indices.clone(),
+        );
         self.indent += 1;
         // Synthesise `var <name>;` lines for every function-local binding so the
         // body that follows reads idiomatically (SpiderMonkey hoists var decls
         // to the function prologue; the inner SETVAR ops then look like plain
         // assignments).
-        for b in fa.bindings.iter().filter(|b| b.kind != JsBindingKind::Argument) {
-            let kw = if b.kind == JsBindingKind::Constant { "const" } else { "var" };
+        for b in fa
+            .bindings
+            .iter()
+            .filter(|b| b.kind != JsBindingKind::Argument)
+        {
+            let kw = if b.kind == JsBindingKind::Constant {
+                "const"
+            } else {
+                "var"
+            };
             self.out.push(DecompLine {
                 text: format!("{} {};", kw, b.name),
                 indent: self.indent,
@@ -1641,7 +1922,11 @@ fn local_name(bindings: &[super::xdr::JsFunctionBinding], slot: u16, is_arg: boo
     // Slot number = position in bindings filtered by kind. `short_id` in the
     // XDR binding record is a per-property hash bucket id (not a slot number)
     // and shouldn't be matched against the bytecode operand.
-    let want = if is_arg { JsBindingKind::Argument } else { JsBindingKind::Variable };
+    let want = if is_arg {
+        JsBindingKind::Argument
+    } else {
+        JsBindingKind::Variable
+    };
     let mut idx = 0u16;
     for b in bindings {
         if b.kind == want {
@@ -1658,15 +1943,27 @@ fn local_name(bindings: &[super::xdr::JsFunctionBinding], slot: u16, is_arg: boo
             idx += 1;
         }
     }
-    if is_arg { format!("arg{}", slot) } else { format!("v{}", slot) }
+    if is_arg {
+        format!("arg{}", slot)
+    } else {
+        format!("v{}", slot)
+    }
 }
 
 fn paren_if_lt(e: &StackEntry, parent_prec: u8) -> String {
-    if e.prec < parent_prec { format!("({})", e.text) } else { e.text.clone() }
+    if e.prec < parent_prec {
+        format!("({})", e.text)
+    } else {
+        e.text.clone()
+    }
 }
 
 fn paren_if_le(e: &StackEntry, parent_prec: u8) -> String {
-    if e.prec <= parent_prec { format!("({})", e.text) } else { e.text.clone() }
+    if e.prec <= parent_prec {
+        format!("({})", e.text)
+    } else {
+        e.text.clone()
+    }
 }
 
 /// True if `text` is one of the BINDNAME / `this` / NEWINIT sentinels —
@@ -1689,7 +1986,9 @@ fn op_stack_effect(ins: &DecodedIns) -> Option<(i32, i32)> {
         match ins.op {
             // CALL / NEW: argc + 2 (fn slot, this slot, args).
             JsOp::Call | JsOp::New => {
-                if ins.operand.len() < 2 { return None; }
+                if ins.operand.len() < 2 {
+                    return None;
+                }
                 let argc = u16::from_be_bytes([ins.operand[0], ins.operand[1]]) as i32;
                 argc + 2
             }

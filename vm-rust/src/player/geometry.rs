@@ -88,6 +88,14 @@ impl IntRect {
     }
 
     pub fn to_datum(&self) -> Datum {
-        Datum::Rect([self.left as f64, self.top as f64, self.right as f64, self.bottom as f64], 0)
+        Datum::Rect(
+            [
+                self.left as f64,
+                self.top as f64,
+                self.right as f64,
+                self.bottom as f64,
+            ],
+            0,
+        )
     }
 }

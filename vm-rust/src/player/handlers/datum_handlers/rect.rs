@@ -52,21 +52,21 @@ impl RectDatumHandlers {
                 .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
 
             match handler_name_lower {
-            "getat" => Self::get_at(player, symbols, &datum, args),
-            "setat" => Self::set_at(player, symbols, &datum, args),
-            "intersect" => Self::intersect(player, symbols, &datum, args),
-            "duplicate" => Self::duplicate(player, symbols, &datum),
-            "offset" => Self::offset(player, symbols, &datum, args),
-            "inflate" => Self::inflate(player, symbols, &datum, args),
-            // Same list-like addressing as a point (see PointDatumHandlers),
-            // four elements here: left, top, right, bottom.
-            "count" => {
-                checked_datum(player, &datum, symbols)?.to_rect_inline()?;
-                Ok(player.alloc_datum(Datum::Int(4)))
-            }
-            _ => Err(ScriptError::new(format!(
-                "no handler {handler_name_display} for rect"
-            ))),
+                "getat" => Self::get_at(player, symbols, &datum, args),
+                "setat" => Self::set_at(player, symbols, &datum, args),
+                "intersect" => Self::intersect(player, symbols, &datum, args),
+                "duplicate" => Self::duplicate(player, symbols, &datum),
+                "offset" => Self::offset(player, symbols, &datum, args),
+                "inflate" => Self::inflate(player, symbols, &datum, args),
+                // Same list-like addressing as a point (see PointDatumHandlers),
+                // four elements here: left, top, right, bottom.
+                "count" => {
+                    checked_datum(player, &datum, symbols)?.to_rect_inline()?;
+                    Ok(player.alloc_datum(Datum::Int(4)))
+                }
+                _ => Err(ScriptError::new(format!(
+                    "no handler {handler_name_display} for rect"
+                ))),
             }
         })
     }
@@ -95,12 +95,15 @@ impl RectDatumHandlers {
         let dy = checked_datum(player, &args[1], symbols)?.int_value()?;
 
         // offset always produces int results
-        Ok(player.alloc_datum(Datum::Rect([
-            vals[0] + dx as f64,
-            vals[1] + dy as f64,
-            vals[2] + dx as f64,
-            vals[3] + dy as f64,
-        ], 0)))
+        Ok(player.alloc_datum(Datum::Rect(
+            [
+                vals[0] + dx as f64,
+                vals[1] + dy as f64,
+                vals[2] + dx as f64,
+                vals[3] + dy as f64,
+            ],
+            0,
+        )))
     }
 
     /// `rect.inflate(widthChange, heightChange)` / `inflate(rect, w, h)`.
@@ -119,9 +122,7 @@ impl RectDatumHandlers {
         args: &[DatumRef],
     ) -> Result<DatumRef, ScriptError> {
         if args.len() < 2 {
-            return Err(ScriptError::new(
-                "inflate requires 2 arguments".to_string(),
-            ));
+            return Err(ScriptError::new("inflate requires 2 arguments".to_string()));
         }
         let (vals, _flags) = checked_datum(player, datum, symbols)?.to_rect_inline()?;
         let dw = checked_datum(player, &args[0], symbols)?.to_float()? as f64;
@@ -144,7 +145,9 @@ impl RectDatumHandlers {
         args: &[DatumRef],
     ) -> Result<DatumRef, ScriptError> {
         if args.is_empty() {
-            return Err(ScriptError::new("intersect requires a rectangle".to_string()));
+            return Err(ScriptError::new(
+                "intersect requires a rectangle".to_string(),
+            ));
         }
         let (r1, _f1) = checked_datum(player, datum, symbols)?.to_rect_inline()?;
         let (r2, _f2) = checked_datum(player, &args[0], symbols)?.to_rect_inline()?;
@@ -194,7 +197,9 @@ impl RectDatumHandlers {
         args: &[DatumRef],
     ) -> Result<DatumRef, ScriptError> {
         if args.len() < 2 {
-            return Err(ScriptError::new("setAt requires an index and value".to_string()));
+            return Err(ScriptError::new(
+                "setAt requires an index and value".to_string(),
+            ));
         }
         checked_datum(player, datum, symbols)?.to_rect_inline()?;
         let index = checked_datum(player, &args[0], symbols)?.int_value()?;
@@ -218,7 +223,12 @@ impl RectDatumHandlers {
         Ok(DatumRef::Void)
     }
 
-    pub fn get_prop(player: &DirPlayer, symbols: &SymbolTable, datum: &DatumRef, prop: Symbol) -> Result<Datum, ScriptError> {
+    pub fn get_prop(
+        player: &DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        prop: Symbol,
+    ) -> Result<Datum, ScriptError> {
         let datum = match datum {
             DatumRef::Void => &Datum::Void,
             _ => player
@@ -243,15 +253,36 @@ impl RectDatumHandlers {
             "ilk" => Ok(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Rect))),
             "width" => Ok(Datum::from_f64(right - left)),
             "height" => Ok(Datum::from_f64(bottom - top)),
-            "left" => Ok(Datum::inline_component_to_datum(left, Datum::inline_is_float(flags, 0))),
-            "top" => Ok(Datum::inline_component_to_datum(top, Datum::inline_is_float(flags, 1))),
-            "right" => Ok(Datum::inline_component_to_datum(right, Datum::inline_is_float(flags, 2))),
-            "bottom" => Ok(Datum::inline_component_to_datum(bottom, Datum::inline_is_float(flags, 3))),
-            _ => Err(ScriptError::new(format!("Cannot get rect property {}", prop_name))),
+            "left" => Ok(Datum::inline_component_to_datum(
+                left,
+                Datum::inline_is_float(flags, 0),
+            )),
+            "top" => Ok(Datum::inline_component_to_datum(
+                top,
+                Datum::inline_is_float(flags, 1),
+            )),
+            "right" => Ok(Datum::inline_component_to_datum(
+                right,
+                Datum::inline_is_float(flags, 2),
+            )),
+            "bottom" => Ok(Datum::inline_component_to_datum(
+                bottom,
+                Datum::inline_is_float(flags, 3),
+            )),
+            _ => Err(ScriptError::new(format!(
+                "Cannot get rect property {}",
+                prop_name
+            ))),
         }
     }
 
-    pub fn set_prop(player: &mut DirPlayer, symbols: &SymbolTable, datum: &DatumRef, prop: Symbol, value_ref: &DatumRef) -> Result<(), ScriptError> {
+    pub fn set_prop(
+        player: &mut DirPlayer,
+        symbols: &SymbolTable,
+        datum: &DatumRef,
+        prop: Symbol,
+        value_ref: &DatumRef,
+    ) -> Result<(), ScriptError> {
         let prop_name = symbols
             .display(&prop)
             .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
@@ -263,7 +294,12 @@ impl RectDatumHandlers {
             "top" => 1usize,
             "right" => 2usize,
             "bottom" => 3usize,
-            _ => return Err(ScriptError::new(format!("Cannot set rect property {}", prop_name))),
+            _ => {
+                return Err(ScriptError::new(format!(
+                    "Cannot set rect property {}",
+                    prop_name
+                )))
+            }
         };
 
         let new_val = checked_datum(player, value_ref, symbols)?.clone();

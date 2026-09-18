@@ -1,19 +1,34 @@
 use std::collections::HashMap;
 
-use crate::{director::lingo::datum::TimeoutRef, js_api::JsApi, player::symbols::symbol::Symbol};
+use crate::{
+    director::lingo::datum::TimeoutRef,
+    player::{symbols::symbol::Symbol, ScriptError},
+};
 
 use super::DatumRef;
 
 pub struct TimeoutManager {
     pub timeouts: HashMap<TimeoutRef, Timeout>,
+    next_incarnation: u64,
 }
 
+/// Incarnations cross the wasm/JavaScript ABI as a Number, so keep them below
+/// JavaScript's exact-integer limit even though Rust stores them as u64.
+pub const MAX_JS_SAFE_TIMEOUT_INCARNATION: u64 = 9_007_199_254_740_991;
+
+pub struct TimeoutReplacement {
+    pub old: Option<Timeout>,
+    pub new: Timeout,
+}
+
+#[derive(Clone)]
 pub struct Timeout {
     pub name: TimeoutRef,
     pub period: u32,
     pub handler: Symbol,
     pub target_ref: DatumRef,
     pub is_scheduled: bool,
+    pub incarnation: u64,
     /// Wall-clock timestamp (ms) when this timeout should next fire.
     pub next_fire_ms: f64,
 }
@@ -22,38 +37,66 @@ impl TimeoutManager {
     pub fn new() -> TimeoutManager {
         TimeoutManager {
             timeouts: HashMap::new(),
+            next_incarnation: 1,
         }
     }
 
-    pub fn add_timeout(&mut self, timeout: Timeout) {
-        // Fully cancel the old timeout if one exists with the same name —
-        // both flag it as un-scheduled AND dispatch clear_timeout to the JS
-        // side so the underlying setInterval stops. Previously only the
-        // is_scheduled flag was flipped, leaking the JS interval. Each
-        // re-add without an explicit forget()/clear stacked another active
-        // setInterval for the same name.
-        //
-        // Names are inserted *as-is* (case preserved). We deliberately do
-        // not canonicalize to lowercase here — Habbo creates many timeouts
-        // whose uniqueness depends on case-preserving keys (e.g. "Delay" &&
-        // me.getID() && the milliSeconds, where the embedded ID may be a
-        // mixed-case symbol). Lowercasing would alias unrelated entries and
-        // each new add would cancel an unrelated live timer, which during
-        // teardown cascades into the Object Manager / Window Manager
-        // recursion and blows the scope stack.
-        if let Some(old) = self.timeouts.get_mut(&timeout.name) {
-            old.cancel();
+    fn allocate_incarnation(&mut self) -> Result<u64, ScriptError> {
+        if self.next_incarnation == 0 || self.next_incarnation > MAX_JS_SAFE_TIMEOUT_INCARNATION {
+            return Err(ScriptError::new("timeout incarnation exhausted".to_owned()));
         }
-        self.timeouts.insert(timeout.name.to_owned(), timeout);
+        let incarnation = self.next_incarnation;
+        self.next_incarnation = incarnation
+            .checked_add(1)
+            .ok_or_else(|| ScriptError::new("timeout incarnation exhausted".to_owned()))?;
+        Ok(incarnation)
+    }
+
+    fn resolve_key(&self, timeout_name: &str) -> Option<TimeoutRef> {
+        if self.timeouts.contains_key(timeout_name) {
+            return Some(timeout_name.to_owned());
+        }
+        self.timeouts
+            .keys()
+            .find(|key| key.eq_ignore_ascii_case(timeout_name))
+            .cloned()
+    }
+
+    pub fn get_timeout_exact(&self, timeout_name: &str) -> Option<&Timeout> {
+        self.timeouts.get(timeout_name)
+    }
+
+    /// Atomically replace a timeout. Incarnation allocation occurs before any
+    /// old entry is removed, so exhaustion preserves the old timer exactly.
+    /// The caller turns the returned transition into ordered Clear/Schedule
+    /// host actions after the player borrow has ended.
+    pub fn replace_timeout(
+        &mut self,
+        mut timeout: Timeout,
+        now_ms: f64,
+    ) -> Result<TimeoutReplacement, ScriptError> {
+        let incarnation = self.allocate_incarnation()?;
+        // Creation/replacement is exact-keyed so `Timer` and `timer` remain
+        // independent. Case-insensitive resolution is reserved for legacy
+        // lookup/cancel paths below.
+        let old = self.timeouts.remove(&timeout.name);
+        timeout.incarnation = incarnation;
+        timeout.is_scheduled = timeout.period > 0;
+        timeout.next_fire_ms = if timeout.is_scheduled {
+            now_ms + timeout.period as f64
+        } else {
+            0.0
+        };
+        self.timeouts.insert(timeout.name.clone(), timeout.clone());
+        Ok(TimeoutReplacement { old, new: timeout })
     }
 
     #[allow(dead_code)]
-    pub fn forget_timeout(&mut self, timeout_name: &TimeoutRef) {
+    pub fn forget_timeout(&mut self, timeout_name: &str) -> Option<Timeout> {
         // Exact match wins. This is the common case and matches Habbo's
         // expectation that case-distinct keys stay distinct.
-        if let Some(mut timeout) = self.timeouts.remove(timeout_name) {
-            timeout.cancel();
-            return;
+        if let Some(timeout) = self.timeouts.remove(timeout_name) {
+            return Some(timeout);
         }
         // Fallback: case-insensitive scan. CS's cdtimer creates
         // `timeout("cdplayer").new(...)` and cancels with
@@ -63,78 +106,135 @@ impl TimeoutManager {
         // through the song. Only used when no exact match exists, so it
         // doesn't accidentally cancel a same-named-different-case entry
         // that Habbo legitimately keeps live.
-        let key_to_remove = self
-            .timeouts
-            .keys()
-            .find(|k| k.eq_ignore_ascii_case(timeout_name))
-            .cloned();
-        if let Some(key) = key_to_remove {
-            if let Some(mut timeout) = self.timeouts.remove(&key) {
-                timeout.cancel();
-            }
-        }
+        let key_to_remove = self.resolve_key(timeout_name);
+        key_to_remove.and_then(|key| self.timeouts.remove(&key))
     }
 
     #[allow(dead_code)]
-    pub fn get_timeout(&self, timeout_name: &TimeoutRef) -> Option<&Timeout> {
-        if let Some(t) = self.timeouts.get(timeout_name) {
-            return Some(t);
-        }
-        // Same fallback as forget_timeout: only used when no exact match
-        // exists.
-        self.timeouts
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case(timeout_name))
-            .map(|(_, v)| v)
+    pub fn get_timeout(&self, timeout_name: &str) -> Option<&Timeout> {
+        self.resolve_key(timeout_name)
+            .and_then(|key| self.timeouts.get(&key))
     }
 
-    pub fn get_timeout_mut(&mut self, timeout_name: &TimeoutRef) -> Option<&mut Timeout> {
+    pub fn get_timeout_mut(&mut self, timeout_name: &str) -> Option<&mut Timeout> {
         // Resolve the actual key first (exact, then case-insensitive
         // fallback), then re-borrow mutably. Avoids the borrow-checker
         // issue with returning a &mut while also holding the iterator.
-        let key = if self.timeouts.contains_key(timeout_name) {
-            Some(timeout_name.clone())
-        } else {
-            self.timeouts
-                .keys()
-                .find(|k| k.eq_ignore_ascii_case(timeout_name))
-                .cloned()
-        };
+        let key = self.resolve_key(timeout_name);
         key.and_then(move |k| self.timeouts.get_mut(&k))
     }
 
-    pub fn clear(&mut self) {
-        for (_, timeout) in self.timeouts.iter_mut() {
-            timeout.cancel();
-        }
-        self.timeouts.clear();
+    pub fn set_period(
+        &mut self,
+        timeout_name: &str,
+        period: u32,
+        now_ms: f64,
+    ) -> Result<Option<TimeoutReplacement>, ScriptError> {
+        let Some(key) = self.resolve_key(timeout_name) else {
+            return Ok(None);
+        };
+        let incarnation = self.allocate_incarnation()?;
+        let timeout = self
+            .timeouts
+            .get_mut(&key)
+            .expect("resolved timeout key must remain present");
+        let old = timeout.clone();
+        timeout.period = period;
+        timeout.incarnation = incarnation;
+        timeout.is_scheduled = period > 0;
+        timeout.next_fire_ms = if timeout.is_scheduled {
+            now_ms + period as f64
+        } else {
+            0.0
+        };
+        Ok(Some(TimeoutReplacement {
+            old: Some(old),
+            new: timeout.clone(),
+        }))
+    }
+
+    pub fn clear(&mut self) -> Vec<Timeout> {
+        self.timeouts.drain().map(|(_, timeout)| timeout).collect()
     }
 }
 
-impl Timeout {
-    pub fn cancel(&mut self) {
-        if self.is_scheduled {
-            JsApi::dispatch_clear_timeout(&self.name);
-            self.is_scheduled = false;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn timeout(name: &str, period: u32) -> Timeout {
+        Timeout {
+            name: name.to_owned(),
+            period,
+            handler: Symbol::builtin(crate::player::symbols::builtin::BuiltInSymbol::Timeout),
+            target_ref: DatumRef::Void,
+            is_scheduled: false,
+            incarnation: 0,
+            next_fire_ms: 0.0,
         }
     }
 
-    pub fn schedule(&mut self) {
-        self.cancel();
+    #[test]
+    fn replacement_is_exact_first_and_period_zero_is_dormant() {
+        let mut manager = TimeoutManager::new();
+        let first = manager
+            .replace_timeout(timeout("Timer", 10), 100.0)
+            .unwrap();
+        assert!(first.old.is_none());
+        assert!(first.new.is_scheduled);
+        let second = manager.replace_timeout(timeout("timer", 0), 200.0).unwrap();
+        assert!(second.old.is_none());
+        assert!(!second.new.is_scheduled);
+        assert_eq!(second.new.next_fire_ms, 0.0);
+        assert_eq!(manager.timeouts.len(), 2);
+        assert!(manager.get_timeout_exact("Timer").is_some());
+        assert_eq!(
+            manager.get_timeout(&"TIMER".to_owned()).unwrap().name,
+            "Timer"
+        );
+    }
 
-        // A timeout whose period is 0 is dormant — it sends no events until its
-        // period is set to a value > 0 (Director Scripting Dictionary,
-        // `timeout.period`). Habbo's DM_CurlDetacher depends on this: it creates
-        // the timeout at period 0, then sets `period = 1` from the cURL
-        // completion callback to start it. Scheduling a 0 ms interval here would
-        // fire it immediately and break that hand-off, so leave it un-scheduled.
-        if self.period == 0 {
-            return;
-        }
+    #[test]
+    fn incarnation_allocation_failure_preserves_old_entry() {
+        let mut manager = TimeoutManager::new();
+        manager.replace_timeout(timeout("stable", 10), 0.0).unwrap();
+        manager.next_incarnation = MAX_JS_SAFE_TIMEOUT_INCARNATION + 1;
+        let result = manager.replace_timeout(timeout("stable", 20), 0.0);
+        assert!(result.is_err());
+        let current = manager.get_timeout_exact("stable").unwrap();
+        assert_eq!(current.period, 10);
+        assert_eq!(current.incarnation, 1);
+    }
 
-        let timeout_name = self.name.to_owned();
-        JsApi::dispatch_schedule_timeout(&timeout_name, self.period);
-        self.is_scheduled = true;
-        self.next_fire_ms = crate::player::testing_shared::now_ms() + self.period as f64;
+    #[test]
+    fn maximum_safe_incarnation_is_valid_and_missing_period_does_not_consume_one() {
+        let mut manager = TimeoutManager::new();
+        manager.next_incarnation = MAX_JS_SAFE_TIMEOUT_INCARNATION;
+        let maxed = manager.replace_timeout(timeout("maxed", 1), 0.0).unwrap();
+        assert_eq!(maxed.new.incarnation, MAX_JS_SAFE_TIMEOUT_INCARNATION);
+        let next = manager.next_incarnation;
+        assert!(manager
+            .set_period(&"missing".to_owned(), 1, 0.0)
+            .unwrap()
+            .is_none());
+        assert_eq!(manager.next_incarnation, next);
+    }
+
+    #[test]
+    fn period_mutation_is_incarnation_qualified() {
+        let mut manager = TimeoutManager::new();
+        let initial = manager
+            .replace_timeout(timeout("period", 10), 50.0)
+            .unwrap();
+        let changed = manager
+            .set_period(&"period".to_owned(), 0, 60.0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            changed.old.as_ref().unwrap().incarnation,
+            initial.new.incarnation
+        );
+        assert!(!changed.new.is_scheduled);
+        assert!(changed.new.incarnation > initial.new.incarnation);
     }
 }

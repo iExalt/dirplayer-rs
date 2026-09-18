@@ -4,11 +4,14 @@ use fxhash::FxHashMap;
 use itertools::Itertools;
 use log::warn;
 
-use crate::{director::{
-    chunks::{handler::HandlerDef, script::ScriptChunk},
-    enums::ScriptType,
-    lingo::{datum::Datum, script::ScriptContext},
-}, player::symbols::{builtin::BuiltInSymbol, symbol::Symbol}};
+use crate::{
+    director::{
+        chunks::{handler::HandlerDef, script::ScriptChunk},
+        enums::ScriptType,
+        lingo::{datum::Datum, script::ScriptContext},
+    },
+    player::symbols::{builtin::BuiltInSymbol, symbol::Symbol},
+};
 
 use super::ci_string::{CiStr, CiString};
 
@@ -19,16 +22,15 @@ use super::{
     datum_formatting::{format_concrete_datum, format_datum},
     handlers::{
         datum_handlers::{
-            bitmap::BitmapDatumHandlers, cast_member_ref::CastMemberRefHandlers,
-            color::ColorDatumHandlers, int::IntDatumHandlers, list_handlers::ListDatumUtils,
-            point::PointDatumHandlers, prop_list::PropListUtils, rect::RectDatumHandlers,
+            bitmap::BitmapDatumHandlers, cast_member::shockwave3d::Shockwave3dMemberHandlers,
+            cast_member_ref::CastMemberRefHandlers, color::ColorDatumHandlers,
+            date::DateDatumHandlers, float::FloatDatumHandlers, int::IntDatumHandlers,
+            list_handlers::ListDatumUtils, math::MathDatumHandlers, point::PointDatumHandlers,
+            prop_list::PropListUtils, rect::RectDatumHandlers,
             sound_channel::SoundChannelDatumHandlers, string::StringDatumUtils,
             string_chunk::StringChunkHandlers, symbol::SymbolDatumHandlers,
-            timeout::TimeoutDatumHandlers, void::VoidDatumHandlers,
-            date::DateDatumHandlers, math::MathDatumHandlers,
-            vector::VectorDatumHandlers, xml::XmlDatumHandlers,
-            float::FloatDatumHandlers,
-            cast_member::shockwave3d::Shockwave3dMemberHandlers,
+            timeout::TimeoutDatumHandlers, vector::VectorDatumHandlers, void::VoidDatumHandlers,
+            xml::XmlDatumHandlers,
         },
         types::TypeUtils,
     },
@@ -75,9 +77,7 @@ impl ScriptInstance {
         let mut properties = FxHashMap::default();
 
         for prop_name_id in &script_def.chunk.property_name_ids {
-            let prop_name = lctx
-                .names
-                .get(*prop_name_id as usize);
+            let prop_name = lctx.names.get(*prop_name_id as usize);
 
             let prop_symbol = if let Some(prop_name) = prop_name {
                 symbols.intern(prop_name)
@@ -130,25 +130,29 @@ impl Script {
 pub type ScriptHandlerRef = (CastMemberRef, Symbol);
 
 #[inline]
-fn checked_datum<'a>(player: &'a DirPlayer, datum_ref: &DatumRef) -> Result<&'a Datum, ScriptError> {
+fn checked_datum<'a>(
+    player: &'a DirPlayer,
+    datum_ref: &DatumRef,
+) -> Result<&'a Datum, ScriptError> {
     let datum = match datum_ref {
         DatumRef::Void => Ok(&Datum::Void),
-        _ => player
-            .allocator
-            .try_get_datum(datum_ref)
-            .ok_or_else(|| ScriptError::new_code(
+        _ => player.allocator.try_get_datum(datum_ref).ok_or_else(|| {
+            ScriptError::new_code(
                 crate::player::ScriptErrorCode::InvalidReference,
                 format!("invalid datum reference {datum_ref}"),
-            )),
+            )
+        }),
     }?;
     if let Datum::ScriptInstanceRef(instance_ref) = datum {
         player
             .allocator
             .get_script_instance_opt(instance_ref)
-            .ok_or_else(|| ScriptError::new_code(
-                crate::player::ScriptErrorCode::InvalidReference,
-                "foreign or stale ScriptInstanceRef".to_owned(),
-            ))?;
+            .ok_or_else(|| {
+                ScriptError::new_code(
+                    crate::player::ScriptErrorCode::InvalidReference,
+                    "foreign or stale ScriptInstanceRef".to_owned(),
+                )
+            })?;
     }
     Ok(datum)
 }
@@ -165,13 +169,20 @@ pub fn script_get_prop_opt(
     player
         .allocator
         .get_script_instance_opt(script_instance_ref)
-        .ok_or_else(|| ScriptError::new_code(
-            crate::player::ScriptErrorCode::InvalidReference,
-            "foreign or stale ScriptInstanceRef".to_owned(),
-        ))?;
+        .ok_or_else(|| {
+            ScriptError::new_code(
+                crate::player::ScriptErrorCode::InvalidReference,
+                "foreign or stale ScriptInstanceRef".to_owned(),
+            )
+        })?;
 
     // Check virtual script handler first
-    match super::virtual_scripts::VirtualScriptRegistry::try_get_instance_prop(player, symbols, script_instance_ref, prop_name.clone()) {
+    match super::virtual_scripts::VirtualScriptRegistry::try_get_instance_prop(
+        player,
+        symbols,
+        script_instance_ref,
+        prop_name.clone(),
+    ) {
         Ok(Some(datum_ref)) => {
             let datum = checked_datum(player, &datum_ref)?;
             crate::player::compare::validate_direct_symbol_fields(datum, symbols)?;
@@ -189,10 +200,12 @@ pub fn script_get_prop_opt(
     let script_instance = player
         .allocator
         .get_script_instance_opt(script_instance_ref)
-        .ok_or_else(|| ScriptError::new_code(
-            crate::player::ScriptErrorCode::InvalidReference,
-            "foreign or stale ScriptInstanceRef".to_owned(),
-        ))?;
+        .ok_or_else(|| {
+            ScriptError::new_code(
+                crate::player::ScriptErrorCode::InvalidReference,
+                "foreign or stale ScriptInstanceRef".to_owned(),
+            )
+        })?;
 
     // Resolve the builtin identity ONCE. `eq_builtin` calls `into_builtin`,
     // which is a `spur_to_builtin` hash lookup — so testing ancestor/script/ilk
@@ -203,17 +216,23 @@ pub fn script_get_prop_opt(
         Some(BuiltInSymbol::Ancestor) => {
             let script_instance = player.allocator.get_script_instance(&script_instance_ref);
             if let Some(ancestor_id) = &script_instance.ancestor {
-                return Ok(Some(player.alloc_datum(Datum::ScriptInstanceRef(ancestor_id.clone()))));
+                return Ok(Some(
+                    player.alloc_datum(Datum::ScriptInstanceRef(ancestor_id.clone())),
+                ));
             } else {
                 return Ok(Some(DatumRef::Void));
             }
         }
         Some(BuiltInSymbol::Script) => {
             let script_instance = player.allocator.get_script_instance(&script_instance_ref);
-            return Ok(Some(player.alloc_datum(Datum::ScriptRef(script_instance.script.clone()))));
+            return Ok(Some(
+                player.alloc_datum(Datum::ScriptRef(script_instance.script.clone())),
+            ));
         }
         Some(BuiltInSymbol::Ilk) => {
-            return Ok(Some(player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Instance)))));
+            return Ok(Some(player.alloc_datum(Datum::Symbol(Symbol::builtin(
+                BuiltInSymbol::Instance,
+            )))));
         }
         _ => {}
     }
@@ -226,7 +245,9 @@ pub fn script_get_prop_opt(
     // Check ancestor for the property
     if script_instance.ancestor.is_some() {
         let ancestor_ref = script_instance.ancestor.as_ref().unwrap().clone();
-        if let Some(result) = script_get_prop_opt(player, symbols, &ancestor_ref, prop_name.clone())? {
+        if let Some(result) =
+            script_get_prop_opt(player, symbols, &ancestor_ref, prop_name.clone())?
+        {
             return Ok(Some(result));
         }
     }
@@ -237,14 +258,18 @@ pub fn script_get_prop_opt(
     let script_instance = player
         .allocator
         .get_script_instance_opt(script_instance_ref)
-        .ok_or_else(|| ScriptError::new_code(
-            crate::player::ScriptErrorCode::InvalidReference,
-            "foreign or stale ScriptInstanceRef".to_owned(),
-        ))?;
+        .ok_or_else(|| {
+            ScriptError::new_code(
+                crate::player::ScriptErrorCode::InvalidReference,
+                "foreign or stale ScriptInstanceRef".to_owned(),
+            )
+        })?;
 
     // Fall back to built-in properties if not found in instance or ancestors
     if prop_name.eq_builtin(BuiltInSymbol::Class) || prop_name.eq_builtin(BuiltInSymbol::Script) {
-        return Ok(Some(player.alloc_datum(Datum::ScriptRef(script_instance.script.clone()))));
+        return Ok(Some(
+            player.alloc_datum(Datum::ScriptRef(script_instance.script.clone())),
+        ));
     }
 
     Ok(None)
@@ -305,7 +330,9 @@ pub fn script_set_static_prop(
             // visible rather than masked.
             return Err(ScriptError::new(format!(
                 "Cannot set static property {} — script not found ({}:{})",
-                symbols.display(&prop_name).unwrap_or("<foreign symbol>"), script_ref.cast_lib, script_ref.cast_member
+                symbols.display(&prop_name).unwrap_or("<foreign symbol>"),
+                script_ref.cast_lib,
+                script_ref.cast_member
             )));
         }
     };
@@ -315,17 +342,22 @@ pub fn script_set_static_prop(
     if required && !properties.contains_key(&prop_name) {
         return Err(ScriptError::new(format!(
             "Cannot set static property {} on script {}",
-            symbols.display(&prop_name).unwrap_or("<foreign symbol>"), script.name
+            symbols.display(&prop_name).unwrap_or("<foreign symbol>"),
+            script.name
         )));
     } else {
         let value = checked_datum(player, value_ref)?.clone();
         crate::player::compare::validate_direct_symbol_fields(&value, symbols)?;
         if let Datum::ScriptInstanceRef(value_instance_ref) = &value {
-            player.allocator.get_script_instance_opt(value_instance_ref)
-                .ok_or_else(|| ScriptError::new_code(
-                    crate::player::ScriptErrorCode::InvalidReference,
-                    "foreign or stale ScriptInstanceRef value".to_owned(),
-                ))?;
+            player
+                .allocator
+                .get_script_instance_opt(value_instance_ref)
+                .ok_or_else(|| {
+                    ScriptError::new_code(
+                        crate::player::ScriptErrorCode::InvalidReference,
+                        "foreign or stale ScriptInstanceRef value".to_owned(),
+                    )
+                })?;
         }
         properties.insert(prop_name.clone(), value_ref.clone());
         Ok(())
@@ -338,7 +370,9 @@ pub fn script_get_prop(
     script_instance_ref: &ScriptInstanceRef,
     prop_name: Symbol,
 ) -> Result<DatumRef, ScriptError> {
-    if let Some(prop) = script_get_prop_opt(player, symbols, script_instance_ref, prop_name.clone())? {
+    if let Some(prop) =
+        script_get_prop_opt(player, symbols, script_instance_ref, prop_name.clone())?
+    {
         let datum = checked_datum(player, &prop)?;
         crate::player::compare::validate_direct_symbol_fields(datum, symbols)?;
         Ok(prop)
@@ -369,7 +403,10 @@ pub fn script_get_prop(
                 sprite_id,
                 fallback.as_slice(),
             )?;
-            if instance_ids.iter().any(|si| si.id() == script_instance_ref.id()) {
+            if instance_ids
+                .iter()
+                .any(|si| si.id() == script_instance_ref.id())
+            {
                 let datum_ref = player.alloc_datum(Datum::Int(channel_number));
                 return Ok(datum_ref);
             }
@@ -387,10 +424,12 @@ pub fn script_get_prop(
         let script_instance = player
             .allocator
             .get_script_instance_opt(script_instance_ref)
-            .ok_or_else(|| ScriptError::new_code(
-                crate::player::ScriptErrorCode::InvalidReference,
-                "foreign or stale ScriptInstanceRef".to_owned(),
-            ))?;
+            .ok_or_else(|| {
+                ScriptError::new_code(
+                    crate::player::ScriptErrorCode::InvalidReference,
+                    "foreign or stale ScriptInstanceRef".to_owned(),
+                )
+            })?;
         let valid_props: Vec<Symbol> = script_instance.properties.keys().cloned().collect();
         warn!(
             "script_get_prop: undefined property '{}' on {} → returning VOID. Valid properties: {}",
@@ -426,21 +465,33 @@ pub fn script_set_prop(
     player
         .allocator
         .get_script_instance_opt(script_instance_ref)
-        .ok_or_else(|| ScriptError::new_code(
-            crate::player::ScriptErrorCode::InvalidReference,
-            "foreign or stale ScriptInstanceRef".to_owned(),
-        ))?;
+        .ok_or_else(|| {
+            ScriptError::new_code(
+                crate::player::ScriptErrorCode::InvalidReference,
+                "foreign or stale ScriptInstanceRef".to_owned(),
+            )
+        })?;
     let value = checked_datum(player, value_ref)?.clone();
     crate::player::compare::validate_direct_symbol_fields(&value, symbols)?;
     if let Datum::ScriptInstanceRef(value_instance_ref) = &value {
-        player.allocator.get_script_instance_opt(value_instance_ref)
-            .ok_or_else(|| ScriptError::new_code(
-                crate::player::ScriptErrorCode::InvalidReference,
-                "foreign or stale ScriptInstanceRef value".to_owned(),
-            ))?;
+        player
+            .allocator
+            .get_script_instance_opt(value_instance_ref)
+            .ok_or_else(|| {
+                ScriptError::new_code(
+                    crate::player::ScriptErrorCode::InvalidReference,
+                    "foreign or stale ScriptInstanceRef value".to_owned(),
+                )
+            })?;
     }
     // Check virtual script handler first
-    match super::virtual_scripts::VirtualScriptRegistry::try_set_instance_prop(player, symbols, script_instance_ref, prop_name.clone(), value_ref) {
+    match super::virtual_scripts::VirtualScriptRegistry::try_set_instance_prop(
+        player,
+        symbols,
+        script_instance_ref,
+        prop_name.clone(),
+        value_ref,
+    ) {
         Ok(Some(())) => return Ok(()),
         Err(e) => return Err(e),
         Ok(None) => {}
@@ -469,11 +520,15 @@ pub fn script_set_prop(
                 // unreachable from every component built on that thread.
                 Datum::Void => Ok(()),
                 Datum::ScriptInstanceRef(ancestor_id) => {
-                    player.allocator.get_script_instance_opt(&ancestor_id)
-                        .ok_or_else(|| ScriptError::new_code(
-                            crate::player::ScriptErrorCode::InvalidReference,
-                            "foreign or stale ancestor ScriptInstanceRef".to_owned(),
-                        ))?;
+                    player
+                        .allocator
+                        .get_script_instance_opt(&ancestor_id)
+                        .ok_or_else(|| {
+                            ScriptError::new_code(
+                                crate::player::ScriptErrorCode::InvalidReference,
+                                "foreign or stale ancestor ScriptInstanceRef".to_owned(),
+                            )
+                        })?;
                     let script_instance = player
                         .allocator
                         .get_script_instance_mut(&script_instance_ref);
@@ -513,10 +568,10 @@ pub fn script_set_prop(
                     player,
                 ) {
                     Ok(text) => text,
-                    Err(error) => format!("<format error: {error}>")
+                    Err(error) => format!("<format error: {error}>"),
                 };
                 Err(ScriptError::new(format!(
-            "Cannot set property {} found on script instance {}",
+                    "Cannot set property {} found on script instance {}",
                     symbols.display(&prop_name).unwrap_or("<foreign symbol>"),
                     instance_text
                 )))
@@ -527,10 +582,24 @@ pub fn script_set_prop(
     let result = match result {
         Ok(_) => Ok(()),
         Err(err) if err.code != crate::player::ScriptErrorCode::InvalidReference => {
-            let script_instance = player.allocator.get_script_instance_opt(&script_instance_ref)
-                .ok_or_else(|| ScriptError::new_code(crate::player::ScriptErrorCode::InvalidReference, "foreign or stale ScriptInstanceRef".to_owned()))?;
+            let script_instance = player
+                .allocator
+                .get_script_instance_opt(&script_instance_ref)
+                .ok_or_else(|| {
+                    ScriptError::new_code(
+                        crate::player::ScriptErrorCode::InvalidReference,
+                        "foreign or stale ScriptInstanceRef".to_owned(),
+                    )
+                })?;
             if let Some(ancestor_id) = &script_instance.ancestor {
-                script_set_prop(player, symbols, &ancestor_id.clone(), prop_name.clone(), value_ref, true)
+                script_set_prop(
+                    player,
+                    symbols,
+                    &ancestor_id.clone(),
+                    prop_name.clone(),
+                    value_ref,
+                    true,
+                )
             } else {
                 Err(ScriptError::new("No ancestor found".to_string()))
             }
@@ -548,7 +617,7 @@ pub fn script_set_prop(
             } else {
                 let script_instance = player
                     .allocator
-                .get_script_instance_mut(&script_instance_ref);
+                    .get_script_instance_mut(&script_instance_ref);
                 script_instance
                     .properties
                     .insert(prop_name.clone(), value_ref.clone());
@@ -567,7 +636,7 @@ pub fn script_set_prop(
             player,
         ) {
             Ok(text) => text,
-            Err(error) => format!("<format error: {error}>")
+            Err(error) => format!("<format error: {error}>"),
         };
         ScriptError::new(format!(
             "Error setting property {} on script instance {}: {}",
@@ -653,9 +722,9 @@ pub fn set_obj_prop_sync(
     match obj {
         Datum::CastLib(cast_lib) => {
             let value = checked_set_value(player, symbols, value_ref)?;
-            let builtin = prop_name.into_builtin().ok_or_else(|| {
-                ScriptError::new("castLib property must be a builtin".to_owned())
-            })?;
+            let builtin = prop_name
+                .into_builtin()
+                .ok_or_else(|| ScriptError::new("castLib property must be a builtin".to_owned()))?;
             let prep = {
                 let cast = player.movie.cast_manager.get_cast_mut(cast_lib);
                 cast.set_prop(prop_name, value, &player.allocator, symbols, Some(outbox))?;
@@ -705,7 +774,12 @@ pub fn set_obj_prop_sync(
             }
         }
         Datum::ScriptInstanceRef(script_instance_ref) => applied(script_set_prop(
-            player, symbols, &script_instance_ref, prop_name, value_ref, false,
+            player,
+            symbols,
+            &script_instance_ref,
+            prop_name,
+            value_ref,
+            false,
         )),
         Datum::SpriteRef(sprite_id) => applied(sprite_set_prop(
             player,
@@ -738,7 +812,11 @@ pub fn set_obj_prop_sync(
         Datum::BitmapRef(bitmap_ref) => {
             checked_set_value(player, symbols, value_ref)?;
             applied(BitmapDatumHandlers::set_bitmap_ref_prop(
-                player, symbols, &bitmap_ref, prop_name, value_ref,
+                player,
+                symbols,
+                &bitmap_ref,
+                prop_name,
+                value_ref,
             ))
         }
         Datum::Point(..) => {
@@ -749,7 +827,9 @@ pub fn set_obj_prop_sync(
         }
         Datum::TimeoutRef(_) | Datum::TimeoutInstance { .. } | Datum::TimeoutFactory => {
             checked_set_value(player, symbols, value_ref)?;
-            applied(TimeoutDatumHandlers::set_prop(player, symbols, obj_ref, prop_name, value_ref))
+            applied(TimeoutDatumHandlers::set_prop(
+                player, symbols, obj_ref, prop_name, value_ref,
+            ))
         }
         Datum::PropList(..) => {
             checked_set_value(player, symbols, value_ref)?;
@@ -789,11 +869,18 @@ pub fn set_obj_prop_sync(
             applied(player.set_movie_prop(symbols, prop_name, value))
         }
         Datum::ScriptRef(script_ref) => applied(script_set_static_prop(
-            player, symbols, &script_ref, prop_name, value_ref, false,
+            player,
+            symbols,
+            &script_ref,
+            prop_name,
+            value_ref,
+            false,
         )),
         Datum::XmlRef(_) => {
             checked_set_value(player, symbols, value_ref)?;
-            applied(XmlDatumHandlers::set_prop(player, symbols, obj_ref, prop_name, value_ref))
+            applied(XmlDatumHandlers::set_prop(
+                player, symbols, obj_ref, prop_name, value_ref,
+            ))
         }
         Datum::JsObjectRef(_) => Ok(SetObjPropOutcome::JsObject {
             receiver: obj_ref.clone(),

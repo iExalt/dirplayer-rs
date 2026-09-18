@@ -6,8 +6,8 @@ use super::{
     allocator::{DatumAllocator, DatumAllocatorTrait},
     bitmap::manager::BitmapManager,
     cast_lib::{CastMemberRef, INVALID_CAST_MEMBER_REF},
-    symbols::symbol::Symbol,
     script_ref::ScriptInstanceRef,
+    symbols::symbol::Symbol,
     DatumRef,
 };
 
@@ -38,7 +38,10 @@ pub enum StackDatum {
     /// destructure it again. Leaving the arguments in place and pushing this
     /// instead removes both. Nesting is unaffected: the marker occupies the same
     /// stack position the list did, so `foo(a, bar(b))` resolves identically.
-    ArgMarker { count: u16, no_ret: bool },
+    ArgMarker {
+        count: u16,
+        no_ret: bool,
+    },
 }
 
 impl StackDatum {
@@ -415,10 +418,7 @@ impl Scope {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::player::{
-        allocator::DatumAllocatorTrait,
-        ownership::OwnerKey,
-    };
+    use crate::player::{allocator::DatumAllocatorTrait, ownership::OwnerKey};
 
     fn allocator() -> DatumAllocator {
         DatumAllocator::new(OwnerKey::transitional())
@@ -459,9 +459,7 @@ mod tests {
             .alloc_datum(Datum::String("second".into()), &mut second_bitmaps)
             .unwrap();
 
-        let reference = stack
-            .pop_ref_with(&mut first, &mut first_bitmaps)
-            .unwrap();
+        let reference = stack.pop_ref_with(&mut first, &mut first_bitmaps).unwrap();
         let id = reference.unwrap();
         assert_eq!(id, second_reference.unwrap());
         assert!(matches!(

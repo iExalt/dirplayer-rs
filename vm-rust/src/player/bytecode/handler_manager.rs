@@ -6,17 +6,22 @@ use crate::{
         lingo::{constants::get_opcode_name, opcode::OpCode},
     },
     player::{
-        ScopeToken,
-        HandlerExecutionResult, PLAYER_OPT, ScriptError, session::ExecutionContext, bytecode::{
+        bytecode::{
             arithmetics::ArithmeticsBytecodeHandler, flow_control::FlowControlBytecodeHandler,
             stack::StackBytecodeHandler,
-        }, scope::ScopeRef, script::Script, symbols::symbol::Symbol
+        },
+        scope::ScopeRef,
+        script::Script,
+        session::ExecutionContext,
+        symbols::symbol::Symbol,
+        HandlerExecutionResult, ScopeToken, ScriptError, PLAYER_OPT,
     },
 };
 
 use super::{
-    compare::CompareBytecodeHandler, get_set::GetSetBytecodeHandler, string::StringBytecodeHandler,
-    sprite_compare::SpriteCompareBytecodeHandler, expression_tracker::StackExpressionTracker,
+    compare::CompareBytecodeHandler, expression_tracker::StackExpressionTracker,
+    get_set::GetSetBytecodeHandler, sprite_compare::SpriteCompareBytecodeHandler,
+    string::StringBytecodeHandler,
 };
 
 thread_local! {
@@ -103,14 +108,16 @@ fn record_execution(
 ) {
     EXECUTION_HISTORY.with(|history| {
         // SAFETY: single-threaded wasm; push does not re-enter or alias.
-        unsafe { (*history.get()).push(ExecutionHistoryEntry {
-            opcode: opcode_u16,
-            bytecode_pos,
-            operand,
-            handler_name_id,
-            script_cast_lib,
-            script_cast_member,
-        }); }
+        unsafe {
+            (*history.get()).push(ExecutionHistoryEntry {
+                opcode: opcode_u16,
+                bytecode_pos,
+                operand,
+                handler_name_id,
+                script_cast_lib,
+                script_cast_member,
+            });
+        }
     });
 }
 
@@ -121,7 +128,13 @@ pub fn dump_execution_history_on_error(error_message: &str) {
     {
         use web_sys::console;
 
-        console::group_collapsed_1(&format!("📜 Bytecode execution history (last {} ops before error)", EXECUTION_HISTORY_SIZE).into());
+        console::group_collapsed_1(
+            &format!(
+                "📜 Bytecode execution history (last {} ops before error)",
+                EXECUTION_HISTORY_SIZE
+            )
+            .into(),
+        );
         console::error_1(&format!("Error: {}", error_message).into());
 
         EXECUTION_HISTORY.with(|history| {
@@ -131,12 +144,15 @@ pub fn dump_execution_history_on_error(error_message: &str) {
 
             for (i, entry) in history.iter_recent().enumerate() {
                 // Convert opcode back to name using num_traits
-                let opcode: OpCode = num::FromPrimitive::from_u16(entry.opcode).unwrap_or(OpCode::Invalid);
+                let opcode: OpCode =
+                    num::FromPrimitive::from_u16(entry.opcode).unwrap_or(OpCode::Invalid);
                 let op_name = get_opcode_name(opcode);
 
                 // Try to get handler name from lctx if player is available
                 let handler_name = if let Some(player) = player {
-                    player.movie.cast_manager
+                    player
+                        .movie
+                        .cast_manager
                         .get_cast(entry.script_cast_lib)
                         .ok()
                         .and_then(|cast| cast.lctx.as_ref())
@@ -228,8 +244,12 @@ impl StaticBytecodeHandlerManager {
             // GetGlobal2 (0x48) / SetGlobal2 (0x4e) are alternate encodings of
             // GetGlobal/SetGlobal emitted by older (D4) compilers; same
             // semantics. hackey initMain uses setGlobal2.
-            OpCode::GetGlobal | OpCode::GetGlobal2 => GetSetBytecodeHandler::get_global(runtime, ctx),
-            OpCode::SetGlobal | OpCode::SetGlobal2 => GetSetBytecodeHandler::set_global(runtime, ctx),
+            OpCode::GetGlobal | OpCode::GetGlobal2 => {
+                GetSetBytecodeHandler::get_global(runtime, ctx)
+            }
+            OpCode::SetGlobal | OpCode::SetGlobal2 => {
+                GetSetBytecodeHandler::set_global(runtime, ctx)
+            }
             OpCode::PushCons => StackBytecodeHandler::push_cons(runtime, ctx),
             OpCode::PushZero => StackBytecodeHandler::push_zero(runtime, ctx),
             OpCode::GetField => GetSetBytecodeHandler::get_field(runtime, ctx),
@@ -300,7 +320,6 @@ impl StaticBytecodeHandlerManager {
             _ => false,
         }
     }
-
 }
 
 /// Synchronous fast path for bytecode dispatch.
@@ -364,6 +383,8 @@ pub fn try_execute_opcode_sync(
         } else {
             None
         };
-        Some(StaticBytecodeHandlerManager::call_sync_handler(opcode, runtime, ctx))
+        Some(StaticBytecodeHandlerManager::call_sync_handler(
+            opcode, runtime, ctx,
+        ))
     }
 }

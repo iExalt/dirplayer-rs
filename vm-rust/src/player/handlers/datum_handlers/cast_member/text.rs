@@ -1,20 +1,38 @@
 use std::collections::VecDeque;
 
-use log::{debug, warn};
 use crate::{
-    director::{enums::TextInfo, lingo::{datum::{
-        Datum, DatumType, StringChunkExpr, StringChunkSource, StringChunkType, datum_bool
-    }, decompiler::TokenType::Builtin}},
+    director::{
+        enums::TextInfo,
+        lingo::{
+            datum::{
+                datum_bool, Datum, DatumType, StringChunkExpr, StringChunkSource, StringChunkType,
+            },
+            decompiler::TokenType::Builtin,
+        },
+    },
     player::{
-        DatumRef, DirPlayer, ScriptError, bitmap::{
-            bitmap::{Bitmap, PaletteRef, get_system_default_palette},
+        bitmap::{
+            bitmap::{get_system_default_palette, Bitmap, PaletteRef},
             drawing::CopyPixelsParams,
-        }, cast_lib::CastMemberRef, font::{DrawTextParams, GlyphPreference, get_glyph_preference, get_text_index_at_pos, measure_text, measure_text_wrapped}, handlers::datum_handlers::{
-            cast_member::font::{FontMemberHandlers, HtmlParser, HtmlStyle, OutlineCharStyle, StyledSpan, TextAlignment},
-            cast_member_ref::{borrow_member_mut_with_player, checked_get_datum}, string_chunk::StringChunkUtils,
-        }, symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable}
+        },
+        cast_lib::CastMemberRef,
+        font::{
+            get_glyph_preference, get_text_index_at_pos, measure_text, measure_text_wrapped,
+            DrawTextParams, GlyphPreference,
+        },
+        handlers::datum_handlers::{
+            cast_member::font::{
+                FontMemberHandlers, HtmlParser, HtmlStyle, OutlineCharStyle, StyledSpan,
+                TextAlignment,
+            },
+            cast_member_ref::{borrow_member_mut_with_player, checked_get_datum},
+            string_chunk::StringChunkUtils,
+        },
+        symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable},
+        DatumRef, DirPlayer, ScriptError,
     },
 };
+use log::{debug, warn};
 
 pub struct TextMemberHandlers {}
 const DEBUG_TEXT_IMAGE: bool = true;
@@ -28,7 +46,11 @@ fn builtin_symbol(symbol: &Symbol, symbols: &SymbolTable) -> Result<BuiltInSymbo
 /// `fixed_line_space` when set, otherwise font_size as the implicit line
 /// height. Field members behave identically.
 pub(crate) fn line_step_px(fixed_line_space: u16, font_size: u16) -> i32 {
-    if fixed_line_space > 0 { fixed_line_space as i32 } else { font_size as i32 }
+    if fixed_line_space > 0 {
+        fixed_line_space as i32
+    } else {
+        font_size as i32
+    }
 }
 
 /// Effective line height (px) used for scroll math on a field or text member:
@@ -241,7 +263,8 @@ impl TextMemberHandlers {
         let text = member.member_type.as_text().unwrap();
         match handler_name {
             "count" => {
-                let count_of = checked_get_datum(player, &args[0], symbols)?.symbol_value(symbols)?;
+                let count_of =
+                    checked_get_datum(player, &args[0], symbols)?.symbol_value(symbols)?;
                 if args.len() != 1 {
                     return Err(ScriptError::new("count requires 1 argument".to_string()));
                 }
@@ -254,7 +277,8 @@ impl TextMemberHandlers {
                 Ok(player.alloc_datum(Datum::Int(count as i32)))
             }
             "getPropRef" => {
-                let prop_name = checked_get_datum(player, &args[0], symbols)?.symbol_value(symbols)?;
+                let prop_name =
+                    checked_get_datum(player, &args[0], symbols)?.symbol_value(symbols)?;
                 let start = checked_get_datum(player, &args[1], symbols)?.int_value()?;
                 let end = if args.len() > 2 {
                     checked_get_datum(player, &args[2], symbols)?.int_value()?
@@ -277,7 +301,8 @@ impl TextMemberHandlers {
                 )))
             }
             "locToCharPos" => {
-                let (pt_vals, _flags) = checked_get_datum(player, &args[0], symbols)?.to_point_inline()?;
+                let (pt_vals, _flags) =
+                    checked_get_datum(player, &args[0], symbols)?.to_point_inline()?;
                 let x = pt_vals[0] as i32;
                 let y = pt_vals[1] as i32;
 
@@ -323,7 +348,9 @@ impl TextMemberHandlers {
             // the cursor; or overlapping into the previous line's
             // click bucket).
             "linePosToLocV" => {
-                let line_num = checked_get_datum(player, &args[0], symbols)?.int_value()?.max(1);
+                let line_num = checked_get_datum(player, &args[0], symbols)?
+                    .int_value()?
+                    .max(1);
                 let line_step = line_step_px(text.fixed_line_space, text.font_size);
                 let baseline_offset = (line_step * 3) / 4;
                 let y = text.top_spacing as i32 + (line_num - 1) * line_step + baseline_offset;
@@ -344,9 +371,11 @@ impl TextMemberHandlers {
             }
             "setProp" => {
                 // setProp(#line, index, value) or setProp(#word, index, value) etc.
-                let prop_name = checked_get_datum(player, &args[0], symbols)?.symbol_value(symbols)?;
+                let prop_name =
+                    checked_get_datum(player, &args[0], symbols)?.symbol_value(symbols)?;
                 let index = checked_get_datum(player, &args[1], symbols)?.int_value()?;
-                let new_value = checked_get_datum(player, &args[2], symbols)?.string_value(symbols)?;
+                let new_value =
+                    checked_get_datum(player, &args[2], symbols)?.string_value(symbols)?;
                 let chunk_type = StringChunkType::from_symbol(&prop_name, symbols)?;
                 let chunk_expr = StringChunkExpr {
                     chunk_type,
@@ -355,9 +384,17 @@ impl TextMemberHandlers {
                     item_delimiter: player.movie.item_delimiter,
                 };
                 let current_text = text.text.clone();
-                let new_text = StringChunkUtils::string_by_putting_into_chunk(&current_text, &chunk_expr, &new_value)?;
+                let new_text = StringChunkUtils::string_by_putting_into_chunk(
+                    &current_text,
+                    &chunk_expr,
+                    &new_value,
+                )?;
                 // Need mutable access - drop immutable borrows first
-                let cast_member = player.movie.cast_manager.find_mut_member_by_ref(&member_ref).unwrap();
+                let cast_member = player
+                    .movie
+                    .cast_manager
+                    .find_mut_member_by_ref(&member_ref)
+                    .unwrap();
                 let text_member = cast_member.member_type.as_text_mut().unwrap();
                 text_member.set_text_preserving_caret(new_text.trim_end_matches('\0').to_string());
                 Ok(DatumRef::Void)
@@ -374,7 +411,8 @@ impl TextMemberHandlers {
                         "{handler_name} requires 1 argument"
                     )));
                 }
-                let new_str = checked_get_datum(player, &args[0], symbols)?.string_value(symbols)?
+                let new_str = checked_get_datum(player, &args[0], symbols)?
+                    .string_value(symbols)?
                     .trim_end_matches('\0')
                     .to_string();
                 let cast_member = player
@@ -427,7 +465,11 @@ impl TextMemberHandlers {
             // See the setter: the renderer already honours info.scroll_top, so
             // report the same value back. Scrollbar code reads it while dragging.
             "scrolltop" => Ok(Datum::Int(
-                text_data.info.as_ref().map(|i| i.scroll_top as i32).unwrap_or(0),
+                text_data
+                    .info
+                    .as_ref()
+                    .map(|i| i.scroll_top as i32)
+                    .unwrap_or(0),
             )),
             "text" => Ok(Datum::String(text_data.text.to_owned())),
             "line" => {
@@ -444,7 +486,8 @@ impl TextMemberHandlers {
                 // "Invalid string built-in property fixedLineSpace".
                 let item_delimiter = player.movie.item_delimiter;
                 let member_ref = cast_member_ref.clone();
-                let lines: Vec<String> = text_data.text.split('\r').map(|s| s.to_string()).collect();
+                let lines: Vec<String> =
+                    text_data.text.split('\r').map(|s| s.to_string()).collect();
                 let line_datums: VecDeque<_> = lines
                     .into_iter()
                     .enumerate()
@@ -484,9 +527,7 @@ impl TextMemberHandlers {
                     );
                 } else {
                     for item in &text_data.font_style {
-                        item_refs.push_back(
-                            player.alloc_datum(Datum::Symbol((*item).into())),
-                        );
+                        item_refs.push_back(player.alloc_datum(Datum::Symbol((*item).into())));
                     }
                 }
                 Ok(Datum::List(DatumType::List, item_refs, false))
@@ -502,12 +543,20 @@ impl TextMemberHandlers {
 
                 // Get colors for body tag
                 let bg_color = match member.bg_color {
-                    crate::player::sprite::ColorRef::PaletteIndex(idx) => format!("#{:06X}", idx as u32),
-                    crate::player::sprite::ColorRef::Rgb(r, g, b) => format!("#{:02X}{:02X}{:02X}", r, g, b),
+                    crate::player::sprite::ColorRef::PaletteIndex(idx) => {
+                        format!("#{:06X}", idx as u32)
+                    }
+                    crate::player::sprite::ColorRef::Rgb(r, g, b) => {
+                        format!("#{:02X}{:02X}{:02X}", r, g, b)
+                    }
                 };
                 let text_color = match member.color {
-                    crate::player::sprite::ColorRef::PaletteIndex(idx) => format!("#{:06X}", idx as u32),
-                    crate::player::sprite::ColorRef::Rgb(r, g, b) => format!("#{:02X}{:02X}{:02X}", r, g, b),
+                    crate::player::sprite::ColorRef::PaletteIndex(idx) => {
+                        format!("#{:06X}", idx as u32)
+                    }
+                    crate::player::sprite::ColorRef::Rgb(r, g, b) => {
+                        format!("#{:02X}{:02X}{:02X}", r, g, b)
+                    }
                 };
 
                 // Build body tag with color attributes (Director style uses bg= not bgcolor=)
@@ -600,14 +649,22 @@ impl TextMemberHandlers {
                 let (width, measured_height) = if measure_with_canvas {
                     // Canvas2D measurement — matches the Canvas2D render path
                     // used by `.image` for non-PFR and native-standard fonts.
-                    let font_size = if text_data.font_size > 0 { text_data.font_size } else { 12 };
+                    let font_size = if text_data.font_size > 0 {
+                        text_data.font_size
+                    } else {
+                        12
+                    };
                     FontMemberHandlers::measure_text_native_styled(
                         &text_data.text,
                         requested_font_for_measure,
                         font_size,
                         Some(member_style_bits),
                         text_data.word_wrap,
-                        if text_data.width > 0 { text_data.width as i32 } else { 0 },
+                        if text_data.width > 0 {
+                            text_data.width as i32
+                        } else {
+                            0
+                        },
                         text_data.top_spacing,
                         text_data.bottom_spacing,
                         text_data.fixed_line_space,
@@ -639,8 +696,14 @@ impl TextMemberHandlers {
                     let wrap_width = if text_data.width > 0 {
                         text_data.width
                     } else if let Some(ref info) = text_data.info {
-                        if info.width > 0 { info.width as u16 } else { 0 }
-                    } else { 0 };
+                        if info.width > 0 {
+                            info.width as u16
+                        } else {
+                            0
+                        }
+                    } else {
+                        0
+                    };
                     // Count visual lines with the SAME word-wrap walk the
                     // `.image` getter + renderer use (see `count_text_lines`).
                     // The old `measure_text_wrapped().height / (char_height-1)`
@@ -648,8 +711,11 @@ impl TextMemberHandlers {
                     // disagree with `.image` and triggering Habbo's window
                     // Text-Wrapper to copyPixels-stretch the terms text.
                     let line_count = count_text_lines(
-                        &text_data.text, &font, text_data.word_wrap,
-                        wrap_width as i32, text_data.char_spacing,
+                        &text_data.text,
+                        &font,
+                        text_data.word_wrap,
+                        wrap_width as i32,
+                        text_data.char_spacing,
                     );
                     let nominal = if text_data.font_size > 0 {
                         text_data.font_size
@@ -670,12 +736,17 @@ impl TextMemberHandlers {
                         text_data.fixed_line_space
                     } else {
                         crate::player::font::outline_auto_line_height_for_font(
-                            player, &text_data.font, nominal,
-                        ).unwrap_or_else(|| crate::player::font::pfr_auto_line_height(
-                            &font,
-                            player.bitmap_manager.get_bitmap(font.bitmap_ref),
+                            player,
+                            &text_data.font,
                             nominal,
-                        ))
+                        )
+                        .unwrap_or_else(|| {
+                            crate::player::font::pfr_auto_line_height(
+                                &font,
+                                player.bitmap_manager.get_bitmap(font.bitmap_ref),
+                                nominal,
+                            )
+                        })
                     };
                     // Match the renderer's per-line advance at font.rs:921 —
                     // it adds top_spacing AND bottom_spacing to the line step
@@ -706,7 +777,9 @@ impl TextMemberHandlers {
                 if text_data.width > 0 {
                     box_width = text_data.width;
                 } else if let Some(ref info) = text_data.info {
-                    if info.width > 0 { box_width = info.width as u16; }
+                    if info.width > 0 {
+                        box_width = info.width as u16;
+                    }
                 }
                 // Mirror the `.height` getter: trust `text_data.height`
                 // for non-#adjust members and for #adjust members whose
@@ -722,19 +795,25 @@ impl TextMemberHandlers {
                 // the rendered bitmap to one line.
                 // Wrap-only #adjust (single paragraph, no \n — member 82
                 // recycler help, par_runs.len() ≤ 1) still falls through.
-                let text_has_breaks = text_data.text.contains('\n')
-                    || text_data.text.contains('\r');
+                let text_has_breaks =
+                    text_data.text.contains('\n') || text_data.text.contains('\r');
                 let is_multi_par_authored = text_data.par_runs.len() > 1;
                 // Reserve PFR descender/underline overflow so a content-sized box
                 // matches the `.image` getter (the Origins Text-Wrapper bakes with
                 // `src = member.rect`, so a `.rect` shorter than `.image` would drop
                 // the underline of links like `login_b_login_forgotten`).
-                let measured_height = measured_height + player
-                    .bitmap_manager
-                    .get_bitmap(font.bitmap_ref)
-                    .map_or(0, |fb| crate::player::font::pfr_underline_descender_overflow(
-                        &font, fb, text_data.fixed_line_space, text_data.top_spacing,
-                    ));
+                let measured_height = measured_height
+                    + player
+                        .bitmap_manager
+                        .get_bitmap(font.bitmap_ref)
+                        .map_or(0, |fb| {
+                            crate::player::font::pfr_underline_descender_overflow(
+                                &font,
+                                fb,
+                                text_data.fixed_line_space,
+                                text_data.top_spacing,
+                            )
+                        });
                 let box_height = if text_data.box_type == BuiltInSymbol::Adjust {
                     if text_data.rect_set_at_runtime {
                         // #adjust + runtime-set rect: auto-grow to content but keep
@@ -764,11 +843,18 @@ impl TextMemberHandlers {
                 } else if text_data.height > 0 {
                     text_data.height
                 } else if let Some(ref info) = text_data.info {
-                    if info.height > 0 { info.height as u16 } else { measured_height }
+                    if info.height > 0 {
+                        info.height as u16
+                    } else {
+                        measured_height
+                    }
                 } else {
                     measured_height
                 };
-                Ok(Datum::Rect([0.0, 0.0, box_width as f64, box_height as f64], 0))
+                Ok(Datum::Rect(
+                    [0.0, 0.0, box_width as f64, box_height as f64],
+                    0,
+                ))
             }
             "height" => {
                 // Trust the stored `text_data.height` whenever it represents
@@ -792,8 +878,8 @@ impl TextMemberHandlers {
                 // writes, so Junkbot's level-name list reports 331 even
                 // when Lingo has temporarily overwritten the text with a
                 // single line.
-                let text_has_breaks = text_data.text.contains('\n')
-                    || text_data.text.contains('\r');
+                let text_has_breaks =
+                    text_data.text.contains('\n') || text_data.text.contains('\r');
                 let is_multi_par_authored = text_data.par_runs.len() > 1;
                 let measured: u16 = {
                     // Match the `.image` getter's font load exactly (see `.rect`).
@@ -816,8 +902,14 @@ impl TextMemberHandlers {
                     let wrap_width = if text_data.width > 0 {
                         text_data.width
                     } else if let Some(ref info) = text_data.info {
-                        if info.width > 0 { info.width as u16 } else { 0 }
-                    } else { 0 };
+                        if info.width > 0 {
+                            info.width as u16
+                        } else {
+                            0
+                        }
+                    } else {
+                        0
+                    };
                     let requested_font_for_measure = if !text_data.font.is_empty() {
                         text_data.font.as_str()
                     } else {
@@ -837,13 +929,21 @@ impl TextMemberHandlers {
                         s
                     };
                     let height = if measure_with_canvas {
-                        let font_size = if text_data.font_size > 0 { text_data.font_size } else { 12 };
+                        let font_size = if text_data.font_size > 0 {
+                            text_data.font_size
+                        } else {
+                            12
+                        };
                         let (_, h) = FontMemberHandlers::measure_text_native_styled(
-                            &text_data.text, requested_font_for_measure, font_size,
+                            &text_data.text,
+                            requested_font_for_measure,
+                            font_size,
                             Some(member_style_bits),
                             text_data.word_wrap,
                             if wrap_width > 0 { wrap_width as i32 } else { 0 },
-                            text_data.top_spacing, text_data.bottom_spacing, text_data.fixed_line_space,
+                            text_data.top_spacing,
+                            text_data.bottom_spacing,
+                            text_data.fixed_line_space,
                         );
                         h
                     } else {
@@ -868,8 +968,11 @@ impl TextMemberHandlers {
                         // with `.image` and Habbo's Text-Wrapper stretched the
                         // baked terms text vertically.
                         let line_count = count_text_lines(
-                            &text_data.text, &font, text_data.word_wrap,
-                            wrap_width as i32, text_data.char_spacing,
+                            &text_data.text,
+                            &font,
+                            text_data.word_wrap,
+                            wrap_width as i32,
+                            text_data.char_spacing,
                         );
                         // Trust the member's fixed_line_space when set —
                         // `cell_h = char_h - 1` runs one pixel hotter than
@@ -881,12 +984,17 @@ impl TextMemberHandlers {
                             text_data.fixed_line_space
                         } else {
                             crate::player::font::outline_auto_line_height_for_font(
-                                player, &text_data.font, nominal,
-                            ).unwrap_or_else(|| crate::player::font::pfr_auto_line_height(
-                                &font,
-                                player.bitmap_manager.get_bitmap(font.bitmap_ref),
+                                player,
+                                &text_data.font,
                                 nominal,
-                            ))
+                            )
+                            .unwrap_or_else(|| {
+                                crate::player::font::pfr_auto_line_height(
+                                    &font,
+                                    player.bitmap_manager.get_bitmap(font.bitmap_ref),
+                                    nominal,
+                                )
+                            })
                         };
                         // See `.rect` getter for rationale on folding
                         // top_spacing + bottom_spacing into line_step.
@@ -898,7 +1006,7 @@ impl TextMemberHandlers {
                             + text_data.top_spacing as i32
                             + text_data.bottom_spacing as i32;
                         (text_data.top_spacing as i32
-                                + line_h as i32
+                            + line_h as i32
                             + (line_count as i32 - 1) * line_step)
                             .max(0) as u16
                     };
@@ -906,12 +1014,18 @@ impl TextMemberHandlers {
                     // with `.image`/`.rect` (the Origins Text-Wrapper bakes with
                     // src=member.rect, dropping the underline otherwise —
                     // login_b_login_forgotten).
-                    let overflow = player
-                        .bitmap_manager
-                        .get_bitmap(font.bitmap_ref)
-                        .map_or(0, |fb| crate::player::font::pfr_underline_descender_overflow(
-                            &font, fb, text_data.fixed_line_space, text_data.top_spacing,
-                        ));
+                    let overflow =
+                        player
+                            .bitmap_manager
+                            .get_bitmap(font.bitmap_ref)
+                            .map_or(0, |fb| {
+                                crate::player::font::pfr_underline_descender_overflow(
+                                    &font,
+                                    fb,
+                                    text_data.fixed_line_space,
+                                    text_data.top_spacing,
+                                )
+                            });
                     height + overflow
                 };
                 let box_height = if text_data.box_type == BuiltInSymbol::Adjust {
@@ -941,7 +1055,9 @@ impl TextMemberHandlers {
             "forecolor" | "color" => {
                 // Get foreground color from cast member
                 match member.color {
-                    crate::player::sprite::ColorRef::PaletteIndex(idx) => Ok(Datum::Int(idx as i32)),
+                    crate::player::sprite::ColorRef::PaletteIndex(idx) => {
+                        Ok(Datum::Int(idx as i32))
+                    }
                     crate::player::sprite::ColorRef::Rgb(r, g, b) => {
                         // Convert RGB to a packed integer
                         let rgb = ((r as i32) << 16) | ((g as i32) << 8) | (b as i32);
@@ -952,7 +1068,9 @@ impl TextMemberHandlers {
             "bgcolor" | "backcolor" => {
                 // Get background color from cast member
                 match member.bg_color {
-                    crate::player::sprite::ColorRef::PaletteIndex(idx) => Ok(Datum::Int(idx as i32)),
+                    crate::player::sprite::ColorRef::PaletteIndex(idx) => {
+                        Ok(Datum::Int(idx as i32))
+                    }
                     crate::player::sprite::ColorRef::Rgb(r, g, b) => {
                         // Convert RGB to a packed integer
                         let rgb = ((r as i32) << 16) | ((g as i32) << 8) | (b as i32);
@@ -974,63 +1092,81 @@ impl TextMemberHandlers {
                     }
                     Ok(Datum::List(DatumType::List, item_refs, false))
                 } else {
-                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                    Err(ScriptError::new(
+                        "TextInfo not available for this member".to_string(),
+                    ))
                 }
             }
             "tunneldepth" => {
                 if let Some(ref info) = text_data.info {
                     Ok(Datum::Int(info.tunnel_depth as i32))
                 } else {
-                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                    Err(ScriptError::new(
+                        "TextInfo not available for this member".to_string(),
+                    ))
                 }
             }
             "beveltype" => {
                 if let Some(ref info) = text_data.info {
                     Ok(Datum::Symbol(info.bevel_type_symbol().into()))
                 } else {
-                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                    Err(ScriptError::new(
+                        "TextInfo not available for this member".to_string(),
+                    ))
                 }
             }
             "beveldepth" => {
                 if let Some(ref info) = text_data.info {
                     Ok(Datum::Int(info.bevel_depth as i32))
                 } else {
-                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                    Err(ScriptError::new(
+                        "TextInfo not available for this member".to_string(),
+                    ))
                 }
             }
             "smoothness" => {
                 if let Some(ref info) = text_data.info {
                     Ok(Datum::Int(info.smoothness as i32))
                 } else {
-                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                    Err(ScriptError::new(
+                        "TextInfo not available for this member".to_string(),
+                    ))
                 }
             }
             "displaymode" => {
                 if let Some(ref info) = text_data.info {
                     Ok(Datum::Symbol(info.display_mode_symbol().into()))
                 } else {
-                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                    Err(ScriptError::new(
+                        "TextInfo not available for this member".to_string(),
+                    ))
                 }
             }
             "directionalpreset" => {
                 if let Some(ref info) = text_data.info {
                     Ok(Datum::Symbol(info.directional_preset_symbol().into()))
                 } else {
-                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                    Err(ScriptError::new(
+                        "TextInfo not available for this member".to_string(),
+                    ))
                 }
             }
             "texturetype" => {
                 if let Some(ref info) = text_data.info {
                     Ok(Datum::Symbol(info.texture_type_symbol().into()))
                 } else {
-                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                    Err(ScriptError::new(
+                        "TextInfo not available for this member".to_string(),
+                    ))
                 }
             }
             "reflectivity" => {
                 if let Some(ref info) = text_data.info {
                     Ok(Datum::Float(info.reflectivity as f64))
                 } else {
-                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                    Err(ScriptError::new(
+                        "TextInfo not available for this member".to_string(),
+                    ))
                 }
             }
             "directionalcolor" => {
@@ -1039,7 +1175,9 @@ impl TextMemberHandlers {
                     let rgb = ((r as i32) << 16) | ((g as i32) << 8) | (b as i32);
                     Ok(Datum::Int(rgb))
                 } else {
-                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                    Err(ScriptError::new(
+                        "TextInfo not available for this member".to_string(),
+                    ))
                 }
             }
             "ambientcolor" => {
@@ -1048,7 +1186,9 @@ impl TextMemberHandlers {
                     let rgb = ((r as i32) << 16) | ((g as i32) << 8) | (b as i32);
                     Ok(Datum::Int(rgb))
                 } else {
-                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                    Err(ScriptError::new(
+                        "TextInfo not available for this member".to_string(),
+                    ))
                 }
             }
             "specularcolor" => {
@@ -1057,7 +1197,9 @@ impl TextMemberHandlers {
                     let rgb = ((r as i32) << 16) | ((g as i32) << 8) | (b as i32);
                     Ok(Datum::Int(rgb))
                 } else {
-                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                    Err(ScriptError::new(
+                        "TextInfo not available for this member".to_string(),
+                    ))
                 }
             }
             "cameraposition" => {
@@ -1066,9 +1208,15 @@ impl TextMemberHandlers {
                     let x_ref = player.alloc_datum(Datum::Float(info.camera_position_x as f64));
                     let y_ref = player.alloc_datum(Datum::Float(info.camera_position_y as f64));
                     let z_ref = player.alloc_datum(Datum::Float(info.camera_position_z as f64));
-                    Ok(Datum::List(DatumType::Vector, VecDeque::from(vec![x_ref, y_ref, z_ref]), false))
+                    Ok(Datum::List(
+                        DatumType::Vector,
+                        VecDeque::from(vec![x_ref, y_ref, z_ref]),
+                        false,
+                    ))
                 } else {
-                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                    Err(ScriptError::new(
+                        "TextInfo not available for this member".to_string(),
+                    ))
                 }
             }
             "camerarotation" => {
@@ -1077,86 +1225,114 @@ impl TextMemberHandlers {
                     let x_ref = player.alloc_datum(Datum::Float(info.camera_rotation_x as f64));
                     let y_ref = player.alloc_datum(Datum::Float(info.camera_rotation_y as f64));
                     let z_ref = player.alloc_datum(Datum::Float(info.camera_rotation_z as f64));
-                    Ok(Datum::List(DatumType::Vector, VecDeque::from(vec![x_ref, y_ref, z_ref]), false))
+                    Ok(Datum::List(
+                        DatumType::Vector,
+                        VecDeque::from(vec![x_ref, y_ref, z_ref]),
+                        false,
+                    ))
                 } else {
-                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                    Err(ScriptError::new(
+                        "TextInfo not available for this member".to_string(),
+                    ))
                 }
             }
             "texturemember" => {
                 if let Some(ref info) = text_data.info {
                     Ok(Datum::String(info.texture_member.clone()))
                 } else {
-                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                    Err(ScriptError::new(
+                        "TextInfo not available for this member".to_string(),
+                    ))
                 }
             }
             "editable" => {
                 if let Some(ref info) = text_data.info {
                     Ok(datum_bool(info.editable))
                 } else {
-                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                    Err(ScriptError::new(
+                        "TextInfo not available for this member".to_string(),
+                    ))
                 }
             }
             "autotab" => {
                 if let Some(ref info) = text_data.info {
                     Ok(datum_bool(info.auto_tab))
                 } else {
-                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                    Err(ScriptError::new(
+                        "TextInfo not available for this member".to_string(),
+                    ))
                 }
             }
             "directtostage" => {
                 if let Some(ref info) = text_data.info {
                     Ok(datum_bool(info.direct_to_stage))
                 } else {
-                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                    Err(ScriptError::new(
+                        "TextInfo not available for this member".to_string(),
+                    ))
                 }
             }
             "prerender" => {
                 if let Some(ref info) = text_data.info {
                     Ok(Datum::Symbol(info.pre_render_symbol().into()))
                 } else {
-                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                    Err(ScriptError::new(
+                        "TextInfo not available for this member".to_string(),
+                    ))
                 }
             }
             "savebitmap" => {
                 if let Some(ref info) = text_data.info {
                     Ok(datum_bool(info.save_bitmap))
                 } else {
-                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                    Err(ScriptError::new(
+                        "TextInfo not available for this member".to_string(),
+                    ))
                 }
             }
             "kerning" => {
                 if let Some(ref info) = text_data.info {
                     Ok(datum_bool(info.kerning))
                 } else {
-                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                    Err(ScriptError::new(
+                        "TextInfo not available for this member".to_string(),
+                    ))
                 }
             }
             "kerningthreshold" => {
                 if let Some(ref info) = text_data.info {
                     Ok(Datum::Int(info.kerning_threshold as i32))
                 } else {
-                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                    Err(ScriptError::new(
+                        "TextInfo not available for this member".to_string(),
+                    ))
                 }
             }
             "usehypertextstyles" => {
                 if let Some(ref info) = text_data.info {
                     Ok(datum_bool(info.use_hypertext_styles))
                 } else {
-                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                    Err(ScriptError::new(
+                        "TextInfo not available for this member".to_string(),
+                    ))
                 }
             }
             "antialiasthreshold" => {
                 if let Some(ref info) = text_data.info {
                     Ok(Datum::Int(info.anti_alias_threshold as i32))
                 } else {
-                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                    Err(ScriptError::new(
+                        "TextInfo not available for this member".to_string(),
+                    ))
                 }
             }
             "scrolltop" => {
                 if let Some(ref info) = text_data.info {
                     Ok(Datum::Int(info.scroll_top as i32))
                 } else {
-                    Err(ScriptError::new("TextInfo not available for this member".to_string()))
+                    Err(ScriptError::new(
+                        "TextInfo not available for this member".to_string(),
+                    ))
                 }
             }
             "centerregpoint" => {
@@ -1188,14 +1364,23 @@ impl TextMemberHandlers {
                 let mut preferred_font_size: Option<u16> = None;
                 if !text_data.html_styled_spans.is_empty() {
                     let first_style = &text_data.html_styled_spans[0].style;
-                    let font_size = first_style.font_size
+                    let font_size = first_style
+                        .font_size
                         .filter(|&s| s > 0)
-                        .or_else(|| if text_data.font_size > 0 { Some(text_data.font_size as i32) } else { None })
+                        .or_else(|| {
+                            if text_data.font_size > 0 {
+                                Some(text_data.font_size as i32)
+                            } else {
+                                None
+                            }
+                        })
                         .unwrap_or(12) as u16;
                     let font_name = if !text_data.font.is_empty() {
                         text_data.font.clone()
                     } else {
-                        first_style.font_face.clone()
+                        first_style
+                            .font_face
+                            .clone()
                             .filter(|f| !f.is_empty())
                             .unwrap_or_else(|| "Arial".to_string())
                     };
@@ -1219,10 +1404,19 @@ impl TextMemberHandlers {
 
                 // Load font to determine if it's PFR
                 let font = {
-                    let font_name = preferred_font_name.as_deref()
-                        .or(if !text_data.font.is_empty() { Some(text_data.font.as_str()) } else { None });
-                    let font_size = preferred_font_size
-                        .or(if text_data.font_size > 0 { Some(text_data.font_size) } else { None });
+                    let font_name =
+                        preferred_font_name
+                            .as_deref()
+                            .or(if !text_data.font.is_empty() {
+                                Some(text_data.font.as_str())
+                            } else {
+                                None
+                            });
+                    let font_size = preferred_font_size.or(if text_data.font_size > 0 {
+                        Some(text_data.font_size)
+                    } else {
+                        None
+                    });
                     let mut loaded = if let Some(name) = font_name {
                         player.font_manager.get_font_with_cast_and_bitmap(
                             name,
@@ -1247,8 +1441,11 @@ impl TextMemberHandlers {
                             }
                         }
                     }
-                    loaded.or_else(|| player.font_manager.get_system_font())
-                        .ok_or_else(|| ScriptError::new("No font available for text rendering".to_string()))?
+                    loaded
+                        .or_else(|| player.font_manager.get_system_font())
+                        .ok_or_else(|| {
+                            ScriptError::new("No font available for text rendering".to_string())
+                        })?
                 };
                 let is_pfr_font = font.char_widths.is_some();
 
@@ -1269,54 +1466,62 @@ impl TextMemberHandlers {
                 //
                 // Cloned once (consistent with `text_data` above); .image is not
                 // a per-frame call for cached members.
-                let pfr_outline: Option<crate::director::chunks::pfr1::types::Pfr1ParsedFont> = if is_pfr_font {
-                    let name = preferred_font_name.as_deref().unwrap_or("");
-                    if name.is_empty() {
-                        None
-                    } else {
-                        use crate::player::cast_member::CastMemberType;
-                        use crate::player::font::FontManager;
-                        let lc = name.to_ascii_lowercase();
-                        let canon = FontManager::canonical_font_name(name);
-                        let mut found = None;
-                        'find_outline: for cast in &player.movie.cast_manager.casts {
-                            for m in cast.members.values() {
-                                if let CastMemberType::Font(fd) = &m.member_type {
-                                    let matches = fd.font_info.name.to_lowercase() == lc
-                                        || m.name.to_lowercase() == lc
-                                        || (!canon.is_empty()
-                                            && (FontManager::canonical_font_name(&fd.font_info.name) == canon
-                                                || FontManager::canonical_font_name(&m.name) == canon));
-                                    if matches {
-                                        if let Some(p) = &fd.pfr_parsed {
-                                            // Smooth outline-only fonts only.
-                                            // Bitmap-strike fonts AND pixel fonts
-                                            // (rectilinear, e.g. Volter) stay on
-                                            // the atlas path for crisp pixels.
-                                            if !p.glyphs.is_empty()
-                                                && p.bitmap_glyphs.is_empty()
-                                                && !p.is_pixel_font
-                                            {
-                                                found = Some(p.clone());
-                                                break 'find_outline;
+                let pfr_outline: Option<crate::director::chunks::pfr1::types::Pfr1ParsedFont> =
+                    if is_pfr_font {
+                        let name = preferred_font_name.as_deref().unwrap_or("");
+                        if name.is_empty() {
+                            None
+                        } else {
+                            use crate::player::cast_member::CastMemberType;
+                            use crate::player::font::FontManager;
+                            let lc = name.to_ascii_lowercase();
+                            let canon = FontManager::canonical_font_name(name);
+                            let mut found = None;
+                            'find_outline: for cast in &player.movie.cast_manager.casts {
+                                for m in cast.members.values() {
+                                    if let CastMemberType::Font(fd) = &m.member_type {
+                                        let matches = fd.font_info.name.to_lowercase() == lc
+                                            || m.name.to_lowercase() == lc
+                                            || (!canon.is_empty()
+                                                && (FontManager::canonical_font_name(
+                                                    &fd.font_info.name,
+                                                ) == canon
+                                                    || FontManager::canonical_font_name(&m.name)
+                                                        == canon));
+                                        if matches {
+                                            if let Some(p) = &fd.pfr_parsed {
+                                                // Smooth outline-only fonts only.
+                                                // Bitmap-strike fonts AND pixel fonts
+                                                // (rectilinear, e.g. Volter) stay on
+                                                // the atlas path for crisp pixels.
+                                                if !p.glyphs.is_empty()
+                                                    && p.bitmap_glyphs.is_empty()
+                                                    && !p.is_pixel_font
+                                                {
+                                                    found = Some(p.clone());
+                                                    break 'find_outline;
+                                                }
                                             }
                                         }
                                     }
                                 }
                             }
+                            found
                         }
-                        found
-                    }
-                } else {
-                    None
-                };
+                    } else {
+                        None
+                    };
 
                 // Compute the authored box width (used as max_width for word wrap).
                 // Doing this BEFORE measuring so PFR measurement can wrap correctly.
                 let explicit_box_width = if text_data.width > 0 {
                     Some(text_data.width)
                 } else if let Some(ref info) = text_data.info {
-                    if info.width > 0 { Some(info.width as u16) } else { None }
+                    if info.width > 0 {
+                        Some(info.width as u16)
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 };
@@ -1327,9 +1532,14 @@ impl TextMemberHandlers {
                 // the actual rendered bitmap — PFR wrap points disagree with
                 // Canvas2D's wider browser-font metrics and would size the bitmap
                 // for the wrong line count.
-                let requested_font_for_measure = preferred_font_name.as_deref()
+                let requested_font_for_measure = preferred_font_name
+                    .as_deref()
                     .filter(|n| !n.is_empty())
-                    .or(if !text_data.font.is_empty() { Some(text_data.font.as_str()) } else { None })
+                    .or(if !text_data.font.is_empty() {
+                        Some(text_data.font.as_str())
+                    } else {
+                        None
+                    })
                     .unwrap_or("Arial");
                 let measure_with_canvas = !is_pfr_font;
                 let member_style_bits: u8 = {
@@ -1353,7 +1563,11 @@ impl TextMemberHandlers {
                         font_size,
                         Some(member_style_bits),
                         text_data.word_wrap,
-                        if text_data.width > 0 { text_data.width as i32 } else { 0 },
+                        if text_data.width > 0 {
+                            text_data.width as i32
+                        } else {
+                            0
+                        },
                         text_data.top_spacing,
                         text_data.bottom_spacing,
                         text_data.fixed_line_space,
@@ -1411,51 +1625,54 @@ impl TextMemberHandlers {
                     // a 25-px PFR cell rounds down to 1 line. CS catalog rows that
                     // wrapped to ["Premier Studio Chair - 500", "dB"] were getting
                     // a 14-px-tall bitmap that clipped the second line.
-                    let line_count = if text_data.word_wrap && explicit_box_width.map_or(false, |w| w > 0) {
-                        let max_w = explicit_box_width.unwrap() as i32;
-                        let cs = text_data.char_spacing;
-                        let space_w =
-                            font.get_char_advance(b' ') as i32 + cs;
-                        let normalised: String = text_data.text
-                            .replace("\r\n", "\n")
-                            .replace('\r', "\n");
-                        let mut count: usize = 0;
-                        for raw in normalised.split('\n') {
-                            if raw.is_empty() {
-                                count += 1;
-                                continue;
-                            }
-                            let mut current_w: i32 = 0;
-                            let mut had_word = false;
-                            for word in raw.split(' ') {
-                                if word.is_empty() { continue; }
-                                let word_w: i32 = word
-                                    .chars()
-                                    .map(|c| font.get_char_advance(c as u8) as i32 + cs)
-                                    .sum();
-                                let candidate = if !had_word {
-                                    word_w
-                                } else {
-                                    current_w + space_w + word_w
-                                };
-                                if candidate <= max_w || !had_word {
-                                    current_w = candidate;
-                                    had_word = true;
-                                } else {
+                    let line_count =
+                        if text_data.word_wrap && explicit_box_width.map_or(false, |w| w > 0) {
+                            let max_w = explicit_box_width.unwrap() as i32;
+                            let cs = text_data.char_spacing;
+                            let space_w = font.get_char_advance(b' ') as i32 + cs;
+                            let normalised: String =
+                                text_data.text.replace("\r\n", "\n").replace('\r', "\n");
+                            let mut count: usize = 0;
+                            for raw in normalised.split('\n') {
+                                if raw.is_empty() {
                                     count += 1;
-                                    current_w = word_w;
+                                    continue;
                                 }
+                                let mut current_w: i32 = 0;
+                                let mut had_word = false;
+                                for word in raw.split(' ') {
+                                    if word.is_empty() {
+                                        continue;
+                                    }
+                                    let word_w: i32 = word
+                                        .chars()
+                                        .map(|c| font.get_char_advance(c as u8) as i32 + cs)
+                                        .sum();
+                                    let candidate = if !had_word {
+                                        word_w
+                                    } else {
+                                        current_w + space_w + word_w
+                                    };
+                                    if candidate <= max_w || !had_word {
+                                        current_w = candidate;
+                                        had_word = true;
+                                    } else {
+                                        count += 1;
+                                        current_w = word_w;
+                                    }
+                                }
+                                count += 1;
                             }
-                            count += 1;
-                        }
-                        count.max(1)
-                    } else {
-                        text_data.text
-                            .replace("\r\n", "\n")
-                            .chars()
-                            .filter(|c| *c == '\r' || *c == '\n')
-                            .count() + 1
-                    };
+                            count.max(1)
+                        } else {
+                            text_data
+                                .text
+                                .replace("\r\n", "\n")
+                                .chars()
+                                .filter(|c| *c == '\r' || *c == '\n')
+                                .count()
+                                + 1
+                        };
                     // Honor the member's explicit line height (set from the font
                     // struct's #lineHeight → fixedLineSpace) so the produced bitmap
                     // is one line tall (Volter: lineHeight 10 + topSpacing 1 = 11,
@@ -1469,12 +1686,17 @@ impl TextMemberHandlers {
                         text_data.fixed_line_space
                     } else {
                         crate::player::font::outline_auto_line_height_for_font(
-                            player, &text_data.font, nominal,
-                        ).unwrap_or_else(|| crate::player::font::pfr_auto_line_height(
-                            &font,
-                            player.bitmap_manager.get_bitmap(font.bitmap_ref),
+                            player,
+                            &text_data.font,
                             nominal,
-                        ))
+                        )
+                        .unwrap_or_else(|| {
+                            crate::player::font::pfr_auto_line_height(
+                                &font,
+                                player.bitmap_manager.get_bitmap(font.bitmap_ref),
+                                nominal,
+                            )
+                        })
                     };
                     // See `.rect` getter for rationale on folding
                     // top_spacing + bottom_spacing into line_step.
@@ -1515,9 +1737,14 @@ impl TextMemberHandlers {
                     let pfr_descender_overflow: u16 = player
                         .bitmap_manager
                         .get_bitmap(font.bitmap_ref)
-                        .map_or(0, |fb| crate::player::font::pfr_underline_descender_overflow(
-                            &font, fb, text_data.fixed_line_space, text_data.top_spacing,
-                        ));
+                        .map_or(0, |fb| {
+                            crate::player::font::pfr_underline_descender_overflow(
+                                &font,
+                                fb,
+                                text_data.fixed_line_space,
+                                text_data.top_spacing,
+                            )
+                        });
                     // Fold the descender/underline overflow into `measured` so every
                     // content-sized branch (and the `.rect`/`.height` getters) agree —
                     // the Origins Text-Wrapper bakes with src=member.rect, so .image
@@ -1545,9 +1772,13 @@ impl TextMemberHandlers {
                         // #fixed/#scroll/#limit: still render the full content so list
                         // members overflowing a fixed box can be captured whole.
                         let mut h = measured;
-                        if text_data.height > 0 { h = h.max(text_data.height); }
+                        if text_data.height > 0 {
+                            h = h.max(text_data.height);
+                        }
                         if let Some(ref info) = text_data.info {
-                            if info.height > 0 { h = h.max(info.height as u16); }
+                            if info.height > 0 {
+                                h = h.max(info.height as u16);
+                            }
                         }
                         h
                     };
@@ -1572,7 +1803,6 @@ impl TextMemberHandlers {
 
                 // Determine alignment
                 let text_alignment: TextAlignment = text_data.alignment.into();
-
 
                 let glyph_pref = get_glyph_preference();
                 // font and is_pfr_font already loaded above for measurement
@@ -1612,38 +1842,54 @@ impl TextMemberHandlers {
                         )
                     };
                     let default_color_u32 = ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
-                    let default_bold = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Bold);
-                    let default_italic = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Italic);
-                    let default_underline = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Underline);
+                    let default_bold = text_data
+                        .font_style
+                        .iter()
+                        .any(|s| *s == BuiltInSymbol::Bold);
+                    let default_italic = text_data
+                        .font_style
+                        .iter()
+                        .any(|s| *s == BuiltInSymbol::Italic);
+                    let default_underline = text_data
+                        .font_style
+                        .iter()
+                        .any(|s| *s == BuiltInSymbol::Underline);
 
                     // Prefer the stored styled spans (set via chunk style setters
                     // or XMED parsing) over a single synthetic span. Fill in any
                     // Nones from the spans with member-level defaults so each span
                     // has a concrete font / size / color for the renderer.
                     let spans: Vec<StyledSpan> = if text_data.html_styled_spans.len() >= 2 {
-                        text_data.html_styled_spans.iter().map(|sp| {
-                            let mut s = sp.style.clone();
-                            if s.font_face.is_none() {
-                                s.font_face = Some(font_name_str.to_string());
-                            }
-                            if s.font_size.is_none() {
-                                s.font_size = Some(font_size_val as i32);
-                            }
-                            if s.color.is_none() {
-                                s.color = Some(default_color_u32);
-                            }
-                            // Member-level fontStyle defaults apply only when the
-                            // span has no overrides of its own. We can't perfectly
-                            // tell "no override" from "explicitly off" at this
-                            // layer, but the chunk-style setters set bold/italic/
-                            // underline explicitly whenever Lingo writes fontStyle,
-                            // so the OR-with-defaults here just carries the member-
-                            // wide `[#underline]` CS sets before per-chunk writes.
-                            s.bold = s.bold || default_bold;
-                            s.italic = s.italic || default_italic;
-                            s.underline = s.underline || default_underline;
-                            StyledSpan { text: sp.text.clone(), style: s }
-                        }).collect()
+                        text_data
+                            .html_styled_spans
+                            .iter()
+                            .map(|sp| {
+                                let mut s = sp.style.clone();
+                                if s.font_face.is_none() {
+                                    s.font_face = Some(font_name_str.to_string());
+                                }
+                                if s.font_size.is_none() {
+                                    s.font_size = Some(font_size_val as i32);
+                                }
+                                if s.color.is_none() {
+                                    s.color = Some(default_color_u32);
+                                }
+                                // Member-level fontStyle defaults apply only when the
+                                // span has no overrides of its own. We can't perfectly
+                                // tell "no override" from "explicitly off" at this
+                                // layer, but the chunk-style setters set bold/italic/
+                                // underline explicitly whenever Lingo writes fontStyle,
+                                // so the OR-with-defaults here just carries the member-
+                                // wide `[#underline]` CS sets before per-chunk writes.
+                                s.bold = s.bold || default_bold;
+                                s.italic = s.italic || default_italic;
+                                s.underline = s.underline || default_underline;
+                                StyledSpan {
+                                    text: sp.text.clone(),
+                                    style: s,
+                                }
+                            })
+                            .collect()
                     } else {
                         let mut style = HtmlStyle::default();
                         style.font_face = Some(font_name_str.to_string());
@@ -1684,13 +1930,27 @@ impl TextMemberHandlers {
                     // atlas-copy path below when there's no outline data or the
                     // Canvas2D render errors.
                     if let Some(ref parsed) = pfr_outline {
-                        let default_bold = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Bold);
-                        let default_italic = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Italic);
-                        let default_underline = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Underline);
+                        let default_bold = text_data
+                            .font_style
+                            .iter()
+                            .any(|s| *s == BuiltInSymbol::Bold);
+                        let default_italic = text_data
+                            .font_style
+                            .iter()
+                            .any(|s| *s == BuiltInSymbol::Italic);
+                        let default_underline = text_data
+                            .font_style
+                            .iter()
+                            .any(|s| *s == BuiltInSymbol::Underline);
                         let (dr, dg, db) = {
                             use crate::player::bitmap::bitmap::resolve_color_ref;
                             let palettes = player.movie.cast_manager.palettes();
-                            resolve_color_ref(&palettes, &member.color, &bitmap.palette_ref, bitmap.original_bit_depth)
+                            resolve_color_ref(
+                                &palettes,
+                                &member.color,
+                                &bitmap.palette_ref,
+                                bitmap.original_bit_depth,
+                            )
                         };
                         let default_style = OutlineCharStyle {
                             color: (dr, dg, db),
@@ -1704,8 +1964,16 @@ impl TextMemberHandlers {
                         if text_data.html_styled_spans.len() >= 2 {
                             let mut prev_was_cr = false;
                             for span in &text_data.html_styled_spans {
-                                let col = span.style.color
-                                    .map(|c| (((c >> 16) & 0xFF) as u8, ((c >> 8) & 0xFF) as u8, (c & 0xFF) as u8))
+                                let col = span
+                                    .style
+                                    .color
+                                    .map(|c| {
+                                        (
+                                            ((c >> 16) & 0xFF) as u8,
+                                            ((c >> 8) & 0xFF) as u8,
+                                            (c & 0xFF) as u8,
+                                        )
+                                    })
                                     .unwrap_or((dr, dg, db));
                                 let entry = OutlineCharStyle {
                                     color: col,
@@ -1714,7 +1982,10 @@ impl TextMemberHandlers {
                                     underline: span.style.underline,
                                 };
                                 for c in span.text.chars() {
-                                    if prev_was_cr && c == '\n' { prev_was_cr = false; continue; }
+                                    if prev_was_cr && c == '\n' {
+                                        prev_was_cr = false;
+                                        continue;
+                                    }
                                     prev_was_cr = c == '\r';
                                     per_char.push(entry);
                                 }
@@ -1731,458 +2002,547 @@ impl TextMemberHandlers {
                         // "[MEDIUM]" overflowed its 105px member (the mesh is exactly
                         // 105 wide) and lost the closing bracket, and "PLAY MORE GAMES"
                         // came out 15px wide of where Director centres it.
-                        let cs_px: i32 = text_data.html_styled_spans.first()
+                        let cs_px: i32 = text_data
+                            .html_styled_spans
+                            .first()
                             .map(|s| s.style.char_spacing)
                             .unwrap_or(text_data.char_spacing);
                         let osize = preferred_font_size.unwrap_or_else(|| font.font_size.max(12));
                         match FontMemberHandlers::render_pfr_outline_text_to_bitmap(
-                            &mut bitmap, parsed, osize, &text_data.text, &per_char, default_style,
+                            &mut bitmap,
+                            parsed,
+                            osize,
+                            &text_data.text,
+                            &per_char,
+                            default_style,
                             // start_y = 0: the renderer applies `top_spacing`
                             // internally (y_top starts at top_spacing), matching
                             // the atlas-copy path. Passing it here too would
                             // double the top inset.
-                            0, 0, box_width as i32, box_height as i32,
-                            text_alignment, box_width as i32, text_data.word_wrap,
-                            text_data.fixed_line_space, text_data.top_spacing, text_data.bottom_spacing,
-                            cs_px, &text_data.tab_stops,
+                            0,
+                            0,
+                            box_width as i32,
+                            box_height as i32,
+                            text_alignment,
+                            box_width as i32,
+                            text_data.word_wrap,
+                            text_data.fixed_line_space,
+                            text_data.top_spacing,
+                            text_data.bottom_spacing,
+                            cs_px,
+                            &text_data.tab_stops,
                         ) {
                             Ok(()) => rendered_via_outline = true,
-                            Err(e) => warn!("[text.image] PFR outline render failed, atlas fallback: {:?}", e),
+                            Err(e) => warn!(
+                                "[text.image] PFR outline render failed, atlas fallback: {:?}",
+                                e
+                            ),
                         }
                     }
                     if !rendered_via_outline {
-                    // Bitmap glyph rendering using PFR rasterizer font
-                    let font_bitmap = player
-                        .bitmap_manager
-                        .get_bitmap(font.bitmap_ref)
-                        .ok_or_else(|| ScriptError::new("Font bitmap not found".to_string()))?;
-                    let palettes = player.movie.cast_manager.palettes();
-                    let params = CopyPixelsParams {
-                        blend: 100,
-                        ink: 36,
-                        color: member.color.clone(),
-                        bg_color: crate::player::sprite::ColorRef::Rgb(255, 255, 255),
-                        mask_image: None,
-                        is_text_rendering: true,
-                        rotation: 0.0,
-                        skew: 0.0,
-                        sprite: None,
-                        mask_offset: (0, 0),
-                        original_dst_rect: None,
-                        bg_color_explicit: false,
-                        fore_color_explicit: false,
-                        ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
-                        floor_rule: false,
-                    };
-
-                    use crate::player::bitmap::bitmap::resolve_color_ref;
-                    use crate::player::font::{bitmap_font_copy_char, bitmap_font_copy_char_tight};
-
-                    let text_color = resolve_color_ref(
-                        &palettes,
-                        &params.color,
-                        &bitmap.palette_ref,
-                        bitmap.original_bit_depth,
-                    );
-                    let default_bold = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Bold);
-                    let default_italic = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Italic);
-                    let default_underline = text_data.font_style.iter().any(|s| *s == BuiltInSymbol::Underline);
-                    let is_pfr_font = font.char_widths.is_some();
-
-                    // PFR pixel-font vertical anchoring (Paige semantics). Recover
-                    // the strike's cap-top / descender-bottom from the atlas so the
-                    // first line's cell top anchors at lineTop and the underline lands
-                    // in the descent, matching Shockwave. Shared with the on-stage
-                    // `Bitmap::draw_text` path so both render identically.
-                    let (pfr_cap_top, pfr_desc_bottom) =
-                        crate::player::font::pfr_strike_vertical_metrics(&font, font_bitmap);
-
-                    let max_width = box_width as i32;
-                    // Anchor the first line's atlas cell top at box row 0. In Paige
-                    // the line is placed by its baseline = lineTop + ascent, and the
-                    // PFR atlas cell top already corresponds to (baseline - ascent) =
-                    // lineTop, so the cell top maps straight onto box row 0. The
-                    // natural ascent-to-cap gap (cap_top) above the capitals is kept,
-                    // exactly as Shockwave renders it. (Previously this subtracted
-                    // cap_top, pulling the caps onto row 0 and the whole block ~3-4px
-                    // too high.) Non-PFR fonts keep the historical top_spacing.
-                    let mut y = match (pfr_cap_top, pfr_desc_bottom) {
-                        // Director positions baked text using BOTH the authored
-                        // topSpacing (extra space above the line) AND the
-                        // fixedLineSpace leading distributed above the glyph:
-                        //   - The v7 Navigator ROOM ROWS go through Habbo's Writer
-                        //     Class, which FORCES `fixedLineSpace = fontSize` (9) and
-                        //     puts the real line height into `topSpacing`
-                        //     (= fixedLineSpace(18) - fontSize(9) = 9). Their offset
-                        //     therefore lives in topSpacing, not fixedLineSpace.
-                        //   - The TITLE is a non-Writer member that keeps
-                        //     fixedLineSpace=15 over a ~11px glyph, so its offset is
-                        //     fixedLineSpace leading (descender sits at line bottom).
-                        // Volter strikes' taller atlas cell masked both; the scaling
-                        // outline exposed them, baking text ~7px too high (the
-                        // window-element bitmap PLACEMENT is correct). For tight
-                        // lines both terms are ~0, so the registration ToS / headings
-                        // are unchanged. No member has both terms large, so summing
-                        // does not double-count.
-                        //
-                        // The topSpacing term carries a -1: the glyph descender (db)
-                        // already overruns the Writer-forced `fixedLineSpace=fontSize`
-                        // by ~1px, so applying the raw topSpacing dropped the room rows
-                        // 1px below Shockwave. Calibrated against the v7 Navigator room
-                        // list (topSpacing=9 -> 8px effective).
-                        (Some(_), Some(db)) if text_data.fixed_line_space > 0 => {
-                            (text_data.fixed_line_space as i32 - 1 - db).max(0)
-                                + (text_data.top_spacing as i32 - 1).max(0)
-                        }
-                        (Some(_), _) => text_data.top_spacing as i32,
-                        (None, _) => text_data.top_spacing as i32,
-                    };
-                    // Underline row sits just below the line's baseline, and this
-                    // is also the per-line advance below. Use the member's explicit
-                    // line height (fixedLineSpace) when set so the underline lands
-                    // inside the bitmap (Volter login link text is 11px tall);
-                    // otherwise Paige auto leading via the shared helper. The raw
-                    // atlas cell (char_height-1, ~25 for Volter-9) is NOT a line
-                    // height — it put 25 px between Habbo v31's 9 px catalogue
-                    // lines and sized the box for a different line count than the
-                    // measure pass above.
-                    let line_height = if text_data.fixed_line_space > 0 {
-                        (text_data.fixed_line_space as i32).max(1)
-                    } else {
-                        let nominal = if text_data.font_size > 0 {
-                            text_data.font_size
-                        } else if font.font_size > 0 {
-                            font.font_size
-                        } else {
-                            font.char_height
-                        };
-                        // Same rule as the measure pass above, so the atlas path
-                        // can't drift from the box it was given.
-                        (crate::player::font::outline_auto_line_height_for_font(
-                            player, &text_data.font, nominal,
-                        ).unwrap_or_else(|| crate::player::font::pfr_auto_line_height(
-                            &font, Some(font_bitmap), nominal,
-                        )) as i32).max(1)
-                    };
-
-                    // Get char_spacing from styled spans (XMED data)
-                    let char_spacing: i32 = text_data.html_styled_spans.first()
-                        .map(|s| s.style.char_spacing)
-                        .unwrap_or(0);
-
-                    // Build a per-character style map. Indexed by character
-                    // position in `text_data.text`, each entry gives the style
-                    // overrides for that character. Coke Studios applies
-                    // per-line / per-item colour + bold/underline via chunk
-                    // setters, and relies on this bitmap render path honouring
-                    // them. When no styled spans are present every char gets
-                    // the member-level defaults.
-                    #[derive(Clone, Copy)]
-                    struct PerCharStyle {
-                        bold: bool,
-                        italic: bool,
-                        underline: bool,
-                        color: (u8, u8, u8),
-                    }
-                    let default_per_char = PerCharStyle {
-                        bold: default_bold,
-                        italic: default_italic,
-                        underline: default_underline,
-                        color: text_color,
-                    };
-                    let mut per_char: Vec<PerCharStyle> = Vec::new();
-                    if text_data.html_styled_spans.len() >= 2 {
-                        // Build per-char with the SAME normalisation the renderer
-                        // applies (CRLF → LF, lone CR → LF). The renderer iterates
-                        // normalised lines and indexes per_char by
-                        // `line_char_offset + ch_idx`, where line_char_offset
-                        // assumes single-char line breaks. If we kept the raw
-                        // `\r\n` here, per_char would be one entry longer per
-                        // CRLF and styles would shift backwards on every CRLF
-                        // — Coke Studios' roomlist (Windows-saved with `\r\n`)
-                        // bleeds audition row's bold/blue down by N lines.
-                        let mut prev_was_cr = false;
-                        for span in &text_data.html_styled_spans {
-                            let col = if let Some(c) = span.style.color {
-                                (((c >> 16) & 0xFF) as u8,
-                                 ((c >> 8) & 0xFF) as u8,
-                                 (c & 0xFF) as u8)
-                            } else {
-                                text_color
-                            };
-                            // Spans set via chunk-style setters are authoritative
-                            // for that range: don't OR with member defaults, or
-                            // `[#plain]` wouldn't be able to strip underline from
-                            // a member that has underline as its default style.
-                            let style_entry = PerCharStyle {
-                                bold: span.style.bold,
-                                italic: span.style.italic,
-                                underline: span.style.underline,
-                                color: col,
-                            };
-                            for c in span.text.chars() {
-                                if prev_was_cr && c == '\n' {
-                                    // Drop \n that follows \r — the \r already
-                                    // contributed an entry that the renderer
-                                    // treats as the single break.
-                                    prev_was_cr = false;
-                                    continue;
-                                }
-                                prev_was_cr = c == '\r';
-                                per_char.push(style_entry);
-                            }
-                        }
-                    }
-
-                    // Capture tab stops for the closure (line_char_offset usage below
-                    // also needs them, but the closure can't borrow text_data through
-                    // reserve_player_mut). Clone to a small Vec.
-                    let line_tab_stops: Vec<(BuiltInSymbol, i32)> = text_data
-                        .tab_stops
-                        .iter()
-                        .map(|t| (t.tab_type.clone(), t.position as i32))
-                        .collect();
-
-                    let mut flush_line = |line: &str, line_char_offset: usize, y_pos: i32, bitmap: &mut Bitmap| {
-                        // Helper: width of a substring (character advances).
-                        let segment_width = |s: &str| -> i32 {
-                            s.chars()
-                                .map(|c| font.get_char_advance(c as u8) as i32 + char_spacing)
-                                .sum::<i32>()
+                        // Bitmap glyph rendering using PFR rasterizer font
+                        let font_bitmap = player
+                            .bitmap_manager
+                            .get_bitmap(font.bitmap_ref)
+                            .ok_or_else(|| ScriptError::new("Font bitmap not found".to_string()))?;
+                        let palettes = player.movie.cast_manager.palettes();
+                        let params = CopyPixelsParams {
+                            blend: 100,
+                            ink: 36,
+                            color: member.color.clone(),
+                            bg_color: crate::player::sprite::ColorRef::Rgb(255, 255, 255),
+                            mask_image: None,
+                            is_text_rendering: true,
+                            rotation: 0.0,
+                            skew: 0.0,
+                            sprite: None,
+                            mask_offset: (0, 0),
+                            original_dst_rect: None,
+                            bg_color_explicit: false,
+                            fore_color_explicit: false,
+                            ink9_mask_bitmap: None,
+                            ink9_mask_offset: (0, 0),
+                            floor_rule: false,
                         };
 
-                        // Split the line into tab-delimited segments. Each segment
-                        // starts at a tab-stop position (or 0 for the first one).
-                        // Director tab-stop semantics applied here:
-                        //   - #left:    next segment renders starting at the stop
-                        //   - #right:   next segment renders ending at the stop
-                        //   - #center:  next segment centred on the stop
-                        //   - #decimal: treated as #right for now (CS doesn't use it)
-                        // Without tab stops we fall back to advance-as-glyph (TAB
-                        // glyphs in PFR atlases are usually zero-width).
-                        let segments: Vec<&str> = line.split('\t').collect();
-                        let mut segment_starts: Vec<i32> = Vec::with_capacity(segments.len());
-
-                        // Compute the line's logical width for alignment when there
-                        // are no tabs OR when tabs leave the line left-anchored.
-                        let logical_line_width: i32 = if segments.len() == 1 {
-                            segment_width(line)
-                        } else {
-                            let mut acc = 0i32;
-                            for (i, seg) in segments.iter().enumerate() {
-                                let seg_w = segment_width(seg);
-                                if i == 0 {
-                                    acc = seg_w;
-                                } else if let Some((tab_type, tab_pos)) = line_tab_stops.get(i - 1) {
-                                    acc = match tab_type.as_str() {
-                                        "right" => *tab_pos,
-                                        "center" => (*tab_pos + seg_w / 2).max(acc),
-                                        _ => (*tab_pos + seg_w).max(acc + seg_w),
-                                    };
-                                } else {
-                                    acc += seg_w;
-                                }
-                            }
-                            acc
+                        use crate::player::bitmap::bitmap::resolve_color_ref;
+                        use crate::player::font::{
+                            bitmap_font_copy_char, bitmap_font_copy_char_tight,
                         };
 
-                        // Apply line-level alignment offset (only meaningful when no
-                        // right-type tabs anchor the right edge — tabs already
-                        // place segments at fixed positions).
-                        let has_right_tab = line_tab_stops
+                        let text_color = resolve_color_ref(
+                            &palettes,
+                            &params.color,
+                            &bitmap.palette_ref,
+                            bitmap.original_bit_depth,
+                        );
+                        let default_bold = text_data
+                            .font_style
                             .iter()
-                            .any(|(t, _)| *t == BuiltInSymbol::Right);
-                        let line_offset = if has_right_tab {
-                            0
-                        } else {
-                            match text_alignment {
-                                TextAlignment::Center => ((max_width - logical_line_width) / 2).max(0),
-                                TextAlignment::Right => (max_width - logical_line_width).max(0),
-                                _ => 0,
+                            .any(|s| *s == BuiltInSymbol::Bold);
+                        let default_italic = text_data
+                            .font_style
+                            .iter()
+                            .any(|s| *s == BuiltInSymbol::Italic);
+                        let default_underline = text_data
+                            .font_style
+                            .iter()
+                            .any(|s| *s == BuiltInSymbol::Underline);
+                        let is_pfr_font = font.char_widths.is_some();
+
+                        // PFR pixel-font vertical anchoring (Paige semantics). Recover
+                        // the strike's cap-top / descender-bottom from the atlas so the
+                        // first line's cell top anchors at lineTop and the underline lands
+                        // in the descent, matching Shockwave. Shared with the on-stage
+                        // `Bitmap::draw_text` path so both render identically.
+                        let (pfr_cap_top, pfr_desc_bottom) =
+                            crate::player::font::pfr_strike_vertical_metrics(&font, font_bitmap);
+
+                        let max_width = box_width as i32;
+                        // Anchor the first line's atlas cell top at box row 0. In Paige
+                        // the line is placed by its baseline = lineTop + ascent, and the
+                        // PFR atlas cell top already corresponds to (baseline - ascent) =
+                        // lineTop, so the cell top maps straight onto box row 0. The
+                        // natural ascent-to-cap gap (cap_top) above the capitals is kept,
+                        // exactly as Shockwave renders it. (Previously this subtracted
+                        // cap_top, pulling the caps onto row 0 and the whole block ~3-4px
+                        // too high.) Non-PFR fonts keep the historical top_spacing.
+                        let mut y = match (pfr_cap_top, pfr_desc_bottom) {
+                            // Director positions baked text using BOTH the authored
+                            // topSpacing (extra space above the line) AND the
+                            // fixedLineSpace leading distributed above the glyph:
+                            //   - The v7 Navigator ROOM ROWS go through Habbo's Writer
+                            //     Class, which FORCES `fixedLineSpace = fontSize` (9) and
+                            //     puts the real line height into `topSpacing`
+                            //     (= fixedLineSpace(18) - fontSize(9) = 9). Their offset
+                            //     therefore lives in topSpacing, not fixedLineSpace.
+                            //   - The TITLE is a non-Writer member that keeps
+                            //     fixedLineSpace=15 over a ~11px glyph, so its offset is
+                            //     fixedLineSpace leading (descender sits at line bottom).
+                            // Volter strikes' taller atlas cell masked both; the scaling
+                            // outline exposed them, baking text ~7px too high (the
+                            // window-element bitmap PLACEMENT is correct). For tight
+                            // lines both terms are ~0, so the registration ToS / headings
+                            // are unchanged. No member has both terms large, so summing
+                            // does not double-count.
+                            //
+                            // The topSpacing term carries a -1: the glyph descender (db)
+                            // already overruns the Writer-forced `fixedLineSpace=fontSize`
+                            // by ~1px, so applying the raw topSpacing dropped the room rows
+                            // 1px below Shockwave. Calibrated against the v7 Navigator room
+                            // list (topSpacing=9 -> 8px effective).
+                            (Some(_), Some(db)) if text_data.fixed_line_space > 0 => {
+                                (text_data.fixed_line_space as i32 - 1 - db).max(0)
+                                    + (text_data.top_spacing as i32 - 1).max(0)
                             }
+                            (Some(_), _) => text_data.top_spacing as i32,
+                            (None, _) => text_data.top_spacing as i32,
+                        };
+                        // Underline row sits just below the line's baseline, and this
+                        // is also the per-line advance below. Use the member's explicit
+                        // line height (fixedLineSpace) when set so the underline lands
+                        // inside the bitmap (Volter login link text is 11px tall);
+                        // otherwise Paige auto leading via the shared helper. The raw
+                        // atlas cell (char_height-1, ~25 for Volter-9) is NOT a line
+                        // height — it put 25 px between Habbo v31's 9 px catalogue
+                        // lines and sized the box for a different line count than the
+                        // measure pass above.
+                        let line_height = if text_data.fixed_line_space > 0 {
+                            (text_data.fixed_line_space as i32).max(1)
+                        } else {
+                            let nominal = if text_data.font_size > 0 {
+                                text_data.font_size
+                            } else if font.font_size > 0 {
+                                font.font_size
+                            } else {
+                                font.char_height
+                            };
+                            // Same rule as the measure pass above, so the atlas path
+                            // can't drift from the box it was given.
+                            (crate::player::font::outline_auto_line_height_for_font(
+                                player,
+                                &text_data.font,
+                                nominal,
+                            )
+                            .unwrap_or_else(|| {
+                                crate::player::font::pfr_auto_line_height(
+                                    &font,
+                                    Some(font_bitmap),
+                                    nominal,
+                                )
+                            }) as i32)
+                                .max(1)
                         };
 
-                        // First segment always starts at line_offset (no preceding tab).
-                        segment_starts.push(line_offset);
-                        let mut cursor_x = line_offset + segment_width(segments[0]);
-                        for i in 1..segments.len() {
-                            let seg_w = segment_width(segments[i]);
-                            let stop_x = match line_tab_stops.get(i - 1) {
-                                Some((tab_type, tab_pos)) => match tab_type {
-                                    BuiltInSymbol::Right => (*tab_pos - seg_w).max(cursor_x),
-                                    BuiltInSymbol::Center => (*tab_pos - seg_w / 2).max(cursor_x),
-                                    _ => (*tab_pos).max(cursor_x), // #left / #decimal
-                                },
-                                None => cursor_x, // no more tab stops — render inline
-                            };
-                            segment_starts.push(stop_x);
-                            cursor_x = stop_x + seg_w;
-                        }
+                        // Get char_spacing from styled spans (XMED data)
+                        let char_spacing: i32 = text_data
+                            .html_styled_spans
+                            .first()
+                            .map(|s| s.style.char_spacing)
+                            .unwrap_or(0);
 
-                        // Walk the line again to draw, skipping `\t` chars and using
-                        // the precomputed segment starts.
-                        let mut current_segment = 0usize;
-                        let mut x = segment_starts[0];
-                        for (ch_idx, ch) in line.chars().enumerate() {
-                            if ch == '\t' {
-                                current_segment += 1;
-                                if let Some(&sx) = segment_starts.get(current_segment) {
-                                    x = sx;
-                                }
-                                continue;
-                            }
-                            let adv = font.get_char_advance_for(ch) as i32;
-                            let per = per_char
-                                .get(line_char_offset + ch_idx)
-                                .copied()
-                                .unwrap_or(default_per_char);
-                            // Use tight copy for PFR fonts when cell width is much larger
-                            // than character advance, to prevent transparent cell areas from
-                            // overlapping and erasing adjacent characters.
-                            let use_tight = is_pfr_font && (font.char_width as i32) > (adv * 2).max(16);
-                            let ch_params = CopyPixelsParams {
-                                blend: params.blend,
-                                ink: params.ink,
-                                color: crate::player::sprite::ColorRef::Rgb(per.color.0, per.color.1, per.color.2),
-                                bg_color: params.bg_color.clone(),
-                                mask_image: None,
-                                is_text_rendering: params.is_text_rendering,
-                                rotation: params.rotation,
-                                skew: params.skew,
-                                sprite: None,
-                                mask_offset: params.mask_offset,
-                                original_dst_rect: params.original_dst_rect.clone(),
-                                bg_color_explicit: false,
-                                fore_color_explicit: false,
-                                ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
-                                floor_rule: false,
-                            };
-                            if use_tight {
-                                bitmap_font_copy_char_tight(
-                                    &font, font_bitmap, crate::io::encoding::glyph_byte_for(ch), bitmap,
-                                    x, y_pos, &palettes, &ch_params,
-                                );
-                            } else {
-                                bitmap_font_copy_char(
-                                    &font, font_bitmap, crate::io::encoding::glyph_byte_for(ch), bitmap,
-                                    x, y_pos, &palettes, &ch_params,
-                                );
-                            }
-                            if per.bold {
-                                if use_tight {
-                                    bitmap_font_copy_char_tight(
-                                        &font, font_bitmap, crate::io::encoding::glyph_byte_for(ch), bitmap,
-                                        x + 1, y_pos, &palettes, &ch_params,
-                                    );
+                        // Build a per-character style map. Indexed by character
+                        // position in `text_data.text`, each entry gives the style
+                        // overrides for that character. Coke Studios applies
+                        // per-line / per-item colour + bold/underline via chunk
+                        // setters, and relies on this bitmap render path honouring
+                        // them. When no styled spans are present every char gets
+                        // the member-level defaults.
+                        #[derive(Clone, Copy)]
+                        struct PerCharStyle {
+                            bold: bool,
+                            italic: bool,
+                            underline: bool,
+                            color: (u8, u8, u8),
+                        }
+                        let default_per_char = PerCharStyle {
+                            bold: default_bold,
+                            italic: default_italic,
+                            underline: default_underline,
+                            color: text_color,
+                        };
+                        let mut per_char: Vec<PerCharStyle> = Vec::new();
+                        if text_data.html_styled_spans.len() >= 2 {
+                            // Build per-char with the SAME normalisation the renderer
+                            // applies (CRLF → LF, lone CR → LF). The renderer iterates
+                            // normalised lines and indexes per_char by
+                            // `line_char_offset + ch_idx`, where line_char_offset
+                            // assumes single-char line breaks. If we kept the raw
+                            // `\r\n` here, per_char would be one entry longer per
+                            // CRLF and styles would shift backwards on every CRLF
+                            // — Coke Studios' roomlist (Windows-saved with `\r\n`)
+                            // bleeds audition row's bold/blue down by N lines.
+                            let mut prev_was_cr = false;
+                            for span in &text_data.html_styled_spans {
+                                let col = if let Some(c) = span.style.color {
+                                    (
+                                        ((c >> 16) & 0xFF) as u8,
+                                        ((c >> 8) & 0xFF) as u8,
+                                        (c & 0xFF) as u8,
+                                    )
                                 } else {
-                                    bitmap_font_copy_char(
-                                        &font, font_bitmap, crate::io::encoding::glyph_byte_for(ch), bitmap,
-                                        x + 1, y_pos, &palettes, &ch_params,
-                                    );
-                                }
-                            }
-                            if per.underline {
-                                // Per-character underline so per-span underline
-                                // is honoured (CS uses underline on some items
-                                // only). Draw one pixel row under this glyph.
-                                // Paige draws the underline in the descent. For
-                                // PFR strikes put it on the descender's lowest row
-                                // (scanned), so it sits just under the text instead
-                                // of at the oversized atlas cell bottom.
-                                let underline_y = match pfr_desc_bottom {
-                                    Some(db) => y_pos + db,
-                                    None => y_pos + line_height - 1,
+                                    text_color
                                 };
-                                let run_end = (x + adv + char_spacing).max(x);
-                                for ux in x..run_end {
-                                    bitmap.set_pixel(ux, underline_y, per.color, &palettes);
+                                // Spans set via chunk-style setters are authoritative
+                                // for that range: don't OR with member defaults, or
+                                // `[#plain]` wouldn't be able to strip underline from
+                                // a member that has underline as its default style.
+                                let style_entry = PerCharStyle {
+                                    bold: span.style.bold,
+                                    italic: span.style.italic,
+                                    underline: span.style.underline,
+                                    color: col,
+                                };
+                                for c in span.text.chars() {
+                                    if prev_was_cr && c == '\n' {
+                                        // Drop \n that follows \r — the \r already
+                                        // contributed an entry that the renderer
+                                        // treats as the single break.
+                                        prev_was_cr = false;
+                                        continue;
+                                    }
+                                    prev_was_cr = c == '\r';
+                                    per_char.push(style_entry);
                                 }
                             }
-                            x += adv + char_spacing;
                         }
-                    };
 
-                    // Normalise CRLF / lone CR to \n first so a `\r\n` pair counts
-                    // as ONE line break — splitting on either char individually
-                    // would double the line count for Lingo strings produced via
-                    // `& RETURN` on platforms where RETURN is `\r\n`. Coke
-                    // Studios' roomlist hits exactly this: every row of
-                    // "London I\tGo!\r\n..." was rendering with an empty line
-                    // between, doubling the visual line spacing.
-                    let normalised_text: String = text_data.text
-                        .replace("\r\n", "\n")
-                        .replace('\r', "\n");
-                    let raw_lines: Vec<&str> = normalised_text.split('\n').collect();
-                    let mut lines_to_draw: Vec<String> = Vec::new();
+                        // Capture tab stops for the closure (line_char_offset usage below
+                        // also needs them, but the closure can't borrow text_data through
+                        // reserve_player_mut). Clone to a small Vec.
+                        let line_tab_stops: Vec<(BuiltInSymbol, i32)> = text_data
+                            .tab_stops
+                            .iter()
+                            .map(|t| (t.tab_type.clone(), t.position as i32))
+                            .collect();
 
-                    if text_data.word_wrap && max_width > 0 {
-                        for raw in raw_lines {
-                            if raw.is_empty() {
-                                lines_to_draw.push(String::new());
-                                continue;
-                            }
-                            // Wrap on space-separated words but preserve TAB
-                            // characters. Splitting via split_whitespace() and
-                            // re-joining with " " would silently strip tabs and
-                            // break tab-stop layouts (CS roomlist relies on a
-                            // right-tab to anchor "Go!" at the row's right
-                            // edge — tab-stripped lines collapsed everything
-                            // back to the left).
-                            let mut current = String::new();
-                            for word in raw.split(' ') {
-                                if word.is_empty() {
-                                    // Multiple spaces in a row — preserve them
-                                    if !current.is_empty() {
-                                        current.push(' ');
+                        let mut flush_line =
+                            |line: &str,
+                             line_char_offset: usize,
+                             y_pos: i32,
+                             bitmap: &mut Bitmap| {
+                                // Helper: width of a substring (character advances).
+                                let segment_width = |s: &str| -> i32 {
+                                    s.chars()
+                                        .map(|c| {
+                                            font.get_char_advance(c as u8) as i32 + char_spacing
+                                        })
+                                        .sum::<i32>()
+                                };
+
+                                // Split the line into tab-delimited segments. Each segment
+                                // starts at a tab-stop position (or 0 for the first one).
+                                // Director tab-stop semantics applied here:
+                                //   - #left:    next segment renders starting at the stop
+                                //   - #right:   next segment renders ending at the stop
+                                //   - #center:  next segment centred on the stop
+                                //   - #decimal: treated as #right for now (CS doesn't use it)
+                                // Without tab stops we fall back to advance-as-glyph (TAB
+                                // glyphs in PFR atlases are usually zero-width).
+                                let segments: Vec<&str> = line.split('\t').collect();
+                                let mut segment_starts: Vec<i32> =
+                                    Vec::with_capacity(segments.len());
+
+                                // Compute the line's logical width for alignment when there
+                                // are no tabs OR when tabs leave the line left-anchored.
+                                let logical_line_width: i32 = if segments.len() == 1 {
+                                    segment_width(line)
+                                } else {
+                                    let mut acc = 0i32;
+                                    for (i, seg) in segments.iter().enumerate() {
+                                        let seg_w = segment_width(seg);
+                                        if i == 0 {
+                                            acc = seg_w;
+                                        } else if let Some((tab_type, tab_pos)) =
+                                            line_tab_stops.get(i - 1)
+                                        {
+                                            acc = match tab_type.as_str() {
+                                                "right" => *tab_pos,
+                                                "center" => (*tab_pos + seg_w / 2).max(acc),
+                                                _ => (*tab_pos + seg_w).max(acc + seg_w),
+                                            };
+                                        } else {
+                                            acc += seg_w;
+                                        }
                                     }
+                                    acc
+                                };
+
+                                // Apply line-level alignment offset (only meaningful when no
+                                // right-type tabs anchor the right edge — tabs already
+                                // place segments at fixed positions).
+                                let has_right_tab = line_tab_stops
+                                    .iter()
+                                    .any(|(t, _)| *t == BuiltInSymbol::Right);
+                                let line_offset = if has_right_tab {
+                                    0
+                                } else {
+                                    match text_alignment {
+                                        TextAlignment::Center => {
+                                            ((max_width - logical_line_width) / 2).max(0)
+                                        }
+                                        TextAlignment::Right => {
+                                            (max_width - logical_line_width).max(0)
+                                        }
+                                        _ => 0,
+                                    }
+                                };
+
+                                // First segment always starts at line_offset (no preceding tab).
+                                segment_starts.push(line_offset);
+                                let mut cursor_x = line_offset + segment_width(segments[0]);
+                                for i in 1..segments.len() {
+                                    let seg_w = segment_width(segments[i]);
+                                    let stop_x = match line_tab_stops.get(i - 1) {
+                                        Some((tab_type, tab_pos)) => match tab_type {
+                                            BuiltInSymbol::Right => {
+                                                (*tab_pos - seg_w).max(cursor_x)
+                                            }
+                                            BuiltInSymbol::Center => {
+                                                (*tab_pos - seg_w / 2).max(cursor_x)
+                                            }
+                                            _ => (*tab_pos).max(cursor_x), // #left / #decimal
+                                        },
+                                        None => cursor_x, // no more tab stops — render inline
+                                    };
+                                    segment_starts.push(stop_x);
+                                    cursor_x = stop_x + seg_w;
+                                }
+
+                                // Walk the line again to draw, skipping `\t` chars and using
+                                // the precomputed segment starts.
+                                let mut current_segment = 0usize;
+                                let mut x = segment_starts[0];
+                                for (ch_idx, ch) in line.chars().enumerate() {
+                                    if ch == '\t' {
+                                        current_segment += 1;
+                                        if let Some(&sx) = segment_starts.get(current_segment) {
+                                            x = sx;
+                                        }
+                                        continue;
+                                    }
+                                    let adv = font.get_char_advance_for(ch) as i32;
+                                    let per = per_char
+                                        .get(line_char_offset + ch_idx)
+                                        .copied()
+                                        .unwrap_or(default_per_char);
+                                    // Use tight copy for PFR fonts when cell width is much larger
+                                    // than character advance, to prevent transparent cell areas from
+                                    // overlapping and erasing adjacent characters.
+                                    let use_tight =
+                                        is_pfr_font && (font.char_width as i32) > (adv * 2).max(16);
+                                    let ch_params = CopyPixelsParams {
+                                        blend: params.blend,
+                                        ink: params.ink,
+                                        color: crate::player::sprite::ColorRef::Rgb(
+                                            per.color.0,
+                                            per.color.1,
+                                            per.color.2,
+                                        ),
+                                        bg_color: params.bg_color.clone(),
+                                        mask_image: None,
+                                        is_text_rendering: params.is_text_rendering,
+                                        rotation: params.rotation,
+                                        skew: params.skew,
+                                        sprite: None,
+                                        mask_offset: params.mask_offset,
+                                        original_dst_rect: params.original_dst_rect.clone(),
+                                        bg_color_explicit: false,
+                                        fore_color_explicit: false,
+                                        ink9_mask_bitmap: None,
+                                        ink9_mask_offset: (0, 0),
+                                        floor_rule: false,
+                                    };
+                                    if use_tight {
+                                        bitmap_font_copy_char_tight(
+                                            &font,
+                                            font_bitmap,
+                                            crate::io::encoding::glyph_byte_for(ch),
+                                            bitmap,
+                                            x,
+                                            y_pos,
+                                            &palettes,
+                                            &ch_params,
+                                        );
+                                    } else {
+                                        bitmap_font_copy_char(
+                                            &font,
+                                            font_bitmap,
+                                            crate::io::encoding::glyph_byte_for(ch),
+                                            bitmap,
+                                            x,
+                                            y_pos,
+                                            &palettes,
+                                            &ch_params,
+                                        );
+                                    }
+                                    if per.bold {
+                                        if use_tight {
+                                            bitmap_font_copy_char_tight(
+                                                &font,
+                                                font_bitmap,
+                                                crate::io::encoding::glyph_byte_for(ch),
+                                                bitmap,
+                                                x + 1,
+                                                y_pos,
+                                                &palettes,
+                                                &ch_params,
+                                            );
+                                        } else {
+                                            bitmap_font_copy_char(
+                                                &font,
+                                                font_bitmap,
+                                                crate::io::encoding::glyph_byte_for(ch),
+                                                bitmap,
+                                                x + 1,
+                                                y_pos,
+                                                &palettes,
+                                                &ch_params,
+                                            );
+                                        }
+                                    }
+                                    if per.underline {
+                                        // Per-character underline so per-span underline
+                                        // is honoured (CS uses underline on some items
+                                        // only). Draw one pixel row under this glyph.
+                                        // Paige draws the underline in the descent. For
+                                        // PFR strikes put it on the descender's lowest row
+                                        // (scanned), so it sits just under the text instead
+                                        // of at the oversized atlas cell bottom.
+                                        let underline_y = match pfr_desc_bottom {
+                                            Some(db) => y_pos + db,
+                                            None => y_pos + line_height - 1,
+                                        };
+                                        let run_end = (x + adv + char_spacing).max(x);
+                                        for ux in x..run_end {
+                                            bitmap.set_pixel(ux, underline_y, per.color, &palettes);
+                                        }
+                                    }
+                                    x += adv + char_spacing;
+                                }
+                            };
+
+                        // Normalise CRLF / lone CR to \n first so a `\r\n` pair counts
+                        // as ONE line break — splitting on either char individually
+                        // would double the line count for Lingo strings produced via
+                        // `& RETURN` on platforms where RETURN is `\r\n`. Coke
+                        // Studios' roomlist hits exactly this: every row of
+                        // "London I\tGo!\r\n..." was rendering with an empty line
+                        // between, doubling the visual line spacing.
+                        let normalised_text: String =
+                            text_data.text.replace("\r\n", "\n").replace('\r', "\n");
+                        let raw_lines: Vec<&str> = normalised_text.split('\n').collect();
+                        let mut lines_to_draw: Vec<String> = Vec::new();
+
+                        if text_data.word_wrap && max_width > 0 {
+                            for raw in raw_lines {
+                                if raw.is_empty() {
+                                    lines_to_draw.push(String::new());
                                     continue;
                                 }
-                                let candidate = if current.is_empty() {
-                                    word.to_string()
-                                } else {
-                                    format!("{} {}", current, word)
-                                };
-                                let candidate_width: i32 = candidate
-                                    .chars()
-                                    .map(|c| font.get_char_advance(c as u8) as i32 + char_spacing)
-                                    .sum();
-                                if candidate_width <= max_width || current.is_empty() {
-                                    current = candidate;
-                                } else {
+                                // Wrap on space-separated words but preserve TAB
+                                // characters. Splitting via split_whitespace() and
+                                // re-joining with " " would silently strip tabs and
+                                // break tab-stop layouts (CS roomlist relies on a
+                                // right-tab to anchor "Go!" at the row's right
+                                // edge — tab-stripped lines collapsed everything
+                                // back to the left).
+                                let mut current = String::new();
+                                for word in raw.split(' ') {
+                                    if word.is_empty() {
+                                        // Multiple spaces in a row — preserve them
+                                        if !current.is_empty() {
+                                            current.push(' ');
+                                        }
+                                        continue;
+                                    }
+                                    let candidate = if current.is_empty() {
+                                        word.to_string()
+                                    } else {
+                                        format!("{} {}", current, word)
+                                    };
+                                    let candidate_width: i32 = candidate
+                                        .chars()
+                                        .map(|c| {
+                                            font.get_char_advance(c as u8) as i32 + char_spacing
+                                        })
+                                        .sum();
+                                    if candidate_width <= max_width || current.is_empty() {
+                                        current = candidate;
+                                    } else {
+                                        lines_to_draw.push(current);
+                                        current = word.to_string();
+                                    }
+                                }
+                                if !current.is_empty() {
                                     lines_to_draw.push(current);
-                                    current = word.to_string();
                                 }
                             }
-                            if !current.is_empty() {
-                                lines_to_draw.push(current);
-                            }
+                        } else {
+                            lines_to_draw = raw_lines.iter().map(|s| s.to_string()).collect();
                         }
-                    } else {
-                        lines_to_draw = raw_lines.iter().map(|s| s.to_string()).collect();
-                    }
 
-                    let effective_line_height = if text_data.fixed_line_space > 0 {
-                        text_data.fixed_line_space as i32
-                    } else {
-                        line_height
-                    };
-                    let line_step = effective_line_height
-                        + text_data.bottom_spacing as i32
-                        + text_data.top_spacing as i32;
-                    // Track the character offset into `text_data.text` so
-                    // per-span styling aligns with the chars being drawn.
-                    // Word-wrap rebuilds lines from whitespace-split tokens so
-                    // the offset tracking is approximate there; for the
-                    // non-wrap case (which is what CS uses for the roomlist)
-                    // it's exact.
-                    let mut char_offset = 0usize;
-                    for line in lines_to_draw {
-                        flush_line(&line, char_offset, y, &mut bitmap);
-                        y += line_step;
-                        char_offset += line.chars().count() + 1; // +1 for the line break
-                    }
+                        let effective_line_height = if text_data.fixed_line_space > 0 {
+                            text_data.fixed_line_space as i32
+                        } else {
+                            line_height
+                        };
+                        let line_step = effective_line_height
+                            + text_data.bottom_spacing as i32
+                            + text_data.top_spacing as i32;
+                        // Track the character offset into `text_data.text` so
+                        // per-span styling aligns with the chars being drawn.
+                        // Word-wrap rebuilds lines from whitespace-split tokens so
+                        // the offset tracking is approximate there; for the
+                        // non-wrap case (which is what CS uses for the roomlist)
+                        // it's exact.
+                        let mut char_offset = 0usize;
+                        for line in lines_to_draw {
+                            flush_line(&line, char_offset, y, &mut bitmap);
+                            y += line_step;
+                            char_offset += line.chars().count() + 1; // +1 for the line break
+                        }
                     } // end !rendered_via_outline (atlas-copy fallback)
-
                 } // end bitmap glyph else branch
 
                 // Honour `member.antialias = 0` by thresholding the bitmap's
@@ -2206,7 +2566,9 @@ impl TextMemberHandlers {
                     // midpoint of the coverage scale, which empirically
                     // matches Director's crispness for non-AA text (Coke
                     // Studios jukebox catalog and others).
-                    let threshold = text_data.info.as_ref()
+                    let threshold = text_data
+                        .info
+                        .as_ref()
                         .map(|i| i.anti_alias_threshold as u8)
                         .unwrap_or(128)
                         .max(128);
@@ -2232,7 +2594,9 @@ impl TextMemberHandlers {
                     // styling the destination's labels render as plain text
                     // and the visual loses the gray "Terrain:"/"Speed:"/etc
                     // labels Director emits via `\cf<n>` color runs.
-                    Ok(Datum::String(Self::generate_rtf_from_text_member(&text_data)))
+                    Ok(Datum::String(Self::generate_rtf_from_text_member(
+                        &text_data,
+                    )))
                 }
             }
             "state" => Ok(Datum::Int(4)), // 4 = loaded (all embedded members are fully loaded)
@@ -2241,21 +2605,27 @@ impl TextMemberHandlers {
             "charcount" => {
                 let delimiter = player.movie.item_delimiter;
                 let count = StringChunkUtils::resolve_chunk_count(
-                    &text_data.text, StringChunkType::Char, delimiter,
+                    &text_data.text,
+                    StringChunkType::Char,
+                    delimiter,
                 )?;
                 Ok(Datum::Int(count as i32))
             }
             "wordcount" => {
                 let delimiter = player.movie.item_delimiter;
                 let count = StringChunkUtils::resolve_chunk_count(
-                    &text_data.text, StringChunkType::Word, delimiter,
+                    &text_data.text,
+                    StringChunkType::Word,
+                    delimiter,
                 )?;
                 Ok(Datum::Int(count as i32))
             }
             "linecount" => {
                 let delimiter = player.movie.item_delimiter;
                 let count = StringChunkUtils::resolve_chunk_count(
-                    &text_data.text, StringChunkType::Line, delimiter,
+                    &text_data.text,
+                    StringChunkType::Line,
+                    delimiter,
                 )?;
                 Ok(Datum::Int(count as i32))
             }
@@ -2263,7 +2633,9 @@ impl TextMemberHandlers {
                 // Director treats paragraphs as \r-delimited, same as lines.
                 let delimiter = player.movie.item_delimiter;
                 let count = StringChunkUtils::resolve_chunk_count(
-                    &text_data.text, StringChunkType::Line, delimiter,
+                    &text_data.text,
+                    StringChunkType::Line,
+                    delimiter,
                 )?;
                 Ok(Datum::Int(count as i32))
             }
@@ -2276,13 +2648,19 @@ impl TextMemberHandlers {
             "selection" => {
                 let start = player.alloc_datum(Datum::Int(text_data.sel_start));
                 let end = player.alloc_datum(Datum::Int(text_data.sel_end));
-                Ok(Datum::List(DatumType::List, VecDeque::from(vec![start, end]), false))
+                Ok(Datum::List(
+                    DatumType::List,
+                    VecDeque::from(vec![start, end]),
+                    false,
+                ))
             }
             "selectedtext" => {
                 let len = text_data.text.len() as i32;
                 let lo = text_data.sel_start.min(text_data.sel_end).clamp(0, len);
                 let hi = text_data.sel_start.max(text_data.sel_end).clamp(0, len);
-                Ok(Datum::String(text_data.text[lo as usize..hi as usize].to_string()))
+                Ok(Datum::String(
+                    text_data.text[lo as usize..hi as usize].to_string(),
+                ))
             }
             // Previously-unstaged stored properties
             "bottomspacing" => Ok(Datum::Int(text_data.bottom_spacing as i32)),
@@ -2296,10 +2674,8 @@ impl TextMemberHandlers {
                     let type_val = player.alloc_datum(Datum::Symbol(t.tab_type.into()));
                     let pos_key = player.alloc_datum(Datum::Symbol(BuiltInSymbol::Position.into()));
                     let pos_val = player.alloc_datum(Datum::Int(t.position));
-                    let entries: VecDeque<(DatumRef, DatumRef)> = VecDeque::from([
-                        (type_key, type_val),
-                        (pos_key, pos_val),
-                    ]);
+                    let entries: VecDeque<(DatumRef, DatumRef)> =
+                        VecDeque::from([(type_key, type_val), (pos_key, pos_val)]);
                     items.push_back(player.alloc_datum(Datum::PropList(entries, false)));
                 }
                 Ok(Datum::List(DatumType::List, items, false))
@@ -2310,7 +2686,8 @@ impl TextMemberHandlers {
             // 1-based inclusive pairs; empty for members with no links. Used by
             // the `customHyperlink` behavior (help_menu navigation).
             "hyperlinks" => {
-                let items: VecDeque<DatumRef> = text_data.hyperlinks
+                let items: VecDeque<DatumRef> = text_data
+                    .hyperlinks
                     .iter()
                     .map(|(start, end)| {
                         let s = player.alloc_datum(Datum::Int(*start));
@@ -2372,17 +2749,19 @@ impl TextMemberHandlers {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     let new_text = value?.trim_end_matches('\0').to_string();
 
-                    let old_color = text_member.html_styled_spans.first()
+                    let old_color = text_member
+                        .html_styled_spans
+                        .first()
                         .and_then(|s| s.style.color)
                         .map(|c| format!("#{:06X}", c & 0xFFFFFF))
                         .unwrap_or_else(|| "none".to_string());
                     debug!(
                         "[text_setter] member='{}' old_color={} spans={} new_text='{}'",
-                        cast_member.name, old_color,
+                        cast_member.name,
+                        old_color,
                         text_member.html_styled_spans.len(),
                         new_text.chars().take(30).collect::<String>(),
                     );
-
 
                     // Update the plain text + caret state in one go.
                     text_member.set_text_preserving_caret(new_text.clone());
@@ -2411,7 +2790,8 @@ impl TextMemberHandlers {
                 member_ref,
                 |player, symbols| value.symbol_value(symbols),
                 |cast_member, value, symbols| {
-                    cast_member.member_type.as_text_mut().unwrap().alignment = builtin_symbol(&value?, symbols)?;
+                    cast_member.member_type.as_text_mut().unwrap().alignment =
+                        builtin_symbol(&value?, symbols)?;
                     Ok(())
                 },
             ),
@@ -2482,7 +2862,10 @@ impl TextMemberHandlers {
                     match value {
                         Datum::List(_, items, _) => {
                             for x in items {
-                                item_strings.push(checked_get_datum(player, &x, symbols)?.symbol_value(symbols)?);
+                                item_strings.push(
+                                    checked_get_datum(player, &x, symbols)?
+                                        .symbol_value(symbols)?,
+                                );
                             }
                         }
                         _ => {
@@ -2501,11 +2884,13 @@ impl TextMemberHandlers {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     let bold = styles.iter().any(|s| s.eq_builtin(BuiltInSymbol::Bold));
                     let italic = styles.iter().any(|s| s.eq_builtin(BuiltInSymbol::Italic));
-                    let underline = styles.iter().any(|s| s.eq_builtin(BuiltInSymbol::Underline));
-                        text_member.font_style = styles
-                            .iter()
-                            .map(|s| builtin_symbol(s, symbols))
-                            .collect::<Result<_, _>>()?;
+                    let underline = styles
+                        .iter()
+                        .any(|s| s.eq_builtin(BuiltInSymbol::Underline));
+                    text_member.font_style = styles
+                        .iter()
+                        .map(|s| builtin_symbol(s, symbols))
+                        .collect::<Result<_, _>>()?;
                     for span in &mut text_member.html_styled_spans {
                         span.style.bold = bold;
                         span.style.italic = italic;
@@ -2544,7 +2929,8 @@ impl TextMemberHandlers {
                 member_ref,
                 |player, symbols| value.symbol_value(symbols),
                 |cast_member, value, symbols| {
-                    cast_member.member_type.as_text_mut().unwrap().box_type = builtin_symbol(&value?, symbols)?;
+                    cast_member.member_type.as_text_mut().unwrap().box_type =
+                        builtin_symbol(&value?, symbols)?;
                     Ok(())
                 },
             ),
@@ -2565,16 +2951,18 @@ impl TextMemberHandlers {
                 |player, symbols| value.string_value(symbols),
                 |cast_member, value, symbols| {
                     let html_string: String = value?;
-                    let spans = HtmlParser::parse_html(&html_string).map_err(|e| {
-                        ScriptError::new(format!("Failed to parse HTML: {}", e))
-                    })?;
+                    let spans = HtmlParser::parse_html(&html_string)
+                        .map_err(|e| ScriptError::new(format!("Failed to parse HTML: {}", e)))?;
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
 
-                    let old_color = text_member.html_styled_spans.first()
+                    let old_color = text_member
+                        .html_styled_spans
+                        .first()
                         .and_then(|s| s.style.color)
                         .map(|c| format!("#{:06X}", c & 0xFFFFFF))
                         .unwrap_or_else(|| "none".to_string());
-                    let new_color = spans.first()
+                    let new_color = spans
+                        .first()
                         .and_then(|s| s.style.color)
                         .map(|c| format!("#{:06X}", c & 0xFFFFFF))
                         .unwrap_or_else(|| "none".to_string());
@@ -2588,7 +2976,8 @@ impl TextMemberHandlers {
                     text_member.html_source = html_string.clone();
 
                     // Extract plain text from all spans
-                    text_member.set_text_preserving_caret(spans.iter().map(|s| s.text.clone()).collect());
+                    text_member
+                        .set_text_preserving_caret(spans.iter().map(|s| s.text.clone()).collect());
 
                     // Ensure the HTML-derived text ends with a paragraph
                     // terminator. Director appends a trailing `\r` to
@@ -2602,19 +2991,24 @@ impl TextMemberHandlers {
                     // content + 1 trailing empty), so sprite_rect grows
                     // to ~90 px instead of ~108 and the last line gets
                     // clipped.
-                    if !text_member.text.ends_with('\r')
-                        && !text_member.text.ends_with('\n')
-                    {
+                    if !text_member.text.ends_with('\r') && !text_member.text.ends_with('\n') {
                         text_member.text.push('\n');
                     }
 
                     // Extract alignment from <p align="..."> or <center> tag
                     let html_lower = html_string.to_lowercase();
-                    if html_lower.contains("align=\"center\"") || html_lower.contains("align='center'") || html_lower.contains("<center") {
+                    if html_lower.contains("align=\"center\"")
+                        || html_lower.contains("align='center'")
+                        || html_lower.contains("<center")
+                    {
                         text_member.alignment = BuiltInSymbol::Center;
-                    } else if html_lower.contains("align=\"right\"") || html_lower.contains("align='right'") {
+                    } else if html_lower.contains("align=\"right\"")
+                        || html_lower.contains("align='right'")
+                    {
                         text_member.alignment = BuiltInSymbol::Right;
-                    } else if html_lower.contains("align=\"left\"") || html_lower.contains("align='left'") {
+                    } else if html_lower.contains("align=\"left\"")
+                        || html_lower.contains("align='left'")
+                    {
                         text_member.alignment = BuiltInSymbol::Left;
                     }
 
@@ -2638,7 +3032,8 @@ impl TextMemberHandlers {
                             }
 
                             // Try text="..." for foreground color
-                            if let Some(color_str) = HtmlParser::extract_tag_attr(body_tag, "text") {
+                            if let Some(color_str) = HtmlParser::extract_tag_attr(body_tag, "text")
+                            {
                                 if let Some(color) = HtmlParser::parse_color(&color_str) {
                                     cast_member.color = crate::player::sprite::ColorRef::Rgb(
                                         ((color >> 16) & 0xFF) as u8,
@@ -2760,7 +3155,8 @@ impl TextMemberHandlers {
                         let b = (color_val & 0xFF) as u8;
                         cast_member.color = crate::player::sprite::ColorRef::Rgb(r, g, b);
                     } else {
-                        cast_member.color = crate::player::sprite::ColorRef::PaletteIndex(color_val as u8);
+                        cast_member.color =
+                            crate::player::sprite::ColorRef::PaletteIndex(color_val as u8);
                     }
                     // Director's `the color of member` recolors the WHOLE text,
                     // overriding per-run/span colors. Clear the styled spans'
@@ -2792,7 +3188,8 @@ impl TextMemberHandlers {
                         let b = (color_val & 0xFF) as u8;
                         cast_member.bg_color = crate::player::sprite::ColorRef::Rgb(r, g, b);
                     } else {
-                        cast_member.bg_color = crate::player::sprite::ColorRef::PaletteIndex(color_val as u8);
+                        cast_member.bg_color =
+                            crate::player::sprite::ColorRef::PaletteIndex(color_val as u8);
                     }
                     Ok(())
                 },
@@ -2803,7 +3200,11 @@ impl TextMemberHandlers {
                 member_ref,
                 |player, symbols| value.int_value(),
                 |cast_member, value, symbols| {
-                    cast_member.member_type.as_text_mut().unwrap().fixed_line_space = value? as u16;
+                    cast_member
+                        .member_type
+                        .as_text_mut()
+                        .unwrap()
+                        .fixed_line_space = value? as u16;
                     Ok(())
                 },
             ),
@@ -2851,7 +3252,11 @@ impl TextMemberHandlers {
                 player,
                 symbols,
                 member_ref,
-                |player, symbols| value.float_value().or_else(|_| value.int_value().map(|i| i as f64)),
+                |player, symbols| {
+                    value
+                        .float_value()
+                        .or_else(|_| value.int_value().map(|i| i as f64))
+                },
                 |cast_member, value, symbols| {
                     let text_member = cast_member.member_type.as_text_mut().unwrap();
                     if let Some(ref mut info) = text_member.info {
@@ -3006,7 +3411,9 @@ impl TextMemberHandlers {
                         let z = checked_get_datum(player, &list[2], symbols)?.float_value()?;
                         Ok((x, y, z))
                     } else {
-                        Err(ScriptError::new("cameraPosition requires a vector with 3 elements".to_string()))
+                        Err(ScriptError::new(
+                            "cameraPosition requires a vector with 3 elements".to_string(),
+                        ))
                     }
                 },
                 |cast_member, value, symbols| {
@@ -3032,7 +3439,9 @@ impl TextMemberHandlers {
                         let z = checked_get_datum(player, &list[2], symbols)?.float_value()?;
                         Ok((x, y, z))
                     } else {
-                        Err(ScriptError::new("cameraRotation requires a vector with 3 elements".to_string()))
+                        Err(ScriptError::new(
+                            "cameraRotation requires a vector with 3 elements".to_string(),
+                        ))
                     }
                 },
                 |cast_member, value, symbols| {
@@ -3067,7 +3476,8 @@ impl TextMemberHandlers {
                     let list = value.to_list()?;
                     let mut face_mask: i32 = 0;
                     for item_ref in list {
-                        let face_str = checked_get_datum(player, &item_ref, symbols)?.string_value(symbols)?;
+                        let face_str =
+                            checked_get_datum(player, &item_ref, symbols)?.string_value(symbols)?;
                         match face_str.trim_start_matches('#') {
                             "front" => face_mask |= 1,
                             "tunnel" => face_mask |= 2,
@@ -3281,7 +3691,8 @@ impl TextMemberHandlers {
                         if let Some(sz) = first.style.font_size.filter(|s| *s > 0) {
                             text_member.font_size = sz as u16;
                         }
-                        if let Some(face) = first.style.font_face.as_ref().filter(|f| !f.is_empty()) {
+                        if let Some(face) = first.style.font_face.as_ref().filter(|f| !f.is_empty())
+                        {
                             text_member.font = face.clone();
                         }
                     }
@@ -3315,7 +3726,11 @@ impl TextMemberHandlers {
                 member_ref,
                 |_player, symbols| value.int_value(),
                 |cast_member, value, symbols| {
-                    cast_member.member_type.as_text_mut().unwrap().bottom_spacing = value? as i16;
+                    cast_member
+                        .member_type
+                        .as_text_mut()
+                        .unwrap()
+                        .bottom_spacing = value? as i16;
                     Ok(())
                 },
             ),
@@ -3364,7 +3779,11 @@ impl TextMemberHandlers {
                 member_ref,
                 |_player, symbols| value.symbol_value(symbols),
                 |cast_member, value, symbols| {
-                    cast_member.member_type.as_text_mut().unwrap().anti_alias_type = builtin_symbol(&value?, symbols)?;
+                    cast_member
+                        .member_type
+                        .as_text_mut()
+                        .unwrap()
+                        .anti_alias_type = builtin_symbol(&value?, symbols)?;
                     Ok(())
                 },
             ),
@@ -3390,14 +3809,23 @@ impl TextMemberHandlers {
                                 let mut tab_type = BuiltInSymbol::Left;
                                 let mut position = 0i32;
                                 for (key_ref, val_ref) in &entries {
-                                    let key = checked_get_datum(player, key_ref, symbols)?.symbol_value(symbols).unwrap_or(Symbol::empty()).into_builtin();
+                                    let key = checked_get_datum(player, key_ref, symbols)?
+                                        .symbol_value(symbols)
+                                        .unwrap_or(Symbol::empty())
+                                        .into_builtin();
                                     match key {
                                         Some(BuiltInSymbol::Type) => {
-                                            let t = checked_get_datum(player, val_ref, symbols)?.symbol_value(symbols).unwrap_or(Symbol::empty()).into_builtin().unwrap_or(BuiltInSymbol::Left);
+                                            let t = checked_get_datum(player, val_ref, symbols)?
+                                                .symbol_value(symbols)
+                                                .unwrap_or(Symbol::empty())
+                                                .into_builtin()
+                                                .unwrap_or(BuiltInSymbol::Left);
                                             tab_type = t;
                                         }
                                         Some(BuiltInSymbol::Position) => {
-                                            position = checked_get_datum(player, val_ref, symbols)?.int_value().unwrap_or(0);
+                                            position = checked_get_datum(player, val_ref, symbols)?
+                                                .int_value()
+                                                .unwrap_or(0);
                                         }
                                         _ => {}
                                     }
@@ -3526,7 +3954,10 @@ impl TextMemberHandlers {
 
         // Minimal stylesheet. Director emits this; some RTF readers
         // require it for default-style fallback.
-        rtf.push_str(&format!("{{\\stylesheet{{\\s0\\fs{} Normal Text;}}}}", default_size_halfpts));
+        rtf.push_str(&format!(
+            "{{\\stylesheet{{\\s0\\fs{} Normal Text;}}}}",
+            default_size_halfpts
+        ));
 
         // Document margins (twips) — Director's defaults.
         rtf.push_str("\\margl1800 \\margr1800 \\margt1440 \\margb1440 ");
@@ -3581,12 +4012,26 @@ impl TextMemberHandlers {
                     break;
                 }
             }
-            let par_info = text_data.par_infos.get(active_idx as usize)
+            let par_info = text_data
+                .par_infos
+                .get(active_idx as usize)
                 .cloned()
                 .unwrap_or_default();
-            let sb = if par_info.top_spacing > 0 { par_info.top_spacing * 20 } else { 100 };
-            let sa = if par_info.bottom_spacing > 0 { par_info.bottom_spacing * 20 } else { 100 };
-            let sl = if par_info.line_spacing > 0 { par_info.line_spacing * 20 } else { 100 };
+            let sb = if par_info.top_spacing > 0 {
+                par_info.top_spacing * 20
+            } else {
+                100
+            };
+            let sa = if par_info.bottom_spacing > 0 {
+                par_info.bottom_spacing * 20
+            } else {
+                100
+            };
+            let sl = if par_info.line_spacing > 0 {
+                par_info.line_spacing * 20
+            } else {
+                100
+            };
             (sb, sa, sl)
         };
 
@@ -3604,15 +4049,21 @@ impl TextMemberHandlers {
             let mut text_pos: u32 = 0;
             for (idx, span) in spans.iter().enumerate() {
                 let span_start = text_pos;
-                let font_idx = span.style.font_face
+                let font_idx = span
+                    .style
+                    .font_face
                     .as_ref()
                     .and_then(|f| fonts.iter().position(|x| x == f))
                     .unwrap_or(primary_font_idx);
-                let color_idx = span.style.color
+                let color_idx = span
+                    .style
+                    .color
                     .map(|c| c & 0x00FFFFFF)
                     .and_then(|c| colors.iter().position(|x| *x == c))
                     .unwrap_or(0);
-                let size_halfpts = span.style.font_size
+                let size_halfpts = span
+                    .style
+                    .font_size
                     .map(|sz| sz.max(1) * 2)
                     .unwrap_or(default_size_halfpts);
                 let (sb, sa, sl) = par_spacing_at(span_start);
@@ -3624,10 +4075,8 @@ impl TextMemberHandlers {
                 // and size; colored/bold/etc. runs inherit `\fs<default>`
                 // from the outer context so they emit only `\f<n>` and
                 // skip `\fs<n>` to match Director's compact output.
-                let is_styled_label = color_idx != 0
-                    || span.style.bold
-                    || span.style.italic
-                    || span.style.underline;
+                let is_styled_label =
+                    color_idx != 0 || span.style.bold || span.style.italic || span.style.underline;
                 let emit_size = !is_styled_label || size_halfpts != default_size_halfpts;
                 if !is_styled_label {
                     rtf.push_str("\\plain");
@@ -3651,8 +4100,7 @@ impl TextMemberHandlers {
                 rtf.push_str(&format!("\\sb{}\\sa{}\\sl{} ", sb, sa, sl));
 
                 let is_final_span = idx + 1 == span_count;
-                let span_ends_with_break = span.text.ends_with('\r')
-                    || span.text.ends_with('\n');
+                let span_ends_with_break = span.text.ends_with('\r') || span.text.ends_with('\n');
                 let needs_terminal_par = is_final_span && !span_ends_with_break;
 
                 escape_run(&span.text, &mut rtf, false);
@@ -3691,8 +4139,8 @@ impl TextMemberHandlers {
     ///  - `\:` etc. — literal char.
     ///  - `{` / `}` — push/pop style stack.
     fn parse_rtf_to_styled_text(rtf: &str) -> ParsedRtf {
-        use crate::player::handlers::datum_handlers::cast_member::font::{HtmlStyle, StyledSpan};
         use crate::director::chunks::xmedia_styled_text::{ParInfo, ParRun};
+        use crate::player::handlers::datum_handlers::cast_member::font::{HtmlStyle, StyledSpan};
 
         // First pass: extract font table and color table.
         let fonts = Self::rtf_extract_font_table(rtf);
@@ -3771,14 +4219,13 @@ impl TextMemberHandlers {
         // and color_idx → RGB.
         let frame_to_style = |frame: &Frame, fonts: &[String], colors: &[u32]| -> HtmlStyle {
             HtmlStyle {
-                font_face: frame.font_idx
+                font_face: frame
+                    .font_idx
                     .and_then(|i| fonts.get(i))
                     .filter(|f| !f.is_empty())
                     .cloned(),
                 font_size: frame.font_size_halfpts.map(|halfpts| (halfpts / 2) as i32),
-                color: frame.color_idx
-                    .and_then(|i| colors.get(i))
-                    .copied(),
+                color: frame.color_idx.and_then(|i| colors.get(i)).copied(),
                 bg_color: None,
                 bold: frame.bold,
                 italic: frame.italic,
@@ -3853,7 +4300,8 @@ impl TextMemberHandlers {
                         if let Ok(byte) = u8::from_str_radix(&hex, 16) {
                             // Ensure run_style matches current frame.
                             if run_style.is_none() {
-                                run_style = Some(frame_to_style(stack.last().unwrap(), &fonts, &colors));
+                                run_style =
+                                    Some(frame_to_style(stack.last().unwrap(), &fonts, &colors));
                             }
                             run_buf.push(byte as char);
                             text.push(byte as char);
@@ -3861,7 +4309,8 @@ impl TextMemberHandlers {
                         i += 3;
                     } else if next == '\\' || next == '{' || next == '}' {
                         if run_style.is_none() {
-                            run_style = Some(frame_to_style(stack.last().unwrap(), &fonts, &colors));
+                            run_style =
+                                Some(frame_to_style(stack.last().unwrap(), &fonts, &colors));
                         }
                         run_buf.push(next);
                         text.push(next);
@@ -3873,7 +4322,8 @@ impl TextMemberHandlers {
                     } else if !next.is_ascii_alphabetic() {
                         // Non-letter escape (`\:`, `\-`, etc.) — emit literal.
                         if run_style.is_none() {
-                            run_style = Some(frame_to_style(stack.last().unwrap(), &fonts, &colors));
+                            run_style =
+                                Some(frame_to_style(stack.last().unwrap(), &fonts, &colors));
                         }
                         run_buf.push(next);
                         text.push(next);
@@ -3940,9 +4390,8 @@ impl TextMemberHandlers {
                                             Some(v) => v / 20,
                                         }
                                     };
-                                    let pt_sl = |t: Option<i32>| -> i32 {
-                                        t.map(|v| v / 20).unwrap_or(0)
-                                    };
+                                    let pt_sl =
+                                        |t: Option<i32>| -> i32 { t.map(|v| v / 20).unwrap_or(0) };
                                     let new_par = ParInfo {
                                         line_spacing: pt_sl(current_par_sl),
                                         line_height: 0,
@@ -3966,17 +4415,22 @@ impl TextMemberHandlers {
                                     // level top/bottom_spacing at every
                                     // `\par` instead of only at genuine
                                     // par_info group changes.
-                                    let existing_idx = par_infos.iter().enumerate().find_map(|(i, pi)| {
-                                        if pi.line_spacing == new_par.line_spacing
-                                            && pi.line_height == new_par.line_height
-                                            && pi.left_indent == new_par.left_indent
-                                            && pi.right_indent == new_par.right_indent
-                                            && pi.first_indent == new_par.first_indent
-                                            && pi.top_spacing == new_par.top_spacing
-                                            && pi.bottom_spacing == new_par.bottom_spacing
-                                            && pi.justification == new_par.justification
-                                        { Some(i as u16) } else { None }
-                                    });
+                                    let existing_idx =
+                                        par_infos.iter().enumerate().find_map(|(i, pi)| {
+                                            if pi.line_spacing == new_par.line_spacing
+                                                && pi.line_height == new_par.line_height
+                                                && pi.left_indent == new_par.left_indent
+                                                && pi.right_indent == new_par.right_indent
+                                                && pi.first_indent == new_par.first_indent
+                                                && pi.top_spacing == new_par.top_spacing
+                                                && pi.bottom_spacing == new_par.bottom_spacing
+                                                && pi.justification == new_par.justification
+                                            {
+                                                Some(i as u16)
+                                            } else {
+                                                None
+                                            }
+                                        });
                                     match existing_idx {
                                         Some(idx) => idx,
                                         None => {
@@ -4015,7 +4469,11 @@ impl TextMemberHandlers {
                                 // its terminating break the same way the
                                 // generator emits).
                                 if run_style.is_none() {
-                                    run_style = Some(frame_to_style(stack.last().unwrap(), &fonts, &colors));
+                                    run_style = Some(frame_to_style(
+                                        stack.last().unwrap(),
+                                        &fonts,
+                                        &colors,
+                                    ));
                                 }
                                 run_buf.push('\r');
                                 text.push('\r');
@@ -4023,7 +4481,11 @@ impl TextMemberHandlers {
                             }
                             "tab" => {
                                 if run_style.is_none() {
-                                    run_style = Some(frame_to_style(stack.last().unwrap(), &fonts, &colors));
+                                    run_style = Some(frame_to_style(
+                                        stack.last().unwrap(),
+                                        &fonts,
+                                        &colors,
+                                    ));
                                 }
                                 run_buf.push('\t');
                             }
@@ -4106,7 +4568,8 @@ impl TextMemberHandlers {
                         // run so style changes flush the previous run
                         // before applying.
                         if run_style.is_none() {
-                            run_style = Some(frame_to_style(stack.last().unwrap(), &fonts, &colors));
+                            run_style =
+                                Some(frame_to_style(stack.last().unwrap(), &fonts, &colors));
                         }
                         run_buf.push(ch);
                         text.push(ch);
@@ -4343,7 +4806,7 @@ impl TextMemberHandlers {
                 '{' => {
                     depth += 1;
                     // Check if this group starts with a known skip keyword
-                    let rest: String = chars[i+1..len.min(i+20)].iter().collect();
+                    let rest: String = chars[i + 1..len.min(i + 20)].iter().collect();
                     if rest.starts_with("\\fonttbl")
                         || rest.starts_with("\\colortbl")
                         || rest.starts_with("\\stylesheet")
@@ -4363,11 +4826,13 @@ impl TextMemberHandlers {
                 }
                 '\\' if skip_depth.is_none() => {
                     i += 1;
-                    if i >= len { break; }
+                    if i >= len {
+                        break;
+                    }
                     let next = chars[i];
                     if next == '\'' && i + 2 < len {
                         // \'XX hex escape
-                        let hex: String = chars[i+1..i+3].iter().collect();
+                        let hex: String = chars[i + 1..i + 3].iter().collect();
                         if let Ok(byte) = u8::from_str_radix(&hex, 16) {
                             result.push(byte as char);
                         }
@@ -4387,7 +4852,9 @@ impl TextMemberHandlers {
                         }
                         // Skip optional numeric parameter (including negative sign)
                         if i < len && (chars[i] == '-' || chars[i].is_ascii_digit()) {
-                            if chars[i] == '-' { i += 1; }
+                            if chars[i] == '-' {
+                                i += 1;
+                            }
                             while i < len && chars[i].is_ascii_digit() {
                                 i += 1;
                             }

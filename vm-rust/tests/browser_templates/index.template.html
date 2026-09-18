@@ -201,8 +201,6 @@
 
     try {
       await init();
-      // Wire up timeout triggering now that wasm exports are available
-      window.__wasm_trigger_timeout = wasm.trigger_timeout;
       // Tell the real dirplayer-js-api bridge which wasm module to call
       // back into. The bridge's webpack-style `require('vm-rust')` path
       // can't resolve here (we're pure ESM + importmap), so the bridge
@@ -211,9 +209,23 @@
       // loads, registry resolution, etc. all work normally in tests.
       const api = await import('./dirplayer-js-api.js');
       api.setVmModule(wasm);
-      window.dirplayer_registerFlashOwner = api.dirplayer_registerFlashOwner;
-      window.dirplayer_unregisterFlashOwner = api.dirplayer_unregisterFlashOwner;
-      window.dirplayer_testFlashOwnerCapability = api.dirplayer_testFlashOwnerCapability;
+      window.dirplayer_registerBrowserOwner = api.dirplayer_registerBrowserOwner;
+      window.dirplayer_unregisterBrowserOwner = api.dirplayer_unregisterBrowserOwner;
+      window.dirplayer_testBrowserOwnerCapability = api.dirplayer_testBrowserOwnerCapability;
+      window.dirplayer_testNestedBrowserOwnerKeys = api.dirplayer_testNestedBrowserOwnerKeys;
+      window.dirplayer_testDispatchBrowserOwnerAction = api.dirplayer_testDispatchBrowserOwnerAction;
+      window.dirplayer_testQueuePreparedFlashAction = api.dirplayer_testQueuePreparedFlashAction;
+      window.dirplayer_testProbePreparedBrowserOwner = api.dirplayer_testProbePreparedBrowserOwner;
+      window.dirplayer_testBrowserOwnerTimerProbe = api.dirplayer_testBrowserOwnerTimerProbe;
+      window.dirplayer_testInstallBrowserOwnerTimerResetReentry = api.dirplayer_testInstallBrowserOwnerTimerResetReentry;
+      window.dirplayer_testClearBrowserOwnerTimerResetReentry = api.dirplayer_testClearBrowserOwnerTimerResetReentry;
+      window.dirplayer_testResetBrowserOwnerTimerClearRecord = api.dirplayer_testResetBrowserOwnerTimerClearRecord;
+      window.dirplayer_testBrowserOwnerTimerClearCount = api.dirplayer_testBrowserOwnerTimerClearCount;
+      window.dirplayer_testBrowserOwnerTimerClearPhases = api.dirplayer_testBrowserOwnerTimerClearPhases;
+      window.dirplayer_testFailNextNestedCallbackRegistration = api.dirplayer_testFailNextNestedCallbackRegistration;
+      window.dirplayer_testLastFailedNestedOwnerKey = api.dirplayer_testLastFailedNestedOwnerKey;
+      window.dirplayer_testProbeFailedNestedCallbackAbsent = api.dirplayer_testProbeFailedNestedCallbackAbsent;
+      window.dirplayer_testProbeFailedNestedHostAbsent = api.dirplayer_testProbeFailedNestedHostAbsent;
       // Prime the xtra registry from /assets/xtra-registry.json so movies
       // that declare an external Xtra (Groove, BobbaXtra) get their wasm
       // plugin auto-loaded, exactly like the dev host does. The harness

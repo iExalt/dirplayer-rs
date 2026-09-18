@@ -2,21 +2,33 @@ use std::collections::VecDeque;
 
 use crate::{
     director::lingo::datum::{
-        Datum, DatumType, StringChunkExpr, StringChunkSource, StringChunkType, datum_bool
+        datum_bool, Datum, DatumType, StringChunkExpr, StringChunkSource, StringChunkType,
     },
     player::{
-        DatumRef, DirPlayer, ScriptError, bitmap::{bitmap::{self, Bitmap, BuiltInPalette, PaletteRef}, drawing::CopyPixelsParams, mask::BitmapMask, palette_map::PaletteMap}, cast_lib::CastMemberRef, font::{
-            BitmapFont, DrawTextParams, bitmap_font_copy_char_scaled, get_text_index_at_pos, measure_text
-        }, handlers::datum_handlers::{
-            cast_member_ref::{borrow_member_mut_with_player, checked_get_datum}, string_chunk::StringChunkUtils,
-        }, symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable}
+        bitmap::{
+            bitmap::{self, Bitmap, BuiltInPalette, PaletteRef},
+            drawing::CopyPixelsParams,
+            mask::BitmapMask,
+            palette_map::PaletteMap,
+        },
+        cast_lib::CastMemberRef,
+        font::{
+            bitmap_font_copy_char_scaled, get_text_index_at_pos, measure_text, BitmapFont,
+            DrawTextParams,
+        },
+        handlers::datum_handlers::{
+            cast_member_ref::{borrow_member_mut_with_player, checked_get_datum},
+            string_chunk::StringChunkUtils,
+        },
+        symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable},
+        DatumRef, DirPlayer, ScriptError,
     },
 };
 
 use crate::player::cast_member::CastMemberType;
 use crate::player::ColorRef;
-use std::borrow::Borrow;
 use log::debug;
+use std::borrow::Borrow;
 use wasm_bindgen::JsCast;
 
 // Simple HTML parser without external dependencies
@@ -29,8 +41,8 @@ pub struct HtmlStyle {
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
-    pub kerning: i32,       // Kerning amount (from XMED Section 7 dword98, stored as fixed-point * 65536)
-    pub char_spacing: i32,  // Character spacing in pixels (from XMED Section 7 dword9C, stored as fixed-point * 65536)
+    pub kerning: i32, // Kerning amount (from XMED Section 7 dword98, stored as fixed-point * 65536)
+    pub char_spacing: i32, // Character spacing in pixels (from XMED Section 7 dword9C, stored as fixed-point * 65536)
     /// Director chapter 15 `hyperlink` (`director_reference.md:2348`).
     /// Per-character link target — the Lingo-side data string that
     /// `on hyperlinkClick(me, data, range)` receives. We don't currently
@@ -170,7 +182,11 @@ impl HtmlParser {
                     if tag.starts_with('/') {
                         let closing_tag = tag_lower[1..].split_whitespace().next().unwrap_or("");
                         // Check if closing a non-content tag
-                        if closing_tag == "head" || closing_tag == "title" || closing_tag == "script" || closing_tag == "style" {
+                        if closing_tag == "head"
+                            || closing_tag == "title"
+                            || closing_tag == "script"
+                            || closing_tag == "style"
+                        {
                             if skip_content_depth > 0 {
                                 skip_content_depth -= 1;
                             }
@@ -182,11 +198,18 @@ impl HtmlParser {
                         let mut new_style = style_stack.last().unwrap().clone();
 
                         // Get the tag name, handling self-closing tags like <br/> or <br />
-                        let tag_name = tag_lower.split_whitespace().next().unwrap_or("")
+                        let tag_name = tag_lower
+                            .split_whitespace()
+                            .next()
+                            .unwrap_or("")
                             .trim_end_matches('/');
 
                         // Check if entering a non-content tag
-                        if tag_name == "head" || tag_name == "title" || tag_name == "script" || tag_name == "style" {
+                        if tag_name == "head"
+                            || tag_name == "title"
+                            || tag_name == "script"
+                            || tag_name == "style"
+                        {
                             skip_content_depth += 1;
                         } else if skip_content_depth == 0 {
                             // Only process content tags when not inside non-content section
@@ -218,7 +241,8 @@ impl HtmlParser {
                                 "p" => {
                                     // Handle paragraph tag - may have align attribute
                                     // Add newline before paragraph if not at start
-                                    if !spans.is_empty() && !spans.last().unwrap().text.ends_with('\n')
+                                    if !spans.is_empty()
+                                        && !spans.last().unwrap().text.ends_with('\n')
                                     {
                                         spans.push(StyledSpan {
                                             text: "\n".to_string(),
@@ -227,7 +251,8 @@ impl HtmlParser {
                                     }
                                 }
                                 "center" => {
-                                    if !spans.is_empty() && !spans.last().unwrap().text.ends_with('\n')
+                                    if !spans.is_empty()
+                                        && !spans.last().unwrap().text.ends_with('\n')
                                     {
                                         spans.push(StyledSpan {
                                             text: "\n".to_string(),
@@ -359,7 +384,10 @@ pub struct OutlineCharStyle {
 
 pub struct FontMemberHandlers {}
 
-fn builtin_symbol(symbol: &Symbol, symbols: &SymbolTable) -> Result<Option<BuiltInSymbol>, ScriptError> {
+fn builtin_symbol(
+    symbol: &Symbol,
+    symbols: &SymbolTable,
+) -> Result<Option<BuiltInSymbol>, ScriptError> {
     match symbol.into_builtin_or_error(symbols) {
         Ok(value) => Ok(Some(value)),
         Err(crate::player::symbols::symbol::SymbolError::NotBuiltin { .. }) => Ok(None),
@@ -384,7 +412,8 @@ impl FontMemberHandlers {
         let text = member.member_type.as_text().unwrap();
         match handler_name {
             "count" => {
-                let count_of = checked_get_datum(player, &args[0], symbols)?.symbol_value(symbols)?;
+                let count_of =
+                    checked_get_datum(player, &args[0], symbols)?.symbol_value(symbols)?;
                 if args.len() != 1 {
                     return Err(ScriptError::new("count requires 1 argument".to_string()));
                 }
@@ -397,7 +426,8 @@ impl FontMemberHandlers {
                 Ok(player.alloc_datum(Datum::Int(count as i32)))
             }
             "getPropRef" => {
-                let prop_name = checked_get_datum(player, &args[0], symbols)?.symbol_value(symbols)?;
+                let prop_name =
+                    checked_get_datum(player, &args[0], symbols)?.symbol_value(symbols)?;
                 let start = checked_get_datum(player, &args[1], symbols)?.int_value()?;
                 let end = if args.len() > 2 {
                     checked_get_datum(player, &args[2], symbols)?.int_value()?
@@ -420,7 +450,8 @@ impl FontMemberHandlers {
                 )))
             }
             "locToCharPos" => {
-                let (pt_vals, _flags) = checked_get_datum(player, &args[0], symbols)?.to_point_inline()?;
+                let (pt_vals, _flags) =
+                    checked_get_datum(player, &args[0], symbols)?.to_point_inline()?;
                 let x = pt_vals[0] as i32;
                 let y = pt_vals[1] as i32;
 
@@ -485,8 +516,15 @@ impl FontMemberHandlers {
         fixed_line_space: u16,
     ) -> (u16, u16) {
         Self::measure_text_native_styled(
-            text, font_name, font_size, None,
-            word_wrap, max_width, top_spacing, bottom_spacing, fixed_line_space,
+            text,
+            font_name,
+            font_size,
+            None,
+            word_wrap,
+            max_width,
+            top_spacing,
+            bottom_spacing,
+            fixed_line_space,
         )
     }
 
@@ -520,11 +558,7 @@ impl FontMemberHandlers {
         };
         canvas.set_width(1);
         canvas.set_height(1);
-        let ctx: web_sys::CanvasRenderingContext2d = match canvas
-            .get_context("2d")
-            .ok()
-            .flatten()
-        {
+        let ctx: web_sys::CanvasRenderingContext2d = match canvas.get_context("2d").ok().flatten() {
             Some(c) => match c.dyn_into() {
                 Ok(ctx) => ctx,
                 Err(_) => return (100, font_size.max(12)),
@@ -534,8 +568,12 @@ impl FontMemberHandlers {
 
         let mut parts: Vec<String> = Vec::new();
         if let Some(s) = font_style {
-            if s & 0x02 != 0 { parts.push("italic".to_string()); }
-            if s & 0x01 != 0 { parts.push("bold".to_string()); }
+            if s & 0x02 != 0 {
+                parts.push("italic".to_string());
+            }
+            if s & 0x01 != 0 {
+                parts.push("bold".to_string());
+            }
         }
         parts.push(format!("{}px", font_size));
         parts.push(font_name.to_string());
@@ -572,7 +610,10 @@ impl FontMemberHandlers {
                     } else {
                         format!("{} {}", current, word)
                     };
-                    let w = ctx.measure_text(&candidate).map(|m| m.width()).unwrap_or(0.0);
+                    let w = ctx
+                        .measure_text(&candidate)
+                        .map(|m| m.width())
+                        .unwrap_or(0.0);
                     if w > wrap_width && !current.is_empty() {
                         let line_w = ctx.measure_text(&current).map(|m| m.width()).unwrap_or(0.0);
                         total_width = total_width.max(line_w);
@@ -601,7 +642,10 @@ impl FontMemberHandlers {
             top_spacing.max(0) as f64 + line_height + (line_count as f64 - 1.0) * line_step
         };
 
-        (total_width.ceil().max(1.0) as u16, total_height.ceil().max(1.0) as u16)
+        (
+            total_width.ceil().max(1.0) as u16,
+            total_height.ceil().max(1.0) as u16,
+        )
     }
 
     /// Render styled text using browser's native Canvas2D fillText() for smooth, anti-aliased text
@@ -635,9 +679,23 @@ impl FontMemberHandlers {
         par_runs: &[crate::director::chunks::xmedia_styled_text::ParRun],
     ) -> Result<(), ScriptError> {
         Self::render_native_text_to_bitmap_with_caret(
-            bitmap, spans, start_x, start_y, render_width, render_height,
-            alignment, max_width, word_wrap, sprite_color, fixed_line_space,
-            top_spacing, bottom_spacing, tab_stops, par_infos, par_runs, None,
+            bitmap,
+            spans,
+            start_x,
+            start_y,
+            render_width,
+            render_height,
+            alignment,
+            max_width,
+            word_wrap,
+            sprite_color,
+            fixed_line_space,
+            top_spacing,
+            bottom_spacing,
+            tab_stops,
+            par_infos,
+            par_runs,
+            None,
         )
     }
 
@@ -699,7 +757,12 @@ impl FontMemberHandlers {
         // This avoids color-dependent anti-aliasing artifacts from Canvas2D.
         // Coverage is then mapped to the bitmap as: black text on white background.
         ctx.set_fill_style_str("rgb(0,0,0)");
-        ctx.fill_rect(0.0, 0.0, render_width.max(1) as f64, render_height.max(1) as f64);
+        ctx.fill_rect(
+            0.0,
+            0.0,
+            render_width.max(1) as f64,
+            render_height.max(1) as f64,
+        );
 
         // Apply the vertical origin during LAYOUT rather than when blitting the
         // canvas back to the bitmap. The canvas is only render_height tall, so
@@ -779,7 +842,11 @@ impl FontMemberHandlers {
             font_parts.push(font_face);
 
             let color = if let Some(c) = style.color {
-                (((c >> 16) & 0xFF) as u8, ((c >> 8) & 0xFF) as u8, (c & 0xFF) as u8)
+                (
+                    ((c >> 16) & 0xFF) as u8,
+                    ((c >> 8) & 0xFF) as u8,
+                    (c & 0xFF) as u8,
+                )
             } else {
                 fallback_color
             };
@@ -968,7 +1035,6 @@ impl FontMemberHandlers {
         if !current_line.segments.is_empty() || lines.is_empty() {
             lines.push(current_line);
         }
-
 
         // Map a text-character position to its par_info index via par_runs.
         // Returns None when no par_info data is available so callers can
@@ -1239,8 +1305,16 @@ impl FontMemberHandlers {
                 .unwrap_or_else(|| "?".to_string());
             debug!(
                 "[canvas-debug] text='{}' canvas={}x{} nonblack={}/{} first={}",
-                text_preview, canvas_width, canvas_height, nonblack, total_px,
-                if first_nb.is_empty() { "NONE".to_string() } else { first_nb }
+                text_preview,
+                canvas_width,
+                canvas_height,
+                nonblack,
+                total_px,
+                if first_nb.is_empty() {
+                    "NONE".to_string()
+                } else {
+                    first_nb
+                }
             );
         }
 
@@ -1282,7 +1356,9 @@ impl FontMemberHandlers {
 
                 // Only write pixels where text was actually rendered (coverage > 0).
                 // Background pixels stay at the bitmap's pre-fill (transparent for text.image).
-                if coverage == 0 { continue; }
+                if coverage == 0 {
+                    continue;
+                }
 
                 // Write foreColor with coverage-based alpha.
                 // This produces: text pixels = foreColor at full/partial alpha,
@@ -1298,7 +1374,9 @@ impl FontMemberHandlers {
                         let fy = cy as f64;
                         seg_color_rects
                             .iter()
-                            .find(|&&(x0, x1, yt, yb, _)| fx >= x0 && fx < x1 && fy >= yt && fy < yb)
+                            .find(|&&(x0, x1, yt, yb, _)| {
+                                fx >= x0 && fx < x1 && fy >= yt && fy < yb
+                            })
                             .map(|&(_, _, _, _, c)| c)
                             .unwrap_or(fallback_color)
                     };
@@ -1330,25 +1408,40 @@ impl FontMemberHandlers {
                 let x_start = match alignment {
                     TextAlignment::Left => 0.0,
                     TextAlignment::Center => {
-                        if max_width > 0 { ((max_width as f64) - line.width) / 2.0 } else { 0.0 }
+                        if max_width > 0 {
+                            ((max_width as f64) - line.width) / 2.0
+                        } else {
+                            0.0
+                        }
                     }
                     TextAlignment::Right => {
-                        if max_width > 0 { (max_width as f64) - line.width } else { 0.0 }
+                        if max_width > 0 {
+                            (max_width as f64) - line.width
+                        } else {
+                            0.0
+                        }
                     }
                     TextAlignment::Justify => 0.0,
-                }.max(0.0);
+                }
+                .max(0.0);
                 let line_byte_start = line.segments.first().map(|s| s.start_byte).unwrap_or(0);
-                let line_byte_end = line.segments.last()
+                let line_byte_end = line
+                    .segments
+                    .last()
                     .map(|s| s.start_byte + s.text.len())
                     .unwrap_or(line_byte_start);
 
                 // Resolve a byte offset within this line to a pixel x by walking
                 // segments and using Canvas2D measureText for the prefix inside
                 // the segment that contains the offset.
-                let pixel_x_for_byte = |byte: usize, ctx: &web_sys::CanvasRenderingContext2d| -> f64 {
+                let pixel_x_for_byte = |byte: usize,
+                                        ctx: &web_sys::CanvasRenderingContext2d|
+                 -> f64 {
                     let mut x = x_start;
                     for segment in &line.segments {
-                        if segment.is_tab { continue; }
+                        if segment.is_tab {
+                            continue;
+                        }
                         let seg_end = segment.start_byte + segment.text.len();
                         if byte <= segment.start_byte {
                             return x;
@@ -1363,12 +1456,12 @@ impl FontMemberHandlers {
                         // and a raw slice would panic. Rounding DOWN
                         // means the prefix excludes a half-finished char.
                         let mut clamped = inner.min(segment.text.len());
-                        while clamped > 0 && !segment.text.is_char_boundary(clamped) { clamped -= 1; }
+                        while clamped > 0 && !segment.text.is_char_boundary(clamped) {
+                            clamped -= 1;
+                        }
                         let prefix = &segment.text[..clamped];
                         ctx.set_font(&segment.style.font);
-                        let prefix_w = ctx.measure_text(prefix)
-                            .map(|m| m.width())
-                            .unwrap_or(0.0);
+                        let prefix_w = ctx.measure_text(prefix).map(|m| m.width()).unwrap_or(0.0);
                         return x + prefix_w;
                     }
                     x
@@ -1386,12 +1479,13 @@ impl FontMemberHandlers {
                         // Selection wraps to next line — show the trailing space.
                         x1 = x0 + line.max_font_px.max(8.0) * 0.4;
                     }
-                    if x1 <= x0 { continue; }
+                    if x1 <= x0 {
+                        continue;
+                    }
                     let left = (start_x + (x0).round() as i32).max(0);
                     let right = (start_x + (x1).round() as i32).max(0);
                     let top = (start_y + line_top_y.round() as i32).max(0);
-                    let bottom = (top + line_h.round() as i32)
-                        .min(bitmap.height as i32);
+                    let bottom = (top + line_h.round() as i32).min(bitmap.height as i32);
                     let right = right.min(bitmap.width as i32);
                     let left = left.min(right);
                     // Composite the selection BEHIND the already-rasterized
@@ -1407,18 +1501,28 @@ impl FontMemberHandlers {
                     for py in top..bottom {
                         for px in left..right {
                             let idx = ((py as usize) * bitmap.width as usize + px as usize) * 4;
-                            if idx + 3 >= bitmap.data.len() { continue; }
+                            if idx + 3 >= bitmap.data.len() {
+                                continue;
+                            }
                             let a = bitmap.data[idx + 3] as u32;
                             if a == 0 {
-                                bitmap.data[idx]     = selection_color.0;
+                                bitmap.data[idx] = selection_color.0;
                                 bitmap.data[idx + 1] = selection_color.1;
                                 bitmap.data[idx + 2] = selection_color.2;
                                 bitmap.data[idx + 3] = 255;
                             } else if a < 255 {
                                 let inv = 255 - a;
-                                bitmap.data[idx]     = ((bitmap.data[idx]     as u32 * a + selection_color.0 as u32 * inv) / 255) as u8;
-                                bitmap.data[idx + 1] = ((bitmap.data[idx + 1] as u32 * a + selection_color.1 as u32 * inv) / 255) as u8;
-                                bitmap.data[idx + 2] = ((bitmap.data[idx + 2] as u32 * a + selection_color.2 as u32 * inv) / 255) as u8;
+                                bitmap.data[idx] = ((bitmap.data[idx] as u32 * a
+                                    + selection_color.0 as u32 * inv)
+                                    / 255) as u8;
+                                bitmap.data[idx + 1] = ((bitmap.data[idx + 1] as u32 * a
+                                    + selection_color.1 as u32 * inv)
+                                    / 255)
+                                    as u8;
+                                bitmap.data[idx + 2] = ((bitmap.data[idx + 2] as u32 * a
+                                    + selection_color.2 as u32 * inv)
+                                    / 255)
+                                    as u8;
                                 bitmap.data[idx + 3] = 255;
                             }
                         }
@@ -1497,7 +1601,11 @@ impl FontMemberHandlers {
         // Same Y orientation rule as the rasterizer: when the font matrix
         // already flips Y (m[3] < 0) the parsed coords are Y-down, so we use a
         // positive scale; otherwise flip.
-        let glyph_scale_y = if matrix_sy < 0.0 { scale_y_mag } else { -scale_y_mag };
+        let glyph_scale_y = if matrix_sy < 0.0 {
+            scale_y_mag
+        } else {
+            -scale_y_mag
+        };
         let baseline = (phys.metrics.ascender as f64 * scale).round();
 
         // Per-char advance from the glyph's set_width (fractional → sub-pixel).
@@ -1521,7 +1629,11 @@ impl FontMemberHandlers {
         let mut lines: Vec<Vec<(char, usize)>> = Vec::new();
         {
             let chars: Vec<char> = normalised.chars().collect();
-            let wrap_w = if word_wrap && max_width > 0 { max_width as f64 } else { f64::MAX };
+            let wrap_w = if word_wrap && max_width > 0 {
+                max_width as f64
+            } else {
+                f64::MAX
+            };
             let mut cur: Vec<(char, usize)> = Vec::new();
             let mut cur_w: f64 = 0.0;
             let mut last_space: Option<usize> = None; // index within `cur`
@@ -1529,10 +1641,16 @@ impl FontMemberHandlers {
             for (i, &c) in chars.iter().enumerate() {
                 if c == '\n' {
                     lines.push(std::mem::take(&mut cur));
-                    cur_w = 0.0; last_space = None; width_to = 0.0;
+                    cur_w = 0.0;
+                    last_space = None;
+                    width_to = 0.0;
                     continue;
                 }
-                let adv = if c == '\t' { 0.0 } else { advance_of(glyph_byte_for(c)) };
+                let adv = if c == '\t' {
+                    0.0
+                } else {
+                    advance_of(glyph_byte_for(c))
+                };
                 let has_tab = cur.iter().any(|&(ch, _)| ch == '\t');
                 if word_wrap && !has_tab && cur_w + adv > wrap_w && !cur.is_empty() {
                     if let Some(sp) = last_space {
@@ -1541,17 +1659,28 @@ impl FontMemberHandlers {
                         cur.pop(); // drop the break space itself
                         lines.push(std::mem::take(&mut cur));
                         cur = tail;
-                        cur_w = cur.iter()
-                            .map(|&(ch, _)| if ch == '\t' { 0.0 } else { advance_of(glyph_byte_for(ch)) })
+                        cur_w = cur
+                            .iter()
+                            .map(|&(ch, _)| {
+                                if ch == '\t' {
+                                    0.0
+                                } else {
+                                    advance_of(glyph_byte_for(ch))
+                                }
+                            })
                             .sum();
                         let _ = width_to;
                         last_space = None;
                     } else {
                         lines.push(std::mem::take(&mut cur));
-                        cur_w = 0.0; last_space = None;
+                        cur_w = 0.0;
+                        last_space = None;
                     }
                 }
-                if c == ' ' { last_space = Some(cur.len()); width_to = cur_w; }
+                if c == ' ' {
+                    last_space = Some(cur.len());
+                    width_to = cur_w;
+                }
                 cur.push((c, i));
                 cur_w += adv;
             }
@@ -1585,7 +1714,9 @@ impl FontMemberHandlers {
         let line_step = effective_line_h + bottom_spacing as f64 + top_spacing as f64;
 
         let seg_width = |seg: &[(char, usize)]| -> f64 {
-            seg.iter().map(|&(c, _)| advance_of(glyph_byte_for(c))).sum()
+            seg.iter()
+                .map(|&(c, _)| advance_of(glyph_byte_for(c)))
+                .sum()
         };
         let has_right_tab = tab_stops.iter().any(|t| t.tab_type == BuiltInSymbol::Right);
 
@@ -1611,7 +1742,9 @@ impl FontMemberHandlers {
 
         let mut y_top = top_spacing as f64;
         for line in &lines {
-            if y_top >= render_height as f64 { break; }
+            if y_top >= render_height as f64 {
+                break;
+            }
             let baseline_y = y_top + baseline;
 
             // Split into tab segments.
@@ -1693,13 +1826,31 @@ impl FontMemberHandlers {
                         if let Some(glyph) = parsed.glyphs.get(&code) {
                             if !glyph.contours.is_empty() {
                                 Self::raster_glyph_outline(
-                                    &mut buf, cw2u, ch2u, sf as f64, glyph,
-                                    draw_x, baseline_y, scale_x, glyph_scale_y, st.italic, st.color,
+                                    &mut buf,
+                                    cw2u,
+                                    ch2u,
+                                    sf as f64,
+                                    glyph,
+                                    draw_x,
+                                    baseline_y,
+                                    scale_x,
+                                    glyph_scale_y,
+                                    st.italic,
+                                    st.color,
                                 );
                                 if st.bold {
                                     Self::raster_glyph_outline(
-                                        &mut buf, cw2u, ch2u, sf as f64, glyph,
-                                        draw_x + bold_off, baseline_y, scale_x, glyph_scale_y, st.italic, st.color,
+                                        &mut buf,
+                                        cw2u,
+                                        ch2u,
+                                        sf as f64,
+                                        glyph,
+                                        draw_x + bold_off,
+                                        baseline_y,
+                                        scale_x,
+                                        glyph_scale_y,
+                                        st.italic,
+                                        st.color,
                                     );
                                 }
                             }
@@ -1712,8 +1863,14 @@ impl FontMemberHandlers {
                         let uy = baseline_y + 1.0;
                         let sfd = sf as f64;
                         Self::fill_solid_rect(
-                            &mut buf, cw2u, ch2u,
-                            x * sfd, uy * sfd, (x + adv) * sfd, (uy + 1.0) * sfd, st.color,
+                            &mut buf,
+                            cw2u,
+                            ch2u,
+                            x * sfd,
+                            uy * sfd,
+                            (x + adv) * sfd,
+                            (uy + 1.0) * sfd,
+                            st.color,
                         );
                     }
                     x += adv;
@@ -1729,10 +1886,14 @@ impl FontMemberHandlers {
         let out_h = render_height.max(1) as usize;
         for cy in 0..out_h {
             let dest_y = start_y + cy as i32;
-            if dest_y < 0 || dest_y >= bitmap.height as i32 { continue; }
+            if dest_y < 0 || dest_y >= bitmap.height as i32 {
+                continue;
+            }
             for cx in 0..out_w {
                 let dest_x = start_x + cx as i32;
-                if dest_x < 0 || dest_x >= bitmap.width as i32 { continue; }
+                if dest_x < 0 || dest_x >= bitmap.width as i32 {
+                    continue;
+                }
                 let (mut sr, mut sg, mut sb, mut sa) = (0u32, 0u32, 0u32, 0u32);
                 for sy in 0..sf as usize {
                     for sx in 0..sf as usize {
@@ -1747,7 +1908,9 @@ impl FontMemberHandlers {
                     }
                 }
                 let avg_a = (sa / (sf as u32 * sf as u32)) as u8;
-                if avg_a == 0 { continue; }
+                if avg_a == 0 {
+                    continue;
+                }
                 // Steepen the coverage ramp for Shockwave-crisp edges (same
                 // idea as the atlas path's `steepen_alpha_ramp`): clip the
                 // faint outer halo to transparent so edges stay tight, and
@@ -1762,7 +1925,9 @@ impl FontMemberHandlers {
                 } else {
                     (((avg_a as f32 - LO) / (HI - LO)) * 255.0).round() as u8
                 };
-                if out_a == 0 { continue; }
+                if out_a == 0 {
+                    continue;
+                }
                 let r = (sr / sa) as u8;
                 let g = (sg / sa) as u8;
                 let b = (sb / sa) as u8;
@@ -1802,7 +1967,10 @@ impl FontMemberHandlers {
         let map = |gx: f32, gy_raw: f32| -> (f64, f64) {
             let gy = gy_raw as f64 * glyph_scale_y;
             let shear = if italic { -gy * SLANT } else { 0.0 };
-            ((cursor_x + gx as f64 * scale_x + shear) * sf, (baseline_y + gy) * sf)
+            (
+                (cursor_x + gx as f64 * scale_x + shear) * sf,
+                (baseline_y + gy) * sf,
+            )
         };
 
         // Flatten contours into device-space edges (curves → line segments).
@@ -1815,18 +1983,24 @@ impl FontMemberHandlers {
                 match cmd.cmd_type {
                     PfrCmdType::MoveTo => {
                         if let Some(s) = start {
-                            if cur != s { edges.push((cur.0, cur.1, s.0, s.1)); }
+                            if cur != s {
+                                edges.push((cur.0, cur.1, s.0, s.1));
+                            }
                         }
                         start = Some(p);
                         cur = p;
                     }
                     PfrCmdType::LineTo => {
-                        if start.is_none() { start = Some(cur); }
+                        if start.is_none() {
+                            start = Some(cur);
+                        }
                         edges.push((cur.0, cur.1, p.0, p.1));
                         cur = p;
                     }
                     PfrCmdType::CurveTo => {
-                        if start.is_none() { start = Some(cur); }
+                        if start.is_none() {
+                            start = Some(cur);
+                        }
                         let c1 = map(cmd.x1, cmd.y1);
                         let c2 = map(cmd.x2, cmd.y2);
                         // Segment count from control-net length (device px).
@@ -1838,7 +2012,8 @@ impl FontMemberHandlers {
                         for i in 1..=n {
                             let t = i as f64 / n as f64;
                             let mt = 1.0 - t;
-                            let (a, b, cc, d) = (mt * mt * mt, 3.0 * mt * mt * t, 3.0 * mt * t * t, t * t * t);
+                            let (a, b, cc, d) =
+                                (mt * mt * mt, 3.0 * mt * mt * t, 3.0 * mt * t * t, t * t * t);
                             let xp = a * cur.0 + b * c1.0 + cc * c2.0 + d * p.0;
                             let yp = a * cur.1 + b * c1.1 + cc * c2.1 + d * p.1;
                             edges.push((prev.0, prev.1, xp, yp));
@@ -1848,17 +2023,23 @@ impl FontMemberHandlers {
                     }
                     PfrCmdType::Close => {
                         if let Some(s) = start {
-                            if cur != s { edges.push((cur.0, cur.1, s.0, s.1)); }
+                            if cur != s {
+                                edges.push((cur.0, cur.1, s.0, s.1));
+                            }
                             cur = s;
                         }
                     }
                 }
             }
             if let Some(s) = start {
-                if cur != s { edges.push((cur.0, cur.1, s.0, s.1)); }
+                if cur != s {
+                    edges.push((cur.0, cur.1, s.0, s.1));
+                }
             }
         }
-        if edges.is_empty() { return; }
+        if edges.is_empty() {
+            return;
+        }
 
         // Scanline fill, non-zero winding, sampling each row at its center.
         let mut ymin = f64::MAX;
@@ -1879,7 +2060,9 @@ impl FontMemberHandlers {
                     xs.push((x0 + t * (x1 - x0), if y1 > y0 { 1 } else { -1 }));
                 }
             }
-            if xs.len() < 2 { continue; }
+            if xs.len() < 2 {
+                continue;
+            }
             xs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
             let mut wind = 0;
             for i in 0..xs.len() - 1 {
@@ -1993,9 +2176,7 @@ impl FontMemberHandlers {
 
         // Get requested font size from style
         // Font size in points approximately equals pixel height at 96 DPI
-        let requested_font_size = first_style
-            .and_then(|s| s.font_size)
-            .unwrap_or(12) as i32; // Default to 12pt if not specified
+        let requested_font_size = first_style.and_then(|s| s.font_size).unwrap_or(12) as i32; // Default to 12pt if not specified
 
         // Scale based on actual character height vs requested pixel height
         // The requested font_size (in points) should map to approximately that many pixels in height
@@ -2009,8 +2190,10 @@ impl FontMemberHandlers {
         debug!(
             "ðŸ“ Font scaling: requested={}pt, native_char={}x{} -> scaled={}x{}",
             requested_font_size,
-            font.char_width, font.char_height,
-            scaled_char_width, scaled_char_height
+            font.char_width,
+            font.char_height,
+            scaled_char_width,
+            scaled_char_height
         );
 
         // Use scaled dimensions for layout
@@ -2049,7 +2232,8 @@ impl FontMemberHandlers {
             }
 
             // Calculate line width using proportional per-character advances
-            let line_width: i32 = line.chars()
+            let line_width: i32 = line
+                .chars()
                 .map(|c| {
                     let advance = font.get_char_advance_for(c) as i32;
                     (advance * requested_font_size) / native_char_height
@@ -2085,7 +2269,9 @@ impl FontMemberHandlers {
                 }
 
                 // Calculate proportional advance for this character
-                let char_advance = ((font.get_char_advance_for(ch) as i32) * requested_font_size / native_char_height).max(1);
+                let char_advance = ((font.get_char_advance_for(ch) as i32) * requested_font_size
+                    / native_char_height)
+                    .max(1);
 
                 // For space character, just advance position without drawing
                 if ch == ' ' {
@@ -2099,17 +2285,31 @@ impl FontMemberHandlers {
 
                 // Draw the character with scaling (use full cell width for source mapping)
                 bitmap_font_copy_char_scaled(
-                    font, font_bitmap, crate::io::encoding::glyph_byte_for(ch), bitmap,
-                    char_x, y, char_width, char_height,
-                    palettes, &params
+                    font,
+                    font_bitmap,
+                    crate::io::encoding::glyph_byte_for(ch),
+                    bitmap,
+                    char_x,
+                    y,
+                    char_width,
+                    char_height,
+                    palettes,
+                    &params,
                 );
 
                 // Simulate bold by drawing again with 1px offset
                 if is_bold {
                     bitmap_font_copy_char_scaled(
-                        font, font_bitmap, crate::io::encoding::glyph_byte_for(ch), bitmap,
-                        char_x + 1, y, char_width, char_height,
-                        palettes, &params
+                        font,
+                        font_bitmap,
+                        crate::io::encoding::glyph_byte_for(ch),
+                        bitmap,
+                        char_x + 1,
+                        y,
+                        char_width,
+                        char_height,
+                        palettes,
+                        &params,
                     );
                 }
 
@@ -2119,10 +2319,12 @@ impl FontMemberHandlers {
                     if underline_y < bitmap.height as i32 {
                         for ux in char_x..(char_x + char_advance).min(bitmap.width as i32) {
                             if ux >= 0 {
-                                let idx = (underline_y as usize * bitmap.width as usize + ux as usize) * 4;
+                                let idx = (underline_y as usize * bitmap.width as usize
+                                    + ux as usize)
+                                    * 4;
                                 if idx + 3 < bitmap.data.len() {
                                     // Draw underline pixel (use foreground color)
-                                    bitmap.data[idx] = 0;     // R
+                                    bitmap.data[idx] = 0; // R
                                     bitmap.data[idx + 1] = 0; // G
                                     bitmap.data[idx + 2] = 0; // B
                                     bitmap.data[idx + 3] = 255; // A
@@ -2340,7 +2542,8 @@ impl FontMemberHandlers {
                         original_dst_rect: None,
                         bg_color_explicit: false,
                         fore_color_explicit: false,
-                        ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
+                        ink9_mask_bitmap: None,
+                        ink9_mask_offset: (0, 0),
                         floor_rule: false,
                     };
 
@@ -2371,10 +2574,7 @@ impl FontMemberHandlers {
             "center" => Ok(TextAlignment::Center),
             "right" => Ok(TextAlignment::Right),
             "justify" => Ok(TextAlignment::Justify),
-            _ => Err(ScriptError::new(format!(
-                "Invalid alignment '{}'",
-                s
-            ))),
+            _ => Err(ScriptError::new(format!("Invalid alignment '{}'", s))),
         }
     }
 
@@ -2394,7 +2594,9 @@ impl FontMemberHandlers {
             CastMemberType::Text(text_data) => {
                 match builtin_symbol(&prop, symbols)? {
                     Some(BuiltInSymbol::Text) => Ok(Datum::String(text_data.text.clone())),
-                    Some(BuiltInSymbol::Alignment) => Ok(Datum::String(text_data.alignment.to_string())),
+                    Some(BuiltInSymbol::Alignment) => {
+                        Ok(Datum::String(text_data.alignment.to_string()))
+                    }
                     Some(BuiltInSymbol::WordWrap) => Ok(datum_bool(text_data.word_wrap)),
                     Some(BuiltInSymbol::Width) => Ok(Datum::Int(text_data.width as i32)),
                     Some(BuiltInSymbol::Font) => Ok(Datum::String(text_data.font.clone())),
@@ -2407,9 +2609,13 @@ impl FontMemberHandlers {
                             .collect();
                         Ok(Datum::List(DatumType::List, item_refs, false))
                     }
-                    Some(BuiltInSymbol::FixedLineSpace) => Ok(Datum::Int(text_data.fixed_line_space as i32)),
+                    Some(BuiltInSymbol::FixedLineSpace) => {
+                        Ok(Datum::Int(text_data.fixed_line_space as i32))
+                    }
                     Some(BuiltInSymbol::TopSpacing) => Ok(Datum::Int(text_data.top_spacing as i32)),
-                    Some(BuiltInSymbol::BoxType) => Ok(Datum::Symbol(Symbol::builtin(text_data.box_type.clone()))),
+                    Some(BuiltInSymbol::BoxType) => {
+                        Ok(Datum::Symbol(Symbol::builtin(text_data.box_type.clone())))
+                    }
                     Some(BuiltInSymbol::Antialias) => Ok(datum_bool(text_data.anti_alias)),
                     Some(BuiltInSymbol::Rect | BuiltInSymbol::Height | BuiltInSymbol::Image) => {
                         // Clone necessary data to avoid borrow issues
@@ -2455,11 +2661,19 @@ impl FontMemberHandlers {
                             .into(),
                         );
 
-                        let (width, height) =
-                            measure_text(&text_clone, &font, None, fixed_line_space, top_spacing, 0);
+                        let (width, height) = measure_text(
+                            &text_clone,
+                            &font,
+                            None,
+                            fixed_line_space,
+                            top_spacing,
+                            0,
+                        );
 
                         match builtin_symbol(&prop, symbols)? {
-                            Some(BuiltInSymbol::Rect) => Ok(Datum::Rect([0.0, 0.0, width as f64, height as f64], 0)),
+                            Some(BuiltInSymbol::Rect) => {
+                                Ok(Datum::Rect([0.0, 0.0, width as f64, height as f64], 0))
+                            }
                             Some(BuiltInSymbol::Height) => Ok(Datum::Int(height as i32)),
                             Some(BuiltInSymbol::Image) => {
                                 // Create 32-bit bitmap for proper transparency
@@ -2512,7 +2726,8 @@ impl FontMemberHandlers {
                                     original_dst_rect: None,
                                     bg_color_explicit: false,
                                     fore_color_explicit: false,
-                                    ink9_mask_bitmap: None, ink9_mask_offset: (0, 0),
+                                    ink9_mask_bitmap: None,
+                                    ink9_mask_offset: (0, 0),
                                     floor_rule: false,
                                 };
 
@@ -2558,14 +2773,18 @@ impl FontMemberHandlers {
                     }
                     _ => Err(ScriptError::new(format!(
                         "Cannot get castMember property {} for Text member",
-                        symbols.display(&prop).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
+                        symbols
+                            .display(&prop)
+                            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
                     ))),
                 }
             }
 
             CastMemberType::Font(font_data) => match builtin_symbol(&prop, symbols)? {
                 Some(BuiltInSymbol::Text) => Ok(Datum::String(font_data.preview_text.clone())),
-                Some(BuiltInSymbol::PreviewText) => Ok(Datum::String(font_data.preview_text.clone())),
+                Some(BuiltInSymbol::PreviewText) => {
+                    Ok(Datum::String(font_data.preview_text.clone()))
+                }
                 Some(BuiltInSymbol::PreviewHtml) => {
                     let html_string: String = font_data
                         .preview_html_spans
@@ -2574,18 +2793,24 @@ impl FontMemberHandlers {
                         .collect();
                     Ok(Datum::String(html_string))
                 }
-                Some(BuiltInSymbol::FontStyle) => Ok(Datum::List(DatumType::List, VecDeque::new(), false)),
+                Some(BuiltInSymbol::FontStyle) => {
+                    Ok(Datum::List(DatumType::List, VecDeque::new(), false))
+                }
                 Some(BuiltInSymbol::Name) => Ok(Datum::String(font_data.font_info.name.clone())),
                 Some(BuiltInSymbol::Size) => Ok(Datum::Int(font_data.font_info.size as i32)),
                 _ => Err(ScriptError::new(format!(
                     "Cannot get castMember property {} for Font member",
-                    symbols.display(&prop).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
+                    symbols
+                        .display(&prop)
+                        .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
                 ))),
             },
 
             _ => Err(ScriptError::new(format!(
                 "Cannot get castMember property {} for this member type",
-                symbols.display(&prop).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
+                symbols
+                    .display(&prop)
+                    .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?
             ))),
         }
     }
@@ -2610,11 +2835,16 @@ impl FontMemberHandlers {
             |cast_member, _, symbols| {
                 if let CastMemberType::Font(font_member) = &mut cast_member.member_type {
                     let prop = builtin_symbol(&prop, symbols)?.ok_or_else(|| {
-                        ScriptError::new(format!("Cannot set castMember prop '{}' for Font member", prop_name))
+                        ScriptError::new(format!(
+                            "Cannot set castMember prop '{}' for Font member",
+                            prop_name
+                        ))
                     })?;
 
                     match prop {
-                        BuiltInSymbol::Text => font_member.preview_text = value.string_value(symbols)?,
+                        BuiltInSymbol::Text => {
+                            font_member.preview_text = value.string_value(symbols)?
+                        }
                         BuiltInSymbol::Html => {
                             let html_string = value.string_value(symbols)?;
                             let spans = HtmlParser::parse_html(&html_string).map_err(|e| {

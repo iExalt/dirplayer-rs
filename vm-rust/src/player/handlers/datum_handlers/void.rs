@@ -2,7 +2,11 @@ use std::collections::VecDeque;
 
 use crate::{
     director::lingo::datum::Datum,
-    player::{session::ExecutionContext, symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable}, DatumRef, DirPlayer, ScriptError},
+    player::{
+        session::ExecutionContext,
+        symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable},
+        DatumRef, DirPlayer, ScriptError,
+    },
 };
 
 pub struct VoidDatumHandlers {}
@@ -81,29 +85,23 @@ impl VoidDatumHandlers {
             "ilk" => Ok(player.alloc_datum(Datum::Symbol(Symbol::builtin(BuiltInSymbol::Void)))),
             "count" | "length" => Ok(player.alloc_datum(Datum::Int(0))),
             "x" | "y" | "z" | "magnitude" => Ok(player.alloc_datum(Datum::Float(0.0))),
-            "position" | "rotation" | "scale" => Ok(player.alloc_datum(Datum::Vector([0.0, 0.0, 0.0]))),
-            "string" => Ok(player.alloc_datum(Datum::String("".to_owned()))),
-            "childnodes" => {
-                Ok(player.alloc_datum(Datum::List(
-                    crate::director::lingo::datum::DatumType::List,
-                    VecDeque::new(),
-                    false,
-                )))
+            "position" | "rotation" | "scale" => {
+                Ok(player.alloc_datum(Datum::Vector([0.0, 0.0, 0.0])))
             }
+            "string" => Ok(player.alloc_datum(Datum::String("".to_owned()))),
+            "childnodes" => Ok(player.alloc_datum(Datum::List(
+                crate::director::lingo::datum::DatumType::List,
+                VecDeque::new(),
+                false,
+            ))),
             "firstchild" | "lastchild" | "parentnode" | "nextsibling" | "previoussibling" => {
                 Ok(player.alloc_datum(Datum::Void))
             }
-            "nodename" | "nodevalue" => {
-                Ok(player.alloc_datum(Datum::String("".to_owned())))
-            }
-            "attributes" => {
-                Ok(player.alloc_datum(Datum::Void))
-            }
-            "name" | "type" | "number" | "member"
-            | "transform" | "parent" | "shader" | "shaderlist"
-            | "visibility" | "visible" | "blend" | "resource"
-            | "texture" | "texturelist" | "renderformat"
-            | "loch" | "locv" => {
+            "nodename" | "nodevalue" => Ok(player.alloc_datum(Datum::String("".to_owned()))),
+            "attributes" => Ok(player.alloc_datum(Datum::Void)),
+            "name" | "type" | "number" | "member" | "transform" | "parent" | "shader"
+            | "shaderlist" | "visibility" | "visible" | "blend" | "resource" | "texture"
+            | "texturelist" | "renderformat" | "loch" | "locv" => {
                 Ok(player.alloc_datum(Datum::Void))
             }
             "char" | "word" | "line" | "item" => {
@@ -124,7 +122,10 @@ impl VoidDatumHandlers {
             // to VOID, matching Director instead of maintaining a whitelist of
             // custom property names (previously oAvatars/oInfoStand/etc.).
             _ => {
-                log::debug!("Reading property '{}' on VOID → VOID (Director-lenient)", prop_name);
+                log::debug!(
+                    "Reading property '{}' on VOID → VOID (Director-lenient)",
+                    prop_name
+                );
                 Ok(player.alloc_datum(Datum::Void))
             }
         }

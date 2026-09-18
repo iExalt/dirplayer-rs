@@ -5,11 +5,11 @@ use log::{debug, warn};
 use crate::{
     director::lingo::datum::Datum,
     player::{
-        DatumRef, DirPlayer, HandlerExecutionResult, ScriptError,
         bitmap::{manager::BitmapId, mask::BitmapMask},
         datum_formatting::format_concrete_datum,
         score::sprite_get_prop,
         symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable},
+        DatumRef, DirPlayer, HandlerExecutionResult, ScriptError,
     },
 };
 
@@ -85,8 +85,14 @@ fn check_matte_pixel_overlap(
 
     // Helper: get the matte Arc for a sprite's bitmap
     let get_matte = |sprite_num: i16| -> Option<(Arc<BitmapMask>, u16, u16)> {
-        let member_ref = player.movie.score.get_channel(sprite_num)
-            .sprite.member.as_ref()?.clone();
+        let member_ref = player
+            .movie
+            .score
+            .get_channel(sprite_num)
+            .sprite
+            .member
+            .as_ref()?
+            .clone();
         let member = player.movie.cast_manager.find_member_by_ref(&member_ref)?;
         let bmp = member.member_type.as_bitmap()?;
         let bitmap = player.bitmap_manager.get_bitmap(bmp.image_ref)?;
@@ -95,8 +101,16 @@ fn check_matte_pixel_overlap(
     };
 
     // Get matte data for matte-ink sprites
-    let src_matte = if src_is_matte { get_matte(src_num) } else { None };
-    let tgt_matte = if tgt_is_matte { get_matte(tgt_num) } else { None };
+    let src_matte = if src_is_matte {
+        get_matte(src_num)
+    } else {
+        None
+    };
+    let tgt_matte = if tgt_is_matte {
+        get_matte(tgt_num)
+    } else {
+        None
+    };
 
     // If we need matte data but it's not available (not yet rendered), fall back to AABB
     if (src_is_matte && src_matte.is_none()) || (tgt_is_matte && tgt_matte.is_none()) {
@@ -120,7 +134,9 @@ fn check_matte_pixel_overlap(
                 true // Non-matte sprite: all pixels in bounding box are opaque
             };
 
-            if !src_opaque { continue; }
+            if !src_opaque {
+                continue;
+            }
 
             // Check target pixel opacity
             let tgt_opaque = if let Some((ref matte, bw, bh, ..)) = tgt_matte {
@@ -160,18 +176,32 @@ impl SpriteCompareBytecodeHandler {
             }
             // Pop the target sprite (result from sprite() call)
             let target_sprite_ref = {
-                let (scopes, allocator, bitmap_manager) =
-                    (&mut player.scopes, &mut player.allocator, &mut player.bitmap_manager);
-                scopes.get_mut(ctx.scope_ref()).unwrap().stack
-                    .pop_ref_with(allocator, bitmap_manager).unwrap()
+                let (scopes, allocator, bitmap_manager) = (
+                    &mut player.scopes,
+                    &mut player.allocator,
+                    &mut player.bitmap_manager,
+                );
+                scopes
+                    .get_mut(ctx.scope_ref())
+                    .unwrap()
+                    .stack
+                    .pop_ref_with(allocator, bitmap_manager)
+                    .unwrap()
             };
 
             // Pop the source sprite number
             let source_sprite_ref = {
-                let (scopes, allocator, bitmap_manager) =
-                    (&mut player.scopes, &mut player.allocator, &mut player.bitmap_manager);
-                scopes.get_mut(ctx.scope_ref()).unwrap().stack
-                    .pop_ref_with(allocator, bitmap_manager).unwrap()
+                let (scopes, allocator, bitmap_manager) = (
+                    &mut player.scopes,
+                    &mut player.allocator,
+                    &mut player.bitmap_manager,
+                );
+                scopes
+                    .get_mut(ctx.scope_ref())
+                    .unwrap()
+                    .stack
+                    .pop_ref_with(allocator, bitmap_manager)
+                    .unwrap()
             };
 
             // Get sprite numbers - handle both sprite refs and plain integers
@@ -197,55 +227,83 @@ impl SpriteCompareBytecodeHandler {
             let source_sprite_num = get_sprite_num(&source_sprite_ref)?;
             let target_sprite_num = get_sprite_num(&target_sprite_ref)?;
 
-            debug!("ontospr: Comparing sprite {} with sprite {}", source_sprite_num, target_sprite_num);
-            debug!("  source_sprite_ref datum: {}", diagnostic_datum(player.get_datum(&source_sprite_ref), symbols, player));
-            debug!("  target_sprite_ref datum: {}", diagnostic_datum(player.get_datum(&target_sprite_ref), symbols, player));
+            debug!(
+                "ontospr: Comparing sprite {} with sprite {}",
+                source_sprite_num, target_sprite_num
+            );
+            debug!(
+                "  source_sprite_ref datum: {}",
+                diagnostic_datum(player.get_datum(&source_sprite_ref), symbols, player)
+            );
+            debug!(
+                "  target_sprite_ref datum: {}",
+                diagnostic_datum(player.get_datum(&target_sprite_ref), symbols, player)
+            );
 
             // Helper function to get rect bounds
-            let mut get_rect_bounds = |sprite_num: i16| -> Result<(i32, i32, i32, i32), ScriptError> {
-                let rect_datum = sprite_get_prop(player, symbols, sprite_num, Symbol::builtin(BuiltInSymbol::Rect))?;
+            let mut get_rect_bounds =
+                |sprite_num: i16| -> Result<(i32, i32, i32, i32), ScriptError> {
+                    let rect_datum = sprite_get_prop(
+                        player,
+                        symbols,
+                        sprite_num,
+                        Symbol::builtin(BuiltInSymbol::Rect),
+                    )?;
 
-                debug!("  sprite {} rect datum: {}", sprite_num, diagnostic_datum(&rect_datum, symbols, player));
+                    debug!(
+                        "  sprite {} rect datum: {}",
+                        sprite_num,
+                        diagnostic_datum(&rect_datum, symbols, player)
+                    );
 
-                // Extract rect coordinates - rect is stored as Datum::Rect([left, top, right, bottom])
-                match rect_datum {
-                    Datum::Rect(vals, _flags) => {
-                        let left = vals[0] as i32;
-                        let top = vals[1] as i32;
-                        let right = vals[2] as i32;
-                        let bottom = vals[3] as i32;
-                        debug!("  sprite {} rect: [{}, {}, {}, {}]", sprite_num, left, top, right, bottom);
-                        Ok((left, top, right, bottom))
-                    }
-                    Datum::List(_, coords, _) => {
-                        // Also support list format [left, top, right, bottom] just in case
-                        if coords.len() != 4 {
-                            return Err(ScriptError::new(format!(
-                                "Sprite {} rect has invalid format (length {})",
-                                sprite_num, coords.len()
-                            )));
+                    // Extract rect coordinates - rect is stored as Datum::Rect([left, top, right, bottom])
+                    match rect_datum {
+                        Datum::Rect(vals, _flags) => {
+                            let left = vals[0] as i32;
+                            let top = vals[1] as i32;
+                            let right = vals[2] as i32;
+                            let bottom = vals[3] as i32;
+                            debug!(
+                                "  sprite {} rect: [{}, {}, {}, {}]",
+                                sprite_num, left, top, right, bottom
+                            );
+                            Ok((left, top, right, bottom))
                         }
-                        let left = player.get_datum(&coords[0]).int_value()?;
-                        let top = player.get_datum(&coords[1]).int_value()?;
-                        let right = player.get_datum(&coords[2]).int_value()?;
-                        let bottom = player.get_datum(&coords[3]).int_value()?;
-                        debug!("  sprite {} rect: [{}, {}, {}, {}]", sprite_num, left, top, right, bottom);
-                        Ok((left, top, right, bottom))
-                    }
-                    _ => {
-                        Err(ScriptError::new(format!(
+                        Datum::List(_, coords, _) => {
+                            // Also support list format [left, top, right, bottom] just in case
+                            if coords.len() != 4 {
+                                return Err(ScriptError::new(format!(
+                                    "Sprite {} rect has invalid format (length {})",
+                                    sprite_num,
+                                    coords.len()
+                                )));
+                            }
+                            let left = player.get_datum(&coords[0]).int_value()?;
+                            let top = player.get_datum(&coords[1]).int_value()?;
+                            let right = player.get_datum(&coords[2]).int_value()?;
+                            let bottom = player.get_datum(&coords[3]).int_value()?;
+                            debug!(
+                                "  sprite {} rect: [{}, {}, {}, {}]",
+                                sprite_num, left, top, right, bottom
+                            );
+                            Ok((left, top, right, bottom))
+                        }
+                        _ => Err(ScriptError::new(format!(
                             "Sprite {} rect is not a rect or list: {}",
-                            sprite_num, diagnostic_datum(&rect_datum, symbols, player)
-                        )))
+                            sprite_num,
+                            diagnostic_datum(&rect_datum, symbols, player)
+                        ))),
                     }
-                }
-            };
+                };
 
             // Get rectangles for both sprites
             let source_rect = match get_rect_bounds(source_sprite_num) {
                 Ok(rect) => rect,
                 Err(e) => {
-                    warn!("WARNING: Failed to get rect for source sprite {}: {:?}", source_sprite_num, e);
+                    warn!(
+                        "WARNING: Failed to get rect for source sprite {}: {:?}",
+                        source_sprite_num, e
+                    );
                     // Sprite doesn't exist or has no rect, return 0 (no collision)
                     let result_ref = player.alloc_datum(Datum::Int(0));
                     let scope = player.scopes.get_mut(ctx.scope_ref()).unwrap();
@@ -257,7 +315,10 @@ impl SpriteCompareBytecodeHandler {
             let target_rect = match get_rect_bounds(target_sprite_num) {
                 Ok(rect) => rect,
                 Err(e) => {
-                    warn!("WARNING: Failed to get rect for target sprite {}: {:?}", target_sprite_num, e);
+                    warn!(
+                        "WARNING: Failed to get rect for target sprite {}: {:?}",
+                        target_sprite_num, e
+                    );
                     // Sprite doesn't exist or has no rect, return 0 (no collision)
                     let result_ref = player.alloc_datum(Datum::Int(0));
                     let scope = player.scopes.get_mut(ctx.scope_ref()).unwrap();
@@ -274,7 +335,8 @@ impl SpriteCompareBytecodeHandler {
                 src_right <= tgt_left ||   // source is completely to the left
                 src_left >= tgt_right ||   // source is completely to the right
                 src_bottom <= tgt_top ||   // source is completely above
-                src_top >= tgt_bottom      // source is completely below
+                src_top >= tgt_bottom
+                // source is completely below
             );
 
             // Matte ink pixel-level collision check
@@ -287,7 +349,9 @@ impl SpriteCompareBytecodeHandler {
                 if is_matte_ink(src_ink) || is_matte_ink(tgt_ink) {
                     // Ensure mattes are computed for the matte-ink sprites
                     if is_matte_ink(src_ink) {
-                        if let Some((image_ref, _, _)) = get_sprite_image_ref(player, source_sprite_num) {
+                        if let Some((image_ref, _, _)) =
+                            get_sprite_image_ref(player, source_sprite_num)
+                        {
                             let palettes = player.movie.cast_manager.palettes();
                             if let Some(bmp) = player.bitmap_manager.get_bitmap_mut(image_ref) {
                                 if bmp.matte.is_none() {
@@ -297,7 +361,9 @@ impl SpriteCompareBytecodeHandler {
                         }
                     }
                     if is_matte_ink(tgt_ink) {
-                        if let Some((image_ref, _, _)) = get_sprite_image_ref(player, target_sprite_num) {
+                        if let Some((image_ref, _, _)) =
+                            get_sprite_image_ref(player, target_sprite_num)
+                        {
                             let palettes = player.movie.cast_manager.palettes();
                             if let Some(bmp) = player.bitmap_manager.get_bitmap_mut(image_ref) {
                                 if bmp.matte.is_none() {
@@ -320,10 +386,23 @@ impl SpriteCompareBytecodeHandler {
             }
 
             // Debug logging
-            debug!("ontospr: sprite {} [{},{},{},{}] vs sprite {} [{},{},{},{}] => {}",
-                source_sprite_num, src_left, src_top, src_right, src_bottom,
-                target_sprite_num, tgt_left, tgt_top, tgt_right, tgt_bottom,
-                if intersects { "INTERSECT" } else { "no collision" }
+            debug!(
+                "ontospr: sprite {} [{},{},{},{}] vs sprite {} [{},{},{},{}] => {}",
+                source_sprite_num,
+                src_left,
+                src_top,
+                src_right,
+                src_bottom,
+                target_sprite_num,
+                tgt_left,
+                tgt_top,
+                tgt_right,
+                tgt_bottom,
+                if intersects {
+                    "INTERSECT"
+                } else {
+                    "no collision"
+                }
             );
 
             // Push result (1 for true, 0 for false)
@@ -354,18 +433,32 @@ impl SpriteCompareBytecodeHandler {
             }
             // Pop the target sprite (the container)
             let target_sprite_ref = {
-                let (scopes, allocator, bitmap_manager) =
-                    (&mut player.scopes, &mut player.allocator, &mut player.bitmap_manager);
-                scopes.get_mut(ctx.scope_ref()).unwrap().stack
-                    .pop_ref_with(allocator, bitmap_manager).unwrap()
+                let (scopes, allocator, bitmap_manager) = (
+                    &mut player.scopes,
+                    &mut player.allocator,
+                    &mut player.bitmap_manager,
+                );
+                scopes
+                    .get_mut(ctx.scope_ref())
+                    .unwrap()
+                    .stack
+                    .pop_ref_with(allocator, bitmap_manager)
+                    .unwrap()
             };
 
             // Pop the source sprite number (the one to check if within)
             let source_sprite_ref = {
-                let (scopes, allocator, bitmap_manager) =
-                    (&mut player.scopes, &mut player.allocator, &mut player.bitmap_manager);
-                scopes.get_mut(ctx.scope_ref()).unwrap().stack
-                    .pop_ref_with(allocator, bitmap_manager).unwrap()
+                let (scopes, allocator, bitmap_manager) = (
+                    &mut player.scopes,
+                    &mut player.allocator,
+                    &mut player.bitmap_manager,
+                );
+                scopes
+                    .get_mut(ctx.scope_ref())
+                    .unwrap()
+                    .stack
+                    .pop_ref_with(allocator, bitmap_manager)
+                    .unwrap()
             };
 
             // Get sprite numbers - handle both sprite refs and plain integers
@@ -391,47 +484,59 @@ impl SpriteCompareBytecodeHandler {
             let source_sprite_num = get_sprite_num(&source_sprite_ref)?;
             let target_sprite_num = get_sprite_num(&target_sprite_ref)?;
 
-            debug!("intospr: Checking if sprite {} is within sprite {}", source_sprite_num, target_sprite_num);
+            debug!(
+                "intospr: Checking if sprite {} is within sprite {}",
+                source_sprite_num, target_sprite_num
+            );
 
             // Helper function to get rect bounds
-            let mut get_rect_bounds = |sprite_num: i16| -> Result<(i32, i32, i32, i32), ScriptError> {
-                let rect_datum = sprite_get_prop(player, symbols, sprite_num, Symbol::builtin(BuiltInSymbol::Rect))?;
+            let mut get_rect_bounds =
+                |sprite_num: i16| -> Result<(i32, i32, i32, i32), ScriptError> {
+                    let rect_datum = sprite_get_prop(
+                        player,
+                        symbols,
+                        sprite_num,
+                        Symbol::builtin(BuiltInSymbol::Rect),
+                    )?;
 
-                match rect_datum {
-                    Datum::Rect(vals, _flags) => {
-                        let left = vals[0] as i32;
-                        let top = vals[1] as i32;
-                        let right = vals[2] as i32;
-                        let bottom = vals[3] as i32;
-                        Ok((left, top, right, bottom))
-                    }
-                    Datum::List(_, coords, _) => {
-                        if coords.len() != 4 {
-                            return Err(ScriptError::new(format!(
-                                "Sprite {} rect has invalid format (length {})",
-                                sprite_num, coords.len()
-                            )));
+                    match rect_datum {
+                        Datum::Rect(vals, _flags) => {
+                            let left = vals[0] as i32;
+                            let top = vals[1] as i32;
+                            let right = vals[2] as i32;
+                            let bottom = vals[3] as i32;
+                            Ok((left, top, right, bottom))
                         }
-                        let left = player.get_datum(&coords[0]).int_value()?;
-                        let top = player.get_datum(&coords[1]).int_value()?;
-                        let right = player.get_datum(&coords[2]).int_value()?;
-                        let bottom = player.get_datum(&coords[3]).int_value()?;
-                        Ok((left, top, right, bottom))
-                    }
-                    _ => {
-                        Err(ScriptError::new(format!(
+                        Datum::List(_, coords, _) => {
+                            if coords.len() != 4 {
+                                return Err(ScriptError::new(format!(
+                                    "Sprite {} rect has invalid format (length {})",
+                                    sprite_num,
+                                    coords.len()
+                                )));
+                            }
+                            let left = player.get_datum(&coords[0]).int_value()?;
+                            let top = player.get_datum(&coords[1]).int_value()?;
+                            let right = player.get_datum(&coords[2]).int_value()?;
+                            let bottom = player.get_datum(&coords[3]).int_value()?;
+                            Ok((left, top, right, bottom))
+                        }
+                        _ => Err(ScriptError::new(format!(
                             "Sprite {} rect is not a rect or list: {}",
-                            sprite_num, diagnostic_datum(&rect_datum, symbols, player)
-                        )))
+                            sprite_num,
+                            diagnostic_datum(&rect_datum, symbols, player)
+                        ))),
                     }
-                }
-            };
+                };
 
             // Get rectangles for both sprites
             let source_rect = match get_rect_bounds(source_sprite_num) {
                 Ok(rect) => rect,
                 Err(e) => {
-                    warn!("WARNING: Failed to get rect for source sprite {}: {:?}", source_sprite_num, e);
+                    warn!(
+                        "WARNING: Failed to get rect for source sprite {}: {:?}",
+                        source_sprite_num, e
+                    );
                     let result_ref = player.alloc_datum(Datum::Int(0));
                     let scope = player.scopes.get_mut(ctx.scope_ref()).unwrap();
                     scope.stack.push(result_ref);
@@ -442,7 +547,10 @@ impl SpriteCompareBytecodeHandler {
             let target_rect = match get_rect_bounds(target_sprite_num) {
                 Ok(rect) => rect,
                 Err(e) => {
-                    warn!("WARNING: Failed to get rect for target sprite {}: {:?}", target_sprite_num, e);
+                    warn!(
+                        "WARNING: Failed to get rect for target sprite {}: {:?}",
+                        target_sprite_num, e
+                    );
                     let result_ref = player.alloc_datum(Datum::Int(0));
                     let scope = player.scopes.get_mut(ctx.scope_ref()).unwrap();
                     scope.stack.push(result_ref);
@@ -455,15 +563,23 @@ impl SpriteCompareBytecodeHandler {
             let (src_left, src_top, src_right, src_bottom) = source_rect;
             let (tgt_left, tgt_top, tgt_right, tgt_bottom) = target_rect;
 
-            let is_within =
-                src_left >= tgt_left &&
-                src_top >= tgt_top &&
-                src_right <= tgt_right &&
-                src_bottom <= tgt_bottom;
+            let is_within = src_left >= tgt_left
+                && src_top >= tgt_top
+                && src_right <= tgt_right
+                && src_bottom <= tgt_bottom;
 
-            debug!("intospr: sprite {} [{},{},{},{}] within sprite {} [{},{},{},{}] => {}",
-                source_sprite_num, src_left, src_top, src_right, src_bottom,
-                target_sprite_num, tgt_left, tgt_top, tgt_right, tgt_bottom,
+            debug!(
+                "intospr: sprite {} [{},{},{},{}] within sprite {} [{},{},{},{}] => {}",
+                source_sprite_num,
+                src_left,
+                src_top,
+                src_right,
+                src_bottom,
+                target_sprite_num,
+                tgt_left,
+                tgt_top,
+                tgt_right,
+                tgt_bottom,
                 if is_within { "WITHIN" } else { "not within" }
             );
 
@@ -482,11 +598,18 @@ impl SpriteCompareBytecodeHandler {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
-    use std::{cell::RefCell, collections::{HashMap, VecDeque}, rc::Rc};
+    use std::{
+        cell::RefCell,
+        collections::{HashMap, VecDeque},
+        rc::Rc,
+    };
 
     use crate::{
         director::{
-            chunks::{handler::{Bytecode, HandlerDef}, script::ScriptChunk},
+            chunks::{
+                handler::{Bytecode, HandlerDef},
+                script::ScriptChunk,
+            },
             enums::ScriptType,
             lingo::opcode::OpCode,
         },
@@ -498,7 +621,7 @@ mod tests {
             script::Script,
             session::ExecutionContext,
             symbols::{symbol::Symbol, symbol_table::SymbolTable},
-            DatumType, ScopeToken, DirPlayer, ScriptErrorCode,
+            DatumType, DirPlayer, ScopeToken, ScriptErrorCode,
         },
     };
 
@@ -506,15 +629,15 @@ mod tests {
         let (tx, _rx) = async_std::channel::unbounded();
         DirPlayer::new_with_owner(
             tx,
-            OwnerToken::new(OwnerKey { session: 79, player: player_id, generation: 1 }),
+            OwnerToken::new(OwnerKey {
+                session: 79,
+                player: player_id,
+                generation: 1,
+            }),
         )
     }
 
-    fn make_context(
-        player: &DirPlayer,
-        slot: ScopeRef,
-        opcode: OpCode,
-    ) -> BytecodeHandlerContext {
+    fn make_context(player: &DirPlayer, slot: ScopeRef, opcode: OpCode) -> BytecodeHandlerContext {
         let handler = Rc::new(HandlerDef {
             name_id: 0,
             bytecode_array: vec![Bytecode::new(opcode, 0, 0)],
@@ -525,7 +648,10 @@ mod tests {
             compiled_ir: RefCell::new(None),
         });
         let script = Rc::new(Script {
-            member_ref: CastMemberRef { cast_lib: 0, cast_member: 0 },
+            member_ref: CastMemberRef {
+                cast_lib: 0,
+                cast_member: 0,
+            },
             name: String::new(),
             chunk: ScriptChunk {
                 script_number: 0,
@@ -559,8 +685,11 @@ mod tests {
 
     fn pop_int(player: &mut DirPlayer, slot: ScopeRef) -> i32 {
         let result_ref = {
-            let (scopes, allocator, bitmap_manager) =
-                (&mut player.scopes, &mut player.allocator, &mut player.bitmap_manager);
+            let (scopes, allocator, bitmap_manager) = (
+                &mut player.scopes,
+                &mut player.allocator,
+                &mut player.bitmap_manager,
+            );
             scopes[slot]
                 .stack
                 .pop_ref_with(allocator, bitmap_manager)
@@ -633,9 +762,8 @@ mod tests {
         player.movie.score.channels[2].sprite.height = 10;
         let slot = player.push_scope();
         let mut foreign_symbols = SymbolTable::new();
-        let foreign_symbol = player.alloc_datum(Datum::Symbol(
-            foreign_symbols.intern("foreignSprite"),
-        ));
+        let foreign_symbol =
+            player.alloc_datum(Datum::Symbol(foreign_symbols.intern("foreignSprite")));
         let target = player.alloc_datum(Datum::Int(2));
         player.scopes[slot].stack.push(foreign_symbol);
         player.scopes[slot].stack.push(target);
@@ -694,7 +822,9 @@ mod tests {
         let into_ctx = make_context(&player, slot, OpCode::IntoSpr);
         player.pop_scope();
         assert_eq!(player.push_scope(), slot);
-        player.scopes[slot].stack.push_value(crate::player::scope::StackDatum::Int(7));
+        player.scopes[slot]
+            .stack
+            .push_value(crate::player::scope::StackDatum::Int(7));
         let mut symbols = SymbolTable::new();
         let onto_result = {
             let mut runtime = ExecutionContext {
@@ -726,9 +856,8 @@ mod tests {
         add_test_channels(&mut player);
         let slot = player.push_scope();
         let mut foreign_symbols = SymbolTable::new();
-        let nested_foreign = player.alloc_datum(Datum::Symbol(
-            foreign_symbols.intern("nestedForeign"),
-        ));
+        let nested_foreign =
+            player.alloc_datum(Datum::Symbol(foreign_symbols.intern("nestedForeign")));
         let malformed = player.alloc_datum(Datum::List(
             DatumType::List,
             VecDeque::from([nested_foreign]),
@@ -747,7 +876,11 @@ mod tests {
             };
             SpriteCompareBytecodeHandler::onto_sprite(&mut runtime, &ctx)
         };
-        assert!(result.err().unwrap().message.contains("<unformattable list>"));
+        assert!(result
+            .err()
+            .unwrap()
+            .message
+            .contains("<unformattable list>"));
         player.pop_scope();
     }
 }

@@ -2,7 +2,12 @@ use std::collections::VecDeque;
 
 use crate::{
     director::lingo::datum::{Datum, DatumType},
-    player::{DirPlayer, ScriptError, cast_lib::CastMemberRef, cast_member::Media, symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable}},
+    player::{
+        cast_lib::CastMemberRef,
+        cast_member::Media,
+        symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable},
+        DirPlayer, ScriptError,
+    },
 };
 
 pub struct SoundMemberHandlers {}
@@ -21,7 +26,9 @@ impl SoundMemberHandlers {
             .unwrap();
         let sound = member.member_type.as_sound().unwrap();
 
-        let prop_display = symbols.display(&prop).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+        let prop_display = symbols
+            .display(&prop)
+            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
         match prop.into_builtin() {
             // `the media of member` is a read/write opaque media blob
             // (Director 11.5 Scripting Dictionary, `media`). The documented
@@ -34,7 +41,9 @@ impl SoundMemberHandlers {
             Some(BuiltInSymbol::SampleSize) => Ok(Datum::Int(sound.info.sample_size as i32)),
             Some(BuiltInSymbol::ChannelCount) => Ok(Datum::Int(sound.info.channels as i32)),
             Some(BuiltInSymbol::SampleCount) => Ok(Datum::Int(sound.info.sample_count as i32)),
-            Some(BuiltInSymbol::Loop) => Ok(Datum::Int(if sound.info.loop_enabled { 1 } else { 0 })),
+            Some(BuiltInSymbol::Loop) => {
+                Ok(Datum::Int(if sound.info.loop_enabled { 1 } else { 0 }))
+            }
             // Cue-point properties — list of ms times and parallel names.
             // Director uses 1-based indices into these lists when firing
             // `on cuePassed`. Returned as Lingo lists so scripts can do
@@ -44,14 +53,16 @@ impl SoundMemberHandlers {
                 // holds `player` immutably) before re-borrowing `player`
                 // mutably via alloc_datum.
                 let times: Vec<u32> = sound.cue_point_times.clone();
-                let items: VecDeque<_> = times.into_iter()
+                let items: VecDeque<_> = times
+                    .into_iter()
                     .map(|t| player.alloc_datum(Datum::Int(t as i32)))
                     .collect();
                 Ok(Datum::List(DatumType::List, items, false))
             }
             Some(BuiltInSymbol::CuePointNames) => {
                 let names: Vec<String> = sound.cue_point_names.clone();
-                let items: VecDeque<_> = names.into_iter()
+                let items: VecDeque<_> = names
+                    .into_iter()
                     .map(|n| player.alloc_datum(Datum::String(n)))
                     .collect();
                 Ok(Datum::List(DatumType::List, items, false))
@@ -70,7 +81,9 @@ impl SoundMemberHandlers {
         prop: Symbol,
         value: Datum,
     ) -> Result<(), ScriptError> {
-        let prop_display = symbols.display(&prop).map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
+        let prop_display = symbols
+            .display(&prop)
+            .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
         match prop.into_builtin() {
             Some(BuiltInSymbol::Media) => {
                 crate::player::compare::validate_direct_symbol_fields(&value, symbols)?;
@@ -85,8 +98,9 @@ impl SoundMemberHandlers {
                         .cast_manager
                         .find_mut_member_by_ref(member_ref)
                         .ok_or_else(|| ScriptError::new("Cast member not found".to_string()))?;
-                    let sound = member.member_type.as_sound_mut()
-                        .ok_or_else(|| ScriptError::new("Cast member is not a sound".to_string()))?;
+                    let sound = member.member_type.as_sound_mut().ok_or_else(|| {
+                        ScriptError::new("Cast member is not a sound".to_string())
+                    })?;
                     *sound = new_sound;
                     Ok(())
                 }
@@ -100,8 +114,9 @@ impl SoundMemberHandlers {
                         .cast_manager
                         .find_mut_member_by_ref(member_ref)
                         .ok_or_else(|| ScriptError::new("Cast member not found".to_string()))?;
-                    let sound = member.member_type.as_sound_mut()
-                        .ok_or_else(|| ScriptError::new("Cast member is not a sound".to_string()))?;
+                    let sound = member.member_type.as_sound_mut().ok_or_else(|| {
+                        ScriptError::new("Cast member is not a sound".to_string())
+                    })?;
                     sound.info.loop_enabled = loop_enabled;
                     Ok(())
                 }

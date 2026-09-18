@@ -16,12 +16,11 @@ use crate::{
     player::symbols::symbol_table::SymbolTable,
 };
 
-use crate::player::FontManager;
 use crate::player::ci_string::{CiStr, CiString};
 use crate::player::font::FontRef;
+use crate::player::FontManager;
 
 use super::{
-    ScriptError,
     allocator::DatumAllocator,
     bitmap::{
         bitmap::PaletteRef,
@@ -36,6 +35,7 @@ use super::{
     handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers,
     net_manager::NetManager,
     script::Script,
+    ScriptError,
 };
 
 pub struct CastManager {
@@ -227,7 +227,8 @@ impl CastManager {
         self.invalidate_member_name_cache();
         // External cast requests are returned to RuntimeSession for async fetch
         // and synchronous apply. Palette resolution waits for that boundary.
-        self.pending_notifications.push(CastNotification::CastListChanged);
+        self.pending_notifications
+            .push(CastNotification::CastListChanged);
     }
 
     /// After all casts (including external) are loaded, resolve bitmap palette refs
@@ -735,8 +736,12 @@ impl CastManager {
         cast_name_or_num: Option<&Datum>,
         datums: &DatumAllocator,
     ) -> Result<Option<&CastMember>, ScriptError> {
-        let member_ref =
-            self.find_member_ref_by_identifiers(symbols, member_name_or_num, cast_name_or_num, datums)?;
+        let member_ref = self.find_member_ref_by_identifiers(
+            symbols,
+            member_name_or_num,
+            cast_name_or_num,
+            datums,
+        )?;
         Ok(member_ref.and_then(|member_ref| self.find_member_by_ref(&member_ref)))
     }
 
@@ -949,8 +954,9 @@ impl CastManager {
                 for script in cast.scripts.values() {
                     if let ScriptType::Movie = script.script_type {
                         for handler_name in script.handlers.keys() {
-                            map.entry(handler_name.clone())
-                                .or_insert_with(|| (script.member_ref.clone(), handler_name.clone()));
+                            map.entry(handler_name.clone()).or_insert_with(|| {
+                                (script.member_ref.clone(), handler_name.clone())
+                            });
                         }
                     }
                 }

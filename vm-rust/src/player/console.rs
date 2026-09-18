@@ -30,7 +30,12 @@ impl ConsoleBuffer {
 
     pub fn read_head(&self, n: usize) -> String {
         let buf = self.lines.borrow();
-        let output = buf.iter().take(n).cloned().collect::<Vec<String>>().join("\n");
+        let output = buf
+            .iter()
+            .take(n)
+            .cloned()
+            .collect::<Vec<String>>()
+            .join("\n");
         output
     }
 
@@ -38,7 +43,12 @@ impl ConsoleBuffer {
         let buf = self.lines.borrow();
         let len = buf.len();
         let start = if n > len { 0 } else { len - n };
-        let output = buf.iter().skip(start).cloned().collect::<Vec<String>>().join("\n");
+        let output = buf
+            .iter()
+            .skip(start)
+            .cloned()
+            .collect::<Vec<String>>()
+            .join("\n");
         output
     }
 }

@@ -5,25 +5,31 @@
 //! queued or awaited. No pending action contains a VM borrow or a future that
 //! executes against the ambient player.
 
-use std::{collections::{HashMap, HashSet}, sync::Arc};
-use manual_future::ManualFutureCompleter;
 use log::warn;
+use manual_future::ManualFutureCompleter;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
-use crate::director::lingo::{datum::{Datum, VarRef}, opcode::OpCode};
+use crate::director::lingo::{
+    datum::{Datum, VarRef},
+    opcode::OpCode,
+};
 
 use super::{
+    allocator::ScriptInstanceAllocatorTrait,
     bytecode::{
         flow_control::{prepare_obj_call, PreparedObjCall},
         handler_manager::{try_execute_opcode_sync, BytecodeHandlerContext},
     },
-    allocator::ScriptInstanceAllocatorTrait,
     cast_lib::CastMemberRef,
-    debug::Breakpoint,
+    cast_lib::CastNotificationOutbox,
     datum_ref::DatumRef,
+    debug::Breakpoint,
     ownership::OwnerToken,
     scope::ScopeResult,
     script::{set_obj_prop_sync, ScriptHandlerRef, SetObjPropOutcome},
-    cast_lib::CastNotificationOutbox,
     session::{ExecutionContext, PlayerId, RuntimeSession},
     symbols::{builtin::BuiltInSymbol, symbol::Symbol},
     HandlerExecutionResult, ScriptError,
@@ -233,8 +239,9 @@ pub(crate) struct StaticEventGuard {
 /// smuggling borrowed VM state across a host wait.
 pub(crate) fn eval_request_kind(request: &InternalVmRequest) -> ActionKind {
     match request {
-        InternalVmRequest::Global { .. }
-        | InternalVmRequest::GlobalAfterExternalProbe { .. } => ActionKind::InternalInvocation,
+        InternalVmRequest::Global { .. } | InternalVmRequest::GlobalAfterExternalProbe { .. } => {
+            ActionKind::InternalInvocation
+        }
         InternalVmRequest::Object { .. }
         | InternalVmRequest::ObjectV4 { .. }
         | InternalVmRequest::ObjectProperty { .. }
@@ -245,7 +252,9 @@ pub(crate) fn eval_request_kind(request: &InternalVmRequest) -> ActionKind {
         | InternalVmRequest::XtraPending(_) => ActionKind::InternalInvocation,
         InternalVmRequest::SetProperty { .. } => ActionKind::InternalInvocation,
         InternalVmRequest::EvaluateValue { .. } => ActionKind::InternalInvocation,
-        InternalVmRequest::Construct { .. } | InternalVmRequest::Tell { .. } => ActionKind::InternalInvocation,
+        InternalVmRequest::Construct { .. } | InternalVmRequest::Tell { .. } => {
+            ActionKind::InternalInvocation
+        }
         InternalVmRequest::ExternalXtra(_) | InternalVmRequest::ExternalXtraLoad(_) => {
             ActionKind::InternalInvocation
         }
@@ -269,12 +278,12 @@ pub(crate) fn async_request_reason(request: &InternalVmRequest) -> Option<String
                 request.overwrite,
                 request.generate_unique_names,
             )),
-            CastMemberAsyncKind::ImportFileInto => Some(
-                "cast member importFileInto requires owner-bound executor".to_owned(),
-            ),
-            CastMemberAsyncKind::HavokStep => Some(
-                "cast member Havok step requires owner-bound callback executor".to_owned(),
-            ),
+            CastMemberAsyncKind::ImportFileInto => {
+                Some("cast member importFileInto requires owner-bound executor".to_owned())
+            }
+            CastMemberAsyncKind::HavokStep => {
+                Some("cast member Havok step requires owner-bound callback executor".to_owned())
+            }
         },
         InternalVmRequest::MovieAsync(request) => Some(format!(
             "movie {:?} requires owner-bound executor for player {}",
@@ -293,20 +302,27 @@ pub(crate) fn async_request_reason(request: &InternalVmRequest) -> Option<String
             request.name
         )),
         InternalVmRequest::XtraPending(intent) => Some(match intent {
-            super::xtra::manager::XtraPendingIntent::MultiuserConnect { .. } =>
-                "Multiuser connect requires owner-bound WebSocket executor".to_owned(),
-            super::xtra::manager::XtraPendingIntent::MultiuserSend { .. } =>
-                "Multiuser send requires owner-bound WebSocket executor".to_owned(),
-            super::xtra::manager::XtraPendingIntent::CurlExec { .. } =>
-                "Curl execAsync requires owner-bound fetch executor".to_owned(),
-            super::xtra::manager::XtraPendingIntent::FileIoOpen(_) =>
-                "FileIO openFile requires owner-bound network executor".to_owned(),
-            super::xtra::manager::XtraPendingIntent::SysMenu(_) =>
-                "SysMenu host effect requires owner-bound browser executor".to_owned(),
-            super::xtra::manager::XtraPendingIntent::BudApi(_) =>
-                "BudAPI host effect requires owner-bound browser executor".to_owned(),
-            super::xtra::manager::XtraPendingIntent::OpenUrl(_) =>
-                "OpenURL host effect requires owner-bound browser executor".to_owned(),
+            super::xtra::manager::XtraPendingIntent::MultiuserConnect { .. } => {
+                "Multiuser connect requires owner-bound WebSocket executor".to_owned()
+            }
+            super::xtra::manager::XtraPendingIntent::MultiuserSend { .. } => {
+                "Multiuser send requires owner-bound WebSocket executor".to_owned()
+            }
+            super::xtra::manager::XtraPendingIntent::CurlExec { .. } => {
+                "Curl execAsync requires owner-bound fetch executor".to_owned()
+            }
+            super::xtra::manager::XtraPendingIntent::FileIoOpen(_) => {
+                "FileIO openFile requires owner-bound network executor".to_owned()
+            }
+            super::xtra::manager::XtraPendingIntent::SysMenu(_) => {
+                "SysMenu host effect requires owner-bound browser executor".to_owned()
+            }
+            super::xtra::manager::XtraPendingIntent::BudApi(_) => {
+                "BudAPI host effect requires owner-bound browser executor".to_owned()
+            }
+            super::xtra::manager::XtraPendingIntent::OpenUrl(_) => {
+                "OpenURL host effect requires owner-bound browser executor".to_owned()
+            }
         }),
         _ => None,
     }
@@ -334,7 +350,9 @@ pub(crate) enum GlobalDispatch {
     /// Ordered behavior dispatch used by sendSprite/sendAllSprites. The
     /// driver aggregates the last non-void child result while preserving the
     /// original receiver order.
-    ChildSequence { plan: BroadcastPlan },
+    ChildSequence {
+        plan: BroadcastPlan,
+    },
     SyncResult(Result<DatumRef, ScriptError>),
     /// A global form whose first argument was prepared as an owner-bound
     /// typed request. The caller must retain this request; redispatching the
@@ -343,7 +361,9 @@ pub(crate) enum GlobalDispatch {
         request: InternalVmRequest,
         reason: String,
     },
-    Pending { reason: String },
+    Pending {
+        reason: String,
+    },
 }
 
 /// A static frame/movie script callback used only after all behavior receivers
@@ -404,36 +424,6 @@ pub(crate) fn classify_async_object(
             )
             .map(InternalVmRequest::Flash)?
         }
-        Datum::SpriteRef(sprite_num) if name.eq_builtin(BuiltInSymbol::GetVariable) => {
-            let path = args
-                .first()
-                .ok_or_else(|| ScriptError::new("getVariable requires a path".to_owned()))
-                .and_then(|arg| checked_internal_datum(runtime.player, runtime.symbols, arg))?
-                .string_value(runtime.symbols)?;
-            let return_as_object = args.get(1)
-                .map(|arg| checked_internal_datum(runtime.player, runtime.symbols, arg)
-                    .map(|datum| datum.int_value().unwrap_or(1) == 0))
-                .transpose()?
-                .unwrap_or(false);
-            let (cast_lib, cast_member) = runtime
-                .player
-                .movie
-                .score
-                .get_sprite(sprite_num)
-                .and_then(|sprite| sprite.member.as_ref())
-                .map(|member| (member.cast_lib, member.cast_member))
-                .unwrap_or((0, 0));
-            InternalVmRequest::Flash(
-                crate::player::handlers::datum_handlers::flash_object::FlashObjectDatumHandlers::prepare_bind_get(
-                    runtime.player,
-                    sprite_num,
-                    crate::player::handlers::datum_handlers::sprite::root_flash_path(&path),
-                    return_as_object,
-                    cast_lib,
-                    cast_member,
-                )?,
-            )
-        }
         Datum::SpriteRef(sprite_num) => InternalVmRequest::SpriteAsync(SpriteAsyncRequest {
             player_id,
             owner,
@@ -490,9 +480,16 @@ pub(crate) fn classify_async_object(
 
 #[derive(Clone, Debug)]
 pub(crate) enum ChildCompletion {
-    ConstructScript { fallback: DatumRef },
-    TimeoutNew { timeout_name: String, fallback: DatumRef },
-    TimeoutForget { timeout_name: String },
+    ConstructScript {
+        fallback: DatumRef,
+    },
+    TimeoutNew {
+        timeout_name: String,
+        fallback: DatumRef,
+    },
+    TimeoutForget {
+        timeout_name: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -621,15 +618,16 @@ impl PendingAction {
             Self::CooperativeYield(request) => &request.ticket,
             Self::Internal(request) => &request.ticket,
             Self::CastLoad { ticket, .. } => ticket,
-            Self::Host(HostRequest::Fetch { ticket, .. }
+            Self::Host(
+                HostRequest::Fetch { ticket, .. }
                 | HostRequest::JavaScript { ticket, .. }
-                | HostRequest::Debugger { ticket, .. }) => ticket,
+                | HostRequest::Debugger { ticket, .. },
+            ) => ticket,
             Self::Setup(request) => &request.ticket,
             Self::Trace(request) => &request.ticket,
         }
     }
 }
-
 
 /// Owner-bound command/evaluator work retained by the frontend pump. The
 /// optional evaluator fields route a child completion back through the real
@@ -650,7 +648,6 @@ pub(crate) struct PendingCommand {
     pub(crate) eval_child: Option<crate::player::eval::EvalId>,
     pub(crate) eval_sender: Option<async_std::channel::Sender<Result<DatumRef, ScriptError>>>,
 }
-
 
 pub(crate) enum DriverPhase {
     Setup(SetupStage),
@@ -703,7 +700,9 @@ enum ChildDelivery {
 
 #[derive(Clone, Debug)]
 pub(crate) enum ChildReturnPolicy {
-    GlobalScope { ext_call_layer: bool },
+    GlobalScope {
+        ext_call_layer: bool,
+    },
     ObjCallV4,
     Ancestor {
         remaining: Vec<super::handlers::types::AncestorCall>,
@@ -790,10 +789,14 @@ fn prepare_chained_owner_request(
             .ok_or_else(super::cancelled_scope_error)?;
         scope
             .stack
-            .last_ref_with(&mut runtime.player.allocator, &mut runtime.player.bitmap_manager)
+            .last_ref_with(
+                &mut runtime.player.allocator,
+                &mut runtime.player.bitmap_manager,
+            )
             .unwrap_or(DatumRef::Void)
     };
-    let receiver_type = checked_internal_datum(runtime.player, runtime.symbols, &receiver)?.type_enum();
+    let receiver_type =
+        checked_internal_datum(runtime.player, runtime.symbols, &receiver)?.type_enum();
     let request_kind = if matches!(
         receiver_type,
         crate::director::lingo::datum::DatumType::JsObjectRef
@@ -820,7 +823,10 @@ fn prepare_chained_owner_request(
             .ok_or_else(super::cancelled_scope_error)?;
         scope
             .stack
-            .pop_ref_with(&mut runtime.player.allocator, &mut runtime.player.bitmap_manager)
+            .pop_ref_with(
+                &mut runtime.player.allocator,
+                &mut runtime.player.bitmap_manager,
+            )
             .unwrap_or(DatumRef::Void)
     };
     Ok(Some(if let Some(mode) = mode {
@@ -846,10 +852,18 @@ impl DriverContinuation {
     fn policy_has_ext_call_layer(policy: Option<&ChildReturnPolicy>) -> bool {
         matches!(
             policy,
-            Some(ChildReturnPolicy::GlobalScope { ext_call_layer: true })
-                | Some(ChildReturnPolicy::Ancestor { ext_call_layer: true, .. })
-                | Some(ChildReturnPolicy::Broadcast { ext_call_layer: true, .. })
-                | Some(ChildReturnPolicy::Completion { ext_call_layer: true, .. })
+            Some(ChildReturnPolicy::GlobalScope {
+                ext_call_layer: true
+            }) | Some(ChildReturnPolicy::Ancestor {
+                ext_call_layer: true,
+                ..
+            }) | Some(ChildReturnPolicy::Broadcast {
+                ext_call_layer: true,
+                ..
+            }) | Some(ChildReturnPolicy::Completion {
+                ext_call_layer: true,
+                ..
+            })
         )
     }
 
@@ -857,9 +871,18 @@ impl DriverContinuation {
         matches!(
             policy,
             Some(ChildReturnPolicy::GlobalScope { .. })
-                | Some(ChildReturnPolicy::Ancestor { delivery: Some(ChildDelivery::GlobalScope), .. })
-                | Some(ChildReturnPolicy::Broadcast { delivery: Some(ChildDelivery::GlobalScope), .. })
-                | Some(ChildReturnPolicy::Completion { delivery: Some(ChildDelivery::GlobalScope), .. })
+                | Some(ChildReturnPolicy::Ancestor {
+                    delivery: Some(ChildDelivery::GlobalScope),
+                    ..
+                })
+                | Some(ChildReturnPolicy::Broadcast {
+                    delivery: Some(ChildDelivery::GlobalScope),
+                    ..
+                })
+                | Some(ChildReturnPolicy::Completion {
+                    delivery: Some(ChildDelivery::GlobalScope),
+                    ..
+                })
         )
     }
 
@@ -867,9 +890,18 @@ impl DriverContinuation {
         matches!(
             policy,
             Some(ChildReturnPolicy::ObjCallV4)
-                | Some(ChildReturnPolicy::Ancestor { delivery: Some(ChildDelivery::ObjCallV4), .. })
-                | Some(ChildReturnPolicy::Broadcast { delivery: Some(ChildDelivery::ObjCallV4), .. })
-                | Some(ChildReturnPolicy::Completion { delivery: Some(ChildDelivery::ObjCallV4), .. })
+                | Some(ChildReturnPolicy::Ancestor {
+                    delivery: Some(ChildDelivery::ObjCallV4),
+                    ..
+                })
+                | Some(ChildReturnPolicy::Broadcast {
+                    delivery: Some(ChildDelivery::ObjCallV4),
+                    ..
+                })
+                | Some(ChildReturnPolicy::Completion {
+                    delivery: Some(ChildDelivery::ObjCallV4),
+                    ..
+                })
         )
     }
 
@@ -932,22 +964,35 @@ impl DriverContinuation {
                     .player
                     .allocator
                     .get_script_instance_opt(receiver)
-                    .ok_or_else(|| ScriptError::new_code(
-                        super::ScriptErrorCode::InvalidReference,
-                        "stale static event receiver".to_owned(),
-                    ))?;
+                    .ok_or_else(|| {
+                        ScriptError::new_code(
+                            super::ScriptErrorCode::InvalidReference,
+                            "stale static event receiver".to_owned(),
+                        )
+                    })?;
             }
-            let Some(script) = runtime.player.movie.cast_manager.get_script_by_ref(&call.member_ref)
+            let Some(script) = runtime
+                .player
+                .movie
+                .cast_manager
+                .get_script_by_ref(&call.member_ref)
             else {
                 return Err(ScriptError::new_code(
                     super::ScriptErrorCode::InvalidReference,
-                    format!("static event references missing script {:?}", call.member_ref),
+                    format!(
+                        "static event references missing script {:?}",
+                        call.member_ref
+                    ),
                 ));
             };
             let Some(handler_ref) = script.get_own_handler_ref(call.handler_name.clone()) else {
                 return Ok(None);
             };
-            Ok(Some((handler_ref, call.receiver.clone(), call.args.clone())))
+            Ok(Some((
+                handler_ref,
+                call.receiver.clone(),
+                call.args.clone(),
+            )))
         })
         .ok_or_else(super::cancelled_scope_error)
         .and_then(|resolved| resolved)?;
@@ -959,12 +1004,12 @@ impl DriverContinuation {
         };
         self.static_event_guard = Some(guard);
         Ok(Some(super::PendingCall {
-                receiver,
-                handler_ref,
-                args,
-                use_raw_arg_list: true,
-                push_return: false,
-            }))
+            receiver,
+            handler_ref,
+            args,
+            use_raw_arg_list: true,
+            push_return: false,
+        }))
     }
 
     pub(crate) fn start(
@@ -975,7 +1020,15 @@ impl DriverContinuation {
         args: &[DatumRef],
         use_raw_arg_list: bool,
     ) -> Result<DriverStart, ScriptError> {
-        Self::start_subordinate(session, player_id, receiver, handler_ref, args, use_raw_arg_list, None)
+        Self::start_subordinate(
+            session,
+            player_id,
+            receiver,
+            handler_ref,
+            args,
+            use_raw_arg_list,
+            None,
+        )
     }
 
     /// Start a child continuation without claiming the player's primary
@@ -1175,9 +1228,7 @@ impl DriverContinuation {
     pub(crate) fn turn(&mut self, session: &mut RuntimeSession) -> DriverTurn {
         let prior = if self.step_callback {
             Self::with_context(session, self.player_id, |runtime| {
-                if !self.owner.same_identity(&runtime.player.owner)
-                    || !self.owner.is_arena_live()
-                {
+                if !self.owner.same_identity(&runtime.player.owner) || !self.owner.is_arena_live() {
                     return None;
                 }
                 let prior = runtime.player.in_havok_step_callback;
@@ -1191,9 +1242,7 @@ impl DriverContinuation {
         let turn = self.turn_impl(session);
         if let Some(prior) = prior {
             let _ = Self::with_context(session, self.player_id, |runtime| {
-                if self.owner.same_identity(&runtime.player.owner)
-                    && self.owner.is_arena_live()
-                {
+                if self.owner.same_identity(&runtime.player.owner) && self.owner.is_arena_live() {
                     runtime.player.in_havok_step_callback = prior;
                 }
             });
@@ -1207,7 +1256,8 @@ impl DriverContinuation {
                 let active = if self.frames.is_empty() {
                     Self::with_context(session, self.player_id, |ctx| {
                         self.owner.same_identity(&ctx.player.owner) && self.owner.is_arena_live()
-                    }).unwrap_or(false)
+                    })
+                    .unwrap_or(false)
                 } else {
                     self.current_scope_active(session)
                 };
@@ -1238,9 +1288,7 @@ impl DriverContinuation {
                 return DriverTurn::Waiting;
             }
             DriverPhase::Failed(error) => return DriverTurn::Error(error.clone()),
-            DriverPhase::Cancelled => {
-                return DriverTurn::Error(super::cancelled_scope_error())
-            }
+            DriverPhase::Cancelled => return DriverTurn::Error(super::cancelled_scope_error()),
             DriverPhase::Setup(_) => {
                 let Some(request) = self.setup_pending.take() else {
                     return DriverTurn::Error(ScriptError::new(
@@ -1273,10 +1321,16 @@ impl DriverContinuation {
             if !token.validate_top(runtime.player) {
                 return Err(super::cancelled_scope_error());
             }
-            let scope = runtime.player.scopes.get(token.slot()).ok_or_else(
-                super::cancelled_scope_error,
-            )?;
-            let Some(bytecode) = frame_ctx.code.handler.bytecode_array.get(scope.bytecode_index)
+            let scope = runtime
+                .player
+                .scopes
+                .get(token.slot())
+                .ok_or_else(super::cancelled_scope_error)?;
+            let Some(bytecode) = frame_ctx
+                .code
+                .handler
+                .bytecode_array
+                .get(scope.bytecode_index)
             else {
                 return Ok(None);
             };
@@ -1344,9 +1398,7 @@ impl DriverContinuation {
                 self.total_backjumps = self.total_backjumps.saturating_add(1);
                 DriverTurn::Waiting
             }
-            Ok(HandlerExecutionResult::Call(pending)) => {
-                self.start_child(session, pending)
-            }
+            Ok(HandlerExecutionResult::Call(pending)) => self.start_child(session, pending),
             Ok(HandlerExecutionResult::Error(error)) | Err(error) => {
                 self.fail_current_frame(session, error)
             }
@@ -1441,27 +1493,19 @@ impl DriverContinuation {
                     delivery: None,
                 }),
             ),
-            super::handlers::datum_handlers::SyncDatumCall::Handled(Ok(result)) => {
-                self.apply_obj_call_result(
-                    session,
-                    &frame_ctx,
-                    &token,
-                    result,
-                    prepared.push_return,
-                )
-            }
+            super::handlers::datum_handlers::SyncDatumCall::Handled(Ok(result)) => self
+                .apply_obj_call_result(session, &frame_ctx, &token, result, prepared.push_return),
             super::handlers::datum_handlers::SyncDatumCall::Handled(Err(error)) => {
                 self.fail_current_frame(session, error)
             }
-            super::handlers::datum_handlers::SyncDatumCall::Pending { request, reason } => {
-                self.prepare_pending_obj_request(
+            super::handlers::datum_handlers::SyncDatumCall::Pending { request, reason } => self
+                .prepare_pending_obj_request(
                     session,
                     frame_ctx,
                     request,
                     reason,
                     prepared.push_return,
-                )
-            }
+                ),
             super::handlers::datum_handlers::SyncDatumCall::Unsupported => {
                 self.prepare_obj_call_action(session, frame_ctx, prepared)
             }
@@ -1545,8 +1589,12 @@ impl DriverContinuation {
         push_return: bool,
     ) -> DriverTurn {
         let Some(owner) = Self::with_context(session, self.player_id, |ctx| {
-            frame_ctx.scope.validate_top(ctx.player).then(|| ctx.player.owner.clone())
-        }).flatten() else {
+            frame_ctx
+                .scope
+                .validate_top(ctx.player)
+                .then(|| ctx.player.owner.clone())
+        })
+        .flatten() else {
             self.phase = DriverPhase::Cancelled;
             return DriverTurn::Error(super::cancelled_scope_error());
         };
@@ -1585,17 +1633,13 @@ impl DriverContinuation {
                 return None;
             }
             Some(ctx.player.owner.clone())
-        }).flatten() else {
+        })
+        .flatten() else {
             self.phase = DriverPhase::Cancelled;
             return DriverTurn::Error(super::cancelled_scope_error());
         };
         let request = match Self::with_context(session, self.player_id, |runtime| {
-            classify_async_object(
-                runtime,
-                &prepared.receiver,
-                &prepared.name,
-                &prepared.args,
-            )
+            classify_async_object(runtime, &prepared.receiver, &prepared.name, &prepared.args)
         }) {
             Some(Ok(request)) => request,
             Some(Err(error)) => return self.fail_current_frame(session, error),
@@ -1650,13 +1694,9 @@ impl DriverContinuation {
         // non-final ObjCall advances normally instead of re-entering Resuming.
         self.phase = DriverPhase::Running;
         match completion {
-            Ok(result) => self.apply_obj_call_result(
-                session,
-                &frame_ctx,
-                &token,
-                result,
-                push_return,
-            ),
+            Ok(result) => {
+                self.apply_obj_call_result(session, &frame_ctx, &token, result, push_return)
+            }
             Err(error) => self.fail_current_frame(session, error),
         }
     }
@@ -1710,15 +1750,16 @@ impl DriverContinuation {
                 }
                 return self.fail_current_frame(session, super::cancelled_scope_error());
             }
-            let dispatch = match session.dispatch_global_after_external_probe(self.player_id, &name, &args) {
-                Ok(dispatch) => dispatch,
-                Err(error) => {
-                    if release_ext_call_layer {
-                        self.release_ext_call_layer(session);
+            let dispatch =
+                match session.dispatch_global_after_external_probe(self.player_id, &name, &args) {
+                    Ok(dispatch) => dispatch,
+                    Err(error) => {
+                        if release_ext_call_layer {
+                            self.release_ext_call_layer(session);
+                        }
+                        return self.fail_current_frame(session, error);
                     }
-                    return self.fail_current_frame(session, error);
-                }
-            };
+                };
             return self.continue_global_dispatch(
                 session,
                 &frame_ctx,
@@ -1757,7 +1798,11 @@ impl DriverContinuation {
         };
         let result = forced_result.clone().unwrap_or(completion_result);
 
-        if let InternalResultEffect::Tell { target: Some(target), .. } = &effect {
+        if let InternalResultEffect::Tell {
+            target: Some(target),
+            ..
+        } = &effect
+        {
             let target_live = Self::with_context(session, target.player_id, |runtime| {
                 runtime.player.owner.same_identity(&target.owner)
                     && runtime.player.owner.is_arena_live()
@@ -1803,11 +1848,10 @@ impl DriverContinuation {
                     InternalResultEffect::Global {
                         return_value: Some(_),
                         ..
+                    } | InternalResultEffect::Tell {
+                        return_value: Some(_),
+                        ..
                     }
-                        | InternalResultEffect::Tell {
-                            return_value: Some(_),
-                            ..
-                        }
                 );
             if validate_result {
                 validate_obj_call_result(runtime, &result)?;
@@ -1855,12 +1899,11 @@ impl DriverContinuation {
                     InternalResultEffect::Global {
                         stop_current_handler: true,
                         ..
+                    } | InternalResultEffect::Tell {
+                        target: None,
+                        is_return: true,
+                        ..
                     }
-                        | InternalResultEffect::Tell {
-                            target: None,
-                            is_return: true,
-                            ..
-                        }
                 );
                 if stop {
                     self.finish_current_frame(session)
@@ -1912,7 +1955,11 @@ impl DriverContinuation {
             SetObjPropOutcome::Applied => {
                 self.advance_current_opcode(session, frame_ctx, &frame_ctx.scope)
             }
-            SetObjPropOutcome::JsObject { receiver, name, value } => {
+            SetObjPropOutcome::JsObject {
+                receiver,
+                name,
+                value,
+            } => {
                 let Some(owner) = Self::with_context(session, self.player_id, |runtime| {
                     runtime.player.owner.clone()
                 }) else {
@@ -1937,8 +1984,15 @@ impl DriverContinuation {
                 DriverTurn::Pending(PendingAction::Internal(InternalInvocationRequest {
                     ticket,
                     scope: frame_ctx.scope.clone(),
-                    request: InternalVmRequest::SetProperty { receiver, name, value },
-                    pending_reason: Some("JS object property setter requires owner-bound runtime execution".to_owned()),
+                    request: InternalVmRequest::SetProperty {
+                        receiver,
+                        name,
+                        value,
+                    },
+                    pending_reason: Some(
+                        "JS object property setter requires owner-bound runtime execution"
+                            .to_owned(),
+                    ),
                     effect: Some(InternalResultEffect::SetProperty),
                 }))
             }
@@ -1977,7 +2031,9 @@ impl DriverContinuation {
                     ticket,
                     scope: frame_ctx.scope.clone(),
                     request: InternalVmRequest::Flash(request),
-                    pending_reason: Some("Flash property setter requires owner-bound host execution".to_owned()),
+                    pending_reason: Some(
+                        "Flash property setter requires owner-bound host execution".to_owned(),
+                    ),
                     effect: Some(InternalResultEffect::SetProperty),
                 }))
             }
@@ -1998,14 +2054,12 @@ impl DriverContinuation {
                         ScriptError::new("driver action sequence exhausted".to_owned()),
                     );
                 };
-                let outbound = match session.begin_property_cast_load(
-                    self.player_id,
-                    request,
-                    ticket.clone(),
-                ) {
-                    Ok(outbound) => outbound,
-                    Err(error) => return self.fail_current_frame(session, error),
-                };
+                let outbound =
+                    match session.begin_property_cast_load(self.player_id, request, ticket.clone())
+                    {
+                        Ok(outbound) => outbound,
+                        Err(error) => return self.fail_current_frame(session, error),
+                    };
                 if let Some(request) = outbound {
                     self.internal_effect = Some(InternalResultEffect::SetProperty);
                     self.phase = DriverPhase::Awaiting {
@@ -2020,7 +2074,6 @@ impl DriverContinuation {
             }
         }
     }
-
 
     fn continue_global_dispatch(
         &mut self,
@@ -2044,104 +2097,230 @@ impl DriverContinuation {
             _ => Vec::new(),
         };
         let (request, pending_reason) = match dispatch {
-                GlobalDispatch::Child {
-                    receiver,
-                    handler_ref,
-                } => {
-                    let push_return = match &effect {
-                        InternalResultEffect::Global { push_return, .. }
-                        | InternalResultEffect::Tell { push_return, .. }
-                        | InternalResultEffect::ObjectV4 { push_return, .. } => *push_return,
-                        _ => false,
-                    };
-                    let policy = if matches!(
-                        &effect,
-                        InternalResultEffect::ObjectV4 {
-                            route_to_global: true,
-                            ..
+            GlobalDispatch::Child {
+                receiver,
+                handler_ref,
+            } => {
+                let push_return = match &effect {
+                    InternalResultEffect::Global { push_return, .. }
+                    | InternalResultEffect::Tell { push_return, .. }
+                    | InternalResultEffect::ObjectV4 { push_return, .. } => *push_return,
+                    _ => false,
+                };
+                let policy = if matches!(
+                    &effect,
+                    InternalResultEffect::ObjectV4 {
+                        route_to_global: true,
+                        ..
+                    }
+                ) {
+                    Some(ChildReturnPolicy::ObjCallV4)
+                } else {
+                    Some(ChildReturnPolicy::GlobalScope { ext_call_layer })
+                };
+                self.internal_effect = None;
+                self.internal_ext_call_layer = false;
+                return self.start_child_with_policy(
+                    session,
+                    super::PendingCall {
+                        receiver,
+                        handler_ref,
+                        args: child_args,
+                        use_raw_arg_list: true,
+                        push_return,
+                    },
+                    policy,
+                );
+            }
+            GlobalDispatch::ChildPrepared {
+                receiver,
+                handler_ref,
+                args: child_args,
+            } => {
+                let push_return = match &effect {
+                    InternalResultEffect::Global { push_return, .. }
+                    | InternalResultEffect::Tell { push_return, .. }
+                    | InternalResultEffect::ObjectV4 { push_return, .. } => *push_return,
+                    _ => false,
+                };
+                let policy = if matches!(
+                    &effect,
+                    InternalResultEffect::ObjectV4 {
+                        route_to_global: true,
+                        ..
+                    }
+                ) {
+                    Some(ChildReturnPolicy::ObjCallV4)
+                } else {
+                    Some(ChildReturnPolicy::GlobalScope { ext_call_layer })
+                };
+                self.internal_effect = None;
+                self.internal_ext_call_layer = false;
+                return self.start_child_with_policy(
+                    session,
+                    super::PendingCall {
+                        receiver,
+                        handler_ref,
+                        args: child_args,
+                        use_raw_arg_list: false,
+                        push_return,
+                    },
+                    policy,
+                );
+            }
+            GlobalDispatch::ChildWithCompletion {
+                receiver,
+                handler_ref,
+                args,
+                completion,
+            } => {
+                let push_return = match &effect {
+                    InternalResultEffect::Global { push_return, .. }
+                    | InternalResultEffect::Tell { push_return, .. }
+                    | InternalResultEffect::ObjectV4 { push_return, .. } => *push_return,
+                    _ => false,
+                };
+                let delivery = match &effect {
+                    InternalResultEffect::Global { .. } | InternalResultEffect::Tell { .. } => {
+                        Some(ChildDelivery::GlobalScope)
+                    }
+                    InternalResultEffect::ObjectV4 {
+                        route_to_global: true,
+                        ..
+                    } => Some(ChildDelivery::ObjCallV4),
+                    _ => None,
+                };
+                self.internal_effect = None;
+                self.internal_ext_call_layer = false;
+                return self.start_child_with_policy(
+                    session,
+                    super::PendingCall {
+                        receiver,
+                        handler_ref,
+                        args,
+                        use_raw_arg_list: false,
+                        push_return,
+                    },
+                    Some(ChildReturnPolicy::Completion {
+                        completion,
+                        ext_call_layer,
+                        delivery,
+                    }),
+                );
+            }
+            GlobalDispatch::AncestorChildren { calls } => {
+                let mut remaining_calls = calls.into_iter();
+                let mut selected = None;
+                while let Some(call) = remaining_calls.next() {
+                    match self.resolve_ancestor_pending(session, &call) {
+                        Ok(Some(pending)) => {
+                            selected = Some((pending, call));
+                            break;
                         }
-                    ) {
-                        Some(ChildReturnPolicy::ObjCallV4)
-                    } else {
-                        Some(ChildReturnPolicy::GlobalScope {
-                            ext_call_layer,
-                        })
-                    };
-                    self.internal_effect = None;
-                    self.internal_ext_call_layer = false;
-                    return self.start_child_with_policy(
-                        session,
-                        super::PendingCall {
-                            receiver,
-                            handler_ref,
-                            args: child_args,
-                            use_raw_arg_list: true,
-                            push_return,
-                        },
-                        policy,
-                    );
-                }
-                GlobalDispatch::ChildPrepared { receiver, handler_ref, args: child_args } => {
-                    let push_return = match &effect {
-                        InternalResultEffect::Global { push_return, .. }
-                        | InternalResultEffect::Tell { push_return, .. }
-                        | InternalResultEffect::ObjectV4 { push_return, .. } => *push_return,
-                        _ => false,
-                    };
-                    let policy = if matches!(&effect, InternalResultEffect::ObjectV4 { route_to_global: true, .. }) {
-                        Some(ChildReturnPolicy::ObjCallV4)
-                    } else {
-                        Some(ChildReturnPolicy::GlobalScope { ext_call_layer })
-                    };
-                    self.internal_effect = None;
-                    self.internal_ext_call_layer = false;
-                    return self.start_child_with_policy(
-                        session,
-                        super::PendingCall {
-                            receiver,
-                            handler_ref,
-                            args: child_args,
-                            use_raw_arg_list: false,
-                            push_return,
-                        },
-                        policy,
-                    );
-                }
-                GlobalDispatch::ChildWithCompletion { receiver, handler_ref, args, completion } => {
-                    let push_return = match &effect {
-                        InternalResultEffect::Global { push_return, .. }
-                        | InternalResultEffect::Tell { push_return, .. }
-                        | InternalResultEffect::ObjectV4 { push_return, .. } => *push_return,
-                        _ => false,
-                    };
-                    let delivery = match &effect {
-                        InternalResultEffect::Global { .. }
-                        | InternalResultEffect::Tell { .. } => Some(ChildDelivery::GlobalScope),
-                        InternalResultEffect::ObjectV4 { route_to_global: true, .. } => {
-                            Some(ChildDelivery::ObjCallV4)
+                        Ok(None) => {}
+                        Err(error) => {
+                            self.internal_effect = None;
+                            if ext_call_layer {
+                                self.release_ext_call_layer(session);
+                            }
+                            return self.fail_current_frame(session, error);
                         }
-                        _ => None,
-                    };
-                    self.internal_effect = None;
-                    self.internal_ext_call_layer = false;
-                    return self.start_child_with_policy(
-                        session,
-                        super::PendingCall { receiver, handler_ref, args, use_raw_arg_list: false, push_return },
-                        Some(ChildReturnPolicy::Completion {
-                            completion,
-                            ext_call_layer,
-                            delivery,
-                        }),
-                    );
+                    }
                 }
-                GlobalDispatch::AncestorChildren { calls } => {
-                    let mut remaining_calls = calls.into_iter();
-                    let mut selected = None;
-                    while let Some(call) = remaining_calls.next() {
-                        match self.resolve_ancestor_pending(session, &call) {
-                            Ok(Some(pending)) => {
-                                selected = Some((pending, call));
-                                break;
+                let Some((mut pending, _call)) = selected else {
+                    self.internal_effect = None;
+                    if ext_call_layer {
+                        self.release_ext_call_layer(session);
+                    }
+                    return self.apply_internal_result(
+                        session,
+                        &frame_ctx,
+                        &frame_ctx.scope,
+                        effect,
+                        DatumRef::Void,
+                    );
+                };
+                let push_return = match &effect {
+                    InternalResultEffect::Global { push_return, .. }
+                    | InternalResultEffect::Tell { push_return, .. }
+                    | InternalResultEffect::ObjectV4 { push_return, .. } => *push_return,
+                    _ => false,
+                };
+                let delivery = match &effect {
+                    InternalResultEffect::Global { .. } | InternalResultEffect::Tell { .. } => {
+                        Some(ChildDelivery::GlobalScope)
+                    }
+                    InternalResultEffect::ObjectV4 {
+                        route_to_global: true,
+                        ..
+                    } => Some(ChildDelivery::ObjCallV4),
+                    _ => None,
+                };
+                let remaining: Vec<_> = remaining_calls.collect();
+                pending.push_return = remaining.is_empty() && push_return;
+                self.internal_effect = None;
+                self.internal_ext_call_layer = false;
+                return self.start_child_with_policy(
+                    session,
+                    pending,
+                    Some(ChildReturnPolicy::Ancestor {
+                        remaining,
+                        final_push_return: push_return,
+                        ext_call_layer,
+                        delivery,
+                    }),
+                );
+            }
+            GlobalDispatch::ChildSequence { plan } => {
+                let BroadcastPlan {
+                    calls,
+                    fallback,
+                    initial_return,
+                    handled: initial_handled,
+                    continue_on_error,
+                } = plan;
+                let push_return = match &effect {
+                    InternalResultEffect::Global { push_return, .. }
+                    | InternalResultEffect::Tell { push_return, .. }
+                    | InternalResultEffect::ObjectV4 { push_return, .. } => *push_return,
+                    _ => false,
+                };
+                let delivery = match &effect {
+                    InternalResultEffect::Global { .. } | InternalResultEffect::Tell { .. } => {
+                        Some(ChildDelivery::GlobalScope)
+                    }
+                    InternalResultEffect::ObjectV4 {
+                        route_to_global: true,
+                        ..
+                    } => Some(ChildDelivery::ObjCallV4),
+                    _ => None,
+                };
+                let mut remaining_calls = calls.into_iter();
+                let Some(first_call) = remaining_calls.next() else {
+                    // No behavior receiver was prepared.  Try the static
+                    // frame/movie chain before completing the opcode.
+                    let mut remaining_static = fallback.into_iter();
+                    while let Some(static_call) = remaining_static.next() {
+                        match self.resolve_static_pending(session, &static_call) {
+                            Ok(Some(mut pending)) => {
+                                let remaining_static: Vec<_> = remaining_static.collect();
+                                pending.push_return = remaining_static.is_empty() && push_return;
+                                self.internal_effect = None;
+                                self.internal_ext_call_layer = false;
+                                return self.start_child_with_policy(
+                                    session,
+                                    pending,
+                                    Some(ChildReturnPolicy::Broadcast {
+                                        remaining: Vec::new(),
+                                        fallback: remaining_static,
+                                        final_push_return: push_return,
+                                        ext_call_layer,
+                                        delivery,
+                                        last_return_value: initial_return.clone(),
+                                        handled: initial_handled,
+                                        continue_on_error,
+                                    }),
+                                );
                             }
                             Ok(None) => {}
                             Err(error) => {
@@ -2153,74 +2332,38 @@ impl DriverContinuation {
                             }
                         }
                     }
-                    let Some((mut pending, _call)) = selected else {
-                        self.internal_effect = None;
-                        if ext_call_layer { self.release_ext_call_layer(session); }
-                        return self.apply_internal_result(session, &frame_ctx, &frame_ctx.scope, effect, DatumRef::Void);
-                    };
-                    let push_return = match &effect {
-                        InternalResultEffect::Global { push_return, .. }
-                        | InternalResultEffect::Tell { push_return, .. }
-                        | InternalResultEffect::ObjectV4 { push_return, .. } => *push_return,
-                        _ => false,
-                    };
-                    let delivery = match &effect {
-                        InternalResultEffect::Global { .. }
-                        | InternalResultEffect::Tell { .. } => Some(ChildDelivery::GlobalScope),
-                        InternalResultEffect::ObjectV4 { route_to_global: true, .. } => {
-                            Some(ChildDelivery::ObjCallV4)
-                        }
-                        _ => None,
-                    };
-                    let remaining: Vec<_> = remaining_calls.collect();
-                    pending.push_return = remaining.is_empty() && push_return;
                     self.internal_effect = None;
-                    self.internal_ext_call_layer = false;
-                    return self.start_child_with_policy(
+                    if ext_call_layer {
+                        self.release_ext_call_layer(session);
+                    }
+                    return self.apply_internal_result(
                         session,
-                        pending,
-                        Some(ChildReturnPolicy::Ancestor {
-                            remaining,
-                            final_push_return: push_return,
-                            ext_call_layer,
-                            delivery,
-                        }),
+                        &frame_ctx,
+                        &frame_ctx.scope,
+                        effect,
+                        initial_return,
                     );
-                }
-                GlobalDispatch::ChildSequence { plan } => {
-                    let BroadcastPlan { calls, fallback, initial_return, handled: initial_handled, continue_on_error } = plan;
-                    let push_return = match &effect {
-                        InternalResultEffect::Global { push_return, .. }
-                        | InternalResultEffect::Tell { push_return, .. }
-                        | InternalResultEffect::ObjectV4 { push_return, .. } => *push_return,
-                        _ => false,
-                    };
-                    let delivery = match &effect {
-                        InternalResultEffect::Global { .. }
-                        | InternalResultEffect::Tell { .. } => Some(ChildDelivery::GlobalScope),
-                        InternalResultEffect::ObjectV4 { route_to_global: true, .. } => {
-                            Some(ChildDelivery::ObjCallV4)
-                        }
-                        _ => None,
-                    };
-                    let mut remaining_calls = calls.into_iter();
-                    let Some(first_call) = remaining_calls.next() else {
-                        // No behavior receiver was prepared.  Try the static
-                        // frame/movie chain before completing the opcode.
-                        let mut remaining_static = fallback.into_iter();
-                        while let Some(static_call) = remaining_static.next() {
-                            match self.resolve_static_pending(session, &static_call) {
+                };
+                let pending = match self.resolve_broadcast_pending(session, &first_call) {
+                    Ok(Some(pending)) => pending,
+                    Ok(None) => {
+                        // A receiver may have acquired a handler after
+                        // preparation.  Keep walking behavior receivers
+                        // before considering static fallback.
+                        while let Some(call) = remaining_calls.next() {
+                            match self.resolve_broadcast_pending(session, &call) {
                                 Ok(Some(mut pending)) => {
-                                    let remaining_static: Vec<_> = remaining_static.collect();
-                                    pending.push_return = remaining_static.is_empty() && push_return;
+                                    let remaining: Vec<_> = remaining_calls.collect();
+                                    pending.push_return =
+                                        remaining.is_empty() && fallback.is_empty() && push_return;
                                     self.internal_effect = None;
                                     self.internal_ext_call_layer = false;
                                     return self.start_child_with_policy(
                                         session,
                                         pending,
                                         Some(ChildReturnPolicy::Broadcast {
-                                            remaining: Vec::new(),
-                                            fallback: remaining_static,
+                                            remaining,
+                                            fallback: fallback.clone(),
                                             final_push_return: push_return,
                                             ext_call_layer,
                                             delivery,
@@ -2233,150 +2376,6 @@ impl DriverContinuation {
                                 Ok(None) => {}
                                 Err(error) => {
                                     self.internal_effect = None;
-                                    if ext_call_layer { self.release_ext_call_layer(session); }
-                                    return self.fail_current_frame(session, error);
-                                }
-                            }
-                        }
-                        self.internal_effect = None;
-                        if ext_call_layer { self.release_ext_call_layer(session); }
-                        return self.apply_internal_result(
-                            session, &frame_ctx, &frame_ctx.scope, effect, initial_return,
-                        );
-                    };
-                    let pending = match self.resolve_broadcast_pending(session, &first_call) {
-                        Ok(Some(pending)) => pending,
-                        Ok(None) => {
-                            // A receiver may have acquired a handler after
-                            // preparation.  Keep walking behavior receivers
-                            // before considering static fallback.
-                            while let Some(call) = remaining_calls.next() {
-                                match self.resolve_broadcast_pending(session, &call) {
-                                    Ok(Some(mut pending)) => {
-                                        let remaining: Vec<_> = remaining_calls.collect();
-                                        pending.push_return = remaining.is_empty() && fallback.is_empty() && push_return;
-                                        self.internal_effect = None;
-                                        self.internal_ext_call_layer = false;
-                                        return self.start_child_with_policy(
-                                            session,
-                                            pending,
-                                            Some(ChildReturnPolicy::Broadcast {
-                                                remaining,
-                                                fallback: fallback.clone(),
-                                                final_push_return: push_return,
-                                                ext_call_layer,
-                                                delivery,
-                                                last_return_value: initial_return.clone(),
-                                                handled: initial_handled,
-                                                continue_on_error,
-                                            }),
-                                        );
-                                    }
-                                    Ok(None) => {}
-                                    Err(error) => {
-                                        self.internal_effect = None;
-                                        if ext_call_layer { self.release_ext_call_layer(session); }
-                                        return self.fail_current_frame(session, error);
-                                    }
-                                }
-                            }
-                            let mut remaining_static = fallback.into_iter();
-                            while let Some(static_call) = remaining_static.next() {
-                                match self.resolve_static_pending(session, &static_call) {
-                                    Ok(Some(mut pending)) => {
-                                        let fallback: Vec<_> = remaining_static.collect();
-                                        pending.push_return = fallback.is_empty() && push_return;
-                                        self.internal_effect = None;
-                                        self.internal_ext_call_layer = false;
-                                        return self.start_child_with_policy(
-                                            session,
-                                            pending,
-                                            Some(ChildReturnPolicy::Broadcast {
-                                                remaining: Vec::new(),
-                                                fallback,
-                                                final_push_return: push_return,
-                                                ext_call_layer,
-                                                delivery,
-                                                last_return_value: initial_return.clone(),
-                                                handled: initial_handled,
-                                                continue_on_error,
-                                            }),
-                                        );
-                                    }
-                                    Ok(None) => {}
-                                    Err(error) => {
-                                        self.internal_effect = None;
-                                        if ext_call_layer { self.release_ext_call_layer(session); }
-                                        return self.fail_current_frame(session, error);
-                                    }
-                                }
-                            }
-                            self.internal_effect = None;
-                            if ext_call_layer { self.release_ext_call_layer(session); }
-                            return self.apply_internal_result(
-                                session,
-                                &frame_ctx,
-                                &frame_ctx.scope,
-                                effect,
-                                initial_return,
-                            );
-                        }
-                        Err(error) => {
-                            self.internal_effect = None;
-                            if ext_call_layer {
-                                self.release_ext_call_layer(session);
-                            }
-                            return self.fail_current_frame(session, error);
-                        }
-                    };
-                    let mut pending = pending;
-                    let remaining: Vec<_> = remaining_calls.collect();
-                    pending.push_return = remaining.is_empty() && fallback.is_empty() && push_return;
-                    self.internal_effect = None;
-                    self.internal_ext_call_layer = false;
-                    return self.start_child_with_policy(
-                        session,
-                        pending,
-                        Some(ChildReturnPolicy::Broadcast {
-                            remaining,
-                            fallback,
-                            final_push_return: push_return,
-                            ext_call_layer,
-                            delivery,
-                            last_return_value: initial_return,
-                            handled: initial_handled,
-                            continue_on_error,
-                        }),
-                    );
-                }
-                GlobalDispatch::SyncResult(result) => {
-                    self.internal_effect = None;
-                    if ext_call_layer {
-                        self.release_ext_call_layer(session);
-                    }
-                    let result = match result {
-                        Ok(result) => result,
-                        Err(error) => return self.fail_current_frame(session, error),
-                    };
-                    return self.apply_internal_result(
-                        session,
-                        &frame_ctx,
-                        &frame_ctx.scope,
-                        effect,
-                        result,
-                    );
-                }
-                GlobalDispatch::PendingRequest { request: prepared, reason } => {
-                    (prepared, Some(reason))
-                }
-                GlobalDispatch::Pending { reason } => {
-                    let request = match base_request {
-                        InternalVmRequest::GlobalAfterExternalProbe { name, args, .. }
-                        | InternalVmRequest::Global { name, args } => {
-                            match session.prepare_async_global_request(self.player_id, &name, &args) {
-                                Ok(Some(request)) => request,
-                                Ok(None) => InternalVmRequest::Global { name, args },
-                                Err(error) => {
                                     if ext_call_layer {
                                         self.release_ext_call_layer(session);
                                     }
@@ -2384,14 +2383,123 @@ impl DriverContinuation {
                                 }
                             }
                         }
-                        request => request,
-                    };
-                    (request, Some(reason))
+                        let mut remaining_static = fallback.into_iter();
+                        while let Some(static_call) = remaining_static.next() {
+                            match self.resolve_static_pending(session, &static_call) {
+                                Ok(Some(mut pending)) => {
+                                    let fallback: Vec<_> = remaining_static.collect();
+                                    pending.push_return = fallback.is_empty() && push_return;
+                                    self.internal_effect = None;
+                                    self.internal_ext_call_layer = false;
+                                    return self.start_child_with_policy(
+                                        session,
+                                        pending,
+                                        Some(ChildReturnPolicy::Broadcast {
+                                            remaining: Vec::new(),
+                                            fallback,
+                                            final_push_return: push_return,
+                                            ext_call_layer,
+                                            delivery,
+                                            last_return_value: initial_return.clone(),
+                                            handled: initial_handled,
+                                            continue_on_error,
+                                        }),
+                                    );
+                                }
+                                Ok(None) => {}
+                                Err(error) => {
+                                    self.internal_effect = None;
+                                    if ext_call_layer {
+                                        self.release_ext_call_layer(session);
+                                    }
+                                    return self.fail_current_frame(session, error);
+                                }
+                            }
+                        }
+                        self.internal_effect = None;
+                        if ext_call_layer {
+                            self.release_ext_call_layer(session);
+                        }
+                        return self.apply_internal_result(
+                            session,
+                            &frame_ctx,
+                            &frame_ctx.scope,
+                            effect,
+                            initial_return,
+                        );
+                    }
+                    Err(error) => {
+                        self.internal_effect = None;
+                        if ext_call_layer {
+                            self.release_ext_call_layer(session);
+                        }
+                        return self.fail_current_frame(session, error);
+                    }
+                };
+                let mut pending = pending;
+                let remaining: Vec<_> = remaining_calls.collect();
+                pending.push_return = remaining.is_empty() && fallback.is_empty() && push_return;
+                self.internal_effect = None;
+                self.internal_ext_call_layer = false;
+                return self.start_child_with_policy(
+                    session,
+                    pending,
+                    Some(ChildReturnPolicy::Broadcast {
+                        remaining,
+                        fallback,
+                        final_push_return: push_return,
+                        ext_call_layer,
+                        delivery,
+                        last_return_value: initial_return,
+                        handled: initial_handled,
+                        continue_on_error,
+                    }),
+                );
+            }
+            GlobalDispatch::SyncResult(result) => {
+                self.internal_effect = None;
+                if ext_call_layer {
+                    self.release_ext_call_layer(session);
                 }
-            };
-        let Some(owner) = Self::with_context(session, self.player_id, |ctx| {
-            ctx.player.owner.clone()
-        }) else {
+                let result = match result {
+                    Ok(result) => result,
+                    Err(error) => return self.fail_current_frame(session, error),
+                };
+                return self.apply_internal_result(
+                    session,
+                    &frame_ctx,
+                    &frame_ctx.scope,
+                    effect,
+                    result,
+                );
+            }
+            GlobalDispatch::PendingRequest {
+                request: prepared,
+                reason,
+            } => (prepared, Some(reason)),
+            GlobalDispatch::Pending { reason } => {
+                let request = match base_request {
+                    InternalVmRequest::GlobalAfterExternalProbe { name, args, .. }
+                    | InternalVmRequest::Global { name, args } => {
+                        match session.prepare_async_global_request(self.player_id, &name, &args) {
+                            Ok(Some(request)) => request,
+                            Ok(None) => InternalVmRequest::Global { name, args },
+                            Err(error) => {
+                                if ext_call_layer {
+                                    self.release_ext_call_layer(session);
+                                }
+                                return self.fail_current_frame(session, error);
+                            }
+                        }
+                    }
+                    request => request,
+                };
+                (request, Some(reason))
+            }
+        };
+        let Some(owner) =
+            Self::with_context(session, self.player_id, |ctx| ctx.player.owner.clone())
+        else {
             if ext_call_layer {
                 self.release_ext_call_layer(session);
             }
@@ -2451,7 +2559,8 @@ impl DriverContinuation {
                         )
                     })?;
                     let receiver = pop_internal_ref(runtime, &frame_ctx, "get_obj_prop receiver")?;
-                    let receiver_value = checked_internal_datum(runtime.player, runtime.symbols, &receiver)?.clone();
+                    let receiver_value =
+                        checked_internal_datum(runtime.player, runtime.symbols, &receiver)?.clone();
                     let request = match receiver_value {
                         Datum::String(_) | Datum::StringChunk(..)
                             if name == Symbol::builtin(BuiltInSymbol::Value) =>
@@ -2501,39 +2610,33 @@ impl DriverContinuation {
                         ));
                     }
                     let script_arg_ref = all_args.remove(0);
-                    let script_arg = checked_internal_datum(
-                        runtime.player,
-                        runtime.symbols,
-                        &script_arg_ref,
-                    )?
-                    .clone();
-                    let script = match script_arg {
-                        Datum::String(script_name) => runtime
-                            .player
-                            .movie
-                            .cast_manager
-                            .find_member_ref_by_name(&script_name)
-                            .map(|member_ref| {
-                                runtime
-                                    .player
-                                    .alloc_datum(Datum::ScriptRef(member_ref))
-                            })
-                            .ok_or_else(|| {
-                                ScriptError::new(format!(
-                                    "No script found with name {}",
-                                    script_name
-                                ))
-                            })?,
-                        Datum::CastMember(member_ref) => runtime
-                            .player
-                            .alloc_datum(Datum::ScriptRef(member_ref)),
-                        _ => {
-                            return Err(ScriptError::new(
+                    let script_arg =
+                        checked_internal_datum(runtime.player, runtime.symbols, &script_arg_ref)?
+                            .clone();
+                    let script =
+                        match script_arg {
+                            Datum::String(script_name) => runtime
+                                .player
+                                .movie
+                                .cast_manager
+                                .find_member_ref_by_name(&script_name)
+                                .map(|member_ref| {
+                                    runtime.player.alloc_datum(Datum::ScriptRef(member_ref))
+                                })
+                                .ok_or_else(|| {
+                                    ScriptError::new(format!(
+                                        "No script found with name {}",
+                                        script_name
+                                    ))
+                                })?,
+                            Datum::CastMember(member_ref) => {
+                                runtime.player.alloc_datum(Datum::ScriptRef(member_ref))
+                            }
+                            _ => return Err(ScriptError::new(
                                 "First argument to new script must be script name or CastMember"
                                     .to_owned(),
-                            ))
-                        }
-                    };
+                            )),
+                        };
                     for arg in &all_args {
                         checked_internal_datum(runtime.player, runtime.symbols, arg)?;
                     }
@@ -2566,10 +2669,7 @@ impl DriverContinuation {
                         None
                     };
                     Ok((
-                        InternalVmRequest::Global {
-                            name,
-                            args,
-                        },
+                        InternalVmRequest::Global { name, args },
                         InternalResultEffect::Global {
                             push_return: !no_ret,
                             stop_current_handler: is_return,
@@ -2583,12 +2683,9 @@ impl DriverContinuation {
                         pop_internal_ref(runtime, &frame_ctx, "obj_call_v4 handler name")?;
                     let (mut all_args, no_ret) =
                         pop_internal_call_args(runtime, &frame_ctx, opcode)?;
-                    let handler_datum = checked_internal_datum(
-                        runtime.player,
-                        runtime.symbols,
-                        &handler_ref,
-                    )?
-                    .clone();
+                    let handler_datum =
+                        checked_internal_datum(runtime.player, runtime.symbols, &handler_ref)?
+                            .clone();
                     let handler_name = handler_datum.symbol_value(runtime.symbols)?;
                     if all_args.is_empty() {
                         return Err(ScriptError::new(
@@ -2596,12 +2693,8 @@ impl DriverContinuation {
                         ));
                     }
                     let mut receiver = all_args.remove(0);
-                    let receiver_value = checked_internal_datum(
-                        runtime.player,
-                        runtime.symbols,
-                        &receiver,
-                    )?
-                    .clone();
+                    let receiver_value =
+                        checked_internal_datum(runtime.player, runtime.symbols, &receiver)?.clone();
                     if let Datum::Symbol(sym_name) = receiver_value {
                         if let Some(global_ref) = runtime.player.globals.get(&sym_name) {
                             receiver = global_ref.clone();
@@ -2613,16 +2706,10 @@ impl DriverContinuation {
                     }
                     let is_object_receiver = matches!(
                         checked_internal_datum(runtime.player, runtime.symbols, &receiver)?,
-                        Datum::ScriptInstanceRef(_)
-                            | Datum::ScriptRef(_)
-                            | Datum::JsObjectRef(_)
+                        Datum::ScriptInstanceRef(_) | Datum::ScriptRef(_) | Datum::JsObjectRef(_)
                     );
                     let route_to_global = !is_object_receiver
-                        && global_handler_exists(
-                            runtime.player,
-                            runtime.symbols,
-                            &handler_name,
-                        )?;
+                        && global_handler_exists(runtime.player, runtime.symbols, &handler_name)?;
                     Ok((
                         InternalVmRequest::ObjectV4 {
                             receiver,
@@ -2646,8 +2733,7 @@ impl DriverContinuation {
                         )
                     })?;
                     let value = pop_internal_ref(runtime, &frame_ctx, "set_obj_prop value")?;
-                    let receiver =
-                        pop_internal_ref(runtime, &frame_ctx, "set_obj_prop receiver")?;
+                    let receiver = pop_internal_ref(runtime, &frame_ctx, "set_obj_prop receiver")?;
                     Ok((
                         InternalVmRequest::SetProperty {
                             receiver,
@@ -2734,9 +2820,9 @@ impl DriverContinuation {
             );
         }
         if let Some(target_id) = target_id {
-            let Some(target_owner) = Self::with_context(session, target_id, |runtime| {
-                runtime.player.owner.clone()
-            }) else {
+            let Some(target_owner) =
+                Self::with_context(session, target_id, |runtime| runtime.player.owner.clone())
+            else {
                 return self.fail_current_frame(
                     session,
                     ScriptError::new_code(
@@ -2805,7 +2891,8 @@ impl DriverContinuation {
                     route_to_global: true,
                     ..
                 }
-            ) => {
+            ) =>
+            {
                 let mut args_with_receiver = Vec::with_capacity(args.len() + 1);
                 args_with_receiver.push(receiver.clone());
                 args_with_receiver.extend(args.iter().cloned());
@@ -2859,9 +2946,9 @@ impl DriverContinuation {
 
         // Non-global internal requests continue through the ordinary pending
         // action path below.
-        let Some(owner) = Self::with_context(session, self.player_id, |ctx| {
-            ctx.player.owner.clone()
-        }) else {
+        let Some(owner) =
+            Self::with_context(session, self.player_id, |ctx| ctx.player.owner.clone())
+        else {
             if ext_call_layer {
                 self.release_ext_call_layer(session);
             }
@@ -2907,11 +2994,7 @@ impl DriverContinuation {
                 passed: false,
             });
         };
-        let child_policy = self
-            .child_return_policies
-            .last()
-            .cloned()
-            .flatten();
+        let child_policy = self.child_return_policies.last().cloned().flatten();
         let result_valid = Self::with_context(session, self.player_id, |runtime| {
             if !frame.ctx.scope.validate_top(runtime.player) {
                 return Err(super::cancelled_scope_error());
@@ -2983,9 +3066,10 @@ impl DriverContinuation {
                     continue_on_error,
                 }) = child_policy.clone()
                 {
-                let handled = handled
-                    || !scope_result.passed
-                    || (static_event_was_active && session.static_event_stopped(self.player_id));
+                    let handled = handled
+                        || !scope_result.passed
+                        || (static_event_was_active
+                            && session.static_event_stopped(self.player_id));
                     if scope_result.return_value != DatumRef::Void {
                         last_return_value = scope_result.return_value.clone();
                     }
@@ -2994,7 +3078,9 @@ impl DriverContinuation {
                         match self.resolve_broadcast_pending(session, &call) {
                             Ok(Some(mut pending)) => {
                                 let remaining: Vec<_> = remaining_calls.collect();
-                                pending.push_return = remaining.is_empty() && fallback.is_empty() && final_push_return;
+                                pending.push_return = remaining.is_empty()
+                                    && fallback.is_empty()
+                                    && final_push_return;
                                 return self.start_child_without_advancing(
                                     session,
                                     pending,
@@ -3018,26 +3104,26 @@ impl DriverContinuation {
                         let mut remaining_static = fallback.into_iter();
                         while let Some(static_call) = remaining_static.next() {
                             match self.resolve_static_pending(session, &static_call) {
-                            Ok(Some(mut pending)) => {
-                                let fallback: Vec<_> = remaining_static.collect();
-                                pending.push_return = fallback.is_empty() && final_push_return;
-                                return self.start_child_without_advancing(
-                                    session,
-                                    pending,
-                                    Some(ChildReturnPolicy::Broadcast {
-                                        remaining: Vec::new(),
-                                        fallback,
-                                        final_push_return,
-                                        ext_call_layer,
-                                        delivery,
-                                        last_return_value,
-                                        handled,
-                                        continue_on_error,
-                                    }),
-                                );
-                            }
-                            Ok(None) => {}
-                            Err(error) => return self.fail_current_frame(session, error),
+                                Ok(Some(mut pending)) => {
+                                    let fallback: Vec<_> = remaining_static.collect();
+                                    pending.push_return = fallback.is_empty() && final_push_return;
+                                    return self.start_child_without_advancing(
+                                        session,
+                                        pending,
+                                        Some(ChildReturnPolicy::Broadcast {
+                                            remaining: Vec::new(),
+                                            fallback,
+                                            final_push_return,
+                                            ext_call_layer,
+                                            delivery,
+                                            last_return_value,
+                                            handled,
+                                            continue_on_error,
+                                        }),
+                                    );
+                                }
+                                Ok(None) => {}
+                                Err(error) => return self.fail_current_frame(session, error),
                             }
                         }
                     }
@@ -3086,7 +3172,8 @@ impl DriverContinuation {
                         runtime.player.last_handler_result = scope_result.return_value.clone();
                     }
                     if Self::policy_is_global_scope(child_policy.as_ref()) {
-                        let Some(scope) = runtime.player.scopes.get_mut(parent.ctx.scope.slot()) else {
+                        let Some(scope) = runtime.player.scopes.get_mut(parent.ctx.scope.slot())
+                        else {
                             return false;
                         };
                         scope.return_value = scope_result.return_value.clone();
@@ -3114,7 +3201,11 @@ impl DriverContinuation {
         }
     }
 
-    fn start_child(&mut self, session: &mut RuntimeSession, pending: super::PendingCall) -> DriverTurn {
+    fn start_child(
+        &mut self,
+        session: &mut RuntimeSession,
+        pending: super::PendingCall,
+    ) -> DriverTurn {
         self.start_child_with_policy(session, pending, None)
     }
 
@@ -3152,13 +3243,20 @@ impl DriverContinuation {
             return DriverTurn::Error(super::cancelled_scope_error());
         };
         let parent_scope = parent.ctx.scope.clone();
-        let parent_advanced = if !advance_parent { true } else {
+        let parent_advanced = if !advance_parent {
+            true
+        } else {
             Self::with_context(session, self.player_id, |ctx| {
-                if !parent_scope.validate_top(ctx.player) { return false; }
-                let Some(scope) = ctx.player.scopes.get_mut(parent_scope.slot()) else { return false; };
+                if !parent_scope.validate_top(ctx.player) {
+                    return false;
+                }
+                let Some(scope) = ctx.player.scopes.get_mut(parent_scope.slot()) else {
+                    return false;
+                };
                 scope.bytecode_index = scope.bytecode_index.saturating_add(1);
                 true
-            }).unwrap_or(false)
+            })
+            .unwrap_or(false)
         };
         if !parent_advanced {
             self.release_static_event_guard(session);
@@ -3188,7 +3286,7 @@ impl DriverContinuation {
             pending.use_raw_arg_list,
             pending.push_return,
             expectation,
-            ) {
+        ) {
             Ok(super::FrameSetup::Early(mut result)) => {
                 let static_event_was_active = self.static_event_guard.is_some();
                 self.release_static_event_guard(session);
@@ -3234,7 +3332,8 @@ impl DriverContinuation {
                 {
                     let handled = handled
                         || !result.passed
-                        || (static_event_was_active && session.static_event_stopped(self.player_id));
+                        || (static_event_was_active
+                            && session.static_event_stopped(self.player_id));
                     if result.return_value != DatumRef::Void {
                         last_return_value = result.return_value.clone();
                     }
@@ -3243,7 +3342,9 @@ impl DriverContinuation {
                         match self.resolve_broadcast_pending(session, &call) {
                             Ok(Some(mut next_pending)) => {
                                 let remaining: Vec<_> = remaining_calls.collect();
-                                next_pending.push_return = remaining.is_empty() && fallback.is_empty() && final_push_return;
+                                next_pending.push_return = remaining.is_empty()
+                                    && fallback.is_empty()
+                                    && final_push_return;
                                 return self.start_child_without_advancing(
                                     session,
                                     next_pending,
@@ -3267,26 +3368,27 @@ impl DriverContinuation {
                         let mut remaining_static = fallback.into_iter();
                         while let Some(static_call) = remaining_static.next() {
                             match self.resolve_static_pending(session, &static_call) {
-                            Ok(Some(mut next_pending)) => {
-                                let fallback: Vec<_> = remaining_static.collect();
-                                next_pending.push_return = fallback.is_empty() && final_push_return;
-                                return self.start_child_without_advancing(
-                                    session,
-                                    next_pending,
-                                    Some(ChildReturnPolicy::Broadcast {
-                                        remaining: Vec::new(),
-                                        fallback,
-                                        final_push_return,
-                                        ext_call_layer,
-                                        delivery,
-                                        last_return_value,
-                                        handled,
-                                        continue_on_error,
-                                    }),
-                                );
-                            }
-                            Ok(None) => {}
-                            Err(error) => return self.fail_current_frame(session, error),
+                                Ok(Some(mut next_pending)) => {
+                                    let fallback: Vec<_> = remaining_static.collect();
+                                    next_pending.push_return =
+                                        fallback.is_empty() && final_push_return;
+                                    return self.start_child_without_advancing(
+                                        session,
+                                        next_pending,
+                                        Some(ChildReturnPolicy::Broadcast {
+                                            remaining: Vec::new(),
+                                            fallback,
+                                            final_push_return,
+                                            ext_call_layer,
+                                            delivery,
+                                            last_return_value,
+                                            handled,
+                                            continue_on_error,
+                                        }),
+                                    );
+                                }
+                                Ok(None) => {}
+                                Err(error) => return self.fail_current_frame(session, error),
                             }
                         }
                     }
@@ -3366,10 +3468,12 @@ impl DriverContinuation {
                 let parent_anchor = plan.expectation.parent_scope();
                 let ticket = match session.allocate_setup_action(&owner, parent_anchor.as_ref()) {
                     Some(ticket) => ticket,
-                    None => return self.fail_current_frame(
-                        session,
-                        ScriptError::new("setup action ticket exhausted".to_owned()),
-                    ),
+                    None => {
+                        return self.fail_current_frame(
+                            session,
+                            ScriptError::new("setup action ticket exhausted".to_owned()),
+                        )
+                    }
                 };
                 let request = SetupCallbackRequest {
                     ticket: ticket.clone(),
@@ -3404,7 +3508,11 @@ impl DriverContinuation {
         }
     }
 
-    fn fail_current_frame(&mut self, session: &mut RuntimeSession, error: ScriptError) -> DriverTurn {
+    fn fail_current_frame(
+        &mut self,
+        session: &mut RuntimeSession,
+        error: ScriptError,
+    ) -> DriverTurn {
         self.release_static_event_guard(session);
         // sendSprite/sendAllSprites and call(list, ...) are broadcasts.  A
         // non-Abort child error is a warning in Director: continue with the
@@ -3415,10 +3523,16 @@ impl DriverContinuation {
         if error.code != super::ScriptErrorCode::Abort
             && matches!(
                 self.child_return_policies.last(),
-                Some(Some(ChildReturnPolicy::Broadcast { continue_on_error: true, .. }))
+                Some(Some(ChildReturnPolicy::Broadcast {
+                    continue_on_error: true,
+                    ..
+                }))
             )
         {
-            warn!("broadcast child handler failed; continuing: {}", error.message);
+            warn!(
+                "broadcast child handler failed; continuing: {}",
+                error.message
+            );
             let marked = self
                 .current_context()
                 .and_then(|frame| {
@@ -3469,9 +3583,15 @@ impl DriverContinuation {
             ActionCompletion::InternalError(error) | ActionCompletion::Error(error) => {
                 if matches!(
                     child_policy.as_ref(),
-                    Some(ChildReturnPolicy::Broadcast { continue_on_error: true, .. })
+                    Some(ChildReturnPolicy::Broadcast {
+                        continue_on_error: true,
+                        ..
+                    })
                 ) {
-                    warn!("broadcast setup callback failed; continuing: {}", error.message);
+                    warn!(
+                        "broadcast setup callback failed; continuing: {}",
+                        error.message
+                    );
                     DatumRef::Void
                 } else {
                     if release_layer {
@@ -3573,7 +3693,8 @@ impl DriverContinuation {
                 match self.resolve_broadcast_pending(session, &call) {
                     Ok(Some(mut pending)) => {
                         let remaining: Vec<_> = remaining_calls.collect();
-                        pending.push_return = remaining.is_empty() && fallback.is_empty() && final_push_return;
+                        pending.push_return =
+                            remaining.is_empty() && fallback.is_empty() && final_push_return;
                         return self.start_child_without_advancing(
                             session,
                             pending,
@@ -3597,26 +3718,26 @@ impl DriverContinuation {
                 let mut remaining_static = fallback.into_iter();
                 while let Some(static_call) = remaining_static.next() {
                     match self.resolve_static_pending(session, &static_call) {
-                    Ok(Some(mut pending)) => {
-                        let fallback: Vec<_> = remaining_static.collect();
-                        pending.push_return = fallback.is_empty() && final_push_return;
-                        return self.start_child_without_advancing(
-                            session,
-                            pending,
-                            Some(ChildReturnPolicy::Broadcast {
-                                remaining: Vec::new(),
-                                fallback,
-                                final_push_return,
-                                ext_call_layer,
-                                delivery,
-                                last_return_value,
-                                handled,
-                                continue_on_error,
-                            }),
-                        );
-                    }
-                    Ok(None) => {}
-                    Err(error) => return self.fail_current_frame(session, error),
+                        Ok(Some(mut pending)) => {
+                            let fallback: Vec<_> = remaining_static.collect();
+                            pending.push_return = fallback.is_empty() && final_push_return;
+                            return self.start_child_without_advancing(
+                                session,
+                                pending,
+                                Some(ChildReturnPolicy::Broadcast {
+                                    remaining: Vec::new(),
+                                    fallback,
+                                    final_push_return,
+                                    ext_call_layer,
+                                    delivery,
+                                    last_return_value,
+                                    handled,
+                                    continue_on_error,
+                                }),
+                            );
+                        }
+                        Ok(None) => {}
+                        Err(error) => return self.fail_current_frame(session, error),
                     }
                 }
             }
@@ -3624,8 +3745,11 @@ impl DriverContinuation {
         }
 
         if let Some(ChildReturnPolicy::Completion { completion, .. }) = &child_policy {
-            let transformed = Self::with_context(session, self.player_id, |runtime| {
-                match completion {
+            let transformed = Self::with_context(
+                session,
+                self.player_id,
+                |runtime| {
+                    match completion {
                     ChildCompletion::ConstructScript { fallback } =>
                         super::handlers::datum_handlers::script::ScriptDatumHandlers::finish_constructor(
                             runtime.player,
@@ -3649,7 +3773,8 @@ impl DriverContinuation {
                             result.clone(),
                         ),
                 }
-            });
+                },
+            );
             match transformed {
                 Some(Ok(value)) => result = value,
                 Some(Err(error)) => return self.fail_current_frame(session, error),
@@ -3676,10 +3801,15 @@ impl DriverContinuation {
                     };
                     scope.return_value = result.clone();
                 }
-                if !super::deliver_scope_return(ctx.player, &parent_scope, &ScopeResult {
-                    return_value: result.clone(),
-                    passed: false,
-                }, push_return) {
+                if !super::deliver_scope_return(
+                    ctx.player,
+                    &parent_scope,
+                    &ScopeResult {
+                        return_value: result.clone(),
+                        passed: false,
+                    },
+                    push_return,
+                ) {
                     return Err(super::cancelled_scope_error());
                 }
                 Ok(())
@@ -3760,10 +3890,14 @@ impl DriverContinuation {
             self.phase = DriverPhase::Resuming { resume, completion };
             return true;
         }
-        let Some(frame) = self.frames.last() else { return false };
+        let Some(frame) = self.frames.last() else {
+            return false;
+        };
         let Some((owner, scope)) = Self::with_context(session, self.player_id, |ctx| {
             (ctx.player.owner.clone(), frame.ctx.scope.clone())
-        }) else { return false };
+        }) else {
+            return false;
+        };
         // Stored token equality is insufficient: reset/reuse can leave the
         // same locator in a different live scope. Validate the actual top
         // scope before looking up or consuming the action entry.
@@ -3782,14 +3916,14 @@ impl DriverContinuation {
             .unwrap_or(true);
         if validate_completion {
             if let ActionCompletion::InternalResult(result) = &completion {
-            let Some(valid) = Self::with_context(session, self.player_id, |runtime| {
-                validate_obj_call_result(runtime, result).is_ok()
-            }) else {
-                return false;
-            };
-            if !valid {
-                return false;
-            }
+                let Some(valid) = Self::with_context(session, self.player_id, |runtime| {
+                    validate_obj_call_result(runtime, result).is_ok()
+                }) else {
+                    return false;
+                };
+                if !valid {
+                    return false;
+                }
             }
         }
         let Some((kind, resume)) = session.action_details(&ticket) else {
@@ -3798,13 +3932,8 @@ impl DriverContinuation {
         if resume != expected_resume || !completion.matches_action(kind, resume) {
             return false;
         }
-        let Some((_kind, resume)) = session.authorize_action(
-            &ticket,
-            &owner,
-            &scope,
-            kind,
-            resume,
-        ) else {
+        let Some((_kind, resume)) = session.authorize_action(&ticket, &owner, &scope, kind, resume)
+        else {
             return false;
         };
         self.phase = DriverPhase::Resuming { resume, completion };
@@ -3836,7 +3965,10 @@ impl ActionCompletion {
                     | (ActionKind::Trace, ResumePhase::Teardown)
             ),
             Self::Error(_) => {
-                matches!((kind, resume), (ActionKind::ErrorPause, ResumePhase::ErrorUnwind))
+                matches!(
+                    (kind, resume),
+                    (ActionKind::ErrorPause, ResumePhase::ErrorUnwind)
+                )
             }
             Self::InternalResult(_) => matches!(
                 (kind, resume),
@@ -3849,7 +3981,10 @@ impl ActionCompletion {
                     | (ActionKind::SetupCallback, ResumePhase::SetupCallback)
             ),
             Self::RetryInternal(_) => {
-                matches!((kind, resume), (ActionKind::InternalInvocation, ResumePhase::ApplyOpcode))
+                matches!(
+                    (kind, resume),
+                    (ActionKind::InternalInvocation, ResumePhase::ApplyOpcode)
+                )
             }
         }
     }
@@ -3871,10 +4006,7 @@ fn validate_obj_call_result(
     checked_internal_datum(runtime.player, runtime.symbols, result).map(|_| ())
 }
 
-fn checked_context_name(
-    ctx: &BytecodeHandlerContext,
-    name_id: u16,
-) -> Result<Symbol, ScriptError> {
+fn checked_context_name(ctx: &BytecodeHandlerContext, name_id: u16) -> Result<Symbol, ScriptError> {
     ctx.code
         .names
         .get(name_id as usize)
@@ -3945,15 +4077,12 @@ pub(crate) fn checked_internal_datum<'a>(
 ) -> Result<&'a Datum, ScriptError> {
     let datum = match datum_ref {
         DatumRef::Void => &Datum::Void,
-        _ => player
-            .allocator
-            .try_get_datum(datum_ref)
-            .ok_or_else(|| {
-                ScriptError::new_code(
-                    super::ScriptErrorCode::InvalidReference,
-                    format!("invalid datum reference {datum_ref}"),
-                )
-            })?,
+        _ => player.allocator.try_get_datum(datum_ref).ok_or_else(|| {
+            ScriptError::new_code(
+                super::ScriptErrorCode::InvalidReference,
+                format!("invalid datum reference {datum_ref}"),
+            )
+        })?,
     };
     validate_owned_datum_graph(player, symbols, datum_ref)?;
     Ok(datum)
@@ -3974,15 +4103,12 @@ pub(crate) fn validate_owned_datum_graph(
 ) -> Result<(), ScriptError> {
     let root_datum = match root {
         DatumRef::Void => return Ok(()),
-        _ => player
-            .allocator
-            .try_get_datum(root)
-            .ok_or_else(|| {
-                ScriptError::new_code(
-                    super::ScriptErrorCode::InvalidReference,
-                    format!("invalid datum reference {root}"),
-                )
-            })?,
+        _ => player.allocator.try_get_datum(root).ok_or_else(|| {
+            ScriptError::new_code(
+                super::ScriptErrorCode::InvalidReference,
+                format!("invalid datum reference {root}"),
+            )
+        })?,
     };
     super::compare::validate_direct_symbol_fields(root_datum, symbols)?;
     if !datum_has_owned_children(root_datum) {
@@ -3995,15 +4121,12 @@ pub(crate) fn validate_owned_datum_graph(
     while let Some(reference) = pending.pop() {
         let datum = match reference {
             DatumRef::Void => continue,
-            _ => player
-                .allocator
-                .try_get_datum(reference)
-                .ok_or_else(|| {
-                    ScriptError::new_code(
-                        super::ScriptErrorCode::InvalidReference,
-                        format!("invalid datum reference {reference}"),
-                    )
-                })?,
+            _ => player.allocator.try_get_datum(reference).ok_or_else(|| {
+                ScriptError::new_code(
+                    super::ScriptErrorCode::InvalidReference,
+                    format!("invalid datum reference {reference}"),
+                )
+            })?,
         };
         let id = reference.unwrap();
         if !visited.insert(id) {
@@ -4052,10 +4175,7 @@ fn datum_has_owned_children(datum: &Datum) -> bool {
     )
 }
 
-fn validate_owned_datum_leaf(
-    player: &super::DirPlayer,
-    datum: &Datum,
-) -> Result<(), ScriptError> {
+fn validate_owned_datum_leaf(player: &super::DirPlayer, datum: &Datum) -> Result<(), ScriptError> {
     match datum {
         Datum::ScriptInstanceRef(instance_ref)
         | Datum::VarRef(VarRef::ScriptInstance(instance_ref)) => {
@@ -4095,14 +4215,16 @@ fn global_handler_exists(
             "foreign or stale handler symbol".to_owned(),
         )
     })?;
-    Ok(active_static_script_refs(player, symbols)?.iter().any(|script_ref| {
-        player
-            .movie
-            .cast_manager
-            .get_script_by_ref(script_ref)
-            .and_then(|script| script.get_own_handler_ref(handler_name.clone()))
-            .is_some()
-    }))
+    Ok(active_static_script_refs(player, symbols)?
+        .iter()
+        .any(|script_ref| {
+            player
+                .movie
+                .cast_manager
+                .get_script_by_ref(script_ref)
+                .and_then(|script| script.get_own_handler_ref(handler_name.clone()))
+                .is_some()
+        }))
 }
 
 fn active_static_script_refs(
@@ -4175,7 +4297,10 @@ pub(crate) struct ActionRegistry {
 
 impl ActionRegistry {
     pub(crate) fn new() -> Self {
-        Self { next: 0, pending: HashMap::new() }
+        Self {
+            next: 0,
+            pending: HashMap::new(),
+        }
     }
 
     pub(crate) fn allocate(
@@ -4188,13 +4313,16 @@ impl ActionRegistry {
         self.next = self.next.checked_add(1)?;
         let id = ActionId(self.next);
         let capability = Arc::new(ActionCapability);
-        self.pending.insert(id, ActionEntry {
-            owner: owner.clone(),
-            scope: scope.cloned(),
-            kind,
-            resume,
-            capability: capability.clone(),
-        });
+        self.pending.insert(
+            id,
+            ActionEntry {
+                owner: owner.clone(),
+                scope: scope.cloned(),
+                kind,
+                resume,
+                capability: capability.clone(),
+            },
+        );
         Some(CompletionTicket { id, capability })
     }
 
@@ -4210,6 +4338,14 @@ impl ActionRegistry {
             return None;
         }
         Some((entry.kind, entry.resume))
+    }
+
+    pub(crate) fn is_current(&self, ticket: &CompletionTicket, owner: &OwnerToken) -> bool {
+        self.pending.get(&ticket.id).is_some_and(|entry| {
+            Arc::ptr_eq(&entry.capability, &ticket.capability)
+                && entry.owner.same_identity(owner)
+                && entry.owner.is_arena_live()
+        })
     }
 
     pub(crate) fn validate(
@@ -4291,8 +4427,10 @@ impl super::ScopeToken {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
-    use async_std::channel;
-    use crate::director::chunks::{handler::{Bytecode, HandlerDef}, script::ScriptChunk};
+    use crate::director::chunks::{
+        handler::{Bytecode, HandlerDef},
+        script::ScriptChunk,
+    };
     use crate::director::enums::ScriptType;
     use crate::director::lingo::datum::Datum;
     use crate::director::lingo::opcode::OpCode;
@@ -4300,13 +4438,21 @@ mod tests {
     use crate::player::cast_lib::{CastLib, CastMemberRef};
     use crate::player::handlers::datum_handlers::string::StringDatumUtils;
     use crate::player::handlers::string::StringHandlers;
-    use crate::player::script::Script;
-    use crate::player::score::SpriteChannel;
-    use crate::player::ScriptErrorCode;
     use crate::player::scope::StackDatum;
-    use crate::player::symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolOwner};
+    use crate::player::score::SpriteChannel;
+    use crate::player::script::Script;
+    use crate::player::symbols::{
+        builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolOwner,
+    };
     use crate::player::virtual_scripts::{VirtualScriptHandler, VirtualScriptRegistry};
-    use std::{cell::RefCell, collections::{HashMap, VecDeque}, rc::Rc, sync::Arc};
+    use crate::player::ScriptErrorCode;
+    use async_std::channel;
+    use std::{
+        cell::RefCell,
+        collections::{HashMap, VecDeque},
+        rc::Rc,
+        sync::Arc,
+    };
 
     struct VirtualNew;
 
@@ -4370,11 +4516,19 @@ mod tests {
         }
     }
 
-    fn prepared_running_driver(bytecode_array: Vec<Bytecode>) -> (RuntimeSession, DriverContinuation) {
-        let mut session = RuntimeSession::new(SymbolOwner { session: 7, generation: 1 });
+    fn prepared_running_driver(
+        bytecode_array: Vec<Bytecode>,
+    ) -> (RuntimeSession, DriverContinuation) {
+        let mut session = RuntimeSession::new(SymbolOwner {
+            session: 7,
+            generation: 1,
+        });
         let (tx, _rx) = channel::unbounded();
         assert!(session.add_player(1, tx));
-        let member_ref = CastMemberRef { cast_lib: 1, cast_member: 1 };
+        let member_ref = CastMemberRef {
+            cast_lib: 1,
+            cast_member: 1,
+        };
         let handler_name = session.symbols_mut().intern("driverTest");
         let handler = Rc::new(HandlerDef {
             name_id: 0,
@@ -4427,31 +4581,35 @@ mod tests {
         let return_name = Symbol::builtin(BuiltInSymbol::Return);
         let nothing_name = Symbol::builtin(BuiltInSymbol::Nothing);
         let voidp_name = Symbol::builtin(BuiltInSymbol::Voidp);
-        session.with_player(1, |ctx| {
-            let mut cast = CastLib::test_external(1, 0);
-            cast.name_symbols = Rc::from(vec![
-                handler_name.clone(),
-                child_handler_name.clone(),
-                append_name.clone(),
-                count_name.clone(),
-                unsupported_name.clone(),
-                get_at_name,
-                set_at_name,
-                distance_to_name,
-                hex_string_name,
-                sin_name,
-                delete_name,
-                script_name,
-                return_name,
-                nothing_name,
-                voidp_name,
-            ]);
-            cast.scripts.insert(1, script);
-            ctx.player.movie.cast_manager.casts.push(cast);
-        }).unwrap();
-        let expectation = session.with_player(1, |ctx| {
-            super::super::SetupExpectation::capture(ctx.player, None)
-        }).unwrap();
+        session
+            .with_player(1, |ctx| {
+                let mut cast = CastLib::test_external(1, 0);
+                cast.name_symbols = Rc::from(vec![
+                    handler_name.clone(),
+                    child_handler_name.clone(),
+                    append_name.clone(),
+                    count_name.clone(),
+                    unsupported_name.clone(),
+                    get_at_name,
+                    set_at_name,
+                    distance_to_name,
+                    hex_string_name,
+                    sin_name,
+                    delete_name,
+                    script_name,
+                    return_name,
+                    nothing_name,
+                    voidp_name,
+                ]);
+                cast.scripts.insert(1, script);
+                ctx.player.movie.cast_manager.casts.push(cast);
+            })
+            .unwrap();
+        let expectation = session
+            .with_player(1, |ctx| {
+                super::super::SetupExpectation::capture(ctx.player, None)
+            })
+            .unwrap();
         let frame = match super::super::setup_handler_frame(
             &mut session,
             1,
@@ -4461,12 +4619,18 @@ mod tests {
             true,
             false,
             expectation,
-        ).unwrap() {
+        )
+        .unwrap()
+        {
             super::super::FrameSetup::Frame(frame) => frame,
-            super::super::FrameSetup::Early(_) => panic!("test handler unexpectedly answered early"),
+            super::super::FrameSetup::Early(_) => {
+                panic!("test handler unexpectedly answered early")
+            }
             super::super::FrameSetup::Pending(_) => panic!("test handler unexpectedly suspended"),
         };
-        let owner = session.with_player(1, |ctx| ctx.player.owner.clone()).unwrap();
+        let owner = session
+            .with_player(1, |ctx| ctx.player.owner.clone())
+            .unwrap();
         let driver = DriverContinuation {
             player_id: 1,
             owner,
@@ -4493,30 +4657,43 @@ mod tests {
 
     #[test]
     fn checked_internal_datum_rejects_nested_foreign_and_stale_script_refs() {
-        let mut session = RuntimeSession::new(SymbolOwner { session: 7, generation: 1 });
+        let mut session = RuntimeSession::new(SymbolOwner {
+            session: 7,
+            generation: 1,
+        });
         assert!(session.add_player(1, channel::unbounded().0));
         assert!(session.add_player(2, channel::unbounded().0));
 
         let local_instance = session
             .with_player(1, |ctx| {
-                ctx.player.allocator.alloc_script_instance(crate::player::script::ScriptInstance {
-                    instance_id: 7,
-                    script: CastMemberRef { cast_lib: 1, cast_member: 1 },
-                    ancestor: None,
-                    properties: fxhash::FxHashMap::default(),
-                    begin_sprite_called: false,
-                })
+                ctx.player
+                    .allocator
+                    .alloc_script_instance(crate::player::script::ScriptInstance {
+                        instance_id: 7,
+                        script: CastMemberRef {
+                            cast_lib: 1,
+                            cast_member: 1,
+                        },
+                        ancestor: None,
+                        properties: fxhash::FxHashMap::default(),
+                        begin_sprite_called: false,
+                    })
             })
             .unwrap();
         let foreign_instance = session
             .with_player(2, |ctx| {
-                ctx.player.allocator.alloc_script_instance(crate::player::script::ScriptInstance {
-                    instance_id: 7,
-                    script: CastMemberRef { cast_lib: 1, cast_member: 1 },
-                    ancestor: None,
-                    properties: fxhash::FxHashMap::default(),
-                    begin_sprite_called: false,
-                })
+                ctx.player
+                    .allocator
+                    .alloc_script_instance(crate::player::script::ScriptInstance {
+                        instance_id: 7,
+                        script: CastMemberRef {
+                            cast_lib: 1,
+                            cast_member: 1,
+                        },
+                        ancestor: None,
+                        properties: fxhash::FxHashMap::default(),
+                        begin_sprite_called: false,
+                    })
             })
             .unwrap();
         assert_eq!(local_instance.id(), foreign_instance.id());
@@ -4572,11 +4749,13 @@ mod tests {
                         script_instance: Some(foreign_item.clone()),
                     },
                 )));
-                let foreign_var = ctx.player.alloc_datum(Datum::VarRef(
-                    VarRef::ScriptInstance(foreign_instance.clone()),
-                ));
+                let foreign_var = ctx.player.alloc_datum(Datum::VarRef(VarRef::ScriptInstance(
+                    foreign_instance.clone(),
+                )));
                 let local_collision = ctx.player.alloc_datum(Datum::Int(1));
-                let collision_key = ctx.player.alloc_datum(Datum::String("collision".to_owned()));
+                let collision_key = ctx
+                    .player
+                    .alloc_datum(Datum::String("collision".to_owned()));
                 let collision_list = ctx.player.alloc_datum(Datum::List(
                     crate::director::lingo::datum::DatumType::List,
                     // The validator's worklist is LIFO: visit the local ID
@@ -4615,14 +4794,13 @@ mod tests {
             .with_player(1, |ctx| {
                 super::checked_internal_datum(ctx.player, ctx.symbols, &local_prop).map(|_| ())
             })
-        .unwrap();
+            .unwrap();
         assert!(local_result.is_ok());
 
         for foreign_case in &foreign_cases {
             let foreign_result = session
                 .with_player(1, |ctx| {
-                    super::checked_internal_datum(ctx.player, ctx.symbols, foreign_case)
-                        .map(|_| ())
+                    super::checked_internal_datum(ctx.player, ctx.symbols, foreign_case).map(|_| ())
                 })
                 .unwrap();
             assert_eq!(
@@ -4633,8 +4811,7 @@ mod tests {
 
         let collision_result = session
             .with_player(1, |ctx| {
-                super::checked_internal_datum(ctx.player, ctx.symbols, &collision_prop)
-                    .map(|_| ())
+                super::checked_internal_datum(ctx.player, ctx.symbols, &collision_prop).map(|_| ())
             })
             .unwrap();
         assert_eq!(
@@ -4646,10 +4823,12 @@ mod tests {
             .with_player(1, |ctx| {
                 super::checked_internal_datum(ctx.player, ctx.symbols, &cycle).map(|_| ())
             })
-        .unwrap();
+            .unwrap();
         assert!(cycle_result.is_ok());
 
-        let old_local_owner = session.with_player(1, |ctx| ctx.player.owner.clone()).unwrap();
+        let old_local_owner = session
+            .with_player(1, |ctx| ctx.player.owner.clone())
+            .unwrap();
         session.reset_player_owned(1, &old_local_owner).unwrap();
         let (stale_local_prop, fresh_local_prop, fresh_instance) = session
             .with_player(1, |ctx| {
@@ -4670,7 +4849,10 @@ mod tests {
                 let fresh_instance = ctx.player.allocator.alloc_script_instance(
                     crate::player::script::ScriptInstance {
                         instance_id: local_instance.id(),
-                        script: CastMemberRef { cast_lib: 1, cast_member: 1 },
+                        script: CastMemberRef {
+                            cast_lib: 1,
+                            cast_member: 1,
+                        },
                         ancestor: None,
                         properties: fxhash::FxHashMap::default(),
                         begin_sprite_called: false,
@@ -4718,12 +4900,14 @@ mod tests {
             prepared_running_driver(vec![Bytecode::new(OpCode::Ret, 0, 0)]);
         let frame = driver.frames.last().unwrap();
         let owner = driver.owner.clone();
-        let ticket = session.allocate_action(
-            &owner,
-            &frame.ctx.scope,
-            ActionKind::InternalInvocation,
-            ResumePhase::ApplyOpcode,
-        ).unwrap();
+        let ticket = session
+            .allocate_action(
+                &owner,
+                &frame.ctx.scope,
+                ActionKind::InternalInvocation,
+                ResumePhase::ApplyOpcode,
+            )
+            .unwrap();
         driver.phase = DriverPhase::Awaiting {
             ticket: ticket.clone(),
             resume: ResumePhase::ApplyOpcode,
@@ -4756,7 +4940,10 @@ mod tests {
                 let scope = &mut ctx.player.scopes[0];
                 scope.stack.push_value(StackDatum::Ref(list_ref.clone()));
                 scope.stack.push_value(StackDatum::Ref(item_ref));
-                scope.stack.push_value(StackDatum::ArgMarker { count: 2, no_ret: true });
+                scope.stack.push_value(StackDatum::ArgMarker {
+                    count: 2,
+                    no_ret: true,
+                });
             })
             .unwrap();
 
@@ -4767,7 +4954,10 @@ mod tests {
                 (
                     matches!(list, Datum::List(_, items, _) if items.len() == 1),
                     ctx.player.scopes[0].stack.len(),
-                    matches!(ctx.player.get_datum(&ctx.player.last_handler_result), Datum::Void),
+                    matches!(
+                        ctx.player.get_datum(&ctx.player.last_handler_result),
+                        Datum::Void
+                    ),
                     ctx.player.handler_stack_depth,
                     ctx.player.scopes[0].bytecode_index,
                 )
@@ -4779,7 +4969,10 @@ mod tests {
             .with_player(1, |ctx| {
                 let scope = &mut ctx.player.scopes[0];
                 scope.stack.push_value(StackDatum::Ref(list_ref.clone()));
-                scope.stack.push_value(StackDatum::ArgMarker { count: 1, no_ret: false });
+                scope.stack.push_value(StackDatum::ArgMarker {
+                    count: 1,
+                    no_ret: false,
+                });
             })
             .unwrap();
         assert!(matches!(driver.turn(&mut session), DriverTurn::Waiting));
@@ -4889,12 +5082,19 @@ mod tests {
                 let scope = &mut ctx.player.scopes[0];
                 scope.stack.push_value(StackDatum::Ref(string_ref));
                 scope.stack.push_value(StackDatum::Ref(operand_ref));
-                scope.stack.push_value(StackDatum::ArgMarker { count: 2, no_ret: false });
+                scope.stack.push_value(StackDatum::ArgMarker {
+                    count: 2,
+                    no_ret: false,
+                });
             })
             .unwrap();
         assert!(matches!(driver.turn(&mut session), DriverTurn::Waiting));
         let count = session
-            .with_player(1, |ctx| ctx.player.get_datum(&ctx.player.last_handler_result).clone())
+            .with_player(1, |ctx| {
+                ctx.player
+                    .get_datum(&ctx.player.last_handler_result)
+                    .clone()
+            })
             .unwrap();
         assert!(matches!(count, Datum::Int(2)));
 
@@ -4903,20 +5103,32 @@ mod tests {
                 let scope = &mut ctx.player.scopes[0];
                 scope.stack.push_value(StackDatum::Ref(chunk_ref));
                 scope.stack.push_value(StackDatum::Ref(index_ref));
-                scope.stack.push_value(StackDatum::ArgMarker { count: 2, no_ret: false });
+                scope.stack.push_value(StackDatum::ArgMarker {
+                    count: 2,
+                    no_ret: false,
+                });
             })
             .unwrap();
         assert!(matches!(driver.turn(&mut session), DriverTurn::Waiting));
         let character = session
-            .with_player(1, |ctx| ctx.player.get_datum(&ctx.player.last_handler_result).clone())
+            .with_player(1, |ctx| {
+                ctx.player
+                    .get_datum(&ctx.player.last_handler_result)
+                    .clone()
+            })
             .unwrap();
         assert!(matches!(character, Datum::String(value) if value == "n"));
 
-        let mut foreign_session = RuntimeSession::new(SymbolOwner { session: 91, generation: 1 });
+        let mut foreign_session = RuntimeSession::new(SymbolOwner {
+            session: 91,
+            generation: 1,
+        });
         let (foreign_tx, _foreign_rx) = channel::unbounded();
         assert!(foreign_session.add_player(9, foreign_tx));
         let foreign_ref = foreign_session
-            .with_player(9, |ctx| ctx.player.alloc_datum(Datum::String("foreign".to_owned())))
+            .with_player(9, |ctx| {
+                ctx.player.alloc_datum(Datum::String("foreign".to_owned()))
+            })
             .unwrap();
         let local_start = session
             .with_player(1, |ctx| ctx.player.alloc_datum(Datum::Int(1)))
@@ -4953,10 +5165,15 @@ mod tests {
             .with_player(1, |ctx| {
                 let scope = &mut ctx.player.scopes[0];
                 scope.stack.push_value(StackDatum::Ref(foreign_chunk));
-                scope.stack.push_value(StackDatum::ArgMarker { count: 1, no_ret: false });
+                scope.stack.push_value(StackDatum::ArgMarker {
+                    count: 1,
+                    no_ret: false,
+                });
             })
             .unwrap();
-        assert!(matches!(driver.turn(&mut session), DriverTurn::Error(error) if error.code == ScriptErrorCode::InvalidReference));
+        assert!(
+            matches!(driver.turn(&mut session), DriverTurn::Error(error) if error.code == ScriptErrorCode::InvalidReference)
+        );
 
         let mut foreign_symbols = crate::player::symbols::symbol_table::SymbolTable::new();
         let foreign_symbol = foreign_symbols.intern("foreignValue");
@@ -5006,8 +5223,7 @@ mod tests {
         ]);
         let point_ref = session
             .with_player(1, |ctx| {
-                ctx.player
-                    .alloc_datum(Datum::Point([12.5, -3.0], 1))
+                ctx.player.alloc_datum(Datum::Point([12.5, -3.0], 1))
             })
             .unwrap();
         session
@@ -5047,8 +5263,7 @@ mod tests {
         ]);
         let point_ref = session
             .with_player(1, |ctx| {
-                ctx.player
-                    .alloc_datum(Datum::Point([12.5, -3.0], 1))
+                ctx.player.alloc_datum(Datum::Point([12.5, -3.0], 1))
             })
             .unwrap();
         let index_one = session
@@ -5078,7 +5293,12 @@ mod tests {
         let changed = session
             .with_player(1, |ctx| {
                 let (values, flags) = ctx.player.get_datum(&point_ref).to_point_inline().unwrap();
-                (values, flags, ctx.player.handler_stack_depth, ctx.player.scopes[0].stack.len())
+                (
+                    values,
+                    flags,
+                    ctx.player.handler_stack_depth,
+                    ctx.player.scopes[0].stack.len(),
+                )
             })
             .unwrap();
         assert_eq!(changed, ([12.5, 4.25], 3, 29, 0));
@@ -5108,7 +5328,10 @@ mod tests {
             .unwrap();
         assert_eq!(get_result, (true, 29, 2, 1));
 
-        let mut foreign_session = RuntimeSession::new(SymbolOwner { session: 8, generation: 1 });
+        let mut foreign_session = RuntimeSession::new(SymbolOwner {
+            session: 8,
+            generation: 1,
+        });
         let (foreign_tx, _foreign_rx) = channel::unbounded();
         assert!(foreign_session.add_player(2, foreign_tx));
         let foreign_value = foreign_session
@@ -5144,8 +5367,7 @@ mod tests {
         ]);
         let point_ref = session
             .with_player(1, |ctx| {
-                ctx.player
-                    .alloc_datum(Datum::Point([12.5, -3.0], 1))
+                ctx.player.alloc_datum(Datum::Point([12.5, -3.0], 1))
             })
             .unwrap();
         session
@@ -5226,7 +5448,10 @@ mod tests {
             .unwrap();
         assert_eq!(readback, (true, 37));
 
-        let mut foreign_session = RuntimeSession::new(SymbolOwner { session: 10, generation: 1 });
+        let mut foreign_session = RuntimeSession::new(SymbolOwner {
+            session: 10,
+            generation: 1,
+        });
         let (foreign_tx, _foreign_rx) = channel::unbounded();
         assert!(foreign_session.add_player(2, foreign_tx));
         let foreign_component = foreign_session
@@ -5275,22 +5500,25 @@ mod tests {
         ]);
         let color_ref = session
             .with_player(1, |ctx| {
-                ctx.player.alloc_datum(Datum::ColorRef(crate::player::sprite::ColorRef::Rgb(
-                    0x12, 0x34, 0x56,
-                )))
+                ctx.player
+                    .alloc_datum(Datum::ColorRef(crate::player::sprite::ColorRef::Rgb(
+                        0x12, 0x34, 0x56,
+                    )))
             })
             .unwrap();
         let math_ref = session
             .with_player(1, |ctx| {
-                ctx.player
-                    .math_objects
-                    .insert(1, crate::player::handlers::datum_handlers::math::MathObject::new(1));
+                ctx.player.math_objects.insert(
+                    1,
+                    crate::player::handlers::datum_handlers::math::MathObject::new(1),
+                );
                 ctx.player.alloc_datum(Datum::MathRef(1))
             })
             .unwrap();
         let half_pi = session
             .with_player(1, |ctx| {
-                ctx.player.alloc_datum(Datum::Float(std::f64::consts::FRAC_PI_2))
+                ctx.player
+                    .alloc_datum(Datum::Float(std::f64::consts::FRAC_PI_2))
             })
             .unwrap();
         session
@@ -5381,7 +5609,12 @@ mod tests {
         let changed = session
             .with_player(1, |ctx| {
                 let (values, flags) = ctx.player.get_datum(&rect_ref).to_rect_inline().unwrap();
-                (values, flags, ctx.player.handler_stack_depth, ctx.player.scopes[0].stack.len())
+                (
+                    values,
+                    flags,
+                    ctx.player.handler_stack_depth,
+                    ctx.player.scopes[0].stack.len(),
+                )
             })
             .unwrap();
         assert_eq!(changed, ([1.5, 2.0, 10.0, 30.5], 9, 31, 0));
@@ -5411,7 +5644,10 @@ mod tests {
             .unwrap();
         assert_eq!(get_result, (true, 31, 2, 1));
 
-        let mut foreign_session = RuntimeSession::new(SymbolOwner { session: 9, generation: 1 });
+        let mut foreign_session = RuntimeSession::new(SymbolOwner {
+            session: 9,
+            generation: 1,
+        });
         let (foreign_tx, _foreign_rx) = channel::unbounded();
         assert!(foreign_session.add_player(2, foreign_tx));
         let foreign_value = foreign_session
@@ -5459,13 +5695,17 @@ mod tests {
                 ctx.player.handler_stack_depth = 13;
                 let scope = &mut ctx.player.scopes[0];
                 scope.stack.push_value(StackDatum::Ref(list_ref));
-                scope.stack.push_value(StackDatum::ArgMarker { count: 1, no_ret: false });
+                scope.stack.push_value(StackDatum::ArgMarker {
+                    count: 1,
+                    no_ret: false,
+                });
             })
             .unwrap();
         assert!(matches!(driver.turn(&mut session), DriverTurn::Error(_)));
-        assert_eq!(session.with_player(1, |ctx| {
-            ctx.player.handler_stack_depth
-        }), Some(13));
+        assert_eq!(
+            session.with_player(1, |ctx| { ctx.player.handler_stack_depth }),
+            Some(13)
+        );
     }
 
     #[test]
@@ -5485,7 +5725,10 @@ mod tests {
                 let scope = &mut ctx.player.scopes[0];
                 scope.stack.push_value(StackDatum::Ref(receiver.clone()));
                 scope.stack.push_value(StackDatum::Ref(argument.clone()));
-                scope.stack.push_value(StackDatum::ArgMarker { count: 2, no_ret: false });
+                scope.stack.push_value(StackDatum::ArgMarker {
+                    count: 2,
+                    no_ret: false,
+                });
             })
             .unwrap();
 
@@ -5495,16 +5738,26 @@ mod tests {
         };
         let ticket = pending.ticket.clone();
         match pending.request {
-            InternalVmRequest::Object { receiver: actual, name, args } => {
+            InternalVmRequest::Object {
+                receiver: actual,
+                name,
+                args,
+            } => {
                 assert_eq!(actual, receiver);
                 assert_eq!(name, session.symbols_mut().intern("unsupportedCall"));
                 assert_eq!(args, vec![argument]);
             }
             _ => panic!("unsupported ObjCall used the wrong request type"),
         }
-        assert_eq!(session.with_player(1, |ctx| {
-            (ctx.player.scopes[0].bytecode_index, ctx.player.scopes[0].stack.len())
-        }), Some((0, 0)));
+        assert_eq!(
+            session.with_player(1, |ctx| {
+                (
+                    ctx.player.scopes[0].bytecode_index,
+                    ctx.player.scopes[0].stack.len(),
+                )
+            }),
+            Some((0, 0))
+        );
 
         let owned_result = session
             .with_player(1, |ctx| ctx.player.alloc_datum(Datum::Int(23)))
@@ -5518,7 +5771,10 @@ mod tests {
         let applied = session
             .with_player(1, |ctx| {
                 (
-                    matches!(ctx.player.get_datum(&ctx.player.last_handler_result), Datum::Int(23)),
+                    matches!(
+                        ctx.player.get_datum(&ctx.player.last_handler_result),
+                        Datum::Int(23)
+                    ),
                     ctx.player.scopes[0].bytecode_index,
                     ctx.player.scopes[0].stack.len(),
                 )
@@ -5546,7 +5802,10 @@ mod tests {
             .with_player(1, |ctx| {
                 let scope = &mut ctx.player.scopes[0];
                 scope.stack.push_value(StackDatum::Ref(receiver));
-                scope.stack.push_value(StackDatum::ArgMarker { count: 1, no_ret: false });
+                scope.stack.push_value(StackDatum::ArgMarker {
+                    count: 1,
+                    no_ret: false,
+                });
             })
             .unwrap();
         let request = match driver.turn(&mut session) {
@@ -5556,7 +5815,9 @@ mod tests {
 
         let (seed, stale) = session
             .with_player(1, |ctx| {
-                let seed = ctx.player.alloc_datum(Datum::String("stale-result".to_owned()));
+                let seed = ctx
+                    .player
+                    .alloc_datum(Datum::String("stale-result".to_owned()));
                 let pointer = seed.ref_count_ptr().unwrap();
                 let owner = seed.owner().unwrap().clone();
                 // Keep the valid seed alive while the impossible id makes a
@@ -5588,9 +5849,15 @@ mod tests {
             ActionCompletion::InternalResult(foreign_symbol_result),
         ));
         assert!(matches!(driver.phase, DriverPhase::Awaiting { .. }));
-        assert_eq!(session.with_player(1, |ctx| {
-            (ctx.player.scopes[0].bytecode_index, ctx.player.scopes[0].stack.len())
-        }), Some((0, 0)));
+        assert_eq!(
+            session.with_player(1, |ctx| {
+                (
+                    ctx.player.scopes[0].bytecode_index,
+                    ctx.player.scopes[0].stack.len(),
+                )
+            }),
+            Some((0, 0))
+        );
     }
 
     #[test]
@@ -5606,7 +5873,10 @@ mod tests {
             .with_player(1, |ctx| {
                 let scope = &mut ctx.player.scopes[0];
                 scope.stack.push_value(StackDatum::Ref(receiver));
-                scope.stack.push_value(StackDatum::ArgMarker { count: 1, no_ret: false });
+                scope.stack.push_value(StackDatum::ArgMarker {
+                    count: 1,
+                    no_ret: false,
+                });
             })
             .unwrap();
         let ticket = match driver.turn(&mut session) {
@@ -5631,7 +5901,10 @@ mod tests {
                 ctx.player.push_scope();
                 ctx.player.scopes[0].bytecode_index = 19;
                 ctx.player.scopes[0].stack.push_value(StackDatum::Int(91));
-                (ctx.player.scopes[0].bytecode_index, ctx.player.scopes[0].stack.len())
+                (
+                    ctx.player.scopes[0].bytecode_index,
+                    ctx.player.scopes[0].stack.len(),
+                )
             })
             .unwrap();
         let replacement = session
@@ -5643,9 +5916,15 @@ mod tests {
             ActionCompletion::InternalResult(replacement),
         ));
         assert!(matches!(driver.turn(&mut session), DriverTurn::Error(_)));
-        assert_eq!(session.with_player(1, |ctx| {
-            (ctx.player.scopes[0].bytecode_index, ctx.player.scopes[0].stack.len())
-        }), Some(before));
+        assert_eq!(
+            session.with_player(1, |ctx| {
+                (
+                    ctx.player.scopes[0].bytecode_index,
+                    ctx.player.scopes[0].stack.len(),
+                )
+            }),
+            Some(before)
+        );
     }
 
     fn pending_call(driver: &DriverContinuation) -> super::super::PendingCall {
@@ -5686,14 +5965,20 @@ mod tests {
         assert_eq!(parent_pc, 2);
         assert_eq!(scope_count, 2);
         assert!(matches!(session.turn_handler(1), Some(DriverTurn::Waiting)));
-        assert!(matches!(session.turn_handler(1), Some(DriverTurn::Complete(_))));
+        assert!(matches!(
+            session.turn_handler(1),
+            Some(DriverTurn::Complete(_))
+        ));
     }
 
     #[test]
     fn empty_handler_pc_is_normal_completion() {
         let (mut session, mut driver) = prepared_running_driver(Vec::new());
         assert!(matches!(driver.turn(&mut session), DriverTurn::Complete(_)));
-        assert_eq!(session.with_player(1, |ctx| ctx.player.scope_count), Some(0));
+        assert_eq!(
+            session.with_player(1, |ctx| ctx.player.scope_count),
+            Some(0)
+        );
     }
 
     #[test]
@@ -5703,15 +5988,21 @@ mod tests {
             Bytecode::new(OpCode::PushZero, 0, 1),
         ]);
         assert!(matches!(driver.turn(&mut session), DriverTurn::Waiting));
-        assert_eq!(session.with_player(1, |ctx| {
-            (ctx.player.scopes[0].bytecode_index, ctx.player.scope_count)
-        }), Some((1, 1)));
+        assert_eq!(
+            session.with_player(1, |ctx| {
+                (ctx.player.scopes[0].bytecode_index, ctx.player.scope_count)
+            }),
+            Some((1, 1))
+        );
         assert!(matches!(driver.turn(&mut session), DriverTurn::Complete(_)));
         // Scope storage is retained after pop_scope, so the final PC is
         // inspectable even though the active depth has returned to zero.
-        assert_eq!(session.with_player(1, |ctx| {
-            (ctx.player.scopes[0].bytecode_index, ctx.player.scope_count)
-        }), Some((1, 0)));
+        assert_eq!(
+            session.with_player(1, |ctx| {
+                (ctx.player.scopes[0].bytecode_index, ctx.player.scope_count)
+            }),
+            Some((1, 0))
+        );
     }
 
     #[test]
@@ -5720,102 +6011,127 @@ mod tests {
             Bytecode::new(OpCode::PushZero, 0, 0),
             Bytecode::new(OpCode::PushZero, 0, 1),
         ]);
-        session.with_player(1, |ctx| {
-            ctx.player.scopes[0].stop_requested = true;
-        }).unwrap();
+        session
+            .with_player(1, |ctx| {
+                ctx.player.scopes[0].stop_requested = true;
+            })
+            .unwrap();
         assert!(matches!(driver.turn(&mut session), DriverTurn::Complete(_)));
-        assert_eq!(session.with_player(1, |ctx| {
-            (ctx.player.scopes[0].bytecode_index, ctx.player.scope_count)
-        }), Some((1, 0)));
+        assert_eq!(
+            session.with_player(1, |ctx| {
+                (ctx.player.scopes[0].bytecode_index, ctx.player.scope_count)
+            }),
+            Some((1, 0))
+        );
     }
 
     #[test]
     fn child_success_advances_parent_once_and_delivers_return() {
-        let (mut session, mut driver) = prepared_running_driver(vec![
-            Bytecode::new(OpCode::PushZero, 0, 0),
-        ]);
+        let (mut session, mut driver) =
+            prepared_running_driver(vec![Bytecode::new(OpCode::PushZero, 0, 0)]);
         let pending = pending_call(&driver);
         assert!(matches!(
             driver.start_child(&mut session, pending),
             DriverTurn::Waiting
         ));
         assert_eq!(driver.frames.len(), 2);
-        assert_eq!(session.with_player(1, |ctx| {
-            (ctx.player.scopes[0].bytecode_index, ctx.player.scope_count)
-        }), Some((1, 2)));
-        session.with_player(1, |ctx| {
-            let value = ctx.player.alloc_datum(Datum::Int(7));
-            ctx.player.scopes[1].return_value = value;
-        }).unwrap();
-        assert!(matches!(driver.finish_current_frame(&mut session), DriverTurn::Waiting));
+        assert_eq!(
+            session.with_player(1, |ctx| {
+                (ctx.player.scopes[0].bytecode_index, ctx.player.scope_count)
+            }),
+            Some((1, 2))
+        );
+        session
+            .with_player(1, |ctx| {
+                let value = ctx.player.alloc_datum(Datum::Int(7));
+                ctx.player.scopes[1].return_value = value;
+            })
+            .unwrap();
+        assert!(matches!(
+            driver.finish_current_frame(&mut session),
+            DriverTurn::Waiting
+        ));
         assert_eq!(driver.frames.len(), 1);
-        let (parent_pc, returned_seven) = session.with_player(1, |ctx| {
-            let value = ctx.player.scopes[0]
-                .stack
-                .pop_ref_with(&mut ctx.player.allocator, &mut ctx.player.bitmap_manager)
-                .unwrap();
-            (
-                ctx.player.scopes[0].bytecode_index,
-                matches!(ctx.player.get_datum(&value), Datum::Int(7)),
-            )
-        }).unwrap();
+        let (parent_pc, returned_seven) = session
+            .with_player(1, |ctx| {
+                let value = ctx.player.scopes[0]
+                    .stack
+                    .pop_ref_with(&mut ctx.player.allocator, &mut ctx.player.bitmap_manager)
+                    .unwrap();
+                (
+                    ctx.player.scopes[0].bytecode_index,
+                    matches!(ctx.player.get_datum(&value), Datum::Int(7)),
+                )
+            })
+            .unwrap();
         assert_eq!(parent_pc, 1);
         assert!(returned_seven);
     }
 
     #[test]
     fn child_frame_failure_leaves_parent_pc_advanced_once_then_unwinds() {
-        let (mut session, mut driver) = prepared_running_driver(vec![
-            Bytecode::new(OpCode::PushZero, 0, 0),
-        ]);
+        let (mut session, mut driver) =
+            prepared_running_driver(vec![Bytecode::new(OpCode::PushZero, 0, 0)]);
         let pending = pending_call(&driver);
         assert!(matches!(
             driver.start_child(&mut session, pending),
             DriverTurn::Waiting
         ));
-        assert_eq!(session.with_player(1, |ctx| ctx.player.scopes[0].bytecode_index), Some(1));
+        assert_eq!(
+            session.with_player(1, |ctx| ctx.player.scopes[0].bytecode_index),
+            Some(1)
+        );
         assert!(matches!(
             driver.fail_current_frame(&mut session, ScriptError::new("child failed".to_owned())),
             DriverTurn::Error(_)
         ));
         session.insert_driver_for_test(driver);
-        assert!(matches!(session.turn_handler(1), Some(DriverTurn::Error(_))));
-        assert_eq!(session.with_player(1, |ctx| {
-            (ctx.player.scope_count, ctx.player.handler_stack_depth)
-        }), Some((0, 0)));
+        assert!(matches!(
+            session.turn_handler(1),
+            Some(DriverTurn::Error(_))
+        ));
+        assert_eq!(
+            session.with_player(1, |ctx| {
+                (ctx.player.scope_count, ctx.player.handler_stack_depth)
+            }),
+            Some((0, 0))
+        );
     }
 
     #[test]
     fn early_virtual_child_advances_parent_without_pushing_frame() {
-        let (mut session, mut driver) = prepared_running_driver(vec![
-            Bytecode::new(OpCode::PushZero, 0, 0),
-        ]);
+        let (mut session, mut driver) =
+            prepared_running_driver(vec![Bytecode::new(OpCode::PushZero, 0, 0)]);
         let member_ref = driver.frames[0].ctx.code.script.member_ref.clone();
         let call = session.symbols_mut().intern("call");
-        session.with_player(1, |ctx| {
-            super::super::virtual_scripts::VirtualScriptRegistry::attach(
-                ctx.player,
-                member_ref,
-                Rc::new(super::super::virtual_scripts::javascript_proxy::JavascriptProxy),
-            );
-        }).unwrap();
+        session
+            .with_player(1, |ctx| {
+                super::super::virtual_scripts::VirtualScriptRegistry::attach(
+                    ctx.player,
+                    member_ref,
+                    Rc::new(super::super::virtual_scripts::javascript_proxy::JavascriptProxy),
+                );
+            })
+            .unwrap();
         let pending = pending_call_named(&driver, call);
         assert!(matches!(
             driver.start_child(&mut session, pending),
             DriverTurn::Waiting
         ));
         assert_eq!(driver.frames.len(), 1);
-        let (parent_pc, scope_count, returned_void) = session.with_player(1, |ctx| {
-            let value = ctx.player.scopes[0]
-                .stack
-                .pop_ref_with(&mut ctx.player.allocator, &mut ctx.player.bitmap_manager)
-                .unwrap();
-            (
-                ctx.player.scopes[0].bytecode_index,
-                ctx.player.scope_count,
-                matches!(ctx.player.get_datum(&value), Datum::Void),
-            )
-        }).unwrap();
+        let (parent_pc, scope_count, returned_void) = session
+            .with_player(1, |ctx| {
+                let value = ctx.player.scopes[0]
+                    .stack
+                    .pop_ref_with(&mut ctx.player.allocator, &mut ctx.player.bitmap_manager)
+                    .unwrap();
+                (
+                    ctx.player.scopes[0].bytecode_index,
+                    ctx.player.scope_count,
+                    matches!(ctx.player.get_datum(&value), Datum::Void),
+                )
+            })
+            .unwrap();
         assert_eq!(parent_pc, 1);
         assert_eq!(scope_count, 1);
         assert!(returned_void);
@@ -5823,9 +6139,8 @@ mod tests {
 
     #[test]
     fn missing_child_handler_errors_after_parent_pc_advanced_once() {
-        let (mut session, mut driver) = prepared_running_driver(vec![
-            Bytecode::new(OpCode::PushZero, 0, 0),
-        ]);
+        let (mut session, mut driver) =
+            prepared_running_driver(vec![Bytecode::new(OpCode::PushZero, 0, 0)]);
         let missing = session.symbols_mut().intern("missingChildHandler");
         let pending = pending_call_named(&driver, missing);
         assert!(matches!(
@@ -5833,30 +6148,38 @@ mod tests {
             DriverTurn::Error(_)
         ));
         assert_eq!(driver.frames.len(), 1);
-        assert_eq!(session.with_player(1, |ctx| {
-            (ctx.player.scopes[0].bytecode_index, ctx.player.scope_count)
-        }), Some((1, 1)));
+        assert_eq!(
+            session.with_player(1, |ctx| {
+                (ctx.player.scopes[0].bytecode_index, ctx.player.scope_count)
+            }),
+            Some((1, 1))
+        );
         session.insert_driver_for_test(driver);
-        assert!(matches!(session.turn_handler(1), Some(DriverTurn::Error(_))));
-        assert_eq!(session.with_player(1, |ctx| {
-            (ctx.player.scope_count, ctx.player.handler_stack_depth)
-        }), Some((0, 0)));
+        assert!(matches!(
+            session.turn_handler(1),
+            Some(DriverTurn::Error(_))
+        ));
+        assert_eq!(
+            session.with_player(1, |ctx| {
+                (ctx.player.scope_count, ctx.player.handler_stack_depth)
+            }),
+            Some((0, 0))
+        );
     }
 
     #[test]
     fn stale_parent_rejects_child_without_mutating_replacement() {
-        let (mut session, mut driver) = prepared_running_driver(vec![
-            Bytecode::new(OpCode::PushZero, 0, 0),
-        ]);
+        let (mut session, mut driver) =
+            prepared_running_driver(vec![Bytecode::new(OpCode::PushZero, 0, 0)]);
         let pending = pending_call(&driver);
         let before = session.with_player(1, |ctx| {
             ctx.player.pop_scope();
             ctx.player.push_scope();
             ctx.player.scopes[0].bytecode_index = 19;
             let sentinel = ctx.player.alloc_datum(Datum::Int(91));
-            ctx.player.scopes[0].stack.push_value(
-                super::super::scope::StackDatum::Ref(sentinel),
-            );
+            ctx.player.scopes[0]
+                .stack
+                .push_value(super::super::scope::StackDatum::Ref(sentinel));
             ctx.player.handler_stack_depth = 23;
             ctx.player.in_frame_script = true;
             let stack_ref = ctx.player.scopes[0]
@@ -5878,20 +6201,23 @@ mod tests {
             DriverTurn::Error(_)
         ));
         assert_eq!(driver.frames.len(), 1);
-        assert_eq!(session.with_player(1, |ctx| {
-            (
-                ctx.player.scope_count,
-                ctx.player.scopes[0].bytecode_index,
-                ctx.player.scopes[0].stack.len(),
-                ctx.player.scopes[0]
-                    .stack
-                    .last_ref_with(&mut ctx.player.allocator, &mut ctx.player.bitmap_manager)
-                    .as_ref()
-                    .is_some_and(|r| matches!(ctx.player.get_datum(r), Datum::Int(91))),
-                ctx.player.handler_stack_depth,
-                ctx.player.in_frame_script,
-            )
-        }), before);
+        assert_eq!(
+            session.with_player(1, |ctx| {
+                (
+                    ctx.player.scope_count,
+                    ctx.player.scopes[0].bytecode_index,
+                    ctx.player.scopes[0].stack.len(),
+                    ctx.player.scopes[0]
+                        .stack
+                        .last_ref_with(&mut ctx.player.allocator, &mut ctx.player.bitmap_manager)
+                        .as_ref()
+                        .is_some_and(|r| matches!(ctx.player.get_datum(r), Datum::Int(91))),
+                    ctx.player.handler_stack_depth,
+                    ctx.player.in_frame_script,
+                )
+            }),
+            before
+        );
     }
 
     #[test]
@@ -5902,14 +6228,18 @@ mod tests {
         assert!(matches!(driver.phase, DriverPhase::Awaiting { .. }));
 
         session.add_player(2, channel::unbounded().0);
-        let foreign = session.with_player(2, |ctx| ctx.player.alloc_datum(Datum::Int(9))).unwrap();
+        let foreign = session
+            .with_player(2, |ctx| ctx.player.alloc_datum(Datum::Int(9)))
+            .unwrap();
         assert!(!driver.complete(
             &mut session,
             ticket.clone(),
             ActionCompletion::InternalResult(foreign),
         ));
         assert!(session.action_details(&ticket).is_some());
-        let owned = session.with_player(1, |ctx| ctx.player.alloc_datum(Datum::Int(3))).unwrap();
+        let owned = session
+            .with_player(1, |ctx| ctx.player.alloc_datum(Datum::Int(3)))
+            .unwrap();
         assert!(driver.complete(
             &mut session,
             ticket.clone(),
@@ -5920,14 +6250,20 @@ mod tests {
                 resume: ResumePhase::ApplyOpcode,
                 completion: ActionCompletion::InternalResult(result),
             } => {
-                assert!(session.with_player(1, |ctx| {
-                    matches!(ctx.player.get_datum(result), Datum::Int(3))
-                }).unwrap());
+                assert!(session
+                    .with_player(1, |ctx| {
+                        matches!(ctx.player.get_datum(result), Datum::Int(3))
+                    })
+                    .unwrap());
             }
             _ => panic!("accepted completion was not retained for resumption"),
         }
         assert!(session.action_details(&ticket).is_none());
-        assert!(!driver.complete(&mut session, ticket, ActionCompletion::InternalResult(DatumRef::Void)));
+        assert!(!driver.complete(
+            &mut session,
+            ticket,
+            ActionCompletion::InternalResult(DatumRef::Void)
+        ));
     }
 
     #[test]
@@ -5950,9 +6286,11 @@ mod tests {
     fn terminal_error_unwinds_current_and_parent_frames_and_actions() {
         let (mut session, mut driver, ticket) = prepared_driver();
         let parent_scope = driver.frames[0].ctx.scope.clone();
-        let expectation = session.with_player(1, |ctx| {
-            super::super::SetupExpectation::capture(ctx.player, Some(&parent_scope))
-        }).unwrap();
+        let expectation = session
+            .with_player(1, |ctx| {
+                super::super::SetupExpectation::capture(ctx.player, Some(&parent_scope))
+            })
+            .unwrap();
         let child = match super::super::setup_handler_frame(
             &mut session,
             1,
@@ -5965,30 +6303,41 @@ mod tests {
             true,
             false,
             expectation,
-        ).unwrap() {
+        )
+        .unwrap()
+        {
             super::super::FrameSetup::Frame(frame) => frame,
-            super::super::FrameSetup::Early(_) => panic!("test handler unexpectedly answered early"),
+            super::super::FrameSetup::Early(_) => {
+                panic!("test handler unexpectedly answered early")
+            }
             super::super::FrameSetup::Pending(_) => panic!("test handler unexpectedly suspended"),
         };
         driver.frames.push(child);
         driver.phase = DriverPhase::Failed(ScriptError::new("test failure".to_owned()));
         session.insert_driver_for_test(driver);
-        assert!(matches!(session.turn_handler(1), Some(DriverTurn::Error(_))));
+        assert!(matches!(
+            session.turn_handler(1),
+            Some(DriverTurn::Error(_))
+        ));
         assert!(session.action_details(&ticket).is_none());
-        assert!(session.with_player(1, |ctx| {
-            ctx.player.scope_count == 0
-                && ctx.player.handler_stack_depth == 0
-                && !ctx.player.in_frame_script
-        }).unwrap());
+        assert!(session
+            .with_player(1, |ctx| {
+                ctx.player.scope_count == 0
+                    && ctx.player.handler_stack_depth == 0
+                    && !ctx.player.in_frame_script
+            })
+            .unwrap());
     }
 
     #[test]
     fn stale_child_finish_does_not_unwind_valid_parent() {
         let (mut session, mut driver, _ticket) = prepared_driver();
         let parent_scope = driver.frames[0].ctx.scope.clone();
-        let expectation = session.with_player(1, |ctx| {
-            super::super::SetupExpectation::capture(ctx.player, Some(&parent_scope))
-        }).unwrap();
+        let expectation = session
+            .with_player(1, |ctx| {
+                super::super::SetupExpectation::capture(ctx.player, Some(&parent_scope))
+            })
+            .unwrap();
         let child = match super::super::setup_handler_frame(
             &mut session,
             1,
@@ -6001,33 +6350,49 @@ mod tests {
             true,
             false,
             expectation,
-        ).unwrap() {
+        )
+        .unwrap()
+        {
             super::super::FrameSetup::Frame(frame) => frame,
-            super::super::FrameSetup::Early(_) => panic!("test handler unexpectedly answered early"),
+            super::super::FrameSetup::Early(_) => {
+                panic!("test handler unexpectedly answered early")
+            }
             super::super::FrameSetup::Pending(_) => panic!("test handler unexpectedly suspended"),
         };
         driver.frames.push(child);
-        session.with_player(1, |ctx| {
-            assert_eq!(ctx.player.scope_count, 2);
-            ctx.player.pop_scope();
-        }).unwrap();
-        let before = session.with_player(1, |ctx| {
-            (
-                ctx.player.scope_count,
-                ctx.player.handler_stack_depth,
-                ctx.player.in_frame_script,
-            )
-        }).unwrap();
-        assert!(matches!(driver.finish_current_frame(&mut session), DriverTurn::Error(_)));
+        session
+            .with_player(1, |ctx| {
+                assert_eq!(ctx.player.scope_count, 2);
+                ctx.player.pop_scope();
+            })
+            .unwrap();
+        let before = session
+            .with_player(1, |ctx| {
+                (
+                    ctx.player.scope_count,
+                    ctx.player.handler_stack_depth,
+                    ctx.player.in_frame_script,
+                )
+            })
+            .unwrap();
+        assert!(matches!(
+            driver.finish_current_frame(&mut session),
+            DriverTurn::Error(_)
+        ));
         assert_eq!(driver.frames.len(), 2);
         assert!(!driver.cancel(&mut session));
-        assert_eq!(session.with_player(1, |ctx| {
-            (
-                ctx.player.scope_count,
-                ctx.player.handler_stack_depth,
-                ctx.player.in_frame_script,
-            )
-        }).unwrap(), before);
+        assert_eq!(
+            session
+                .with_player(1, |ctx| {
+                    (
+                        ctx.player.scope_count,
+                        ctx.player.handler_stack_depth,
+                        ctx.player.in_frame_script,
+                    )
+                })
+                .unwrap(),
+            before
+        );
     }
 
     #[test]
@@ -6053,11 +6418,13 @@ mod tests {
         assert!(session.action_details(&ticket).is_some());
 
         let old_generation = driver.frames[0].ctx.scope.generation();
-        session.with_player(1, |ctx| {
-            ctx.player.pop_scope();
-            ctx.player.push_scope();
-            assert_ne!(ctx.player.scopes[0].generation, old_generation);
-        }).unwrap();
+        session
+            .with_player(1, |ctx| {
+                ctx.player.pop_scope();
+                ctx.player.push_scope();
+                assert_ne!(ctx.player.scopes[0].generation, old_generation);
+            })
+            .unwrap();
         assert!(!driver.complete(
             &mut session,
             ticket.clone(),
@@ -6070,13 +6437,15 @@ mod tests {
     fn epoch_invalidation_rejects_same_slot_and_generation() {
         let (mut session, mut driver, ticket) = prepared_driver();
         let old_generation = driver.frames[0].ctx.scope.generation();
-        session.with_player(1, |ctx| {
-            assert_eq!(ctx.player.scope_count, 1);
-            assert_eq!(ctx.player.scopes[0].generation, old_generation);
-            ctx.player.bump_scope_invalidation_epoch();
-            assert_eq!(ctx.player.scope_count, 1);
-            assert_eq!(ctx.player.scopes[0].generation, old_generation);
-        }).unwrap();
+        session
+            .with_player(1, |ctx| {
+                assert_eq!(ctx.player.scope_count, 1);
+                assert_eq!(ctx.player.scopes[0].generation, old_generation);
+                ctx.player.bump_scope_invalidation_epoch();
+                assert_eq!(ctx.player.scope_count, 1);
+                assert_eq!(ctx.player.scopes[0].generation, old_generation);
+            })
+            .unwrap();
         assert!(!driver.complete(
             &mut session,
             ticket.clone(),
@@ -6088,7 +6457,11 @@ mod tests {
     #[test]
     fn non_top_scope_does_not_consume_action() {
         let (mut session, mut driver, ticket) = prepared_driver();
-        session.with_player(1, |ctx| { ctx.player.push_scope(); }).unwrap();
+        session
+            .with_player(1, |ctx| {
+                ctx.player.push_scope();
+            })
+            .unwrap();
         assert!(!driver.complete(
             &mut session,
             ticket.clone(),
@@ -6101,12 +6474,16 @@ mod tests {
     fn removing_and_readding_player_retires_old_owner_action() {
         let (mut session, mut driver, ticket) = prepared_driver();
         driver.frames[0].is_frame_script = true;
-        session.with_player(1, |ctx| {
-            ctx.player.in_frame_script = true;
-        }).unwrap();
+        session
+            .with_player(1, |ctx| {
+                ctx.player.in_frame_script = true;
+            })
+            .unwrap();
         session.insert_driver_for_test(driver);
         assert!(session.action_details(&ticket).is_some());
-        let removed = session.remove_player(1).expect("owned player should be removed");
+        let removed = session
+            .remove_player(1)
+            .expect("owned player should be removed");
         assert_eq!(removed.scope_count, 0);
         assert_eq!(removed.handler_stack_depth, 0);
         assert!(!removed.in_frame_script);
@@ -6119,63 +6496,81 @@ mod tests {
     fn stale_driver_removal_preserves_current_scope_bookkeeping() {
         let (mut session, driver, ticket) = prepared_driver();
         session.insert_driver_for_test(driver);
-        let before = session.with_player(1, |ctx| {
-            ctx.player.handler_stack_depth = 11;
-            ctx.player.in_frame_script = true;
-            ctx.player.scopes[0].stack.push_void();
-            ctx.player.scope_count
-        }).unwrap();
-        session.with_player(1, |ctx| ctx.player.bump_scope_invalidation_epoch()).unwrap();
-        let returned = session.remove_player(1).expect("owned player should be removed");
+        let before = session
+            .with_player(1, |ctx| {
+                ctx.player.handler_stack_depth = 11;
+                ctx.player.in_frame_script = true;
+                ctx.player.scopes[0].stack.push_void();
+                ctx.player.scope_count
+            })
+            .unwrap();
+        session
+            .with_player(1, |ctx| ctx.player.bump_scope_invalidation_epoch())
+            .unwrap();
+        let returned = session
+            .remove_player(1)
+            .expect("owned player should be removed");
         assert_eq!(returned.scope_count, before);
         assert_eq!(returned.handler_stack_depth, 11);
         assert!(returned.in_frame_script);
         assert_eq!(returned.scopes[0].stack.len(), 1);
         assert!(session.action_details(&ticket).is_none());
         assert!(session.add_player(1, channel::unbounded().0));
-        assert!(session.with_player(1, |ctx| {
-            ctx.player.scope_count == 0
-                && ctx.player.handler_stack_depth == 0
-                && !ctx.player.in_frame_script
-        }).unwrap());
+        assert!(session
+            .with_player(1, |ctx| {
+                ctx.player.scope_count == 0
+                    && ctx.player.handler_stack_depth == 0
+                    && !ctx.player.in_frame_script
+            })
+            .unwrap());
     }
 
     #[test]
     fn invalidated_pending_turn_retires_without_touching_replacement() {
         let (mut session, driver, ticket) = prepared_driver();
         session.insert_driver_for_test(driver);
-        let before = session.with_player(1, |ctx| {
-            // Invalidate the old token, then reuse its exact scope slot. The
-            // player and allocator owners remain coherent while the current
-            // replacement scope carries observable sentinel state.
-            ctx.player.bump_scope_invalidation_epoch();
-            ctx.player.pop_scope();
-            ctx.player.push_scope();
-            ctx.player.handler_stack_depth = 17;
-            ctx.player.in_frame_script = true;
-            ctx.player.scopes[0].stack.push_void();
-            (
-                ctx.player.scope_count,
-                ctx.player.handler_stack_depth,
-                ctx.player.in_frame_script,
-                ctx.player.scopes[0].stack.len(),
-            )
-        }).unwrap();
+        let before = session
+            .with_player(1, |ctx| {
+                // Invalidate the old token, then reuse its exact scope slot. The
+                // player and allocator owners remain coherent while the current
+                // replacement scope carries observable sentinel state.
+                ctx.player.bump_scope_invalidation_epoch();
+                ctx.player.pop_scope();
+                ctx.player.push_scope();
+                ctx.player.handler_stack_depth = 17;
+                ctx.player.in_frame_script = true;
+                ctx.player.scopes[0].stack.push_void();
+                (
+                    ctx.player.scope_count,
+                    ctx.player.handler_stack_depth,
+                    ctx.player.in_frame_script,
+                    ctx.player.scopes[0].stack.len(),
+                )
+            })
+            .unwrap();
         assert!(!session.complete_handler_action(
             ticket.clone(),
             ActionCompletion::InternalResult(DatumRef::Void),
         ));
         assert!(session.action_details(&ticket).is_some());
-        assert!(matches!(session.turn_handler(1), Some(DriverTurn::Error(_))));
+        assert!(matches!(
+            session.turn_handler(1),
+            Some(DriverTurn::Error(_))
+        ));
         assert!(session.action_details(&ticket).is_none());
-        assert_eq!(session.with_player(1, |ctx| {
-            (
-                ctx.player.scope_count,
-                ctx.player.handler_stack_depth,
-                ctx.player.in_frame_script,
-                ctx.player.scopes[0].stack.len(),
-            )
-        }).unwrap(), before);
+        assert_eq!(
+            session
+                .with_player(1, |ctx| {
+                    (
+                        ctx.player.scope_count,
+                        ctx.player.handler_stack_depth,
+                        ctx.player.in_frame_script,
+                        ctx.player.scopes[0].stack.len(),
+                    )
+                })
+                .unwrap(),
+            before
+        );
         assert!(session.turn_handler(1).is_none());
     }
 
@@ -6202,7 +6597,10 @@ mod tests {
             DriverTurn::Pending(PendingAction::Internal(request)) => request,
             _ => panic!("ExtCall did not produce an internal request"),
         };
-        assert_eq!(session.with_player(1, |ctx| ctx.player.handler_stack_depth), Some(2));
+        assert_eq!(
+            session.with_player(1, |ctx| ctx.player.handler_stack_depth),
+            Some(2)
+        );
         let ticket = pending.ticket.clone();
         match pending.request {
             InternalVmRequest::MovieAsync(request) => {
@@ -6212,7 +6610,10 @@ mod tests {
                         .with_player(1, |ctx| ctx.player.owner.clone())
                         .expect("ExtCall owner disappeared")
                 ));
-                assert_eq!(request.kind, super::super::handlers::movie::MovieAsyncKind::Nothing);
+                assert_eq!(
+                    request.kind,
+                    super::super::handlers::movie::MovieAsyncKind::Nothing
+                );
                 assert_eq!(request.args, vec![argument]);
             }
             _ => panic!("ExtCall used the wrong typed internal request"),
@@ -6228,8 +6629,14 @@ mod tests {
         assert!(matches!(driver.turn(&mut session), DriverTurn::Waiting));
         session.with_player(1, |ctx| {
             assert_eq!(ctx.player.handler_stack_depth, 1);
-            assert!(matches!(ctx.player.get_datum(&ctx.player.last_handler_result), Datum::Int(23)));
-            assert!(matches!(ctx.player.get_datum(&ctx.player.scopes[0].return_value), Datum::Int(23)));
+            assert!(matches!(
+                ctx.player.get_datum(&ctx.player.last_handler_result),
+                Datum::Int(23)
+            ));
+            assert!(matches!(
+                ctx.player.get_datum(&ctx.player.scopes[0].return_value),
+                Datum::Int(23)
+            ));
             assert_eq!(ctx.player.scopes[0].stack.len(), 1);
         });
         assert!(!driver.complete(
@@ -6246,17 +6653,27 @@ mod tests {
             Bytecode::new(OpCode::Ret, 0, 1),
         ]);
         session.with_player(1, |ctx| {
-            ctx.player.scopes[0].stack.push_value(StackDatum::Ref(DatumRef::Void));
-            ctx.player.scopes[0].stack.push_value(StackDatum::ArgMarker {
-                count: 1,
-                no_ret: true,
-            });
+            ctx.player.scopes[0]
+                .stack
+                .push_value(StackDatum::Ref(DatumRef::Void));
+            ctx.player.scopes[0]
+                .stack
+                .push_value(StackDatum::ArgMarker {
+                    count: 1,
+                    no_ret: true,
+                });
         });
         assert!(matches!(driver.turn(&mut session), DriverTurn::Waiting));
         session.with_player(1, |ctx| {
             assert_eq!(ctx.player.handler_stack_depth, 1);
-            assert!(matches!(ctx.player.get_datum(&ctx.player.last_handler_result), Datum::Int(1)));
-            assert!(matches!(ctx.player.get_datum(&ctx.player.scopes[0].return_value), Datum::Int(1)));
+            assert!(matches!(
+                ctx.player.get_datum(&ctx.player.last_handler_result),
+                Datum::Int(1)
+            ));
+            assert!(matches!(
+                ctx.player.get_datum(&ctx.player.scopes[0].return_value),
+                Datum::Int(1)
+            ));
             assert_eq!(ctx.player.scopes[0].stack.len(), 0);
         });
     }
@@ -6268,17 +6685,27 @@ mod tests {
             Bytecode::new(OpCode::Ret, 0, 1),
         ]);
         session.with_player(1, |ctx| {
-            ctx.player.scopes[0].stack.push_value(StackDatum::Ref(DatumRef::Void));
-            ctx.player.scopes[0].stack.push_value(StackDatum::ArgMarker {
-                count: 1,
-                no_ret: false,
-            });
+            ctx.player.scopes[0]
+                .stack
+                .push_value(StackDatum::Ref(DatumRef::Void));
+            ctx.player.scopes[0]
+                .stack
+                .push_value(StackDatum::ArgMarker {
+                    count: 1,
+                    no_ret: false,
+                });
         });
         assert!(matches!(driver.turn(&mut session), DriverTurn::Waiting));
         session.with_player(1, |ctx| {
             assert_eq!(ctx.player.handler_stack_depth, 1);
-            assert!(matches!(ctx.player.get_datum(&ctx.player.last_handler_result), Datum::Int(1)));
-            assert!(matches!(ctx.player.get_datum(&ctx.player.scopes[0].return_value), Datum::Int(1)));
+            assert!(matches!(
+                ctx.player.get_datum(&ctx.player.last_handler_result),
+                Datum::Int(1)
+            ));
+            assert!(matches!(
+                ctx.player.get_datum(&ctx.player.scopes[0].return_value),
+                Datum::Int(1)
+            ));
             assert_eq!(ctx.player.scopes[0].stack.len(), 1);
         });
     }
@@ -6293,70 +6720,120 @@ mod tests {
             .with_player(1, |ctx| ctx.player.alloc_datum(Datum::Int(27)))
             .unwrap();
         session.with_player(1, |ctx| {
-            ctx.player.scopes[0].stack.push_value(StackDatum::Ref(argument.clone()));
-            ctx.player.scopes[0].stack.push_value(StackDatum::ArgMarker {
-                count: 1,
-                no_ret: false,
-            });
+            ctx.player.scopes[0]
+                .stack
+                .push_value(StackDatum::Ref(argument.clone()));
+            ctx.player.scopes[0]
+                .stack
+                .push_value(StackDatum::ArgMarker {
+                    count: 1,
+                    no_ret: false,
+                });
         });
         assert!(matches!(driver.turn(&mut session), DriverTurn::Waiting));
         assert_eq!(driver.frames.len(), 2);
-        assert_eq!(session.with_player(1, |ctx| ctx.player.handler_stack_depth), Some(3));
-        assert_eq!(session.with_player(1, |ctx| ctx.player.scopes[1].args.clone()), Some(vec![argument]));
+        assert_eq!(
+            session.with_player(1, |ctx| ctx.player.handler_stack_depth),
+            Some(3)
+        );
+        assert_eq!(
+            session.with_player(1, |ctx| ctx.player.scopes[1].args.clone()),
+            Some(vec![argument])
+        );
         assert!(matches!(driver.turn(&mut session), DriverTurn::Waiting));
         assert_eq!(driver.frames.len(), 1);
-        assert_eq!(session.with_player(1, |ctx| ctx.player.handler_stack_depth), Some(1));
+        assert_eq!(
+            session.with_player(1, |ctx| ctx.player.handler_stack_depth),
+            Some(1)
+        );
         assert!(matches!(driver.turn(&mut session), DriverTurn::Complete(_)));
-        assert_eq!(session.with_player(1, |ctx| ctx.player.handler_stack_depth), Some(0));
+        assert_eq!(
+            session.with_player(1, |ctx| ctx.player.handler_stack_depth),
+            Some(0)
+        );
 
         let (mut early_session, mut early_driver) = prepared_running_driver(vec![
             Bytecode::new(OpCode::ExtCall, 1, 0),
             Bytecode::new(OpCode::Ret, 0, 1),
         ]);
-        early_session.with_player(1, |ctx| {
-            VirtualScriptRegistry::attach(
-                ctx.player,
-                CastMemberRef { cast_lib: 1, cast_member: 1 },
-                Rc::new(EarlyChild),
-            );
-            ctx.player.scopes[0].stack.push_value(StackDatum::ArgMarker {
-                count: 0,
-                no_ret: false,
-            });
-        }).unwrap();
-        assert!(matches!(early_driver.turn(&mut early_session), DriverTurn::Waiting));
+        early_session
+            .with_player(1, |ctx| {
+                VirtualScriptRegistry::attach(
+                    ctx.player,
+                    CastMemberRef {
+                        cast_lib: 1,
+                        cast_member: 1,
+                    },
+                    Rc::new(EarlyChild),
+                );
+                ctx.player.scopes[0]
+                    .stack
+                    .push_value(StackDatum::ArgMarker {
+                        count: 0,
+                        no_ret: false,
+                    });
+            })
+            .unwrap();
+        assert!(matches!(
+            early_driver.turn(&mut early_session),
+            DriverTurn::Waiting
+        ));
         assert_eq!(early_driver.frames.len(), 1);
         early_session.with_player(1, |ctx| {
             assert_eq!(ctx.player.handler_stack_depth, 1);
-            assert!(matches!(ctx.player.get_datum(&ctx.player.last_handler_result), Datum::Int(31)));
-            assert!(matches!(ctx.player.get_datum(&ctx.player.scopes[0].return_value), Datum::Int(31)));
+            assert!(matches!(
+                ctx.player.get_datum(&ctx.player.last_handler_result),
+                Datum::Int(31)
+            ));
+            assert!(matches!(
+                ctx.player.get_datum(&ctx.player.scopes[0].return_value),
+                Datum::Int(31)
+            ));
             assert_eq!(ctx.player.scopes[0].stack.len(), 1);
         });
     }
 
     #[test]
     fn internal_global_virtual_new_precedes_async_builtin_and_reset_decline_aborts() {
-        let (mut session, _driver) = prepared_running_driver(vec![Bytecode::new(OpCode::Ret, 0, 0)]);
-        session.with_player(1, |ctx| {
-            VirtualScriptRegistry::register(ctx.player, "virtual-new", Rc::new(VirtualNew));
-        }).unwrap();
+        let (mut session, _driver) =
+            prepared_running_driver(vec![Bytecode::new(OpCode::Ret, 0, 0)]);
+        session
+            .with_player(1, |ctx| {
+                VirtualScriptRegistry::register(ctx.player, "virtual-new", Rc::new(VirtualNew));
+            })
+            .unwrap();
         let result = session.dispatch_global(1, &Symbol::builtin(BuiltInSymbol::New), &[]);
         let result = match result {
             Ok(GlobalDispatch::SyncResult(Ok(result))) => result,
             _ => panic!("virtual New did not win precedence"),
         };
         assert_eq!(
-            session.with_player(1, |ctx| matches!(ctx.player.get_datum(&result), Datum::Int(17))),
+            session.with_player(1, |ctx| matches!(
+                ctx.player.get_datum(&result),
+                Datum::Int(17)
+            )),
             Some(true)
         );
 
         let (mut reset_session, _reset_driver) =
             prepared_running_driver(vec![Bytecode::new(OpCode::Ret, 0, 0)]);
-        reset_session.with_player(1, |ctx| {
-            VirtualScriptRegistry::register(ctx.player, "reset-decline", Rc::new(ResetAndDecline));
-        }).unwrap();
+        reset_session
+            .with_player(1, |ctx| {
+                VirtualScriptRegistry::register(
+                    ctx.player,
+                    "reset-decline",
+                    Rc::new(ResetAndDecline),
+                );
+            })
+            .unwrap();
         let result = reset_session.dispatch_global(1, &Symbol::builtin(BuiltInSymbol::New), &[]);
-        assert!(matches!(result, Err(ScriptError { code: ScriptErrorCode::Abort, .. })));
+        assert!(matches!(
+            result,
+            Err(ScriptError {
+                code: ScriptErrorCode::Abort,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -6373,7 +6850,10 @@ mod tests {
             global_name_ids: vec![],
             compiled_ir: RefCell::new(None),
         });
-        let active_script_ref = CastMemberRef { cast_lib: 1, cast_member: 2 };
+        let active_script_ref = CastMemberRef {
+            cast_lib: 1,
+            cast_member: 2,
+        };
         let mut active_handlers = fxhash::FxHashMap::default();
         active_handlers.insert(active_name.clone(), active_handler);
         let active_script = Rc::new(Script {
@@ -6392,24 +6872,35 @@ mod tests {
             handler_names: vec![active_name.clone()],
             properties: RefCell::new(fxhash::FxHashMap::default()),
         });
-        let mut foreign = RuntimeSession::new(SymbolOwner { session: 98, generation: 1 });
+        let mut foreign = RuntimeSession::new(SymbolOwner {
+            session: 98,
+            generation: 1,
+        });
         assert!(foreign.add_player(1, channel::unbounded().0));
         let foreign_list = foreign
-            .with_player(1, |ctx| ctx.player.alloc_datum(Datum::List(
-                crate::director::lingo::datum::DatumType::List,
-                VecDeque::new(),
-                false,
-            )))
+            .with_player(1, |ctx| {
+                ctx.player.alloc_datum(Datum::List(
+                    crate::director::lingo::datum::DatumType::List,
+                    VecDeque::new(),
+                    false,
+                ))
+            })
             .unwrap();
-        session.with_player(1, |ctx| {
-            ctx.player.movie.cast_manager.casts[0].scripts.insert(2, active_script);
-            ctx.player.movie.cast_manager.clear_movie_script_cache();
-            ctx.player.movie.score.channels.push(SpriteChannel::new(0));
-            let mut active_channel = SpriteChannel::new(1);
-            active_channel.sprite.entered = true;
-            ctx.player.movie.score.channels.push(active_channel);
-            ctx.player.script_instance_list_cache.insert(1, foreign_list);
-        }).unwrap();
+        session
+            .with_player(1, |ctx| {
+                ctx.player.movie.cast_manager.casts[0]
+                    .scripts
+                    .insert(2, active_script);
+                ctx.player.movie.cast_manager.clear_movie_script_cache();
+                ctx.player.movie.score.channels.push(SpriteChannel::new(0));
+                let mut active_channel = SpriteChannel::new(1);
+                active_channel.sprite.entered = true;
+                ctx.player.movie.score.channels.push(active_channel);
+                ctx.player
+                    .script_instance_list_cache
+                    .insert(1, foreign_list);
+            })
+            .unwrap();
         let result = session.dispatch_global(1, &active_name, &[]);
         assert!(matches!(
             result,
@@ -6428,15 +6919,23 @@ mod tests {
         ]);
         session.with_player(1, |ctx| {
             ctx.player.handler_stack_depth = 9;
-            ctx.player.scopes[0].stack.push_value(StackDatum::ArgMarker {
-                count: 0,
-                no_ret: true,
-            });
+            ctx.player.scopes[0]
+                .stack
+                .push_value(StackDatum::ArgMarker {
+                    count: 0,
+                    no_ret: true,
+                });
         });
         assert!(matches!(driver.turn(&mut session), DriverTurn::Pending(_)));
-        assert_eq!(session.with_player(1, |ctx| ctx.player.handler_stack_depth), Some(10));
+        assert_eq!(
+            session.with_player(1, |ctx| ctx.player.handler_stack_depth),
+            Some(10)
+        );
         assert!(driver.cancel(&mut session));
-        assert_eq!(session.with_player(1, |ctx| ctx.player.handler_stack_depth), Some(8));
+        assert_eq!(
+            session.with_player(1, |ctx| ctx.player.handler_stack_depth),
+            Some(8)
+        );
     }
 
     #[test]
@@ -6446,38 +6945,58 @@ mod tests {
             Bytecode::new(OpCode::Ret, 0, 1),
         ]);
         session.with_player(1, |ctx| {
-            ctx.player.scopes[0].stack.push_value(StackDatum::ArgMarker {
-                count: 0,
-                no_ret: true,
-            });
+            ctx.player.scopes[0]
+                .stack
+                .push_value(StackDatum::ArgMarker {
+                    count: 0,
+                    no_ret: true,
+                });
         });
         assert!(matches!(driver.turn(&mut session), DriverTurn::Pending(_)));
-        session.with_player(1, |ctx| {
-            ctx.player.bump_scope_invalidation_epoch();
-            ctx.player.pop_scope();
-            ctx.player.push_scope();
-            ctx.player.handler_stack_depth = 17;
-        }).unwrap();
+        session
+            .with_player(1, |ctx| {
+                ctx.player.bump_scope_invalidation_epoch();
+                ctx.player.pop_scope();
+                ctx.player.push_scope();
+                ctx.player.handler_stack_depth = 17;
+            })
+            .unwrap();
         assert!(matches!(driver.turn(&mut session), DriverTurn::Error(_)));
-        assert_eq!(session.with_player(1, |ctx| ctx.player.handler_stack_depth), Some(17));
+        assert_eq!(
+            session.with_player(1, |ctx| ctx.player.handler_stack_depth),
+            Some(17)
+        );
 
         let (mut reset_session, mut reset_driver) = prepared_running_driver(vec![
             Bytecode::new(OpCode::ExtCall, 13, 0),
             Bytecode::new(OpCode::Ret, 0, 1),
         ]);
         reset_session.with_player(1, |ctx| {
-            ctx.player.scopes[0].stack.push_value(StackDatum::ArgMarker {
-                count: 0,
-                no_ret: true,
-            });
+            ctx.player.scopes[0]
+                .stack
+                .push_value(StackDatum::ArgMarker {
+                    count: 0,
+                    no_ret: true,
+                });
         });
-        assert!(matches!(reset_driver.turn(&mut reset_session), DriverTurn::Pending(_)));
-        reset_session.with_player(1, |ctx| {
-            ctx.player.owner.begin_reset();
-            ctx.player.handler_stack_depth = 23;
-        }).unwrap();
-        assert!(matches!(reset_driver.turn(&mut reset_session), DriverTurn::Error(_)));
-        assert_eq!(reset_session.with_player(1, |ctx| ctx.player.handler_stack_depth), Some(23));
+        assert!(matches!(
+            reset_driver.turn(&mut reset_session),
+            DriverTurn::Pending(_)
+        ));
+        reset_session
+            .with_player(1, |ctx| {
+                ctx.player.owner.begin_reset();
+                ctx.player.handler_stack_depth = 23;
+            })
+            .unwrap();
+        assert!(matches!(
+            reset_driver.turn(&mut reset_session),
+            DriverTurn::Error(_)
+        ));
+        assert_eq!(
+            reset_session.with_player(1, |ctx| ctx.player.handler_stack_depth),
+            Some(23)
+        );
     }
 
     #[test]
@@ -6512,7 +7031,9 @@ mod tests {
         match pending.request {
             InternalVmRequest::Construct { script, args } => {
                 let is_script_ref = session
-                    .with_player(1, |ctx| matches!(ctx.player.get_datum(&script), Datum::ScriptRef(_)))
+                    .with_player(1, |ctx| {
+                        matches!(ctx.player.get_datum(&script), Datum::ScriptRef(_))
+                    })
                     .unwrap();
                 assert!(is_script_ref);
                 assert!(args.is_empty());
@@ -6530,7 +7051,10 @@ mod tests {
         assert!(matches!(driver.turn(&mut session), DriverTurn::Waiting));
         session.with_player(1, |ctx| {
             assert_eq!(ctx.player.scopes[0].stack.len(), 1);
-            assert!(matches!(ctx.player.get_datum(&ctx.player.last_handler_result), Datum::Void));
+            assert!(matches!(
+                ctx.player.get_datum(&ctx.player.last_handler_result),
+                Datum::Void
+            ));
         });
     }
 
@@ -6565,7 +7089,10 @@ mod tests {
             })
             .unwrap();
         driver.internal_effect = Some(InternalResultEffect::SetProperty);
-        let mut foreign = RuntimeSession::new(SymbolOwner { session: 91, generation: 1 });
+        let mut foreign = RuntimeSession::new(SymbolOwner {
+            session: 91,
+            generation: 1,
+        });
         assert!(foreign.add_player(1, channel::unbounded().0));
         let foreign_result = foreign
             .with_player(1, |ctx| ctx.player.alloc_datum(Datum::Int(3)))
@@ -6604,7 +7131,8 @@ mod tests {
             .unwrap();
         let value = session
             .with_player(1, |ctx| {
-                ctx.player.alloc_datum(Datum::String("replacement.cct".to_owned()))
+                ctx.player
+                    .alloc_datum(Datum::String("replacement.cct".to_owned()))
             })
             .unwrap();
         let old_last = session
@@ -6662,7 +7190,9 @@ mod tests {
         ]);
         let handler = session.symbols_mut().intern("unsupportedCall");
         let handler_ref = session
-            .with_player(1, |ctx| ctx.player.alloc_datum(Datum::Symbol(handler.clone())))
+            .with_player(1, |ctx| {
+                ctx.player.alloc_datum(Datum::Symbol(handler.clone()))
+            })
             .unwrap();
         let receiver = session
             .with_player(1, |ctx| ctx.player.alloc_datum(Datum::Int(4)))
@@ -6687,7 +7217,11 @@ mod tests {
             _ => panic!("ObjCallV4 did not produce an internal request"),
         };
         match pending.request {
-            InternalVmRequest::ObjectV4 { receiver: actual, name, args } => {
+            InternalVmRequest::ObjectV4 {
+                receiver: actual,
+                name,
+                args,
+            } => {
                 assert_eq!(actual, receiver);
                 assert_eq!(name, handler);
                 assert_eq!(args, vec![argument]);
@@ -6704,7 +7238,10 @@ mod tests {
         ));
         assert!(matches!(driver.turn(&mut session), DriverTurn::Waiting));
         session.with_player(1, |ctx| {
-            assert!(matches!(ctx.player.get_datum(&ctx.player.last_handler_result), Datum::Int(6)));
+            assert!(matches!(
+                ctx.player.get_datum(&ctx.player.last_handler_result),
+                Datum::Int(6)
+            ));
             assert_eq!(ctx.player.scopes[0].stack.len(), 1);
         });
     }
@@ -6717,13 +7254,19 @@ mod tests {
         ]);
         let handler = session.symbols_mut().intern("child");
         let handler_ref = session
-            .with_player(1, |ctx| ctx.player.alloc_datum(Datum::Symbol(handler.clone())))
+            .with_player(1, |ctx| {
+                ctx.player.alloc_datum(Datum::Symbol(handler.clone()))
+            })
             .unwrap();
         let object = Rc::new(RefCell::new(crate::player::js_lingo::value::JsObject::new()));
         let handle = session
             .with_player_js(1, |context, registry| {
-                let runtime = Rc::new(RefCell::new(crate::player::js_lingo::interpreter::JsRuntime::new()));
-                registry.register_object(1, &context.player.owner, &runtime, &object).unwrap()
+                let runtime = Rc::new(RefCell::new(
+                    crate::player::js_lingo::interpreter::JsRuntime::new(),
+                ));
+                registry
+                    .register_object(1, &context.player.owner, &runtime, &object)
+                    .unwrap()
             })
             .unwrap();
         let receiver = session
@@ -6736,7 +7279,10 @@ mod tests {
             let scope = &mut ctx.player.scopes[0];
             scope.stack.push_value(StackDatum::Ref(receiver.clone()));
             scope.stack.push_value(StackDatum::Ref(argument.clone()));
-            scope.stack.push_value(StackDatum::ArgMarker { count: 2, no_ret: false });
+            scope.stack.push_value(StackDatum::ArgMarker {
+                count: 2,
+                no_ret: false,
+            });
             scope.stack.push_value(StackDatum::Ref(handler_ref));
         });
 
@@ -6745,7 +7291,11 @@ mod tests {
             _ => panic!("ObjCallV4 JS receiver did not produce an internal request"),
         };
         match &pending.request {
-            InternalVmRequest::ObjectV4 { receiver: actual, name, args } => {
+            InternalVmRequest::ObjectV4 {
+                receiver: actual,
+                name,
+                args,
+            } => {
                 assert_eq!(actual, &receiver);
                 assert_eq!(name, &handler);
                 assert_eq!(args, &vec![argument]);
@@ -6764,19 +7314,27 @@ mod tests {
         Rc::make_mut(&mut driver.frames[0].ctx.code.names)[2] =
             Symbol::builtin(BuiltInSymbol::Value);
         let object = Rc::new(RefCell::new(crate::player::js_lingo::value::JsObject::new()));
-        object.borrow_mut().set_own("value", crate::player::js_lingo::value::JsValue::Int(4));
+        object
+            .borrow_mut()
+            .set_own("value", crate::player::js_lingo::value::JsValue::Int(4));
         let handle = session
             .with_player_js(1, |context, registry| {
                 let owner = context.player.owner.clone();
-                let runtime = Rc::new(RefCell::new(crate::player::js_lingo::interpreter::JsRuntime::new()));
-                registry.register_object(1, &owner, &runtime, &object).unwrap()
+                let runtime = Rc::new(RefCell::new(
+                    crate::player::js_lingo::interpreter::JsRuntime::new(),
+                ));
+                registry
+                    .register_object(1, &owner, &runtime, &object)
+                    .unwrap()
             })
             .unwrap();
         let receiver = session
             .with_player(1, |ctx| ctx.player.alloc_datum(Datum::JsObjectRef(handle)))
             .unwrap();
         session.with_player(1, |ctx| {
-            ctx.player.scopes[0].stack.push_value(StackDatum::Ref(receiver.clone()));
+            ctx.player.scopes[0]
+                .stack
+                .push_value(StackDatum::Ref(receiver.clone()));
         });
 
         let pending = match driver.turn(&mut session) {
@@ -6784,7 +7342,10 @@ mod tests {
             _ => panic!("GetChainedProp did not defer JS receiver"),
         };
         match pending.request {
-            InternalVmRequest::ObjectProperty { receiver: actual, name } => {
+            InternalVmRequest::ObjectProperty {
+                receiver: actual,
+                name,
+            } => {
                 assert_eq!(actual, receiver);
                 assert_eq!(name, Symbol::builtin(BuiltInSymbol::Value));
             }
@@ -6799,10 +7360,14 @@ mod tests {
         Rc::make_mut(&mut string_driver.frames[0].ctx.code.names)[2] =
             Symbol::builtin(BuiltInSymbol::Value);
         let string_ref = string_session
-            .with_player(1, |ctx| ctx.player.alloc_datum(Datum::String("g.x".to_owned())))
+            .with_player(1, |ctx| {
+                ctx.player.alloc_datum(Datum::String("g.x".to_owned()))
+            })
             .unwrap();
         string_session.with_player(1, |ctx| {
-            ctx.player.scopes[0].stack.push_value(StackDatum::Ref(string_ref));
+            ctx.player.scopes[0]
+                .stack
+                .push_value(StackDatum::Ref(string_ref));
         });
         let pending = match string_driver.turn(&mut string_session) {
             DriverTurn::Pending(PendingAction::Internal(request)) => request,
@@ -6830,10 +7395,12 @@ mod tests {
             .with_player(1, |ctx| {
                 ctx.player.last_handler_result = stale.clone();
                 ctx.player.scopes[0].return_value = stale;
-                ctx.player.scopes[0].stack.push_value(StackDatum::ArgMarker {
-                    count: 0,
-                    no_ret: false,
-                });
+                ctx.player.scopes[0]
+                    .stack
+                    .push_value(StackDatum::ArgMarker {
+                        count: 0,
+                        no_ret: false,
+                    });
             })
             .unwrap();
         let result = match driver.turn(&mut session) {
@@ -6852,14 +7419,18 @@ mod tests {
         assert!(session.add_player(2, channel::unbounded().0));
         session
             .with_player(1, |ctx| {
-                ctx.player.tell_target_stack.push(crate::player::TellTarget {
-                    nested_player: Some(2),
-                    film_loop: None,
-                });
-                ctx.player.scopes[0].stack.push_value(StackDatum::ArgMarker {
-                    count: 0,
-                    no_ret: false,
-                });
+                ctx.player
+                    .tell_target_stack
+                    .push(crate::player::TellTarget {
+                        nested_player: Some(2),
+                        film_loop: None,
+                    });
+                ctx.player.scopes[0]
+                    .stack
+                    .push_value(StackDatum::ArgMarker {
+                        count: 0,
+                        no_ret: false,
+                    });
             })
             .unwrap();
         let pending = match driver.turn(&mut session) {
@@ -6867,7 +7438,10 @@ mod tests {
             _ => panic!("TellCall did not produce an internal request"),
         };
         match &pending.request {
-            InternalVmRequest::Tell { target: Some(target), .. } => assert_eq!(target.player_id, 2),
+            InternalVmRequest::Tell {
+                target: Some(target),
+                ..
+            } => assert_eq!(target.player_id, 2),
             _ => panic!("TellCall did not retain nested target identity"),
         }
         let old = session.remove_player(2);
@@ -6897,14 +7471,18 @@ mod tests {
         assert!(session.add_player(2, channel::unbounded().0));
         session
             .with_player(1, |ctx| {
-                ctx.player.tell_target_stack.push(crate::player::TellTarget {
-                    nested_player: Some(2),
-                    film_loop: None,
-                });
-                ctx.player.scopes[0].stack.push_value(StackDatum::ArgMarker {
-                    count: 0,
-                    no_ret: false,
-                });
+                ctx.player
+                    .tell_target_stack
+                    .push(crate::player::TellTarget {
+                        nested_player: Some(2),
+                        film_loop: None,
+                    });
+                ctx.player.scopes[0]
+                    .stack
+                    .push_value(StackDatum::ArgMarker {
+                        count: 0,
+                        no_ret: false,
+                    });
             })
             .unwrap();
         let pending = match driver.turn(&mut session) {
@@ -6951,7 +7529,10 @@ mod tests {
             DriverTurn::Pending(PendingAction::Internal(request)) => request,
             _ => panic!("local TellCall did not produce an internal request"),
         };
-        assert_eq!(session.with_player(1, |ctx| ctx.player.handler_stack_depth), Some(2));
+        assert_eq!(
+            session.with_player(1, |ctx| ctx.player.handler_stack_depth),
+            Some(2)
+        );
         match &pending.request {
             InternalVmRequest::MovieAsync(request) => {
                 assert_eq!(request.player_id, 1);
@@ -6960,7 +7541,10 @@ mod tests {
                         .with_player(1, |ctx| ctx.player.owner.clone())
                         .expect("Tell owner disappeared")
                 ));
-                assert_eq!(request.kind, super::super::handlers::movie::MovieAsyncKind::Nothing);
+                assert_eq!(
+                    request.kind,
+                    super::super::handlers::movie::MovieAsyncKind::Nothing
+                );
                 assert_eq!(&request.args, &vec![argument]);
             }
             _ => panic!("local TellCall retained an unexpected typed request"),
@@ -6976,8 +7560,14 @@ mod tests {
         assert!(matches!(driver.turn(&mut session), DriverTurn::Waiting));
         session.with_player(1, |ctx| {
             assert_eq!(ctx.player.handler_stack_depth, 1);
-            assert!(matches!(ctx.player.get_datum(&ctx.player.last_handler_result), Datum::Int(32)));
-            assert!(matches!(ctx.player.get_datum(&ctx.player.scopes[0].return_value), Datum::Int(32)));
+            assert!(matches!(
+                ctx.player.get_datum(&ctx.player.last_handler_result),
+                Datum::Int(32)
+            ));
+            assert!(matches!(
+                ctx.player.get_datum(&ctx.player.scopes[0].return_value),
+                Datum::Int(32)
+            ));
             assert_eq!(ctx.player.scopes[0].stack.len(), 1);
         });
 
@@ -6987,22 +7577,35 @@ mod tests {
         ]);
         assert!(nested_session.add_player(2, channel::unbounded().0));
         nested_session.with_player(1, |ctx| {
-            ctx.player.tell_target_stack.push(crate::player::TellTarget {
-                nested_player: Some(2),
-                film_loop: None,
-            });
-            ctx.player.scopes[0].stack.push_value(StackDatum::ArgMarker {
-                count: 0,
-                no_ret: true,
-            });
+            ctx.player
+                .tell_target_stack
+                .push(crate::player::TellTarget {
+                    nested_player: Some(2),
+                    film_loop: None,
+                });
+            ctx.player.scopes[0]
+                .stack
+                .push_value(StackDatum::ArgMarker {
+                    count: 0,
+                    no_ret: true,
+                });
         });
         let nested_pending = match nested_driver.turn(&mut nested_session) {
             DriverTurn::Pending(PendingAction::Internal(request)) => request,
             _ => panic!("nested TellCall did not produce an internal request"),
         };
-        assert_eq!(nested_pending.pending_reason.as_deref(), Some("cross-player Tell requires nested executor"));
-        assert_eq!(nested_session.with_player(1, |ctx| ctx.player.handler_stack_depth), Some(1));
-        let mut foreign = RuntimeSession::new(SymbolOwner { session: 93, generation: 1 });
+        assert_eq!(
+            nested_pending.pending_reason.as_deref(),
+            Some("cross-player Tell requires nested executor")
+        );
+        assert_eq!(
+            nested_session.with_player(1, |ctx| ctx.player.handler_stack_depth),
+            Some(1)
+        );
+        let mut foreign = RuntimeSession::new(SymbolOwner {
+            session: 93,
+            generation: 1,
+        });
         assert!(foreign.add_player(1, channel::unbounded().0));
         let foreign_result = foreign
             .with_player(1, |ctx| ctx.player.alloc_datum(Datum::Int(33)))
@@ -7012,10 +7615,16 @@ mod tests {
             nested_pending.ticket,
             ActionCompletion::InternalResult(foreign_result),
         ));
-        assert!(matches!(nested_driver.turn(&mut nested_session), DriverTurn::Waiting));
+        assert!(matches!(
+            nested_driver.turn(&mut nested_session),
+            DriverTurn::Waiting
+        ));
         nested_session.with_player(1, |ctx| {
             assert_eq!(ctx.player.scopes[0].stack.len(), 0);
-            assert!(matches!(ctx.player.get_datum(&ctx.player.last_handler_result), Datum::Void));
+            assert!(matches!(
+                ctx.player.get_datum(&ctx.player.last_handler_result),
+                Datum::Void
+            ));
         });
     }
 
@@ -7031,10 +7640,12 @@ mod tests {
         session.with_player(1, |ctx| {
             ctx.player.last_handler_result = stale.clone();
             ctx.player.scopes[0].return_value = stale;
-            ctx.player.scopes[0].stack.push_value(StackDatum::ArgMarker {
-                count: 0,
-                no_ret: false,
-            });
+            ctx.player.scopes[0]
+                .stack
+                .push_value(StackDatum::ArgMarker {
+                    count: 0,
+                    no_ret: false,
+                });
         });
         let result = match driver.turn(&mut session) {
             DriverTurn::Complete(result) => result,
@@ -7042,8 +7653,14 @@ mod tests {
         };
         assert_eq!(result.return_value, DatumRef::Void);
         session.with_player(1, |ctx| {
-            assert!(matches!(ctx.player.get_datum(&ctx.player.last_handler_result), Datum::Void));
-            assert!(matches!(ctx.player.get_datum(&ctx.player.scopes[0].return_value), Datum::Void));
+            assert!(matches!(
+                ctx.player.get_datum(&ctx.player.last_handler_result),
+                Datum::Void
+            ));
+            assert!(matches!(
+                ctx.player.get_datum(&ctx.player.scopes[0].return_value),
+                Datum::Void
+            ));
         });
     }
 
@@ -7055,7 +7672,9 @@ mod tests {
         ]);
         let handler = session.symbols_mut().intern("child");
         let handler_ref = session
-            .with_player(1, |ctx| ctx.player.alloc_datum(Datum::Symbol(handler.clone())))
+            .with_player(1, |ctx| {
+                ctx.player.alloc_datum(Datum::Symbol(handler.clone()))
+            })
             .unwrap();
         let receiver = session
             .with_player(1, |ctx| ctx.player.alloc_datum(Datum::Int(41)))
@@ -7075,11 +7694,20 @@ mod tests {
         });
         assert!(matches!(driver.turn(&mut session), DriverTurn::Waiting));
         assert_eq!(driver.frames.len(), 2);
-        assert_eq!(session.with_player(1, |ctx| ctx.player.handler_stack_depth), Some(2));
-        assert_eq!(session.with_player(1, |ctx| ctx.player.scopes[1].args.clone()), Some(vec![receiver, argument]));
+        assert_eq!(
+            session.with_player(1, |ctx| ctx.player.handler_stack_depth),
+            Some(2)
+        );
+        assert_eq!(
+            session.with_player(1, |ctx| ctx.player.scopes[1].args.clone()),
+            Some(vec![receiver, argument])
+        );
         assert!(matches!(driver.turn(&mut session), DriverTurn::Waiting));
         assert_eq!(driver.frames.len(), 1);
-        assert_eq!(session.with_player(1, |ctx| ctx.player.handler_stack_depth), Some(1));
+        assert_eq!(
+            session.with_player(1, |ctx| ctx.player.handler_stack_depth),
+            Some(1)
+        );
         session.with_player(1, |ctx| assert_eq!(ctx.player.scopes[0].stack.len(), 0));
     }
 
@@ -7096,7 +7724,10 @@ mod tests {
         let receiver = session
             .with_player(1, |ctx| ctx.player.alloc_datum(Datum::Int(41)))
             .unwrap();
-        let mut foreign = RuntimeSession::new(SymbolOwner { session: 92, generation: 1 });
+        let mut foreign = RuntimeSession::new(SymbolOwner {
+            session: 92,
+            generation: 1,
+        });
         assert!(foreign.add_player(1, channel::unbounded().0));
         let foreign_global = foreign
             .with_player(1, |ctx| ctx.player.alloc_datum(Datum::Int(99)))
@@ -7126,10 +7757,12 @@ mod tests {
             Bytecode::new(OpCode::Ret, 0, 1),
         ]);
         session.with_player(1, |ctx| {
-            ctx.player.scopes[0].stack.push_value(StackDatum::ArgMarker {
-                count: 0,
-                no_ret: false,
-            });
+            ctx.player.scopes[0]
+                .stack
+                .push_value(StackDatum::ArgMarker {
+                    count: 0,
+                    no_ret: false,
+                });
         });
         let pending = match driver.turn(&mut session) {
             DriverTurn::Pending(PendingAction::Internal(request)) => request,
@@ -7144,7 +7777,10 @@ mod tests {
                 )
             })
             .unwrap();
-        let mut foreign = RuntimeSession::new(SymbolOwner { session: 95, generation: 1 });
+        let mut foreign = RuntimeSession::new(SymbolOwner {
+            session: 95,
+            generation: 1,
+        });
         assert!(foreign.add_player(1, channel::unbounded().0));
         let foreign_result = foreign
             .with_player(1, |ctx| ctx.player.alloc_datum(Datum::Int(101)))
@@ -7183,7 +7819,10 @@ mod tests {
         ]);
         session.with_player(1, |ctx| ctx.player.handler_stack_depth = 7);
         assert!(matches!(driver.turn(&mut session), DriverTurn::Error(_)));
-        assert_eq!(session.with_player(1, |ctx| ctx.player.handler_stack_depth), Some(7));
+        assert_eq!(
+            session.with_player(1, |ctx| ctx.player.handler_stack_depth),
+            Some(7)
+        );
         assert!(matches!(driver.phase, DriverPhase::Failed(_)));
     }
 
@@ -7194,13 +7833,18 @@ mod tests {
             Bytecode::new(OpCode::Ret, 0, 1),
         ]);
         session.with_player(1, |ctx| {
-            ctx.player.scopes[0].stack.push_value(StackDatum::ArgMarker {
-                count: 0,
-                no_ret: false,
-            });
+            ctx.player.scopes[0]
+                .stack
+                .push_value(StackDatum::ArgMarker {
+                    count: 0,
+                    no_ret: false,
+                });
         });
         assert!(matches!(driver.turn(&mut session), DriverTurn::Error(_)));
-        assert_eq!(session.with_player(1, |ctx| ctx.player.handler_stack_depth), Some(1));
+        assert_eq!(
+            session.with_player(1, |ctx| ctx.player.handler_stack_depth),
+            Some(1)
+        );
         assert!(matches!(driver.phase, DriverPhase::Failed(_)));
     }
 }

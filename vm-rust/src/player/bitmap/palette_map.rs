@@ -48,7 +48,8 @@ impl PaletteMap {
     /// When multiple palettes exist, picks the one with the highest member number,
     /// since a higher stale clutId corresponds to a higher CAS* index (= higher member number).
     pub fn find_by_cast_lib(&self, cast_lib: u32) -> Option<&PaletteMember> {
-        self.palettes.iter()
+        self.palettes
+            .iter()
             .filter(|entry| (entry.number >> 16) == cast_lib)
             .max_by_key(|entry| entry.number & 0xFFFF)
             .map(|entry| &entry.member)

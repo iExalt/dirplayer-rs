@@ -3,21 +3,25 @@ use log::debug;
 use crate::{
     director::lingo::datum::Datum,
     player::{
-        datum_formatting::format_concrete_datum,
-        compare::validate_direct_symbol_fields,
-        session::ExecutionContext,
-        DatumRef, ScriptError,
+        compare::validate_direct_symbol_fields, datum_formatting::format_concrete_datum,
+        session::ExecutionContext, DatumRef, ScriptError,
     },
 };
 
 pub struct StringHandlers {}
 
 impl StringHandlers {
-    pub fn space(runtime: &mut ExecutionContext<'_>, _: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn space(
+        runtime: &mut ExecutionContext<'_>,
+        _: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
         Ok(runtime.player.alloc_datum(Datum::String(" ".to_string())))
     }
 
-    pub fn offset(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn offset(
+        runtime: &mut ExecutionContext<'_>,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
         runtime.with_player_and_symbols(|player, symbols| {
             let str_to_find = checked_datum(player, symbols, &args[0])?.string_value(symbols)?;
             let find_in = checked_datum(player, symbols, &args[1])?.string_value(symbols)?;
@@ -48,7 +52,10 @@ impl StringHandlers {
         })
     }
 
-    pub fn length(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn length(
+        runtime: &mut ExecutionContext<'_>,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
         runtime.with_player_and_symbols(|player, symbols| {
             let obj = checked_datum(player, symbols, &args[0])?;
             match obj {
@@ -70,7 +77,10 @@ impl StringHandlers {
         })
     }
 
-    pub fn string(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn string(
+        runtime: &mut ExecutionContext<'_>,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
         runtime.with_player_and_symbols(|player, symbols| {
             let obj = checked_datum(player, symbols, &args[0])?;
             let result_obj = if obj.is_string() {
@@ -79,7 +89,12 @@ impl StringHandlers {
                 Datum::String("".to_string())
             } else if let Datum::Symbol(s) = obj {
                 // In Director, string(#symbol) returns "symbol" without the # prefix
-                Datum::String(symbols.display(s).map_err(|_| ScriptError::new("foreign symbol".to_owned()))?.to_owned())
+                Datum::String(
+                    symbols
+                        .display(s)
+                        .map_err(|_| ScriptError::new("foreign symbol".to_owned()))?
+                        .to_owned(),
+                )
             } else {
                 Datum::String(format_concrete_datum(obj, symbols, player)?)
             };
@@ -87,7 +102,10 @@ impl StringHandlers {
         })
     }
 
-    pub fn chars(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn chars(
+        runtime: &mut ExecutionContext<'_>,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
         runtime.with_player_and_symbols(|player, symbols| {
             let string = checked_datum(player, symbols, &args[0])?
                 .string_value(symbols)
@@ -95,8 +113,11 @@ impl StringHandlers {
             let start = (checked_datum(player, symbols, &args[1])?
                 .int_value()
                 .unwrap_or(1)
-                .max(1) - 1) as usize;
-            let mut end = checked_datum(player, symbols, &args[2])?.int_value().unwrap_or(0) as usize;
+                .max(1)
+                - 1) as usize;
+            let mut end = checked_datum(player, symbols, &args[2])?
+                .int_value()
+                .unwrap_or(0) as usize;
 
             let len = string.chars().count();
             end = end.min(len); // clamp to string length
@@ -111,7 +132,10 @@ impl StringHandlers {
         })
     }
 
-    pub fn char_to_num(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn char_to_num(
+        runtime: &mut ExecutionContext<'_>,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
         runtime.with_player_and_symbols(|player, symbols| {
             let str_value = checked_datum(player, symbols, &args[0])?.string_value(symbols)?;
             let mut chars = str_value.chars();
@@ -126,7 +150,10 @@ impl StringHandlers {
         })
     }
 
-    pub fn num_to_char(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn num_to_char(
+        runtime: &mut ExecutionContext<'_>,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
         runtime.with_player_and_symbols(|player, symbols| {
             let num = checked_datum(player, symbols, &args[0])?.int_value()?;
             let byte_val = (num & 0xFF) as u8 as char;
@@ -138,7 +165,10 @@ impl StringHandlers {
         })
     }
 
-    pub fn url_encode(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
+    pub fn url_encode(
+        runtime: &mut ExecutionContext<'_>,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
         runtime.with_player_and_symbols(|player, symbols| {
             // urlEncode([#empty: sSessionID]) - takes a prop list and converts to URL parameters
             let prop_list_datum = checked_datum(player, symbols, &args[0])?;
@@ -152,7 +182,9 @@ impl StringHandlers {
                         let value = checked_datum(player, symbols, value_ref)?;
 
                         let key_str = match key {
-                            Datum::Symbol(s) => symbols.display(s).map_err(|_| ScriptError::new("foreign symbol".to_owned()))?,
+                            Datum::Symbol(s) => symbols
+                                .display(s)
+                                .map_err(|_| ScriptError::new("foreign symbol".to_owned()))?,
                             Datum::String(s) => s.as_str(),
                             _ => continue,
                         };
@@ -161,7 +193,10 @@ impl StringHandlers {
                             Datum::String(s) => s.clone(),
                             Datum::Int(n) => n.to_string(),
                             Datum::Float(f) => f.to_string(),
-                            Datum::Symbol(s) => symbols.display(s).map_err(|_| ScriptError::new("foreign symbol".to_owned()))?.to_owned(),
+                            Datum::Symbol(s) => symbols
+                                .display(s)
+                                .map_err(|_| ScriptError::new("foreign symbol".to_owned()))?
+                                .to_owned(),
                             Datum::Void => String::new(),
                             _ => continue,
                         };
@@ -174,11 +209,36 @@ impl StringHandlers {
                         let mut encoded_value = String::new();
                         for ch in value_str.chars() {
                             let encoded_char = match ch {
-                                ':' => "%3A", ';' => "%3B", '<' => "%3C", '=' => "%3D", '>' => "%3E", '?' => "%3F",
-                                '@' => "%40", '[' => "%5B", ']' => "%5D", '{' => "%7B", '}' => "%7D", '~' => "%7E",
-                                ' ' => "%20", '!' => "%21", '"' => "%22", '#' => "%23", '$' => "%24", '%' => "%25",
-                                '&' => "%26", '\'' => "%27", '(' => "%28", ')' => "%29", '*' => "%2A", '+' => "%2B",
-                                ',' => "%2C", '-' => "%2D", '.' => "%2E", '/' => "%2F", '©' => "%26%23169", '®' => "%26%23174",
+                                ':' => "%3A",
+                                ';' => "%3B",
+                                '<' => "%3C",
+                                '=' => "%3D",
+                                '>' => "%3E",
+                                '?' => "%3F",
+                                '@' => "%40",
+                                '[' => "%5B",
+                                ']' => "%5D",
+                                '{' => "%7B",
+                                '}' => "%7D",
+                                '~' => "%7E",
+                                ' ' => "%20",
+                                '!' => "%21",
+                                '"' => "%22",
+                                '#' => "%23",
+                                '$' => "%24",
+                                '%' => "%25",
+                                '&' => "%26",
+                                '\'' => "%27",
+                                '(' => "%28",
+                                ')' => "%29",
+                                '*' => "%2A",
+                                '+' => "%2B",
+                                ',' => "%2C",
+                                '-' => "%2D",
+                                '.' => "%2E",
+                                '/' => "%2F",
+                                '©' => "%26%23169",
+                                '®' => "%26%23174",
                                 _ => {
                                     encoded_value.push(ch);
                                     continue;
@@ -190,17 +250,38 @@ impl StringHandlers {
                         url_params.push_str(&format!("{}={}", key_str, encoded_value));
                     }
                     url_params
-                },
+                }
                 Datum::String(s) => {
                     // Direct string encoding (fallback)
                     let mut encoded = String::new();
                     for ch in s.chars() {
                         let encoded_char = match ch {
-                            ':' => "%3A", ';' => "%3B", '<' => "%3C", '=' => "%3D", '>' => "%3E", '?' => "%3F",
-                            '@' => "%40", '[' => "%5B", ']' => "%5D", '{' => "%7B", '}' => "%7D", '~' => "%7E",
-                            ' ' => "%20", '!' => "%21", '"' => "%22", '#' => "%23", '%' => "%25",
-                            '&' => "%26", '\'' => "%27", '(' => "%28", ')' => "%29", '*' => "%2A", '+' => "%2B",
-                            ',' => "%2C", '©' => "%26%23169", '®' => "%26%23174",
+                            ':' => "%3A",
+                            ';' => "%3B",
+                            '<' => "%3C",
+                            '=' => "%3D",
+                            '>' => "%3E",
+                            '?' => "%3F",
+                            '@' => "%40",
+                            '[' => "%5B",
+                            ']' => "%5D",
+                            '{' => "%7B",
+                            '}' => "%7D",
+                            '~' => "%7E",
+                            ' ' => "%20",
+                            '!' => "%21",
+                            '"' => "%22",
+                            '#' => "%23",
+                            '%' => "%25",
+                            '&' => "%26",
+                            '\'' => "%27",
+                            '(' => "%28",
+                            ')' => "%29",
+                            '*' => "%2A",
+                            '+' => "%2B",
+                            ',' => "%2C",
+                            '©' => "%26%23169",
+                            '®' => "%26%23174",
                             _ => {
                                 encoded.push(ch);
                                 continue;
@@ -209,8 +290,12 @@ impl StringHandlers {
                         encoded.push_str(encoded_char);
                     }
                     encoded
-                },
-                _ => return Err(ScriptError::new("urlEncode: argument must be a prop list or string".to_string()))
+                }
+                _ => {
+                    return Err(ScriptError::new(
+                        "urlEncode: argument must be a prop list or string".to_string(),
+                    ))
+                }
             };
 
             debug!("urlEncode() = '{}'", result);
@@ -226,13 +311,12 @@ fn checked_datum<'a>(
 ) -> Result<&'a Datum, ScriptError> {
     let datum = match datum_ref {
         DatumRef::Void => &Datum::Void,
-        _ => player
-            .allocator
-            .try_get_datum(datum_ref)
-            .ok_or_else(|| ScriptError::new_code(
+        _ => player.allocator.try_get_datum(datum_ref).ok_or_else(|| {
+            ScriptError::new_code(
                 crate::player::ScriptErrorCode::InvalidReference,
                 format!("invalid datum reference {datum_ref}"),
-            ))?,
+            )
+        })?,
     };
     validate_direct_symbol_fields(datum, symbols)?;
     Ok(datum)

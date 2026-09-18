@@ -1,4 +1,6 @@
-use super::{allocator::ScriptInstanceAllocatorTrait, ownership::OwnerToken, script::ScriptInstanceId};
+use super::{
+    allocator::ScriptInstanceAllocatorTrait, ownership::OwnerToken, script::ScriptInstanceId,
+};
 
 #[derive(Debug)]
 pub struct ScriptInstanceRef(ScriptInstanceId, *mut u32, OwnerToken);
@@ -23,10 +25,14 @@ impl ScriptInstanceRef {
     }
 
     #[inline]
-    pub(crate) fn owner(&self) -> &OwnerToken { &self.2 }
+    pub(crate) fn owner(&self) -> &OwnerToken {
+        &self.2
+    }
 
     #[inline]
-    pub(crate) fn ref_count_ptr(&self) -> *mut u32 { self.1 }
+    pub(crate) fn ref_count_ptr(&self) -> *mut u32 {
+        self.1
+    }
 }
 
 impl std::ops::Deref for ScriptInstanceRef {
@@ -56,7 +62,8 @@ impl Drop for ScriptInstanceRef {
         }
         *rc -= 1;
         if *rc == 0 {
-            self.2.enqueue(super::ownership::ReclaimKind::ScriptInstance(self.0));
+            self.2
+                .enqueue(super::ownership::ReclaimKind::ScriptInstance(self.0));
         }
     }
 }

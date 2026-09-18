@@ -44,8 +44,8 @@
 //! the selector and never writes `callPtr->resultValue`.
 
 use crate::player::{
-    driver::checked_internal_datum,
-    DatumRef, DirPlayer, ScriptError, symbols::symbol_table::SymbolTable,
+    driver::checked_internal_datum, symbols::symbol_table::SymbolTable, DatumRef, DirPlayer,
+    ScriptError,
 };
 
 /// Fake environment installed by the LeechProtectionRemovalHelp Xtra.
@@ -154,7 +154,12 @@ fn set_string_explicit(
 ) -> Result<DatumRef, ScriptError> {
     let value = args
         .first()
-        .ok_or_else(|| ScriptError::new(format!("LeechProtectionRemovalHelp: {} requires 1 argument", name)))
+        .ok_or_else(|| {
+            ScriptError::new(format!(
+                "LeechProtectionRemovalHelp: {} requires 1 argument",
+                name
+            ))
+        })
         .and_then(|arg| checked_internal_datum(player, symbols, arg)?.string_value(symbols))?;
     apply(&mut player.env_overrides, value);
     Ok(DatumRef::Void)
@@ -169,7 +174,12 @@ fn set_int_explicit(
 ) -> Result<DatumRef, ScriptError> {
     let value = args
         .first()
-        .ok_or_else(|| ScriptError::new(format!("LeechProtectionRemovalHelp: {} requires 1 argument", name)))
+        .ok_or_else(|| {
+            ScriptError::new(format!(
+                "LeechProtectionRemovalHelp: {} requires 1 argument",
+                name
+            ))
+        })
         .and_then(|arg| checked_internal_datum(player, symbols, arg)?.int_value())?;
     apply(&mut player.env_overrides, value);
     Ok(DatumRef::Void)
@@ -182,7 +192,11 @@ fn set_external_param_explicit(
 ) -> Result<DatumRef, ScriptError> {
     let name = args
         .first()
-        .ok_or_else(|| ScriptError::new("LeechProtectionRemovalHelp: setExternalParam requires a name".to_owned()))
+        .ok_or_else(|| {
+            ScriptError::new(
+                "LeechProtectionRemovalHelp: setExternalParam requires a name".to_owned(),
+            )
+        })
         .and_then(|arg| checked_internal_datum(player, symbols, arg)?.string_value(symbols))?;
     if name.is_empty() {
         return Ok(DatumRef::Void);
@@ -197,7 +211,9 @@ fn set_external_param_explicit(
         .keys()
         .find(|key| key.eq_ignore_ascii_case(&name))
         .cloned();
-    player.external_params.insert(existing.unwrap_or(name), value);
+    player
+        .external_params
+        .insert(existing.unwrap_or(name), value);
     Ok(DatumRef::Void)
 }
 
@@ -216,9 +232,9 @@ mod tests {
     //!   cargo test --lib --manifest-path vm-rust/Cargo.toml leechprotection
 
     use crate::director::lingo::datum::Datum;
-    use crate::player::symbols::{builtin::BuiltInSymbol, symbol::Symbol};
     use crate::player::session::{RuntimeSession, RuntimeSessionHandle};
     use crate::player::symbols::symbol_table::SymbolOwner;
+    use crate::player::symbols::{builtin::BuiltInSymbol, symbol::Symbol};
     use crate::player::testing::run_test;
     use crate::player::xtra::manager::try_call_xtra_static_handler_explicit;
     use crate::player::{DatumRef, ScriptError};
@@ -226,7 +242,11 @@ mod tests {
     /// Call an LPRH handler the way a movie would — through the static
     /// dispatcher, so the manager wiring is under test too.
     fn test_session() -> RuntimeSessionHandle {
-        let session = RuntimeSession::new(SymbolOwner { session: 0x4c50_5248, generation: 1 }).into_handle();
+        let session = RuntimeSession::new(SymbolOwner {
+            session: 0x4c50_5248,
+            generation: 1,
+        })
+        .into_handle();
         let (tx, _rx) = async_std::channel::unbounded();
         assert!(session.borrow_mut().add_player(1, tx));
         session
@@ -295,16 +315,44 @@ mod tests {
         run_test(async {
             // The README's own usage example, minus the trailing `go`.
             let session = test_session();
-            call(&session, "setTheMoviePath", &[Datum::String(
-                "http://addictinggames.com/newGames/metalmayhemworldtour/".to_string(),
-            )]);
-            call(&session, "setTheMovieName", &[Datum::String("metalmayhemworldtour.dcr".to_string())]);
+            call(
+                &session,
+                "setTheMoviePath",
+                &[Datum::String(
+                    "http://addictinggames.com/newGames/metalmayhemworldtour/".to_string(),
+                )],
+            );
+            call(
+                &session,
+                "setTheMovieName",
+                &[Datum::String("metalmayhemworldtour.dcr".to_string())],
+            );
             call(&session, "setTheEnvironment_shockMachine", &[Datum::Int(0)]);
-            call(&session, "setThePlatform", &[Datum::String("Macintosh,PowerPC".to_string())]);
-            call(&session, "setTheRunMode", &[Datum::String("Author".to_string())]);
-            call(&session, "setTheEnvironment_productBuildVersion", &[Datum::String("593".to_string())]);
-            call(&session, "setTheProductVersion", &[Datum::String("11.5".to_string())]);
-            call(&session, "setTheEnvironment_osVersion", &[Datum::String("Windows,6,2,148,2,".to_string())]);
+            call(
+                &session,
+                "setThePlatform",
+                &[Datum::String("Macintosh,PowerPC".to_string())],
+            );
+            call(
+                &session,
+                "setTheRunMode",
+                &[Datum::String("Author".to_string())],
+            );
+            call(
+                &session,
+                "setTheEnvironment_productBuildVersion",
+                &[Datum::String("593".to_string())],
+            );
+            call(
+                &session,
+                "setTheProductVersion",
+                &[Datum::String("11.5".to_string())],
+            );
+            call(
+                &session,
+                "setTheEnvironment_osVersion",
+                &[Datum::String("Windows,6,2,148,2,".to_string())],
+            );
             call(&session, "setTheMachineType", &[Datum::Int(72)]);
 
             assert_eq!(
@@ -317,8 +365,14 @@ mod tests {
                 "http://addictinggames.com/newGames/metalmayhemworldtour/"
             );
             // The name is taken verbatim, NOT derived from the path.
-            assert_eq!(movie_prop_string(&session, "movieName"), "metalmayhemworldtour.dcr");
-            assert_eq!(movie_prop_string(&session, "movie"), "metalmayhemworldtour.dcr");
+            assert_eq!(
+                movie_prop_string(&session, "movieName"),
+                "metalmayhemworldtour.dcr"
+            );
+            assert_eq!(
+                movie_prop_string(&session, "movie"),
+                "metalmayhemworldtour.dcr"
+            );
             assert_eq!(movie_prop_string(&session, "platform"), "Macintosh,PowerPC");
             assert_eq!(movie_prop_string(&session, "runMode"), "Author");
             assert_eq!(movie_prop_string(&session, "productVersion"), "11.5");
@@ -340,18 +394,56 @@ mod tests {
         run_test(async {
             let session = test_session();
 
-            call(&session, "setExternalParam", &[Datum::String("src".to_string()), Datum::String("/a.dcr".to_string())]);
-            call(&session, "setExternalParam", &[Datum::String("sw2".to_string()), Datum::String("121220".to_string())]);
+            call(
+                &session,
+                "setExternalParam",
+                &[
+                    Datum::String("src".to_string()),
+                    Datum::String("/a.dcr".to_string()),
+                ],
+            );
+            call(
+                &session,
+                "setExternalParam",
+                &[
+                    Datum::String("sw2".to_string()),
+                    Datum::String("121220".to_string()),
+                ],
+            );
             // An empty name is documented as invalid and must not add an entry.
-            call(&session, "setExternalParam", &[Datum::String(String::new()), Datum::String("x".to_string())]);
+            call(
+                &session,
+                "setExternalParam",
+                &[Datum::String(String::new()), Datum::String("x".to_string())],
+            );
             // Re-setting updates in place rather than appending.
-            call(&session, "setExternalParam", &[Datum::String("SRC".to_string()), Datum::String("/b.dcr".to_string())]);
+            call(
+                &session,
+                "setExternalParam",
+                &[
+                    Datum::String("SRC".to_string()),
+                    Datum::String("/b.dcr".to_string()),
+                ],
+            );
 
-            session.borrow_mut().with_player(1, |context| {
-                let params: Vec<(String, String)> = context.player
-                    .external_params.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                assert_eq!(params, vec![("src".to_string(), "/b.dcr".to_string()), ("sw2".to_string(), "121220".to_string())]);
-            }).expect("test harness player must exist");
+            session
+                .borrow_mut()
+                .with_player(1, |context| {
+                    let params: Vec<(String, String)> = context
+                        .player
+                        .external_params
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    assert_eq!(
+                        params,
+                        vec![
+                            ("src".to_string(), "/b.dcr".to_string()),
+                            ("sw2".to_string(), "121220".to_string())
+                        ]
+                    );
+                })
+                .expect("test harness player must exist");
         });
     }
 
@@ -364,9 +456,17 @@ mod tests {
             call(&session, "forceTheSafePlayer", &[Datum::Int(0)]);
 
             // A leech check re-asserting the value it wants must not stick.
-            session.borrow_mut().with_player(1, |context| {
-                context.player.set_movie_prop(context.symbols, Symbol::builtin(BuiltInSymbol::ExitLock), Datum::Int(1))
-            }).expect("test harness player must exist").unwrap();
+            session
+                .borrow_mut()
+                .with_player(1, |context| {
+                    context.player.set_movie_prop(
+                        context.symbols,
+                        Symbol::builtin(BuiltInSymbol::ExitLock),
+                        Datum::Int(1),
+                    )
+                })
+                .expect("test harness player must exist")
+                .unwrap();
 
             assert_eq!(movie_prop(&session, "exitLock").int_value().unwrap(), 0);
             assert_eq!(movie_prop(&session, "safePlayer").int_value().unwrap(), 0);
@@ -388,10 +488,13 @@ mod tests {
             // which would abort the movie's setup script.
             call(&session, "bugfixShockwave3DBadDriverList", &[]);
 
-            session.borrow_mut().with_player(1, |context| {
-                assert!(context.player.env_overrides.disable_goto_net_movie);
-                assert!(context.player.env_overrides.disable_goto_net_page);
-            }).expect("test harness player must exist");
+            session
+                .borrow_mut()
+                .with_player(1, |context| {
+                    assert!(context.player.env_overrides.disable_goto_net_movie);
+                    assert!(context.player.env_overrides.disable_goto_net_page);
+                })
+                .expect("test harness player must exist");
         });
     }
 }

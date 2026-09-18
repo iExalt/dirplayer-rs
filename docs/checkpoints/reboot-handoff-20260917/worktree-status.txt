@@ -1,0 +1,50 @@
+/Users/clliaw/Projects/dirplayer-rs
+ M dirplayer-js-api/index.d.ts
+ M dirplayer-js-api/index.js
+ M docs/checkpoints/flash-nested-host-audit-20260917.md
+ M docs/checkpoints/mouse-down-ownership-audit-20260917.md
+ m ruffle
+ M scripts/flash-owner-lifecycle.test.mjs
+ M src/services/flashPlayerManager.test.ts
+ M src/services/flashPlayerManager.ts
+ M src/vm/callbacks.ts
+ M vm-rust/src/js_api.rs
+ M vm-rust/src/lib.rs
+ M vm-rust/src/player/commands.rs
+ M vm-rust/src/player/events.rs
+ M vm-rust/src/player/handlers/datum_handlers/flash_object.rs
+ M vm-rust/src/player/mod.rs
+ M vm-rust/src/player/nested.rs
+ M vm-rust/src/player/score.rs
+ M vm-rust/src/player/session.rs
+ M vm-rust/src/player/testing_browser.rs
+ M vm-rust/tests/browser/e2e.spec.ts
+ M vm-rust/tests/browser_templates/dirplayer-js-api.js
+ M vm-rust/tests/e2e/dirplayer_test_movies/nested.rs
+?? docs/checkpoints/reboot-handoff-20260917/
+?? vm-rust/tests/fixtures/flash_mouse_a.swf
+?? vm-rust/tests/fixtures/flash_mouse_b.swf
+?? vm-rust/tests/fixtures/flash_mouse_reentry.swf
+?? vm-rust/tests/fixtures/flash_pointer_fixture_provenance.md
+?? vm-rust/tests/fixtures/generate_flash_pointer_fixture.py
+?? vm-rust/tests/fixtures/generate_nested_flash_fixture.py
+?? vm-rust/tests/fixtures/nested_flash_a.dcr
+?? vm-rust/tests/fixtures/nested_flash_a.swf
+?? vm-rust/tests/fixtures/nested_flash_b.dcr
+?? vm-rust/tests/fixtures/nested_flash_b.swf
+?? vm-rust/tests/fixtures/nested_flash_bad.dcr
+?? vm-rust/tests/fixtures/nested_flash_fixture_provenance.md
+?? vm-rust/tests/fixtures/validate_flash_pointer_fixture.py
+?? vm-rust/tests/fixtures/validate_nested_flash_fixture.py
+
+/Users/clliaw/Projects/childhood-redux
+ M docs/NATIVE_DIR_PLAYER_PLAN.md
+
+/Users/clliaw/Projects/dirplayer-rs/ruffle
+ M core/src/avm1/globals/local_connection.rs
+ M core/src/context.rs
+ M core/src/player.rs
+ M web/packages/core/src/internal/player/inner.tsx
+ M web/packages/core/src/internal/player/ruffle-player-element.tsx
+ M web/packages/core/tools/build_wasm.ts
+ M web/src/builder.rs

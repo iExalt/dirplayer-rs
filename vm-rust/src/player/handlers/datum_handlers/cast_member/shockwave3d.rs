@@ -12,7 +12,11 @@ use crate::{
         cast_member::{CastMemberType, Shockwave3dMember, Text3dSource, Text3dState},
         reserve_player_mut, reserve_player_ref,
         session::ExecutionContext,
-        symbols::{builtin::BuiltInSymbol, symbol::{Symbol, SymbolError}, symbol_table::SymbolTable},
+        symbols::{
+            builtin::BuiltInSymbol,
+            symbol::{Symbol, SymbolError},
+            symbol_table::SymbolTable,
+        },
         DatumRef, DirPlayer, ScriptError,
     },
 };
@@ -47,10 +51,9 @@ fn checked_datum<'a>(
 ) -> Result<&'a Datum, ScriptError> {
     let datum = match datum_ref {
         DatumRef::Void => player.get_datum(datum_ref),
-        DatumRef::Ref(_) => player
-            .allocator
-            .try_get_datum(datum_ref)
-            .ok_or_else(|| ScriptError::new("Invalid or stale Shockwave3D datum reference".to_string()))?,
+        DatumRef::Ref(_) => player.allocator.try_get_datum(datum_ref).ok_or_else(|| {
+            ScriptError::new("Invalid or stale Shockwave3D datum reference".to_string())
+        })?,
     };
     crate::player::compare::validate_direct_symbol_fields(datum, symbols)?;
     Ok(datum)
@@ -74,7 +77,11 @@ impl Shockwave3dMemberHandlers {
         let scene = match crate::director::chunks::w3d::parse_w3d(&bytes, symbols) {
             Ok(scene) => scene,
             Err(error) => {
-                warn!("loadFile: failed to parse W3D ({} bytes): {}", bytes.len(), error);
+                warn!(
+                    "loadFile: failed to parse W3D ({} bytes): {}",
+                    bytes.len(),
+                    error
+                );
                 return Ok(player.alloc_datum(Datum::Void));
             }
         };
@@ -84,10 +91,9 @@ impl Shockwave3dMemberHandlers {
             .cast_manager
             .find_mut_member_by_ref(member_ref)
             .ok_or_else(|| ScriptError::new("loadFile: member not found".to_owned()))?;
-        let w3d = member
-            .member_type
-            .as_shockwave3d_mut()
-            .ok_or_else(|| ScriptError::new("loadFile: member is not a Shockwave3D member".to_owned()))?;
+        let w3d = member.member_type.as_shockwave3d_mut().ok_or_else(|| {
+            ScriptError::new("loadFile: member is not a Shockwave3D member".to_owned())
+        })?;
         if overwrite || w3d.parsed_scene.is_none() {
             w3d.source_scene = Some(scene.clone());
             w3d.parsed_scene = Some(scene.clone());
@@ -98,7 +104,9 @@ impl Shockwave3dMemberHandlers {
         } else if let Some(existing) = w3d.scene_mut() {
             existing
                 .merge_from((*scene).clone(), generate_unique_names, symbols)
-                .map_err(|error| ScriptError::new(format!("loadFile: W3D merge failed: {error}")))?;
+                .map_err(|error| {
+                    ScriptError::new(format!("loadFile: W3D merge failed: {error}"))
+                })?;
         }
         Ok(player.alloc_datum(Datum::Void))
     }
@@ -134,7 +142,6 @@ impl Shockwave3dMemberHandlers {
         Ok((file_name, flag(1)?, flag(2)?))
     }
 
-
     /// `member(x).loadFile(fileName {, overwrite, generateUniqueNames})`
     ///
     /// Director 11.5 Scripting Dictionary, `loadFile()`: imports the assets of a
@@ -146,7 +153,9 @@ impl Shockwave3dMemberHandlers {
     /// .loadFile("data/level_1.W3D")` in "Frame Load Data", plus the shared
     /// materials and sky members — so with this stubbed out the track had no
     /// models at all.
-    fn native_text_alignment(alignment: BuiltInSymbol) -> crate::player::handlers::datum_handlers::cast_member::font::TextAlignment {
+    fn native_text_alignment(
+        alignment: BuiltInSymbol,
+    ) -> crate::player::handlers::datum_handlers::cast_member::font::TextAlignment {
         use crate::player::handlers::datum_handlers::cast_member::font::TextAlignment;
 
         match alignment.to_ascii_lowercase().as_str() {
@@ -183,19 +192,28 @@ impl Shockwave3dMemberHandlers {
     /// XMED stores font cell height (ascent+descent) rather than point/em size.
     /// Use canvas font metrics to convert back to the actual point size.
     fn xmed_cell_height_to_point_size(cell_height: i32, font_face: &str) -> i32 {
-        if cell_height <= 0 { return cell_height; }
+        if cell_height <= 0 {
+            return cell_height;
+        }
         let ref_size = 100.0_f64;
         let doc = match web_sys::window().and_then(|w| w.document()) {
             Some(d) => d,
             None => return cell_height,
         };
-        let canvas: web_sys::HtmlCanvasElement = match doc.create_element("canvas")
-            .ok().and_then(|e| e.dyn_into().ok()) {
+        let canvas: web_sys::HtmlCanvasElement = match doc
+            .create_element("canvas")
+            .ok()
+            .and_then(|e| e.dyn_into().ok())
+        {
             Some(c) => c,
             None => return cell_height,
         };
-        let ctx: web_sys::CanvasRenderingContext2d = match canvas.get_context("2d")
-            .ok().flatten().and_then(|c| c.dyn_into().ok()) {
+        let ctx: web_sys::CanvasRenderingContext2d = match canvas
+            .get_context("2d")
+            .ok()
+            .flatten()
+            .and_then(|c| c.dyn_into().ok())
+        {
             Some(c) => c,
             None => return cell_height,
         };
@@ -226,7 +244,11 @@ impl Shockwave3dMemberHandlers {
             .iter()
             .cloned()
             .map(|mut span| {
-                let base_size = span.style.font_size.unwrap_or(fallback_font_size as i32).max(1);
+                let base_size = span
+                    .style
+                    .font_size
+                    .unwrap_or(fallback_font_size as i32)
+                    .max(1);
                 span.style.font_size = Some(base_size * scale);
                 span
             })
@@ -254,20 +276,29 @@ impl Shockwave3dMemberHandlers {
         let bw = (source.width as i32).max(128) * supersample;
         let bh = (source.height as i32).max(32) * supersample;
         // Correct XMED cell-height values to actual point sizes before scaling
-        let corrected_spans: Vec<_> = source.spans.iter().cloned().map(|mut span| {
-            if let Some(sz) = span.style.font_size {
-                let font_face = span.style.font_face.as_deref().unwrap_or("Arial");
-                span.style.font_size = Some(Self::xmed_cell_height_to_point_size(sz, font_face));
-            }
-            span
-        }).collect();
+        let corrected_spans: Vec<_> = source
+            .spans
+            .iter()
+            .cloned()
+            .map(|mut span| {
+                if let Some(sz) = span.style.font_size {
+                    let font_face = span.style.font_face.as_deref().unwrap_or("Arial");
+                    span.style.font_size =
+                        Some(Self::xmed_cell_height_to_point_size(sz, font_face));
+                }
+                span
+            })
+            .collect();
         let corrected_font_size = {
-            let font_face = source.spans.first()
+            let font_face = source
+                .spans
+                .first()
                 .and_then(|s| s.style.font_face.as_deref())
                 .unwrap_or("Arial");
             Self::xmed_cell_height_to_point_size(source.font_size as i32, font_face) as u16
         };
-        let scaled_spans = Self::scale_native_spans(&corrected_spans, supersample, corrected_font_size);
+        let scaled_spans =
+            Self::scale_native_spans(&corrected_spans, supersample, corrected_font_size);
         let alignment = Self::native_text_alignment(source.alignment);
         let scaled_tab_stops: Vec<crate::player::cast_member::TabStop> = source
             .tab_stops
@@ -317,11 +348,14 @@ impl Shockwave3dMemberHandlers {
 
     fn rebuild_native_text_mesh(w3d: &mut Shockwave3dMember) {
         let (source, state) = match (&w3d.text3d_source, &w3d.text3d_state) {
-            (Some(source), Some(state)) if source.native_alpha_mesh => (source.clone(), state.clone()),
+            (Some(source), Some(state)) if source.native_alpha_mesh => {
+                (source.clone(), state.clone())
+            }
             _ => return,
         };
 
-        let Some((bw, bh, rgba)) = Self::render_native_text_bitmap(&source, state.smoothness) else {
+        let Some((bw, bh, rgba)) = Self::render_native_text_bitmap(&source, state.smoothness)
+        else {
             return;
         };
 
@@ -337,7 +371,9 @@ impl Shockwave3dMemberHandlers {
                 state.bevel_type,
                 state.smoothness,
             );
-            scene.clod_meshes.insert(Symbol::builtin(BuiltInSymbol::Text), vec![mesh]);
+            scene
+                .clod_meshes
+                .insert(Symbol::builtin(BuiltInSymbol::Text), vec![mesh]);
             scene.mesh_content_version += 1;
         }
     }
@@ -411,12 +447,14 @@ impl Shockwave3dMemberHandlers {
         member_ref: &CastMemberRef,
         resname: Symbol,
     ) -> Result<(), ScriptError> {
-        symbols
-            .display(&resname)
-            .map_err(|_| ScriptError::new("Cannot use foreign Shockwave3D resource symbol".to_string()))?;
+        symbols.display(&resname).map_err(|_| {
+            ScriptError::new("Cannot use foreign Shockwave3D resource symbol".to_string())
+        })?;
         if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) {
             if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                if let Some((source, state)) = w3d.runtime_state.text3d_resources.get(&resname).cloned() {
+                if let Some((source, state)) =
+                    w3d.runtime_state.text3d_resources.get(&resname).cloned()
+                {
                     if let Some(mut mesh) = Self::build_text3d_mesh(&source, &state, symbols) {
                         mesh.name = resname.clone();
                         if let Some(scene) = w3d.scene_mut() {
@@ -442,9 +480,9 @@ impl Shockwave3dMemberHandlers {
         prop: &str,
         value: &Datum,
     ) -> Result<bool, ScriptError> {
-        symbols
-            .display(&resname)
-            .map_err(|_| ScriptError::new("Cannot use foreign Shockwave3D resource symbol".to_string()))?;
+        symbols.display(&resname).map_err(|_| {
+            ScriptError::new("Cannot use foreign Shockwave3D resource symbol".to_string())
+        })?;
         crate::player::compare::validate_direct_symbol_fields(value, symbols)?;
         let mut found = false;
         if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(member_ref) {
@@ -453,20 +491,29 @@ impl Shockwave3dMemberHandlers {
                     found = true;
                     match prop.to_ascii_lowercase().as_str() {
                         "tunneldepth" => {
-                            state.tunnel_depth = value.float_value()
+                            state.tunnel_depth = value
+                                .float_value()
                                 .or_else(|_| value.int_value().map(|v| v as f64))
-                                .unwrap_or(state.tunnel_depth as f64).max(1.0) as f32;
+                                .unwrap_or(state.tunnel_depth as f64)
+                                .max(1.0) as f32;
                         }
                         "beveldepth" => {
-                            state.bevel_depth = value.float_value()
+                            state.bevel_depth = value
+                                .float_value()
                                 .or_else(|_| value.int_value().map(|v| v as f64))
-                                .unwrap_or(state.bevel_depth as f64) as f32;
+                                .unwrap_or(state.bevel_depth as f64)
+                                as f32;
                         }
                         "smoothness" => {
-                            state.smoothness = value.int_value().unwrap_or(state.smoothness as i32) as u32;
+                            state.smoothness =
+                                value.int_value().unwrap_or(state.smoothness as i32) as u32;
                         }
                         "beveltype" => {
-                            state.bevel_type = match value.string_value(symbols).unwrap_or_default().trim_start_matches('#') {
+                            state.bevel_type = match value
+                                .string_value(symbols)
+                                .unwrap_or_default()
+                                .trim_start_matches('#')
+                            {
                                 "miter" => 1,
                                 "round" => 2,
                                 _ => 0,
@@ -492,7 +539,10 @@ impl Shockwave3dMemberHandlers {
         let new_depth = new_depth.max(1.0);
         let scale = new_depth / old_depth;
 
-        if let Some(meshes) = scene.clod_meshes.get_mut(&Symbol::builtin(BuiltInSymbol::Text)) {
+        if let Some(meshes) = scene
+            .clod_meshes
+            .get_mut(&Symbol::builtin(BuiltInSymbol::Text))
+        {
             for mesh in meshes.iter_mut() {
                 for pos in mesh.positions.iter_mut() {
                     pos[2] *= scale;
@@ -520,7 +570,11 @@ impl Shockwave3dMemberHandlers {
     /// Lazily initialize the embedded 3D world for text members.
     /// Builds 3D extruded text mesh from PFR glyph outlines when available,
     /// or falls back to an alpha-mask-derived glyph mesh for native/system fonts.
-    fn ensure_text3d(player: &mut DirPlayer, symbols: &mut SymbolTable, member_ref: &CastMemberRef) {
+    fn ensure_text3d(
+        player: &mut DirPlayer,
+        symbols: &mut SymbolTable,
+        member_ref: &CastMemberRef,
+    ) {
         use crate::director::chunks::w3d::types::*;
 
         // Check if this is a text member that needs 3D initialization
@@ -529,7 +583,9 @@ impl Shockwave3dMemberHandlers {
             match member {
                 Some(m) => match &m.member_type {
                     CastMemberType::Text(text) => {
-                        let tex_member_name = text.info.as_ref()
+                        let tex_member_name = text
+                            .info
+                            .as_ref()
                             .filter(|i| i.texture_type == 2) // 2 = #member
                             .map(|i| i.texture_member.clone())
                             .filter(|s| !s.is_empty() && s != "NoTexture");
@@ -555,7 +611,22 @@ impl Shockwave3dMemberHandlers {
                 None => None,
             }
         };
-        let (text_content, font_name, font_size, tw, th, alignment, word_wrap, spans, fls, ts, bs, tab_stops, tunnel_depth, tex_member_name) = match text_info {
+        let (
+            text_content,
+            font_name,
+            font_size,
+            tw,
+            th,
+            alignment,
+            word_wrap,
+            spans,
+            fls,
+            ts,
+            bs,
+            tab_stops,
+            tunnel_depth,
+            tex_member_name,
+        ) = match text_info {
             Some(info) => info,
             None => return,
         };
@@ -578,7 +649,9 @@ impl Shockwave3dMemberHandlers {
                         }
                     }
                 }
-                if result.is_some() { break; }
+                if result.is_some() {
+                    break;
+                }
             }
             result
         };
@@ -587,10 +660,19 @@ impl Shockwave3dMemberHandlers {
 
         log(&format!(
             "[Text3D] text='{}' font='{}' size={} has_pfr={} spans={} w={} h={} tex_member={:?}",
-            text_content, font_name, font_size, has_pfr, spans.len(), tw, th, tex_member_name
+            text_content,
+            font_name,
+            font_size,
+            has_pfr,
+            spans.len(),
+            tw,
+            th,
+            tex_member_name
         ));
 
-        let texture_bitmap: Option<(u32, u32, Vec<u8>)> = if let Some(ref tex_name) = tex_member_name {
+        let texture_bitmap: Option<(u32, u32, Vec<u8>)> = if let Some(ref tex_name) =
+            tex_member_name
+        {
             // Look up the texture cast member by name and get its RGBA data
             let mut tex_result = None;
             let tex_ref = player.movie.cast_manager.find_member_ref_by_name(tex_name);
@@ -604,7 +686,8 @@ impl Shockwave3dMemberHandlers {
                             let mut rgba = vec![0u8; (w as usize) * (h as usize) * 4];
                             for y in 0..h as usize {
                                 for x in 0..w as usize {
-                                    let (r, g, b, a) = bmp.get_pixel_color_with_alpha(&palettes, x as u16, y as u16);
+                                    let (r, g, b, a) = bmp
+                                        .get_pixel_color_with_alpha(&palettes, x as u16, y as u16);
                                     let idx = (y * w as usize + x) * 4;
                                     rgba[idx] = r;
                                     rgba[idx + 1] = g;
@@ -614,7 +697,10 @@ impl Shockwave3dMemberHandlers {
                             }
                             log(&format!(
                                 "[Text3D] texture from member '{}': {}x{} rgba_len={}",
-                                tex_name, w, h, rgba.len()
+                                tex_name,
+                                w,
+                                h,
+                                rgba.len()
                             ));
                             tex_result = Some((w as u32, h as u32, rgba));
                         }
@@ -623,7 +709,8 @@ impl Shockwave3dMemberHandlers {
             }
             if tex_result.is_none() {
                 log(&format!(
-                    "[Text3D] texture member '{}' not found or not a bitmap", tex_name
+                    "[Text3D] texture member '{}' not found or not a bitmap",
+                    tex_name
                 ));
             }
             tex_result
@@ -666,36 +753,74 @@ impl Shockwave3dMemberHandlers {
 
                 // Add mesh to the scene
                 if let Some((glyphs, outline_res)) = glyph_data {
-                    let bevel_depth = w3d_member.text3d_state.as_ref().map(|s| s.bevel_depth).unwrap_or(1.0);
-                    let bevel_type = w3d_member.text3d_state.as_ref().map(|s| s.bevel_type).unwrap_or(1);
-                    let smoothness = w3d_member.text3d_state.as_ref().map(|s| s.smoothness).unwrap_or(10);
-                    let display_face = w3d_member.text3d_state.as_ref().map(|s| s.display_face).unwrap_or(-1);
+                    let bevel_depth = w3d_member
+                        .text3d_state
+                        .as_ref()
+                        .map(|s| s.bevel_depth)
+                        .unwrap_or(1.0);
+                    let bevel_type = w3d_member
+                        .text3d_state
+                        .as_ref()
+                        .map(|s| s.bevel_type)
+                        .unwrap_or(1);
+                    let smoothness = w3d_member
+                        .text3d_state
+                        .as_ref()
+                        .map(|s| s.smoothness)
+                        .unwrap_or(10);
+                    let display_face = w3d_member
+                        .text3d_state
+                        .as_ref()
+                        .map(|s| s.display_face)
+                        .unwrap_or(-1);
                     let mesh = crate::director::chunks::w3d::primitives::extrude_text_to_mesh(
-                        &text_content, &glyphs, outline_res, font_size as f32, depth,
-                        bevel_type, bevel_depth, smoothness, display_face,
+                        &text_content,
+                        &glyphs,
+                        outline_res,
+                        font_size as f32,
+                        depth,
+                        bevel_type,
+                        bevel_depth,
+                        smoothness,
+                        display_face,
                     );
                     if !mesh.positions.is_empty() {
                         if let Some(scene) = w3d_member.scene_mut() {
-                            scene.clod_meshes.insert(Symbol::builtin(BuiltInSymbol::Text), vec![mesh]);
+                            scene
+                                .clod_meshes
+                                .insert(Symbol::builtin(BuiltInSymbol::Text), vec![mesh]);
                             scene.mesh_content_version += 1;
                         }
                     }
                 } else if let Some((bw, bh, rgba)) = glyph_bitmap {
-                    let bevel_depth = w3d_member.text3d_state.as_ref().map(|s| s.bevel_depth).unwrap_or(1.0);
-                    let bevel_type = w3d_member.text3d_state.as_ref().map(|s| s.bevel_type).unwrap_or(0);
-                    let smoothness = w3d_member.text3d_state.as_ref().map(|s| s.smoothness).unwrap_or(10);
+                    let bevel_depth = w3d_member
+                        .text3d_state
+                        .as_ref()
+                        .map(|s| s.bevel_depth)
+                        .unwrap_or(1.0);
+                    let bevel_type = w3d_member
+                        .text3d_state
+                        .as_ref()
+                        .map(|s| s.bevel_type)
+                        .unwrap_or(0);
+                    let smoothness = w3d_member
+                        .text3d_state
+                        .as_ref()
+                        .map(|s| s.smoothness)
+                        .unwrap_or(10);
                     if let Some(scene) = w3d_member.scene_mut() {
-                        let mesh = crate::director::chunks::w3d::primitives::extrude_alpha_mask_to_mesh(
-                            bw,
-                            bh,
-                            &rgba,
-                            tw as f32,
-                            th as f32,
-                            depth,
-                            bevel_depth,
-                            bevel_type,
-                            smoothness,
-                        );
+                        let mesh =
+                            crate::director::chunks::w3d::primitives::extrude_alpha_mask_to_mesh(
+                                bw,
+                                bh,
+                                &rgba,
+                                tw as f32,
+                                th as f32,
+                                depth,
+                                bevel_depth,
+                                bevel_type,
+                                smoothness,
+                            );
                         if let Some((tex_w, tex_h, tex_rgba)) = texture_bitmap.as_ref() {
                             let mut tex_data = Vec::with_capacity(8 + tex_rgba.len());
                             tex_data.extend_from_slice(&tex_w.to_le_bytes());
@@ -706,7 +831,10 @@ impl Shockwave3dMemberHandlers {
                             if !scene.texture_infos.iter().any(|t| t.name == text_bitmap) {
                                 scene.texture_infos.push(W3dTextureInfo {
                                     name: text_bitmap.clone(),
-                                    render_format: 0, mip_mode: 0, mag_filter: 0, image_type: 0,
+                                    render_format: 0,
+                                    mip_mode: 0,
+                                    mag_filter: 0,
+                                    image_type: 0,
                                 });
                             }
                             if let Some(shader) = scene.shaders.first_mut() {
@@ -718,7 +846,9 @@ impl Shockwave3dMemberHandlers {
                                 }
                             }
                         }
-                        scene.clod_meshes.insert(Symbol::builtin(BuiltInSymbol::Text), vec![mesh]);
+                        scene
+                            .clod_meshes
+                            .insert(Symbol::builtin(BuiltInSymbol::Text), vec![mesh]);
                         scene.mesh_content_version += 1;
                     }
                 }
@@ -741,7 +871,11 @@ impl Shockwave3dMemberHandlers {
                     });
                 }
                 if let Some(state) = w3d_member.text3d_state.as_ref() {
-                    Self::apply_text3d_display_face(&mut w3d_member.runtime_state, state.display_face, symbols);
+                    Self::apply_text3d_display_face(
+                        &mut w3d_member.runtime_state,
+                        state.display_face,
+                        symbols,
+                    );
                 }
                 w3d_member.text3d_source = Some(Text3dSource {
                     spans: spans.clone(),
@@ -776,74 +910,135 @@ impl Shockwave3dMemberHandlers {
                 .cast_manager
                 .find_member_by_ref(cast_member_ref)
                 .ok_or_else(|| ScriptError::new("Cast member not found".to_string()))?;
-            let w3d = member.member_type.as_shockwave3d()
+            let w3d = member
+                .member_type
+                .as_shockwave3d()
                 .ok_or_else(|| ScriptError::new("Not a Shockwave3D member".to_string()))?;
-            (w3d.info.clone(), w3d.parsed_scene.clone(), w3d.text3d_state.clone())
+            (
+                w3d.info.clone(),
+                w3d.parsed_scene.clone(),
+                w3d.text3d_state.clone(),
+            )
         };
 
         use crate::director::chunks::w3d::types::W3dNodeType;
 
         match prop_builtin {
             // ─── Member-level properties ───
-            BuiltInSymbol::DirectToStage => Ok(Datum::Int(if info.direct_to_stage { 1 } else { 0 })),
+            BuiltInSymbol::DirectToStage => {
+                Ok(Datum::Int(if info.direct_to_stage { 1 } else { 0 }))
+            }
             BuiltInSymbol::Preload => Ok(Datum::Int(if info.preload { 1 } else { 0 })),
             BuiltInSymbol::Duration => Ok(Datum::Int(info.duration as i32)),
 
-            BuiltInSymbol::RegPoint => {
-                Ok(Datum::Point([info.reg_point.0 as f64, info.reg_point.1 as f64], 0))
-            }
+            BuiltInSymbol::RegPoint => Ok(Datum::Point(
+                [info.reg_point.0 as f64, info.reg_point.1 as f64],
+                0,
+            )),
             BuiltInSymbol::Rect => {
                 let r = info.default_rect;
-                Ok(Datum::Rect([r.0 as f64, r.1 as f64, r.2 as f64, r.3 as f64], 0))
+                Ok(Datum::Rect(
+                    [r.0 as f64, r.1 as f64, r.2 as f64, r.3 as f64],
+                    0,
+                ))
             }
             BuiltInSymbol::Width => Ok(Datum::Int(info.default_rect.2 - info.default_rect.0)),
             BuiltInSymbol::Height => Ok(Datum::Int(info.default_rect.3 - info.default_rect.1)),
 
             // ─── Scene collection properties ───
             // These return lists of Shockwave3dObjectRefs, supporting .count and [index]
-            BuiltInSymbol::Model | BuiltInSymbol::ModelCount | BuiltInSymbol::ModelResource | BuiltInSymbol::ModelResourceCount
-            | BuiltInSymbol::Shader | BuiltInSymbol::ShaderCount | BuiltInSymbol::Texture | BuiltInSymbol::TextureCount
-            | BuiltInSymbol::Light | BuiltInSymbol::LightCount | BuiltInSymbol::Camera | BuiltInSymbol::CameraCount
-            | BuiltInSymbol::Group | BuiltInSymbol::GroupCount | BuiltInSymbol::Motion | BuiltInSymbol::MotionCount => {
-                use crate::director::lingo::datum::{Shockwave3dObjectRef, DatumType};
+            BuiltInSymbol::Model
+            | BuiltInSymbol::ModelCount
+            | BuiltInSymbol::ModelResource
+            | BuiltInSymbol::ModelResourceCount
+            | BuiltInSymbol::Shader
+            | BuiltInSymbol::ShaderCount
+            | BuiltInSymbol::Texture
+            | BuiltInSymbol::TextureCount
+            | BuiltInSymbol::Light
+            | BuiltInSymbol::LightCount
+            | BuiltInSymbol::Camera
+            | BuiltInSymbol::CameraCount
+            | BuiltInSymbol::Group
+            | BuiltInSymbol::GroupCount
+            | BuiltInSymbol::Motion
+            | BuiltInSymbol::MotionCount => {
+                use crate::director::lingo::datum::{DatumType, Shockwave3dObjectRef};
                 let is_count = matches!(
                     prop_builtin,
-                    BuiltInSymbol::ModelCount | BuiltInSymbol::ModelResourceCount
-                        | BuiltInSymbol::ShaderCount | BuiltInSymbol::TextureCount
-                        | BuiltInSymbol::LightCount | BuiltInSymbol::CameraCount
-                        | BuiltInSymbol::GroupCount | BuiltInSymbol::MotionCount
+                    BuiltInSymbol::ModelCount
+                        | BuiltInSymbol::ModelResourceCount
+                        | BuiltInSymbol::ShaderCount
+                        | BuiltInSymbol::TextureCount
+                        | BuiltInSymbol::LightCount
+                        | BuiltInSymbol::CameraCount
+                        | BuiltInSymbol::GroupCount
+                        | BuiltInSymbol::MotionCount
                 );
                 let collection = match prop_builtin {
                     BuiltInSymbol::Model | BuiltInSymbol::ModelCount => Some(BuiltInSymbol::Model),
-                    BuiltInSymbol::ModelResource | BuiltInSymbol::ModelResourceCount => Some(BuiltInSymbol::ModelResource),
-                    BuiltInSymbol::Shader | BuiltInSymbol::ShaderCount => Some(BuiltInSymbol::Shader),
-                    BuiltInSymbol::Texture | BuiltInSymbol::TextureCount => Some(BuiltInSymbol::Texture),
+                    BuiltInSymbol::ModelResource | BuiltInSymbol::ModelResourceCount => {
+                        Some(BuiltInSymbol::ModelResource)
+                    }
+                    BuiltInSymbol::Shader | BuiltInSymbol::ShaderCount => {
+                        Some(BuiltInSymbol::Shader)
+                    }
+                    BuiltInSymbol::Texture | BuiltInSymbol::TextureCount => {
+                        Some(BuiltInSymbol::Texture)
+                    }
                     BuiltInSymbol::Light | BuiltInSymbol::LightCount => Some(BuiltInSymbol::Light),
-                    BuiltInSymbol::Camera | BuiltInSymbol::CameraCount => Some(BuiltInSymbol::Camera),
+                    BuiltInSymbol::Camera | BuiltInSymbol::CameraCount => {
+                        Some(BuiltInSymbol::Camera)
+                    }
                     BuiltInSymbol::Group | BuiltInSymbol::GroupCount => Some(BuiltInSymbol::Group),
-                    BuiltInSymbol::Motion | BuiltInSymbol::MotionCount => Some(BuiltInSymbol::Motion),
+                    BuiltInSymbol::Motion | BuiltInSymbol::MotionCount => {
+                        Some(BuiltInSymbol::Motion)
+                    }
                     _ => None,
                 };
                 let names: Vec<Symbol> = if let Some(scene) = &scene_data {
                     match collection {
-                        Some(BuiltInSymbol::Model) => scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Model).map(|n| n.name.clone()).collect(),
-                        Some(BuiltInSymbol::ModelResource) => scene.model_resources.keys().cloned().collect(),
-                        Some(BuiltInSymbol::Shader) => scene.shaders.iter().map(|s| s.name.clone()).collect(),
-                        Some(BuiltInSymbol::Texture) => scene.texture_images.keys().cloned().collect(),
-                        Some(BuiltInSymbol::Light) => scene.lights.iter().map(|l| l.name.clone()).collect(),
+                        Some(BuiltInSymbol::Model) => scene
+                            .nodes
+                            .iter()
+                            .filter(|n| n.node_type == W3dNodeType::Model)
+                            .map(|n| n.name.clone())
+                            .collect(),
+                        Some(BuiltInSymbol::ModelResource) => {
+                            scene.model_resources.keys().cloned().collect()
+                        }
+                        Some(BuiltInSymbol::Shader) => {
+                            scene.shaders.iter().map(|s| s.name.clone()).collect()
+                        }
+                        Some(BuiltInSymbol::Texture) => {
+                            scene.texture_images.keys().cloned().collect()
+                        }
+                        Some(BuiltInSymbol::Light) => {
+                            scene.lights.iter().map(|l| l.name.clone()).collect()
+                        }
                         Some(BuiltInSymbol::Camera) => {
                             let mut cams = Vec::new();
-                            if let Some(dv) = scene.nodes.iter().find(|n| n.node_type == W3dNodeType::View && n.name == Symbol::builtin(BuiltInSymbol::DefaultView)) {
+                            if let Some(dv) = scene.nodes.iter().find(|n| {
+                                n.node_type == W3dNodeType::View
+                                    && n.name == Symbol::builtin(BuiltInSymbol::DefaultView)
+                            }) {
                                 cams.push(dv.name.clone());
                             }
                             for n in &scene.nodes {
-                                if n.node_type == W3dNodeType::View && n.name != Symbol::builtin(BuiltInSymbol::DefaultView) {
+                                if n.node_type == W3dNodeType::View
+                                    && n.name != Symbol::builtin(BuiltInSymbol::DefaultView)
+                                {
                                     cams.push(n.name.clone());
                                 }
                             }
                             cams
                         }
-                        Some(BuiltInSymbol::Group) => scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Group).map(|n| n.name.clone()).collect(),
+                        Some(BuiltInSymbol::Group) => scene
+                            .nodes
+                            .iter()
+                            .filter(|n| n.node_type == W3dNodeType::Group)
+                            .map(|n| n.name.clone())
+                            .collect(),
                         Some(BuiltInSymbol::Motion) => {
                             // Default motion at index 1, then authored motions (see DEFAULT_MOTION_NAME).
                             let mut v = vec![symbols.intern(DEFAULT_MOTION_NAME)];
@@ -860,26 +1055,33 @@ impl Shockwave3dMemberHandlers {
                     return Ok(Datum::Int(names.len() as i32));
                 }
                 for name in &names {
-                    symbols
-                        .display(name)
-                        .map_err(|_| ScriptError::new("Cannot allocate foreign Shockwave3D object name symbol".to_string()))?;
+                    symbols.display(name).map_err(|_| {
+                        ScriptError::new(
+                            "Cannot allocate foreign Shockwave3D object name symbol".to_string(),
+                        )
+                    })?;
                 }
                 // Return a list of Shockwave3dObjectRefs
-                let items: VecDeque<_> = names.iter().map(|name| {
-                    player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
-                        cast_lib: cast_member_ref.cast_lib,
-                        cast_member: cast_member_ref.cast_member,
-                        object_type: collection.unwrap(),
-                        name: name.clone(),
-                    }))
-                }).collect();
+                let items: VecDeque<_> = names
+                    .iter()
+                    .map(|name| {
+                        player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
+                            cast_lib: cast_member_ref.cast_lib,
+                            cast_member: cast_member_ref.cast_member,
+                            object_type: collection.unwrap(),
+                            name: name.clone(),
+                        }))
+                    })
+                    .collect();
                 Ok(Datum::List(DatumType::List, items, false))
             }
 
             // ─── State ───
             BuiltInSymbol::State => Ok(Datum::Int(4)), // 4 = loaded
             BuiltInSymbol::PercentStreamed => Ok(Datum::Int(100)),
-            BuiltInSymbol::AnimationEnabled => Ok(Datum::Int(if info.animation_enabled { 1 } else { 0 })),
+            BuiltInSymbol::AnimationEnabled => {
+                Ok(Datum::Int(if info.animation_enabled { 1 } else { 0 }))
+            }
             BuiltInSymbol::Loop => Ok(Datum::Int(if info.loops { 1 } else { 0 })),
 
             // ─── Rendering ───
@@ -892,9 +1094,14 @@ impl Shockwave3dMemberHandlers {
                 crate::player::handlers::datum_handlers::shockwave3d_object::sync_shader_texture_lists(player, symbols)?;
                 // Re-clone scene_data to pick up the just-applied sync.
                 let scene_data = {
-                    let member = player.movie.cast_manager.find_member_by_ref(cast_member_ref)
+                    let member = player
+                        .movie
+                        .cast_manager
+                        .find_member_by_ref(cast_member_ref)
                         .ok_or_else(|| ScriptError::new("Cast member not found".to_string()))?;
-                    let w3d = member.member_type.as_shockwave3d()
+                    let w3d = member
+                        .member_type
+                        .as_shockwave3d()
                         .ok_or_else(|| ScriptError::new("Not a Shockwave3D member".to_string()))?;
                     w3d.parsed_scene.clone()
                 };
@@ -914,9 +1121,14 @@ impl Shockwave3dMemberHandlers {
 
                 // No cached frame — render offscreen
                 let runtime_state = {
-                    let member = player.movie.cast_manager.find_member_by_ref(cast_member_ref)
+                    let member = player
+                        .movie
+                        .cast_manager
+                        .find_member_by_ref(cast_member_ref)
                         .ok_or_else(|| ScriptError::new("Member not found".to_string()))?;
-                    let w3d = member.member_type.as_shockwave3d()
+                    let w3d = member
+                        .member_type
+                        .as_shockwave3d()
                         .ok_or_else(|| ScriptError::new("Not 3D".to_string()))?;
                     w3d.runtime_state.clone()
                 };
@@ -924,9 +1136,13 @@ impl Shockwave3dMemberHandlers {
                 let rgba_data = render_3d_to_rgba(&scene_data, &runtime_state, w, h, symbols);
 
                 let mut bitmap = crate::player::bitmap::bitmap::Bitmap::new(
-                    w as u16, h as u16, 32, 32, 8,
+                    w as u16,
+                    h as u16,
+                    32,
+                    32,
+                    8,
                     crate::player::bitmap::bitmap::PaletteRef::BuiltIn(
-                        crate::player::bitmap::bitmap::get_system_default_palette()
+                        crate::player::bitmap::bitmap::get_system_default_palette(),
                     ),
                 );
                 bitmap.data = rgba_data;
@@ -1028,19 +1244,30 @@ impl Shockwave3dMemberHandlers {
                 // A Text member with displayMode #mode3D is represented here as a
                 // converted Shockwave3D member; Director keeps its .text live. Read
                 // it back from the retained 3D-text spans.
-                let s = player.movie.cast_manager.find_member_by_ref(cast_member_ref)
+                let s = player
+                    .movie
+                    .cast_manager
+                    .find_member_by_ref(cast_member_ref)
                     .and_then(|m| m.member_type.as_shockwave3d())
                     .and_then(|w3d| w3d.text3d_source.as_ref())
-                    .map(|src| src.spans.iter().map(|sp| sp.text.as_str()).collect::<String>())
+                    .map(|src| {
+                        src.spans
+                            .iter()
+                            .map(|sp| sp.text.as_str())
+                            .collect::<String>()
+                    })
                     .unwrap_or_default();
                 Ok(Datum::String(s))
             }
             _ => {
-                let prop_display = symbols
-                    .display(&prop)
-                    .map_err(|_| ScriptError::new("Cannot display foreign Shockwave3D property symbol".to_string()))?;
+                let prop_display = symbols.display(&prop).map_err(|_| {
+                    ScriptError::new(
+                        "Cannot display foreign Shockwave3D property symbol".to_string(),
+                    )
+                })?;
                 Err(ScriptError::new(format!(
-                    "Cannot get Shockwave3D property '{}'", prop_display
+                    "Cannot get Shockwave3D property '{}'",
+                    prop_display
                 )))
             }
         }
@@ -1056,14 +1283,27 @@ impl Shockwave3dMemberHandlers {
         crate::player::compare::validate_direct_symbol_fields(value, symbols)?;
         match prop {
             "diffuseColor" | "diffusecolor" => {
-                if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(cast_member_ref) {
+                if let Some(member) = player
+                    .movie
+                    .cast_manager
+                    .find_mut_member_by_ref(cast_member_ref)
+                {
                     if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                         if let Some(state) = w3d.text3d_state.as_mut() {
-                            if let Datum::ColorRef(crate::player::sprite::ColorRef::Rgb(r, g, b)) = value {
+                            if let Datum::ColorRef(crate::player::sprite::ColorRef::Rgb(r, g, b)) =
+                                value
+                            {
                                 state.diffuse_color = (*r, *g, *b);
                                 if let Some(scene) = w3d.scene_mut() {
-                                    if let Some(mat) = scene.materials.iter_mut().find(|m| m.name == Symbol::builtin(BuiltInSymbol::TextMaterial)) {
-                                        mat.diffuse = [*r as f32 / 255.0, *g as f32 / 255.0, *b as f32 / 255.0, 1.0];
+                                    if let Some(mat) = scene.materials.iter_mut().find(|m| {
+                                        m.name == Symbol::builtin(BuiltInSymbol::TextMaterial)
+                                    }) {
+                                        mat.diffuse = [
+                                            *r as f32 / 255.0,
+                                            *g as f32 / 255.0,
+                                            *b as f32 / 255.0,
+                                            1.0,
+                                        ];
                                     }
                                 }
                             }
@@ -1074,9 +1314,13 @@ impl Shockwave3dMemberHandlers {
             }
             "directToStage" | "preLoad" | "preload" | "loop" | "animationEnabled"
             | "smoothness" | "tunnelDepth" | "tunneldepth" | "bevelDepth" | "beveldepth"
-            | "bevelType" | "beveltype" | "displayFace" | "displayface"
-            | "displayMode" | "displaymode" => {
-                if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(cast_member_ref) {
+            | "bevelType" | "beveltype" | "displayFace" | "displayface" | "displayMode"
+            | "displaymode" => {
+                if let Some(member) = player
+                    .movie
+                    .cast_manager
+                    .find_mut_member_by_ref(cast_member_ref)
+                {
                     if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                         let mut pending_depth_update: Option<(f32, f32)> = None;
                         let mut needs_rebuild = false;
@@ -1089,28 +1333,39 @@ impl Shockwave3dMemberHandlers {
                                 "tunnelDepth" | "tunneldepth" => {
                                     let new_depth = value
                                         .float_value()
-                                        .or_else(|_| value.int_value().map(|v| v as f64))? as f32;
+                                        .or_else(|_| value.int_value().map(|v| v as f64))?
+                                        as f32;
                                     let new_depth = new_depth.max(1.0);
-                                    pending_depth_update = Some((state.tunnel_depth.max(1.0), new_depth));
+                                    pending_depth_update =
+                                        Some((state.tunnel_depth.max(1.0), new_depth));
                                     state.tunnel_depth = new_depth;
                                 }
                                 "bevelDepth" | "beveldepth" => {
                                     state.bevel_depth = value
                                         .float_value()
-                                        .or_else(|_| value.int_value().map(|v| v as f64))? as f32;
+                                        .or_else(|_| value.int_value().map(|v| v as f64))?
+                                        as f32;
                                     needs_rebuild = true;
                                 }
                                 "bevelType" | "beveltype" => {
-                                    state.bevel_type = match value.string_value(symbols)?.trim_start_matches('#') {
+                                    state.bevel_type = match value
+                                        .string_value(symbols)?
+                                        .trim_start_matches('#')
+                                    {
                                         "miter" => 1,
                                         "round" => 2,
                                         _ => 0,
                                     };
                                     needs_rebuild = true;
                                 }
-                                "displayFace" | "displayface" => state.display_face = value.int_value()?,
+                                "displayFace" | "displayface" => {
+                                    state.display_face = value.int_value()?
+                                }
                                 "displayMode" | "displaymode" => {
-                                    state.display_mode = match value.string_value(symbols)?.trim_start_matches('#') {
+                                    state.display_mode = match value
+                                        .string_value(symbols)?
+                                        .trim_start_matches('#')
+                                    {
                                         "mode3d" => 1,
                                         _ => 0,
                                     };
@@ -1127,7 +1382,11 @@ impl Shockwave3dMemberHandlers {
                             Self::rebuild_native_text_mesh(w3d);
                         }
                         if let Some(state) = w3d.text3d_state.as_ref() {
-                            Self::apply_text3d_display_face(&mut w3d.runtime_state, state.display_face, symbols);
+                            Self::apply_text3d_display_face(
+                                &mut w3d.runtime_state,
+                                state.display_face,
+                                symbols,
+                            );
                         }
                     }
                 }
@@ -1153,7 +1412,11 @@ impl Shockwave3dMemberHandlers {
                     _ => 0,
                 };
 
-                if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(cast_member_ref) {
+                if let Some(member) = player
+                    .movie
+                    .cast_manager
+                    .find_mut_member_by_ref(cast_member_ref)
+                {
                     if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                         w3d.runtime_state.directional_preset = preset;
 
@@ -1165,13 +1428,15 @@ impl Shockwave3dMemberHandlers {
                             // Update the scene's DefaultDirectional light node transform (authoritative)
                             // and also the runtime_state.node_transforms so the renderer picks it up.
                             if let Some(scene) = w3d.scene_mut() {
-                                if let Some(light_node) = scene.nodes.iter_mut()
-                                    .find(|n| n.name == Symbol::builtin(BuiltInSymbol::DefaultDirectional))
-                                {
+                                if let Some(light_node) = scene.nodes.iter_mut().find(|n| {
+                                    n.name == Symbol::builtin(BuiltInSymbol::DefaultDirectional)
+                                }) {
                                     light_node.transform = t;
                                 }
                             }
-                            w3d.runtime_state.node_transforms.insert(Symbol::builtin(BuiltInSymbol::DefaultDirectional), t);
+                            w3d.runtime_state
+                                .node_transforms
+                                .insert(Symbol::builtin(BuiltInSymbol::DefaultDirectional), t);
                         }
                     }
                 }
@@ -1183,7 +1448,11 @@ impl Shockwave3dMemberHandlers {
                 // and re-extrudes; replace the retained span content (preserving the
                 // first span's style) and rebuild the mesh. Returning Ok here is what
                 // stops PacMan3D crashing on its score-popup updates.
-                if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(cast_member_ref) {
+                if let Some(member) = player
+                    .movie
+                    .cast_manager
+                    .find_mut_member_by_ref(cast_member_ref)
+                {
                     if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                         let new_text = value.string_value(symbols).unwrap_or_default();
                         if let Some(source) = w3d.text3d_source.as_mut() {
@@ -1208,7 +1477,11 @@ impl Shockwave3dMemberHandlers {
             "defaultRect" | "defaultrect" | "rect" => {
                 if let Datum::Rect([l, t, r, b], _) = value {
                     let new_rect = (*l as i32, *t as i32, *r as i32, *b as i32);
-                    if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(cast_member_ref) {
+                    if let Some(member) = player
+                        .movie
+                        .cast_manager
+                        .find_mut_member_by_ref(cast_member_ref)
+                    {
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                             w3d.info.default_rect = new_rect;
                         }
@@ -1216,11 +1489,10 @@ impl Shockwave3dMemberHandlers {
                 }
                 Ok(())
             }
-            _ => {
-                Err(ScriptError::new(format!(
-                    "Cannot set Shockwave3D property '{}'", prop
-                )))
-            }
+            _ => Err(ScriptError::new(format!(
+                "Cannot set Shockwave3D property '{}'",
+                prop
+            ))),
         }
     }
 
@@ -1237,7 +1509,9 @@ impl Shockwave3dMemberHandlers {
         let handler_name_builtin = handler_name.into_builtin_or_error(symbols)?;
         let handler_name_display = symbols
             .display(&handler_name)
-            .map_err(|_| ScriptError::new("Cannot display foreign Shockwave3D handler symbol".to_string()))?
+            .map_err(|_| {
+                ScriptError::new("Cannot display foreign Shockwave3D handler symbol".to_string())
+            })?
             .to_owned();
         // Lazily init 3D world for text members before any 3D operation
         if let Datum::CastMember(member_ref) = checked_datum(player, datum, symbols)?.clone() {
@@ -1253,31 +1527,45 @@ impl Shockwave3dMemberHandlers {
                         _ => return Err(ScriptError::new("Expected cast member ref".to_string())),
                     };
                     if args.is_empty() {
-                        return Err(ScriptError::new("getPropRef requires a collection argument".to_string()));
+                        return Err(ScriptError::new(
+                            "getPropRef requires a collection argument".to_string(),
+                        ));
                     }
-                    let collection = checked_datum(player, &args[0], symbols)?.symbol_value(symbols)?;
+                    let collection =
+                        checked_datum(player, &args[0], symbols)?.symbol_value(symbols)?;
                     let index = if args.len() > 1 {
                         checked_datum(player, &args[1], symbols)?.int_value()? as usize
                     } else {
                         1
                     };
-                    let member = player.movie.cast_manager.find_member_by_ref(&cast_member_ref);
+                    let member = player
+                        .movie
+                        .cast_manager
+                        .find_member_by_ref(&cast_member_ref);
                     if let Some(m) = member {
                         if let Some(w3d) = m.member_type.as_shockwave3d() {
                             if let Some(ref scene) = w3d.parsed_scene {
-                                let obj_name = Self::get_3d_object_name_by_index(scene, symbols, collection.clone(), index)
-                                    .unwrap_or_default();
+                                let obj_name = Self::get_3d_object_name_by_index(
+                                    scene,
+                                    symbols,
+                                    collection.clone(),
+                                    index,
+                                )
+                                .unwrap_or_default();
                                 if !obj_name.is_empty() {
                                     symbols
                                         .display(&obj_name)
                                         .map_err(|_| ScriptError::new("Cannot allocate foreign Shockwave3D object name symbol".to_string()))?;
                                     use crate::director::lingo::datum::Shockwave3dObjectRef;
-                                    return Ok(player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
-                                        cast_lib: cast_member_ref.cast_lib,
-                                        cast_member: cast_member_ref.cast_member,
-                                        object_type: collection.into_builtin_or_error(symbols)?,
-                                        name: obj_name,
-                                    })));
+                                    return Ok(player.alloc_datum(Datum::Shockwave3dObjectRef(
+                                        Shockwave3dObjectRef {
+                                            cast_lib: cast_member_ref.cast_lib,
+                                            cast_member: cast_member_ref.cast_member,
+                                            object_type: collection
+                                                .into_builtin_or_error(symbols)?,
+                                            name: obj_name,
+                                        },
+                                    )));
                                 }
                             }
                         }
@@ -1285,72 +1573,115 @@ impl Shockwave3dMemberHandlers {
                     Ok(player.alloc_datum(Datum::Void))
                 })(player, symbols)
             }
-            BuiltInSymbol::Count => {
-                (|player: &mut DirPlayer, symbols: &mut SymbolTable| {
-                    let cast_member_ref = match checked_datum(player, datum, symbols)? {
-                        Datum::CastMember(r) => r.to_owned(),
-                        _ => return Err(ScriptError::new("Expected cast member ref".to_string())),
-                    };
-                    if args.is_empty() {
-                        return Err(ScriptError::new("count requires 1 argument".to_string()));
-                    }
-                    let count_of = checked_datum(player, &args[0], symbols)?.symbol_value(symbols)?;
-                    let member = player.movie.cast_manager.find_member_by_ref(&cast_member_ref);
-                    if let Some(m) = member {
-                        if let Some(w3d) = m.member_type.as_shockwave3d() {
-                            if let Some(ref scene) = w3d.parsed_scene {
-                                let count = Self::get_3d_collection_count(scene, symbols, count_of)?;
-                                return Ok(player.alloc_datum(Datum::Int(count)));
-                            }
+            BuiltInSymbol::Count => (|player: &mut DirPlayer, symbols: &mut SymbolTable| {
+                let cast_member_ref = match checked_datum(player, datum, symbols)? {
+                    Datum::CastMember(r) => r.to_owned(),
+                    _ => return Err(ScriptError::new("Expected cast member ref".to_string())),
+                };
+                if args.is_empty() {
+                    return Err(ScriptError::new("count requires 1 argument".to_string()));
+                }
+                let count_of = checked_datum(player, &args[0], symbols)?.symbol_value(symbols)?;
+                let member = player
+                    .movie
+                    .cast_manager
+                    .find_member_by_ref(&cast_member_ref);
+                if let Some(m) = member {
+                    if let Some(w3d) = m.member_type.as_shockwave3d() {
+                        if let Some(ref scene) = w3d.parsed_scene {
+                            let count = Self::get_3d_collection_count(scene, symbols, count_of)?;
+                            return Ok(player.alloc_datum(Datum::Int(count)));
                         }
                     }
-                    Ok(player.alloc_datum(Datum::Int(0)))
-                })(player, symbols)
-            }
+                }
+                Ok(player.alloc_datum(Datum::Int(0)))
+            })(player, symbols),
             // Shockwave 3D collection accessors & mutators
-            BuiltInSymbol::Model | BuiltInSymbol::ModelResource | BuiltInSymbol::Shader | BuiltInSymbol::Texture | BuiltInSymbol::Light | BuiltInSymbol::Camera | BuiltInSymbol::Group | BuiltInSymbol::Motion
-            | BuiltInSymbol::ResetWorld | BuiltInSymbol::RevertToWorldDefaults
-            | BuiltInSymbol::NewTexture | BuiltInSymbol::NewShader | BuiltInSymbol::NewModel | BuiltInSymbol::NewModelResource | BuiltInSymbol::NewLight | BuiltInSymbol::NewCamera | BuiltInSymbol::NewGroup | BuiltInSymbol::NewMotion | BuiltInSymbol::NewMesh
-            | BuiltInSymbol::DeleteTexture | BuiltInSymbol::DeleteShader | BuiltInSymbol::DeleteModel | BuiltInSymbol::DeleteModelResource | BuiltInSymbol::DeleteLight | BuiltInSymbol::DeleteCamera | BuiltInSymbol::DeleteGroup | BuiltInSymbol::DeleteMotion
-            | BuiltInSymbol::CloneModelFromCastmember | BuiltInSymbol::CloneMotionFromCastmember | BuiltInSymbol::CloneDeep
-            | BuiltInSymbol::LoadFile | BuiltInSymbol::Extrude3d | BuiltInSymbol::GetPref | BuiltInSymbol::SetPref
-            | BuiltInSymbol::RegisterForEvent | BuiltInSymbol::RegisterScript | BuiltInSymbol::UnregisterAllEvents
+            BuiltInSymbol::Model
+            | BuiltInSymbol::ModelResource
+            | BuiltInSymbol::Shader
+            | BuiltInSymbol::Texture
+            | BuiltInSymbol::Light
+            | BuiltInSymbol::Camera
+            | BuiltInSymbol::Group
+            | BuiltInSymbol::Motion
+            | BuiltInSymbol::ResetWorld
+            | BuiltInSymbol::RevertToWorldDefaults
+            | BuiltInSymbol::NewTexture
+            | BuiltInSymbol::NewShader
+            | BuiltInSymbol::NewModel
+            | BuiltInSymbol::NewModelResource
+            | BuiltInSymbol::NewLight
+            | BuiltInSymbol::NewCamera
+            | BuiltInSymbol::NewGroup
+            | BuiltInSymbol::NewMotion
+            | BuiltInSymbol::NewMesh
+            | BuiltInSymbol::DeleteTexture
+            | BuiltInSymbol::DeleteShader
+            | BuiltInSymbol::DeleteModel
+            | BuiltInSymbol::DeleteModelResource
+            | BuiltInSymbol::DeleteLight
+            | BuiltInSymbol::DeleteCamera
+            | BuiltInSymbol::DeleteGroup
+            | BuiltInSymbol::DeleteMotion
+            | BuiltInSymbol::CloneModelFromCastmember
+            | BuiltInSymbol::CloneMotionFromCastmember
+            | BuiltInSymbol::CloneDeep
+            | BuiltInSymbol::LoadFile
+            | BuiltInSymbol::Extrude3d
+            | BuiltInSymbol::GetPref
+            | BuiltInSymbol::SetPref
+            | BuiltInSymbol::RegisterForEvent
+            | BuiltInSymbol::RegisterScript
+            | BuiltInSymbol::UnregisterAllEvents
             | BuiltInSymbol::Image => {
                 (|player: &mut DirPlayer, symbols: &mut SymbolTable| {
                     let member_ref = match checked_datum(player, datum, symbols)? {
                         Datum::CastMember(r) => r.to_owned(),
                         _ => return Err(ScriptError::new("Expected cast member ref".to_string())),
                     };
-                    let cast_member = player.movie.cast_manager.find_member_by_ref(&member_ref)
+                    let cast_member = player
+                        .movie
+                        .cast_manager
+                        .find_member_by_ref(&member_ref)
                         .ok_or_else(|| ScriptError::new("Cast member not found".to_string()))?;
-                    let w3d = cast_member.member_type.as_shockwave3d()
-                        .ok_or_else(|| {
-                            ScriptError::new(format!(
-                                "Cannot call .{}() on non-Shockwave3D member (type: {:?})",
-                                handler_name_display, cast_member.member_type.member_type_id()
-                            ))
-                        })?;
+                    let w3d = cast_member.member_type.as_shockwave3d().ok_or_else(|| {
+                        ScriptError::new(format!(
+                            "Cannot call .{}() on non-Shockwave3D member (type: {:?})",
+                            handler_name_display,
+                            cast_member.member_type.member_type_id()
+                        ))
+                    })?;
 
                     if handler_name_builtin == BuiltInSymbol::UnregisterAllEvents {
-                        let member = player.movie.cast_manager.find_mut_member_by_ref(&member_ref)
+                        let member = player
+                            .movie
+                            .cast_manager
+                            .find_mut_member_by_ref(&member_ref)
                             .ok_or_else(|| ScriptError::new("Member not found".to_string()))?;
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                             w3d.runtime_state.registered_events.clear();
                         }
                         return Ok(player.alloc_datum(Datum::Void));
                     }
-                    if handler_name_builtin == BuiltInSymbol::RegisterForEvent || handler_name_builtin == BuiltInSymbol::RegisterScript {
+                    if handler_name_builtin == BuiltInSymbol::RegisterForEvent
+                        || handler_name_builtin == BuiltInSymbol::RegisterScript
+                    {
                         // member.registerForEvent(eventName, handlerName, scriptObject {, begin, period, repetitions})
                         // For #timeMS this drives the dispatcher in `dispatch_w3d_timer_events`.
                         // Other event names are stored but never fired (their producers —
                         // collision callbacks, animation start/end notifications — aren't wired).
                         let event_name = if let Some(a) = args.get(0) {
-                            checked_datum(player, a, symbols)?.symbol_value(symbols).unwrap_or_else(|_| Symbol::empty())
+                            checked_datum(player, a, symbols)?
+                                .symbol_value(symbols)
+                                .unwrap_or_else(|_| Symbol::empty())
                         } else {
                             Symbol::empty()
                         };
                         let handler_sym = if let Some(a) = args.get(1) {
-                            checked_datum(player, a, symbols)?.symbol_value(symbols).unwrap_or_else(|_| Symbol::empty())
+                            checked_datum(player, a, symbols)?
+                                .symbol_value(symbols)
+                                .unwrap_or_else(|_| Symbol::empty())
                         } else {
                             Symbol::empty()
                         };
@@ -1369,17 +1700,32 @@ impl Shockwave3dMemberHandlers {
                             None
                         };
                         let begin_ms = if let Some(a) = args.get(3) {
-                            checked_datum(player, a, symbols)?.int_value().ok()
-                                .map(|v| v.max(0) as u32).unwrap_or(0)
-                        } else { 0 };
+                            checked_datum(player, a, symbols)?
+                                .int_value()
+                                .ok()
+                                .map(|v| v.max(0) as u32)
+                                .unwrap_or(0)
+                        } else {
+                            0
+                        };
                         let period_ms = if let Some(a) = args.get(4) {
-                            checked_datum(player, a, symbols)?.int_value().ok()
-                                .map(|v| v.max(0) as u32).unwrap_or(0)
-                        } else { 0 };
+                            checked_datum(player, a, symbols)?
+                                .int_value()
+                                .ok()
+                                .map(|v| v.max(0) as u32)
+                                .unwrap_or(0)
+                        } else {
+                            0
+                        };
                         let repetitions = if let Some(a) = args.get(5) {
-                            checked_datum(player, a, symbols)?.int_value().ok()
-                                .map(|v| v.max(0) as u32).unwrap_or(0)
-                        } else { 0 };
+                            checked_datum(player, a, symbols)?
+                                .int_value()
+                                .ok()
+                                .map(|v| v.max(0) as u32)
+                                .unwrap_or(0)
+                        } else {
+                            0
+                        };
                         let now_ms = crate::player::testing_shared::now_ms();
                         let event = crate::player::cast_member::RegisteredW3dEvent {
                             event_name,
@@ -1392,7 +1738,10 @@ impl Shockwave3dMemberHandlers {
                             fires_so_far: 0,
                             last_fire_ms: now_ms,
                         };
-                        let member = player.movie.cast_manager.find_mut_member_by_ref(&member_ref)
+                        let member = player
+                            .movie
+                            .cast_manager
+                            .find_mut_member_by_ref(&member_ref)
                             .ok_or_else(|| ScriptError::new("Member not found".to_string()))?;
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                             w3d.runtime_state.registered_events.push(event);
@@ -1409,7 +1758,10 @@ impl Shockwave3dMemberHandlers {
                         // back on a cached version and leave the PREVIOUS game's models
                         // on screen (stale models, maze rebuilt over old transforms).
                         static RESET_GEN: AtomicU64 = AtomicU64::new(1_000_000);
-                        let member = player.movie.cast_manager.find_mut_member_by_ref(&member_ref)
+                        let member = player
+                            .movie
+                            .cast_manager
+                            .find_mut_member_by_ref(&member_ref)
                             .ok_or_else(|| ScriptError::new("Member not found".to_string()))?;
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                             // resetWorld: restore to the state from when the member was
@@ -1422,18 +1774,28 @@ impl Shockwave3dMemberHandlers {
                                 fresh.texture_content_version = reset_gen;
                                 w3d.parsed_scene = Some(std::rc::Rc::new(fresh));
                             }
-                            w3d.runtime_state = crate::player::cast_member::Shockwave3dRuntimeState::from_info(&w3d.info, w3d.parsed_scene.as_deref());
+                            w3d.runtime_state =
+                                crate::player::cast_member::Shockwave3dRuntimeState::from_info(
+                                    &w3d.info,
+                                    w3d.parsed_scene.as_deref(),
+                                );
                         }
                         return Ok(player.alloc_datum(Datum::Void));
                     }
                     if handler_name_builtin == BuiltInSymbol::RevertToWorldDefaults {
-                        let member = player.movie.cast_manager.find_mut_member_by_ref(&member_ref)
+                        let member = player
+                            .movie
+                            .cast_manager
+                            .find_mut_member_by_ref(&member_ref)
                             .ok_or_else(|| ScriptError::new("Member not found".to_string()))?;
                         if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                             // revertToWorldDefaults: restore to state when member was first created
                             // (re-parse from original W3D data)
                             if !w3d.w3d_data.is_empty() {
-                                match crate::director::chunks::w3d::parse_w3d(&w3d.w3d_data, symbols) {
+                                match crate::director::chunks::w3d::parse_w3d(
+                                    &w3d.w3d_data,
+                                    symbols,
+                                ) {
                                     Ok(scene) => {
                                         w3d.parsed_scene = Some(std::rc::Rc::new(scene));
                                     }
@@ -1445,23 +1807,35 @@ impl Shockwave3dMemberHandlers {
                                 }
                             } else {
                                 w3d.parsed_scene = Some(std::rc::Rc::new(
-                                    crate::player::cast_member::CastMember::create_empty_w3d_scene()
+                                    crate::player::cast_member::CastMember::create_empty_w3d_scene(
+                                    ),
                                 ));
                             }
-                            w3d.runtime_state = crate::player::cast_member::Shockwave3dRuntimeState::from_info(&w3d.info, w3d.parsed_scene.as_deref());
+                            w3d.runtime_state =
+                                crate::player::cast_member::Shockwave3dRuntimeState::from_info(
+                                    &w3d.info,
+                                    w3d.parsed_scene.as_deref(),
+                                );
                         }
                         return Ok(player.alloc_datum(Datum::Void));
                     }
 
                     // cloneModelFromCastmember / cloneMotionFromCastmember / cloneDeep
-                    if handler_name_builtin == BuiltInSymbol::CloneModelFromCastmember || handler_name_builtin == BuiltInSymbol::CloneMotionFromCastmember || handler_name_builtin == BuiltInSymbol::CloneDeep {
+                    if handler_name_builtin == BuiltInSymbol::CloneModelFromCastmember
+                        || handler_name_builtin == BuiltInSymbol::CloneMotionFromCastmember
+                        || handler_name_builtin == BuiltInSymbol::CloneDeep
+                    {
                         let obj_name = if !args.is_empty() {
-                            checked_datum(player, &args[0], symbols)?.string_value(symbols).unwrap_or_default()
+                            checked_datum(player, &args[0], symbols)?
+                                .string_value(symbols)
+                                .unwrap_or_default()
                         } else {
                             String::new()
                         };
                         let source_model_name = if args.len() > 1 {
-                            checked_datum(player, &args[1], symbols)?.string_value(symbols).unwrap_or_default()
+                            checked_datum(player, &args[1], symbols)?
+                                .string_value(symbols)
+                                .unwrap_or_default()
                         } else {
                             String::new()
                         };
@@ -1473,15 +1847,26 @@ impl Shockwave3dMemberHandlers {
                         } else {
                             None
                         };
-                        let obj_type = if handler_name_builtin == BuiltInSymbol::CloneMotionFromCastmember {
-                            BuiltInSymbol::Motion
-                        } else {
-                            BuiltInSymbol::Model
-                        };
+                        let obj_type =
+                            if handler_name_builtin == BuiltInSymbol::CloneMotionFromCastmember {
+                                BuiltInSymbol::Motion
+                            } else {
+                                BuiltInSymbol::Model
+                            };
 
                         // Look up source model's shader/transform/resource from source member's scene
-                        let identity = [1.0f32,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0];
-                        let (source_shader_name, source_transform, source_resource_name, source_model_resource_name, src_motion_tracks, src_child_nodes) = if let Some(ref src_ref) = source_member_ref {
+                        let identity = [
+                            1.0f32, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                            0.0, 0.0, 1.0,
+                        ];
+                        let (
+                            source_shader_name,
+                            source_transform,
+                            source_resource_name,
+                            source_model_resource_name,
+                            src_motion_tracks,
+                            src_child_nodes,
+                        ) = if let Some(ref src_ref) = source_member_ref {
                             let src_member = player.movie.cast_manager.find_member_by_ref(src_ref);
                             if let Some(sm) = src_member {
                                 if let Some(sw3d) = sm.member_type.as_shockwave3d() {
@@ -1489,7 +1874,11 @@ impl Shockwave3dMemberHandlers {
                                         let node = {
                                             let mut found = None;
                                             for n in &scene.nodes {
-                                                if symbols.lower(&n.name).map_err(|_| SymbolError::Foreign)?.eq_ignore_ascii_case(&source_model_name) {
+                                                if symbols
+                                                    .lower(&n.name)
+                                                    .map_err(|_| SymbolError::Foreign)?
+                                                    .eq_ignore_ascii_case(&source_model_name)
+                                                {
                                                     found = Some(n);
                                                     break;
                                                 }
@@ -1497,9 +1886,19 @@ impl Shockwave3dMemberHandlers {
                                             found
                                         };
                                         let (sn, st, sr, smr) = if let Some(n) = node {
-                                            (n.shader_name.clone(), n.transform, n.resource_name.clone(), n.model_resource_name.clone())
+                                            (
+                                                n.shader_name.clone(),
+                                                n.transform,
+                                                n.resource_name.clone(),
+                                                n.model_resource_name.clone(),
+                                            )
                                         } else {
-                                            (Symbol::empty(), identity, Symbol::empty(), Symbol::empty())
+                                            (
+                                                Symbol::empty(),
+                                                identity,
+                                                Symbol::empty(),
+                                                Symbol::empty(),
+                                            )
                                         };
                                         // cloneMotionFromCastmember(newName, sourceMotionName, member)
                                         // must clone the SPECIFIC motion named sourceMotionName
@@ -1518,15 +1917,23 @@ impl Shockwave3dMemberHandlers {
                                             // a no-op when the name is unique (On the Run).
                                             let mut best = None;
                                             for motion in &scene.motions {
-                                                if symbols.lower(&motion.name).map_err(|_| SymbolError::Foreign)?.eq_ignore_ascii_case(&source_model_name)
-                                                    && best.as_ref().map_or(true, |(_, len)| motion.tracks.len() >= *len)
+                                                if symbols
+                                                    .lower(&motion.name)
+                                                    .map_err(|_| SymbolError::Foreign)?
+                                                    .eq_ignore_ascii_case(&source_model_name)
+                                                    && best.as_ref().map_or(true, |(_, len)| {
+                                                        motion.tracks.len() >= *len
+                                                    })
                                                 {
                                                     best = Some((motion, motion.tracks.len()));
                                                 }
                                             }
-                                            best.map(|(motion, _)| motion.tracks.clone()).unwrap_or_default()
+                                            best.map(|(motion, _)| motion.tracks.clone())
+                                                .unwrap_or_default()
                                         } else {
-                                            scene.motions.iter()
+                                            scene
+                                                .motions
+                                                .iter()
                                                 .max_by_key(|m| m.tracks.len())
                                                 .map(|m| m.tracks.clone())
                                                 .unwrap_or_default()
@@ -1562,7 +1969,12 @@ impl Shockwave3dMemberHandlers {
                                             > = std::collections::HashMap::new();
                                             for n in &scene.nodes {
                                                 children_by_parent
-                                                    .entry(symbols.lower(&n.parent_name).map_err(|_| SymbolError::Foreign)?.to_owned())
+                                                    .entry(
+                                                        symbols
+                                                            .lower(&n.parent_name)
+                                                            .map_err(|_| SymbolError::Foreign)?
+                                                            .to_owned(),
+                                                    )
                                                     .or_default()
                                                     .push(n);
                                             }
@@ -1575,22 +1987,62 @@ impl Shockwave3dMemberHandlers {
                                                 if let Some(kids) = children_by_parent.get(&key) {
                                                     for n in kids {
                                                         descendants.push((*n).clone());
-                                                        stack.push(symbols.display(&n.name).map_err(|_| SymbolError::Foreign)?.to_owned());
+                                                        stack.push(
+                                                            symbols
+                                                                .display(&n.name)
+                                                                .map_err(|_| SymbolError::Foreign)?
+                                                                .to_owned(),
+                                                        );
                                                     }
                                                 }
                                             }
                                             descendants
                                         };
                                         (sn, st, sr, smr, motion_tracks, child_nodes)
-                                    } else { (Symbol::empty(), identity, Symbol::empty(), Symbol::empty(), vec![], vec![]) }
-                                } else { (Symbol::empty(), identity, Symbol::empty(), Symbol::empty(), vec![], vec![]) }
-                            } else { (Symbol::empty(), identity, Symbol::empty(), Symbol::empty(), vec![], vec![]) }
+                                    } else {
+                                        (
+                                            Symbol::empty(),
+                                            identity,
+                                            Symbol::empty(),
+                                            Symbol::empty(),
+                                            vec![],
+                                            vec![],
+                                        )
+                                    }
+                                } else {
+                                    (
+                                        Symbol::empty(),
+                                        identity,
+                                        Symbol::empty(),
+                                        Symbol::empty(),
+                                        vec![],
+                                        vec![],
+                                    )
+                                }
+                            } else {
+                                (
+                                    Symbol::empty(),
+                                    identity,
+                                    Symbol::empty(),
+                                    Symbol::empty(),
+                                    vec![],
+                                    vec![],
+                                )
+                            }
                         } else {
-                            (Symbol::empty(), identity, Symbol::empty(), Symbol::empty(), vec![], vec![])
+                            (
+                                Symbol::empty(),
+                                identity,
+                                Symbol::empty(),
+                                Symbol::empty(),
+                                vec![],
+                                vec![],
+                            )
                         };
 
                         // Track shader name remapping for -clone suffix creation
-                        let mut shader_name_map: std::collections::HashMap<Symbol, Symbol> = std::collections::HashMap::new();
+                        let mut shader_name_map: std::collections::HashMap<Symbol, Symbol> =
+                            std::collections::HashMap::new();
                         // Track texture name remapping for -clone suffix creation. Director
                         // renames a colliding texture to "<name>-clone<N>": two models can both
                         // ship a generically-named texture (e.g. the base map AND the Shield item
@@ -1598,7 +2050,8 @@ impl Shockwave3dMemberHandlers {
                         // and that model's shaders are repointed at the clone, so neither hijacks
                         // the other. dirplayer previously kept only the first → the map wall showed
                         // the shield's sunset texture.
-                        let mut texture_name_map: std::collections::HashMap<Symbol, Symbol> = std::collections::HashMap::new();
+                        let mut texture_name_map: std::collections::HashMap<Symbol, Symbol> =
+                            std::collections::HashMap::new();
 
                         // Namespace prefix for cloned NODE names (must be unique per
                         // clone). Resource/mesh names instead follow loadFile's merge
@@ -1612,9 +2065,22 @@ impl Shockwave3dMemberHandlers {
 
                         // Copy source shaders, model resources, meshes, and textures that don't exist in target scene
                         if let Some(ref src_ref) = source_member_ref {
-                            let (src_shaders, src_materials, src_model_resources, src_clod_meshes, src_raw_meshes, src_textures, src_lights, src_light_nodes, src_skeletons, src_motions) = {
-                                let src_member = player.movie.cast_manager.find_member_by_ref(src_ref);
-                                let scene = src_member.and_then(|sm| sm.member_type.as_shockwave3d())
+                            let (
+                                src_shaders,
+                                src_materials,
+                                src_model_resources,
+                                src_clod_meshes,
+                                src_raw_meshes,
+                                src_textures,
+                                src_lights,
+                                src_light_nodes,
+                                src_skeletons,
+                                src_motions,
+                            ) = {
+                                let src_member =
+                                    player.movie.cast_manager.find_member_by_ref(src_ref);
+                                let scene = src_member
+                                    .and_then(|sm| sm.member_type.as_shockwave3d())
                                     .and_then(|sw3d| sw3d.parsed_scene.as_ref());
 
                                 // Director 11.5 (`cloneModelFromCastmember`): this copies "the model
@@ -1642,51 +2108,112 @@ impl Shockwave3dMemberHandlers {
                                 // when they can attribute them, and falling back to the full tables
                                 // costs little — the load stays ~30s either way, because the meshes
                                 // and model resources were what made it expensive.
-                                let mut used_res: std::collections::HashSet<Symbol> = std::collections::HashSet::new();
-                                for name in [source_resource_name.clone(), source_model_resource_name.clone()] {
-                                    if !name.is_empty() { used_res.insert(name); }
+                                let mut used_res: std::collections::HashSet<Symbol> =
+                                    std::collections::HashSet::new();
+                                for name in [
+                                    source_resource_name.clone(),
+                                    source_model_resource_name.clone(),
+                                ] {
+                                    if !name.is_empty() {
+                                        used_res.insert(name);
+                                    }
                                 }
                                 for child in &src_child_nodes {
-                                    for name in [child.resource_name.clone(), child.model_resource_name.clone()] {
-                                        if !name.is_empty() { used_res.insert(name); }
+                                    for name in [
+                                        child.resource_name.clone(),
+                                        child.model_resource_name.clone(),
+                                    ] {
+                                        if !name.is_empty() {
+                                            used_res.insert(name);
+                                        }
                                     }
                                 }
                                 let filter_res = !used_res.is_empty();
-                                let wants_res = |name: Symbol| !filter_res || used_res.contains(&name);
+                                let wants_res =
+                                    |name: Symbol| !filter_res || used_res.contains(&name);
 
-                                let shaders: Vec<_> = scene.map(|s| s.shaders.clone()).unwrap_or_default();
-                                let materials: Vec<_> = scene.map(|s| s.materials.clone()).unwrap_or_default();
-                                let resources: Vec<_> = scene.map(|s| s.model_resources.iter()
-                                    .filter(|(k, _)| wants_res((*k).clone()))
-                                    .map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default();
-                                let meshes: Vec<_> = scene.map(|s| s.clod_meshes.iter()
-                                    .filter(|(k, _)| wants_res((*k).clone()))
-                                    .map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default();
-                                let raw: Vec<_> = scene.map(|s| s.raw_meshes.iter()
-                                    .filter(|m| wants_res(m.name.clone()))
-                                    .cloned().collect()).unwrap_or_default();
-                                let textures: Vec<_> = scene.map(|s| s.texture_images.iter()
-                                    .map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default();
-                                let lights: Vec<_> = scene.map(|s| s.lights.clone()).unwrap_or_default();
+                                let shaders: Vec<_> =
+                                    scene.map(|s| s.shaders.clone()).unwrap_or_default();
+                                let materials: Vec<_> =
+                                    scene.map(|s| s.materials.clone()).unwrap_or_default();
+                                let resources: Vec<_> = scene
+                                    .map(|s| {
+                                        s.model_resources
+                                            .iter()
+                                            .filter(|(k, _)| wants_res((*k).clone()))
+                                            .map(|(k, v)| (k.clone(), v.clone()))
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+                                let meshes: Vec<_> = scene
+                                    .map(|s| {
+                                        s.clod_meshes
+                                            .iter()
+                                            .filter(|(k, _)| wants_res((*k).clone()))
+                                            .map(|(k, v)| (k.clone(), v.clone()))
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+                                let raw: Vec<_> = scene
+                                    .map(|s| {
+                                        s.raw_meshes
+                                            .iter()
+                                            .filter(|m| wants_res(m.name.clone()))
+                                            .cloned()
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+                                let textures: Vec<_> = scene
+                                    .map(|s| {
+                                        s.texture_images
+                                            .iter()
+                                            .map(|(k, v)| (k.clone(), v.clone()))
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+                                let lights: Vec<_> =
+                                    scene.map(|s| s.lights.clone()).unwrap_or_default();
                                 let light_nodes: Vec<_> = scene.map(|s| s.nodes.iter()
                                     .filter(|n| n.node_type == crate::director::chunks::w3d::types::W3dNodeType::Light)
                                     .cloned().collect()).unwrap_or_default();
-                                let skeletons: Vec<_> = scene.map(|s| s.skeletons.clone()).unwrap_or_default();
+                                let skeletons: Vec<_> =
+                                    scene.map(|s| s.skeletons.clone()).unwrap_or_default();
                                 // A skeleton without its motions is just a bind pose. Agent Free
                                 // Ride clones "player" out of member 5 into the member 1 scene it
                                 // actually renders, and the rider stood in his T-pose because the
                                 // clip stayed behind in the source member.
-                                let motions: Vec<_> = scene.map(|s| s.motions.clone()).unwrap_or_default();
-                                (shaders, materials, resources, meshes, raw, textures, lights, light_nodes, skeletons, motions)
+                                let motions: Vec<_> =
+                                    scene.map(|s| s.motions.clone()).unwrap_or_default();
+                                (
+                                    shaders,
+                                    materials,
+                                    resources,
+                                    meshes,
+                                    raw,
+                                    textures,
+                                    lights,
+                                    light_nodes,
+                                    skeletons,
+                                    motions,
+                                )
                             };
 
                             let source_resource_display = symbols
                                 .display(&source_resource_name)
-                                .map_err(|_| ScriptError::new("Cannot display foreign source resource symbol".to_string()))?
+                                .map_err(|_| {
+                                    ScriptError::new(
+                                        "Cannot display foreign source resource symbol".to_string(),
+                                    )
+                                })?
                                 .to_owned();
                             let source_model_resource_display = symbols
                                 .display(&source_model_resource_name)
-                                .map_err(|_| ScriptError::new("Cannot display foreign source model resource symbol".to_string()))?
+                                .map_err(|_| {
+                                    ScriptError::new(
+                                        "Cannot display foreign source model resource symbol"
+                                            .to_string(),
+                                    )
+                                })?
                                 .to_owned();
                             debug!(
                                 "[W3D-CLONE] {}(\"{}\") src_model=\"{}\" src_member={:?}: \
@@ -1700,12 +2227,18 @@ impl Shockwave3dMemberHandlers {
                                 source_resource_display, source_model_resource_display,
                             );
 
-                            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                            if let Some(member) = player
+                                .movie
+                                .cast_manager
+                                .find_mut_member_by_ref(&member_ref)
+                            {
                                 if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                                     if let Some(scene) = w3d.scene_mut() {
                                         // Determine which shaders are USED by the model being cloned.
                                         // Director docs: "copies shaders...used by the model and its children"
-                                        let mut used_shader_names: std::collections::HashSet<Symbol> = std::collections::HashSet::new();
+                                        let mut used_shader_names: std::collections::HashSet<
+                                            Symbol,
+                                        > = std::collections::HashSet::new();
                                         // From model resource shader bindings
                                         let res_key = if !source_model_resource_name.is_empty() {
                                             source_model_resource_name.clone()
@@ -1716,7 +2249,8 @@ impl Shockwave3dMemberHandlers {
                                             if rname == &res_key {
                                                 for binding in &rinfo.shader_bindings {
                                                     for shader_name in &binding.mesh_bindings {
-                                                        used_shader_names.insert(shader_name.clone());
+                                                        used_shader_names
+                                                            .insert(shader_name.clone());
                                                     }
                                                 }
                                             }
@@ -1727,7 +2261,8 @@ impl Shockwave3dMemberHandlers {
                                         }
                                         // Also collect shaders from CHILD model resources
                                         for child in &src_child_nodes {
-                                            let child_res = if !child.model_resource_name.is_empty() {
+                                            let child_res = if !child.model_resource_name.is_empty()
+                                            {
                                                 child.model_resource_name.clone()
                                             } else {
                                                 child.resource_name.clone()
@@ -1736,7 +2271,8 @@ impl Shockwave3dMemberHandlers {
                                                 if rname == &child_res {
                                                     for binding in &rinfo.shader_bindings {
                                                         for shader_name in &binding.mesh_bindings {
-                                                            used_shader_names.insert(shader_name.clone());
+                                                            used_shader_names
+                                                                .insert(shader_name.clone());
                                                         }
                                                     }
                                                 }
@@ -1747,12 +2283,15 @@ impl Shockwave3dMemberHandlers {
                                         }
 
                                         // Collect texture names used by the used shaders
-                                        let mut used_texture_names: std::collections::HashSet<Symbol> = std::collections::HashSet::new();
+                                        let mut used_texture_names: std::collections::HashSet<
+                                            Symbol,
+                                        > = std::collections::HashSet::new();
                                         for shader in &src_shaders {
                                             if used_shader_names.contains(&shader.name) {
                                                 for layer in &shader.texture_layers {
                                                     if !layer.name.is_empty() {
-                                                        used_texture_names.insert(layer.name.clone());
+                                                        used_texture_names
+                                                            .insert(layer.name.clone());
                                                     }
                                                 }
                                             }
@@ -1768,8 +2307,14 @@ impl Shockwave3dMemberHandlers {
                                         // a "-clone<N>" rename so the shaders below point at it. Same
                                         // bytes under the same name are genuinely shared — left as-is.
                                         for (tex_name, tex_data) in &src_textures {
-                                            if filter_shaders && !used_texture_names.contains(tex_name) { continue; }
-                                            if let Some(existing) = scene.texture_images.get(tex_name) {
+                                            if filter_shaders
+                                                && !used_texture_names.contains(tex_name)
+                                            {
+                                                continue;
+                                            }
+                                            if let Some(existing) =
+                                                scene.texture_images.get(tex_name)
+                                            {
                                                 if existing != tex_data {
                                                     let mut n = 1;
                                                     loop {
@@ -1777,11 +2322,17 @@ impl Shockwave3dMemberHandlers {
                                                             .display(tex_name)
                                                             .map_err(|_| ScriptError::new("Cannot display foreign texture symbol".to_string()))?
                                                             .to_owned();
-                                                        let cand = symbols.intern(&format!("{}-clone{}", tex_display, n));
+                                                        let cand = symbols.intern(&format!(
+                                                            "{}-clone{}",
+                                                            tex_display, n
+                                                        ));
                                                         if !scene.texture_images.contains_key(&cand)
-                                                            && !texture_name_map.values().any(|v| v == &cand)
+                                                            && !texture_name_map
+                                                                .values()
+                                                                .any(|v| v == &cand)
                                                         {
-                                                            texture_name_map.insert(tex_name.clone(), cand);
+                                                            texture_name_map
+                                                                .insert(tex_name.clone(), cand);
                                                             break;
                                                         }
                                                         n += 1;
@@ -1794,10 +2345,14 @@ impl Shockwave3dMemberHandlers {
                                         // If name conflicts, create -clone<N> copy (Director behavior).
                                         // DefaultShader is built-in to every cast member — never copy it.
                                         for shader in &src_shaders {
-                                            if shader.name == Symbol::builtin(BuiltInSymbol::DefaultShader) {
+                                            if shader.name
+                                                == Symbol::builtin(BuiltInSymbol::DefaultShader)
+                                            {
                                                 continue;
                                             }
-                                            if filter_shaders && !used_shader_names.contains(&shader.name) {
+                                            if filter_shaders
+                                                && !used_shader_names.contains(&shader.name)
+                                            {
                                                 continue; // Skip shaders not used by this model
                                             }
                                             let mut cloned = shader.clone();
@@ -1805,7 +2360,9 @@ impl Shockwave3dMemberHandlers {
                                             // on collision (Director's -clone<N> behavior).
                                             if !texture_name_map.is_empty() {
                                                 for layer in &mut cloned.texture_layers {
-                                                    if let Some(nt) = texture_name_map.get(&layer.name) {
+                                                    if let Some(nt) =
+                                                        texture_name_map.get(&layer.name)
+                                                    {
                                                         layer.name = nt.clone();
                                                     }
                                                 }
@@ -1818,9 +2375,19 @@ impl Shockwave3dMemberHandlers {
                                                         .display(&shader.name)
                                                         .map_err(|_| ScriptError::new("Cannot display foreign shader symbol".to_string()))?
                                                         .to_owned();
-                                                    let clone_name = symbols.intern(&format!("{}-clone{}", shader_display, n));
-                                                    if !scene.shaders.iter().any(|s| s.name == clone_name) {
-                                                        shader_name_map.insert(shader.name.clone(), clone_name.clone());
+                                                    let clone_name = symbols.intern(&format!(
+                                                        "{}-clone{}",
+                                                        shader_display, n
+                                                    ));
+                                                    if !scene
+                                                        .shaders
+                                                        .iter()
+                                                        .any(|s| s.name == clone_name)
+                                                    {
+                                                        shader_name_map.insert(
+                                                            shader.name.clone(),
+                                                            clone_name.clone(),
+                                                        );
                                                         cloned.name = clone_name;
                                                         scene.shaders.push(cloned);
                                                         break;
@@ -1835,20 +2402,29 @@ impl Shockwave3dMemberHandlers {
                                         // Check both shader.material_name and shader.name as material key,
                                         // since the renderer falls back to finding materials by shader name.
                                         for shader in &src_shaders {
-                                            if !used_shader_names.contains(&shader.name) { continue; }
+                                            if !used_shader_names.contains(&shader.name) {
+                                                continue;
+                                            }
                                             for mat in &src_materials {
-                                                if (!shader.material_name.is_empty() && mat.name == shader.material_name)
+                                                if (!shader.material_name.is_empty()
+                                                    && mat.name == shader.material_name)
                                                     || mat.name == shader.name
                                                 {
-                                                    let target_name = shader_name_map.get(&shader.name)
+                                                    let target_name = shader_name_map
+                                                        .get(&shader.name)
                                                         .map(|mapped| {
                                                             // If shader was renamed (conflict), rename material too
                                                             let mut m = mat.clone();
                                                             m.name = mapped.clone();
                                                             m
                                                         });
-                                                    let mat_to_push = target_name.unwrap_or_else(|| mat.clone());
-                                                    if !scene.materials.iter().any(|m| m.name == mat_to_push.name) {
+                                                    let mat_to_push =
+                                                        target_name.unwrap_or_else(|| mat.clone());
+                                                    if !scene
+                                                        .materials
+                                                        .iter()
+                                                        .any(|m| m.name == mat_to_push.name)
+                                                    {
                                                         scene.materials.push(mat_to_push);
                                                     }
                                                 }
@@ -1869,31 +2445,48 @@ impl Shockwave3dMemberHandlers {
                                         {
                                             let mut taken: std::collections::HashSet<Symbol> =
                                                 scene.model_resources.keys().cloned().collect();
-                                            taken.extend(scene.raw_meshes.iter().map(|m| m.name.clone()));
+                                            taken.extend(
+                                                scene.raw_meshes.iter().map(|m| m.name.clone()),
+                                            );
                                             taken.extend(scene.clod_meshes.keys().cloned());
-                                            let mut src_names: Vec<Symbol> =
-                                                src_model_resources.iter().map(|(k, _)| k.clone()).collect();
-                                            src_names.extend(src_clod_meshes.iter().map(|(k, _)| k.clone()));
-                                            src_names.extend(src_raw_meshes.iter().map(|m| m.name.clone()));
+                                            let mut src_names: Vec<Symbol> = src_model_resources
+                                                .iter()
+                                                .map(|(k, _)| k.clone())
+                                                .collect();
+                                            src_names.extend(
+                                                src_clod_meshes.iter().map(|(k, _)| k.clone()),
+                                            );
+                                            src_names.extend(
+                                                src_raw_meshes.iter().map(|m| m.name.clone()),
+                                            );
                                             for name in src_names {
-                                                if name.is_empty() { continue; }
-                                                if res_rename.contains_key(&name) { continue; }
+                                                if name.is_empty() {
+                                                    continue;
+                                                }
+                                                if res_rename.contains_key(&name) {
+                                                    continue;
+                                                }
                                                 let dst = if taken.contains(&name) {
                                                     let mut n = 1;
                                                     loop {
-                                                let name_display = symbols
+                                                        let name_display = symbols
                                                     .display(&name)
                                                     .map_err(|_| ScriptError::new("Cannot display foreign resource symbol".to_string()))?
                                                     .to_owned();
-                                                let cand = symbols.intern(&format!("{}-clone{}", name_display, n));
-                                                        if !taken.contains(&cand) { break cand; }
+                                                        let cand = symbols.intern(&format!(
+                                                            "{}-clone{}",
+                                                            name_display, n
+                                                        ));
+                                                        if !taken.contains(&cand) {
+                                                            break cand;
+                                                        }
                                                         n += 1;
                                                     }
                                                 } else {
                                                     name.clone()
                                                 };
-                                                    taken.insert(dst.clone());
-                                                    res_rename.insert(name, dst);
+                                                taken.insert(dst.clone());
+                                                res_rename.insert(name, dst);
                                             }
                                         }
                                         // Helper: resolve a source resource/mesh name through the map.
@@ -1907,7 +2500,9 @@ impl Shockwave3dMemberHandlers {
                                                 let mut cloned_res = res_info.clone();
                                                 for binding in &mut cloned_res.shader_bindings {
                                                     for mesh_shader in &mut binding.mesh_bindings {
-                                                        if let Some(renamed) = shader_name_map.get(mesh_shader) {
+                                                        if let Some(renamed) =
+                                                            shader_name_map.get(mesh_shader)
+                                                        {
                                                             *mesh_shader = renamed.clone();
                                                         }
                                                     }
@@ -1919,26 +2514,35 @@ impl Shockwave3dMemberHandlers {
                                         for (mesh_name, mesh_data) in &src_clod_meshes {
                                             let new_name = map_res(mesh_name.clone());
                                             if !scene.clod_meshes.contains_key(&new_name) {
-                                                scene.clod_meshes.insert(new_name, mesh_data.clone());
+                                                scene
+                                                    .clod_meshes
+                                                    .insert(new_name, mesh_data.clone());
                                             }
                                         }
                                         // Textures: only copy those used by copied shaders.
                                         // A collided texture lands under its "-clone<N>" name.
                                         for (tex_name, tex_data) in &src_textures {
-                                            if filter_shaders && !used_texture_names.contains(tex_name) {
+                                            if filter_shaders
+                                                && !used_texture_names.contains(tex_name)
+                                            {
                                                 continue;
                                             }
-                                            let target = texture_name_map.get(tex_name).cloned()
+                                            let target = texture_name_map
+                                                .get(tex_name)
+                                                .cloned()
                                                 .unwrap_or_else(|| tex_name.clone());
                                             if !scene.texture_images.contains_key(&target) {
-                                                scene.texture_images.insert(target, tex_data.clone());
+                                                scene
+                                                    .texture_images
+                                                    .insert(target, tex_data.clone());
                                                 scene.texture_content_version += 1;
                                             }
                                         }
                                         // Raw meshes: insert under their (collision-renamed) names.
                                         for raw_mesh in &src_raw_meshes {
                                             let new_name = map_res(raw_mesh.name.clone());
-                                            if !scene.raw_meshes.iter().any(|m| m.name == new_name) {
+                                            if !scene.raw_meshes.iter().any(|m| m.name == new_name)
+                                            {
                                                 let mut cloned = raw_mesh.clone();
                                                 cloned.name = new_name;
                                                 scene.raw_meshes.push(cloned);
@@ -1967,13 +2571,23 @@ impl Shockwave3dMemberHandlers {
                                             map_res(source_model_resource_name.clone())
                                         } else if !source_resource_name.is_empty() {
                                             map_res(source_resource_name.clone())
-                                        } else { Symbol::empty() };
-                                        let src_skel = src_skeletons.iter().find(|s|
+                                        } else {
+                                            Symbol::empty()
+                                        };
+                                        let src_skel = src_skeletons
+                                            .iter()
+                                            .find(|s| {
                                                 s.name == source_model_resource_name
-                                                || s.name == source_resource_name)
+                                                    || s.name == source_resource_name
+                                            })
                                             .or_else(|| src_skeletons.first());
                                         if let Some(skeleton) = src_skel {
-                                            if !skel_key.is_empty() && !scene.skeletons.iter().any(|s| s.name == skel_key) {
+                                            if !skel_key.is_empty()
+                                                && !scene
+                                                    .skeletons
+                                                    .iter()
+                                                    .any(|s| s.name == skel_key)
+                                            {
                                                 let mut cloned = skeleton.clone();
                                                 cloned.name = skel_key.clone();
                                                 scene.skeletons.push(cloned);
@@ -1987,7 +2601,11 @@ impl Shockwave3dMemberHandlers {
                                                 // Motion tracks address bones by name, so a copied
                                                 // clip drives the renamed skeleton unchanged.
                                                 for motion in &src_motions {
-                                                    if scene.motions.iter().any(|m| m.name == motion.name) {
+                                                    if scene
+                                                        .motions
+                                                        .iter()
+                                                        .any(|m| m.name == motion.name)
+                                                    {
                                                         continue;
                                                     }
                                                     scene.motions.push(motion.clone());
@@ -2008,18 +2626,26 @@ impl Shockwave3dMemberHandlers {
                         };
                         let mapped_resource = if !source_resource_name.is_empty() {
                             map_res_out(source_resource_name)
-                        } else { source_resource_name };
+                        } else {
+                            source_resource_name
+                        };
                         let mapped_model_resource = if !source_model_resource_name.is_empty() {
                             map_res_out(source_model_resource_name)
-                        } else { source_model_resource_name };
+                        } else {
+                            source_model_resource_name
+                        };
 
                         // Don't propagate "DefaultShader" as the node-level shader —
                         // it overrides the model resource's per-mesh shader bindings
                         // (which have the correct materials with proper colors).
-                        let effective_shader_name = if source_shader_name == Symbol::builtin(BuiltInSymbol::DefaultShader) || source_shader_name.is_empty() {
+                        let effective_shader_name = if source_shader_name
+                            == Symbol::builtin(BuiltInSymbol::DefaultShader)
+                            || source_shader_name.is_empty()
+                        {
                             Symbol::empty()
                         } else {
-                            shader_name_map.get(&source_shader_name)
+                            shader_name_map
+                                .get(&source_shader_name)
                                 .cloned()
                                 .unwrap_or_else(|| source_shader_name.clone())
                         };
@@ -2030,16 +2656,24 @@ impl Shockwave3dMemberHandlers {
                         // (Splat: pac-man feet footA/footB clones play "footA-Key"/
                         // "footB-Key"; the motion's track is named after the source
                         // node "footA"/"footB", which matches the same-named clone.)
-                        let src_motions: Vec<crate::director::chunks::w3d::types::W3dMotion> = if obj_type == BuiltInSymbol::Model {
-                            source_member_ref.as_ref()
-                                .and_then(|sr| player.movie.cast_manager.find_member_by_ref(sr))
-                                .and_then(|sm| sm.member_type.as_shockwave3d())
-                                .and_then(|sw| sw.parsed_scene.as_ref())
-                                .map(|sc| sc.motions.clone())
-                                .unwrap_or_default()
-                        } else { Vec::new() };
+                        let src_motions: Vec<crate::director::chunks::w3d::types::W3dMotion> =
+                            if obj_type == BuiltInSymbol::Model {
+                                source_member_ref
+                                    .as_ref()
+                                    .and_then(|sr| player.movie.cast_manager.find_member_by_ref(sr))
+                                    .and_then(|sm| sm.member_type.as_shockwave3d())
+                                    .and_then(|sw| sw.parsed_scene.as_ref())
+                                    .map(|sc| sc.motions.clone())
+                                    .unwrap_or_default()
+                            } else {
+                                Vec::new()
+                            };
 
-                        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                        if let Some(member) = player
+                            .movie
+                            .cast_manager
+                            .find_mut_member_by_ref(&member_ref)
+                        {
                             if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                                 if let Some(scene) = w3d.scene_mut() {
                                     use crate::director::chunks::w3d::types::*;
@@ -2047,10 +2681,17 @@ impl Shockwave3dMemberHandlers {
                                         // Bring over any source motions not already present (by
                                         // name) so keyframePlayer.play() resolves them.
                                         for m in &src_motions {
-                                            let m_display = symbols.display(&m.name).map_err(|_| SymbolError::Foreign)?.to_owned();
+                                            let m_display = symbols
+                                                .display(&m.name)
+                                                .map_err(|_| SymbolError::Foreign)?
+                                                .to_owned();
                                             let mut already_present = false;
                                             for em in &scene.motions {
-                                                if symbols.lower(&em.name).map_err(|_| SymbolError::Foreign)?.eq_ignore_ascii_case(&m_display) {
+                                                if symbols
+                                                    .lower(&em.name)
+                                                    .map_err(|_| SymbolError::Foreign)?
+                                                    .eq_ignore_ascii_case(&m_display)
+                                                {
                                                     already_present = true;
                                                     break;
                                                 }
@@ -2060,24 +2701,36 @@ impl Shockwave3dMemberHandlers {
                                             }
                                         }
                                         scene.nodes.push(W3dNode {
-                                            name: obj_symbol.clone(), node_type: W3dNodeType::Model,
+                                            name: obj_symbol.clone(),
+                                            node_type: W3dNodeType::Model,
                                             parent_name: Symbol::builtin(BuiltInSymbol::World),
                                             resource_name: mapped_resource,
                                             model_resource_name: mapped_model_resource,
                                             shader_name: effective_shader_name,
                                             visibility: 1,
-                                            near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
-                                            screen_width: 640, screen_height: 480,
+                                            near_plane: 1.0,
+                                            far_plane: 10000.0,
+                                            fov: 30.0,
+                                            screen_width: 640,
+                                            screen_height: 480,
                                             transform: source_transform,
                                         });
                                         // Namespace every descendant's name to avoid collisions
                                         // with prior clones from the same source.
-                                        let mut node_name_map: std::collections::HashMap<Symbol, Symbol> =
-                                            std::collections::HashMap::new();
+                                        let mut node_name_map: std::collections::HashMap<
+                                            Symbol,
+                                            Symbol,
+                                        > = std::collections::HashMap::new();
                                         for child in &src_child_nodes {
-                                            let child_name = symbols.display(&child.name)
-                                                .map_err(|_| ScriptError::new("Cannot display foreign child node symbol".to_string()))?;
-                                            let new_name = symbols.intern(&format!("{}{}", ns, child_name));
+                                            let child_name =
+                                                symbols.display(&child.name).map_err(|_| {
+                                                    ScriptError::new(
+                                                        "Cannot display foreign child node symbol"
+                                                            .to_string(),
+                                                    )
+                                                })?;
+                                            let new_name =
+                                                symbols.intern(&format!("{}{}", ns, child_name));
                                             node_name_map.insert(child.name.clone(), new_name);
                                         }
 
@@ -2087,26 +2740,37 @@ impl Shockwave3dMemberHandlers {
                                         for child in &src_child_nodes {
                                             let mut cloned = child.clone();
                                             // Rename the node itself
-                                            if let Some(new_name) = node_name_map.get(&cloned.name) {
+                                            if let Some(new_name) = node_name_map.get(&cloned.name)
+                                            {
                                                 cloned.name = new_name.clone();
                                             }
                                             // Re-parent: direct child of source_model → obj_name;
                                             // otherwise remap to the namespaced descendant name.
-                                            if symbols.lower(&cloned.parent_name).map_err(|_| SymbolError::Foreign)?.eq_ignore_ascii_case(&source_model_name) {
+                                            if symbols
+                                                .lower(&cloned.parent_name)
+                                                .map_err(|_| SymbolError::Foreign)?
+                                                .eq_ignore_ascii_case(&source_model_name)
+                                            {
                                                 cloned.parent_name = obj_symbol.clone();
-                                            } else if let Some(new_parent) = node_name_map.get(&cloned.parent_name) {
+                                            } else if let Some(new_parent) =
+                                                node_name_map.get(&cloned.parent_name)
+                                            {
                                                 cloned.parent_name = new_parent.clone();
                                             }
                                             // Repoint child resource names to the (collision-
                                             // renamed) keys the cloned mesh data was inserted under.
                                             if !cloned.resource_name.is_empty() {
-                                                cloned.resource_name = map_res_out(cloned.resource_name);
+                                                cloned.resource_name =
+                                                    map_res_out(cloned.resource_name);
                                             }
                                             if !cloned.model_resource_name.is_empty() {
-                                                cloned.model_resource_name = map_res_out(cloned.model_resource_name);
+                                                cloned.model_resource_name =
+                                                    map_res_out(cloned.model_resource_name);
                                             }
                                             // Remap shader name if it was renamed during clone
-                                            if let Some(new_shader) = shader_name_map.get(&cloned.shader_name) {
+                                            if let Some(new_shader) =
+                                                shader_name_map.get(&cloned.shader_name)
+                                            {
                                                 cloned.shader_name = new_shader.clone();
                                             }
                                             // Names are now unique per clone — push unconditionally
@@ -2122,40 +2786,68 @@ impl Shockwave3dMemberHandlers {
                             }
                         }
                         use crate::director::lingo::datum::Shockwave3dObjectRef;
-                        return Ok(player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
-                            cast_lib: member_ref.cast_lib,
-                            cast_member: member_ref.cast_member,
-                            object_type: obj_type,
-                            name: obj_symbol,
-                        })));
+                        return Ok(player.alloc_datum(Datum::Shockwave3dObjectRef(
+                            Shockwave3dObjectRef {
+                                cast_lib: member_ref.cast_lib,
+                                cast_member: member_ref.cast_member,
+                                object_type: obj_type,
+                                name: obj_symbol,
+                            },
+                        )));
                     }
 
                     // newTexture/newShader/newModel/etc. — create and return a ref
-                    if handler_name_display.starts_with("new") || handler_name_display.starts_with("delete") {
+                    if handler_name_display.starts_with("new")
+                        || handler_name_display.starts_with("delete")
+                    {
                         let obj_type = match handler_name_builtin {
-                            BuiltInSymbol::NewTexture | BuiltInSymbol::DeleteTexture => BuiltInSymbol::Texture,
-                            BuiltInSymbol::NewShader | BuiltInSymbol::DeleteShader => BuiltInSymbol::Shader,
-                            BuiltInSymbol::NewModel | BuiltInSymbol::DeleteModel => BuiltInSymbol::Model,
-                            BuiltInSymbol::NewModelResource | BuiltInSymbol::DeleteModelResource | BuiltInSymbol::NewMesh => BuiltInSymbol::ModelResource,
-                            BuiltInSymbol::NewLight | BuiltInSymbol::DeleteLight => BuiltInSymbol::Light,
-                            BuiltInSymbol::NewCamera | BuiltInSymbol::DeleteCamera => BuiltInSymbol::Camera,
-                            BuiltInSymbol::NewGroup | BuiltInSymbol::DeleteGroup => BuiltInSymbol::Group,
-                            BuiltInSymbol::NewMotion | BuiltInSymbol::DeleteMotion => BuiltInSymbol::Motion,
+                            BuiltInSymbol::NewTexture | BuiltInSymbol::DeleteTexture => {
+                                BuiltInSymbol::Texture
+                            }
+                            BuiltInSymbol::NewShader | BuiltInSymbol::DeleteShader => {
+                                BuiltInSymbol::Shader
+                            }
+                            BuiltInSymbol::NewModel | BuiltInSymbol::DeleteModel => {
+                                BuiltInSymbol::Model
+                            }
+                            BuiltInSymbol::NewModelResource
+                            | BuiltInSymbol::DeleteModelResource
+                            | BuiltInSymbol::NewMesh => BuiltInSymbol::ModelResource,
+                            BuiltInSymbol::NewLight | BuiltInSymbol::DeleteLight => {
+                                BuiltInSymbol::Light
+                            }
+                            BuiltInSymbol::NewCamera | BuiltInSymbol::DeleteCamera => {
+                                BuiltInSymbol::Camera
+                            }
+                            BuiltInSymbol::NewGroup | BuiltInSymbol::DeleteGroup => {
+                                BuiltInSymbol::Group
+                            }
+                            BuiltInSymbol::NewMotion | BuiltInSymbol::DeleteMotion => {
+                                BuiltInSymbol::Motion
+                            }
                             _ => BuiltInSymbol::Unknown,
                         };
                         let obj_name = if !args.is_empty() {
-                            checked_datum(player, &args[0], symbols)?.string_value(symbols).unwrap_or_default()
+                            checked_datum(player, &args[0], symbols)?
+                                .string_value(symbols)
+                                .unwrap_or_default()
                         } else {
                             String::new()
                         };
 
                         if handler_name_display.starts_with("delete") {
-                            if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                            if let Some(member) = player
+                                .movie
+                                .cast_manager
+                                .find_mut_member_by_ref(&member_ref)
+                            {
                                 if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                                     if let Some(scene) = w3d.scene_mut() {
                                         let obj_sym = symbols.intern(&obj_name);
                                         match obj_type {
-                                            BuiltInSymbol::Model | BuiltInSymbol::Group | BuiltInSymbol::Camera => {
+                                            BuiltInSymbol::Model
+                                            | BuiltInSymbol::Group
+                                            | BuiltInSymbol::Camera => {
                                                 // Director deleteModel removes the model AND its child
                                                 // subtree. Without that, children added via addChild are
                                                 // orphaned (parent gone) and keep rendering at a fixed
@@ -2166,8 +2858,12 @@ impl Shockwave3dMemberHandlers {
                                                 // clones (children of car2..car17) are NOT in car1's
                                                 // subtree, so they're unaffected.
                                                 for n in &scene.nodes {
-                                                    symbols.lower(&n.name).map_err(|_| SymbolError::Foreign)?;
-                                                    symbols.lower(&n.parent_name).map_err(|_| SymbolError::Foreign)?;
+                                                    symbols
+                                                        .lower(&n.name)
+                                                        .map_err(|_| SymbolError::Foreign)?;
+                                                    symbols
+                                                        .lower(&n.parent_name)
+                                                        .map_err(|_| SymbolError::Foreign)?;
                                                 }
                                                 let mut doomed: std::collections::HashSet<String> =
                                                     std::collections::HashSet::new();
@@ -2176,9 +2872,18 @@ impl Shockwave3dMemberHandlers {
                                                 while changed {
                                                     changed = false;
                                                     for n in scene.nodes.iter() {
-                                                        let nl = symbols.lower(&n.name).map_err(|_| SymbolError::Foreign)?.to_owned();
+                                                        let nl = symbols
+                                                            .lower(&n.name)
+                                                            .map_err(|_| SymbolError::Foreign)?
+                                                            .to_owned();
                                                         if !doomed.contains(&nl)
-                                                            && doomed.contains(symbols.lower(&n.parent_name).map_err(|_| SymbolError::Foreign)?)
+                                                            && doomed.contains(
+                                                                symbols
+                                                                    .lower(&n.parent_name)
+                                                                    .map_err(|_| {
+                                                                        SymbolError::Foreign
+                                                                    })?,
+                                                            )
                                                         {
                                                             doomed.insert(nl);
                                                             changed = true;
@@ -2207,7 +2912,9 @@ impl Shockwave3dMemberHandlers {
                                             }
                                             BuiltInSymbol::Shader => {
                                                 // DefaultShader cannot be deleted (Director behavior)
-                                                if obj_sym != Symbol::builtin(BuiltInSymbol::DefaultShader) {
+                                                if obj_sym
+                                                    != Symbol::builtin(BuiltInSymbol::DefaultShader)
+                                                {
                                                     scene.shaders.retain(|s| s.name != obj_sym);
                                                 }
                                             }
@@ -2227,88 +2934,154 @@ impl Shockwave3dMemberHandlers {
                         }
 
                         // Pre-read args for newMesh before mutable borrow
-                        let mesh_num_faces = if handler_name.eq_builtin(BuiltInSymbol::NewMesh) && args.len() >= 2 {
-                            checked_datum(player, &args[1], symbols)?.int_value().unwrap_or(0) as u32
-                        } else { 0 };
+                        let mesh_num_faces =
+                            if handler_name.eq_builtin(BuiltInSymbol::NewMesh) && args.len() >= 2 {
+                                checked_datum(player, &args[1], symbols)?
+                                    .int_value()
+                                    .unwrap_or(0) as u32
+                            } else {
+                                0
+                            };
 
                         // Pre-read model resource name for newModel(name, modelResource)
-                        let new_model_resource_name = if handler_name.eq_builtin(BuiltInSymbol::NewModel) && args.len() >= 2 {
+                        let new_model_resource_name = if handler_name
+                            .eq_builtin(BuiltInSymbol::NewModel)
+                            && args.len() >= 2
+                        {
                             match checked_datum(player, &args[1], symbols)? {
-                                Datum::Shockwave3dObjectRef(r) if r.object_type == BuiltInSymbol::ModelResource => r.name.clone(),
+                                Datum::Shockwave3dObjectRef(r)
+                                    if r.object_type == BuiltInSymbol::ModelResource =>
+                                {
+                                    r.name.clone()
+                                }
                                 _ => Symbol::empty(),
                             }
-                        } else { Symbol::empty() };
+                        } else {
+                            Symbol::empty()
+                        };
 
                         // Pre-read type arg for newModelResource(name, #type, #facing), newLight(name, #type),
                         // newShader(name, #type)
-                        let new_res_type = if (handler_name.eq_builtin(BuiltInSymbol::NewModelResource)
+                        let new_res_type = if (handler_name
+                            .eq_builtin(BuiltInSymbol::NewModelResource)
                             || handler_name.eq_builtin(BuiltInSymbol::NewMesh)
                             || handler_name.eq_builtin(BuiltInSymbol::NewLight)
-                            || handler_name.eq_builtin(BuiltInSymbol::NewShader)) && args.len() >= 2
+                            || handler_name.eq_builtin(BuiltInSymbol::NewShader))
+                            && args.len() >= 2
                         {
                             // Lowercase at the source: this comes from a SYMBOL, whose
                             // string form is the first-interned spelling, and every
                             // downstream compare uses lowercase literals.
-                            checked_datum(player, &args[1], symbols)?.string_value(symbols).unwrap_or_default().to_ascii_lowercase()
-                        } else { String::new() };
-                        let new_res_facing = if handler_name.eq_builtin(BuiltInSymbol::NewModelResource) && args.len() >= 3 {
-                            checked_datum(player, &args[2], symbols)?.string_value(symbols).unwrap_or_default().to_ascii_lowercase()
-                        } else { String::new() };
+                            checked_datum(player, &args[1], symbols)?
+                                .string_value(symbols)
+                                .unwrap_or_default()
+                                .to_ascii_lowercase()
+                        } else {
+                            String::new()
+                        };
+                        let new_res_facing = if handler_name
+                            .eq_builtin(BuiltInSymbol::NewModelResource)
+                            && args.len() >= 3
+                        {
+                            checked_datum(player, &args[2], symbols)?
+                                .string_value(symbols)
+                                .unwrap_or_default()
+                                .to_ascii_lowercase()
+                        } else {
+                            String::new()
+                        };
 
                         // Read only the arguments that the local NewTexture mode
                         // will consume before creating anything in the scene. An
                         // unknown mode leaves its source argument ignored, matching
                         // the original branch's fallback behavior.
-                        let new_texture_type = if handler_name.eq_builtin(BuiltInSymbol::NewTexture) && args.len() >= 3 {
-                            Some(checked_datum(player, &args[1], symbols)?.string_value(symbols).unwrap_or_default())
-                        } else { None };
-                        let new_texture_source = if matches!(new_texture_type.as_deref(), Some("fromCastMember" | "fromImageObject")) {
+                        let new_texture_type = if handler_name.eq_builtin(BuiltInSymbol::NewTexture)
+                            && args.len() >= 3
+                        {
+                            Some(
+                                checked_datum(player, &args[1], symbols)?
+                                    .string_value(symbols)
+                                    .unwrap_or_default(),
+                            )
+                        } else {
+                            None
+                        };
+                        let new_texture_source = if matches!(
+                            new_texture_type.as_deref(),
+                            Some("fromCastMember" | "fromImageObject")
+                        ) {
                             Some(checked_datum(player, &args[2], symbols)?.clone())
-                        } else { None };
+                        } else {
+                            None
+                        };
 
                         let obj_sym = symbols.intern(&obj_name);
                         // Add to parsed scene
-                        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
+                        if let Some(member) = player
+                            .movie
+                            .cast_manager
+                            .find_mut_member_by_ref(&member_ref)
+                        {
                             if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
                                 if let Some(scene) = w3d.scene_mut() {
                                     use crate::director::chunks::w3d::types::*;
-                                    let identity = [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0];
+                                    let identity = [
+                                        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+                                        0.0, 0.0, 0.0, 1.0,
+                                    ];
                                     match obj_type {
                                         BuiltInSymbol::Model => {
                                             scene.nodes.push(W3dNode {
-                                                name: obj_sym.clone(), node_type: W3dNodeType::Model,
+                                                name: obj_sym.clone(),
+                                                node_type: W3dNodeType::Model,
                                                 parent_name: Symbol::builtin(BuiltInSymbol::World),
                                                 resource_name: Symbol::empty(),
                                                 model_resource_name: new_model_resource_name,
                                                 shader_name: Symbol::empty(),
                                                 visibility: 1,
-                                                near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
-                                                screen_width: 640, screen_height: 480,
+                                                near_plane: 1.0,
+                                                far_plane: 10000.0,
+                                                fov: 30.0,
+                                                screen_width: 640,
+                                                screen_height: 480,
                                                 transform: identity,
                                             });
                                         }
                                         BuiltInSymbol::Group => {
                                             scene.nodes.push(W3dNode {
-                                                name: obj_sym.clone(), node_type: W3dNodeType::Group,
+                                                name: obj_sym.clone(),
+                                                node_type: W3dNodeType::Group,
                                                 parent_name: Symbol::builtin(BuiltInSymbol::World),
-                                                resource_name: Symbol::empty(), model_resource_name: Symbol::empty(),
+                                                resource_name: Symbol::empty(),
+                                                model_resource_name: Symbol::empty(),
                                                 shader_name: Symbol::empty(),
                                                 visibility: 1,
-                                                near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
-                                                screen_width: 640, screen_height: 480,
+                                                near_plane: 1.0,
+                                                far_plane: 10000.0,
+                                                fov: 30.0,
+                                                screen_width: 640,
+                                                screen_height: 480,
                                                 transform: identity,
                                             });
                                         }
                                         BuiltInSymbol::Camera => {
                                             scene.nodes.push(W3dNode {
-                                                name: obj_sym.clone(), node_type: W3dNodeType::View,
+                                                name: obj_sym.clone(),
+                                                node_type: W3dNodeType::View,
                                                 parent_name: Symbol::builtin(BuiltInSymbol::World),
-                                                resource_name: Symbol::empty(), model_resource_name: Symbol::empty(),
+                                                resource_name: Symbol::empty(),
+                                                model_resource_name: Symbol::empty(),
                                                 shader_name: Symbol::empty(),
                                                 visibility: 1,
-                                                near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
-                                                screen_width: 640, screen_height: 480,
-                                                transform: [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0],
+                                                near_plane: 1.0,
+                                                far_plane: 10000.0,
+                                                fov: 30.0,
+                                                screen_width: 640,
+                                                screen_height: 480,
+                                                transform: [
+                                                    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,
+                                                    0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+                                                ],
                                             });
                                         }
                                         BuiltInSymbol::Light => {
@@ -2325,20 +3098,29 @@ impl Shockwave3dMemberHandlers {
                                             scene.lights.push(W3dLight {
                                                 name: obj_sym.clone(),
                                                 light_type,
-                                                color: [191.0/255.0, 191.0/255.0, 191.0/255.0], // Director default: color(191,191,191)
+                                                color: [
+                                                    191.0 / 255.0,
+                                                    191.0 / 255.0,
+                                                    191.0 / 255.0,
+                                                ], // Director default: color(191,191,191)
                                                 attenuation: [1.0, 0.0, 0.0],
                                                 spot_angle: 90.0, // Director default
                                                 enabled: true,
                                                 ..Default::default()
                                             });
                                             scene.nodes.push(W3dNode {
-                                                name: obj_sym.clone(), node_type: W3dNodeType::Light,
+                                                name: obj_sym.clone(),
+                                                node_type: W3dNodeType::Light,
                                                 parent_name: Symbol::builtin(BuiltInSymbol::World),
-                                                resource_name: Symbol::empty(), model_resource_name: Symbol::empty(),
+                                                resource_name: Symbol::empty(),
+                                                model_resource_name: Symbol::empty(),
                                                 shader_name: Symbol::empty(),
                                                 visibility: 1,
-                                                near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
-                                                screen_width: 640, screen_height: 480,
+                                                near_plane: 1.0,
+                                                far_plane: 10000.0,
+                                                fov: 30.0,
+                                                screen_width: 640,
+                                                screen_height: 480,
                                                 transform: identity,
                                             });
                                         }
@@ -2365,168 +3147,264 @@ impl Shockwave3dMemberHandlers {
                                         BuiltInSymbol::ModelResource => {
                                             // Generate primitive geometry based on type
                                             // For #plane default: both front+back (2 meshes). #front/#back = single mesh.
-                                            let want_front = new_res_facing.is_empty() || new_res_facing == "front" || new_res_facing == "both";
-                                            let want_back = new_res_facing.is_empty() || new_res_facing == "back" || new_res_facing == "both";
+                                            let want_front = new_res_facing.is_empty()
+                                                || new_res_facing == "front"
+                                                || new_res_facing == "both";
+                                            let want_back = new_res_facing.is_empty()
+                                                || new_res_facing == "back"
+                                                || new_res_facing == "both";
                                             // For plane, default facing generates both sides; for others, default is #front only
-                                            let (plane_front, plane_back) = if new_res_type == "plane" {
-                                                (want_front, want_back)
-                                            } else {
-                                                let f = new_res_facing.is_empty() || new_res_facing == "front" || new_res_facing == "both";
-                                                let b = new_res_facing == "back" || new_res_facing == "both";
-                                                (f, b)
-                                            };
+                                            let (plane_front, plane_back) =
+                                                if new_res_type == "plane" {
+                                                    (want_front, want_back)
+                                                } else {
+                                                    let f = new_res_facing.is_empty()
+                                                        || new_res_facing == "front"
+                                                        || new_res_facing == "both";
+                                                    let b = new_res_facing == "back"
+                                                        || new_res_facing == "both";
+                                                    (f, b)
+                                                };
 
                                             let mut meshes: Vec<ClodDecodedMesh> = Vec::new();
-                                            let (positions, normals, tex_coords, faces) = match new_res_type.as_str() {
-                                                "plane" => {
-                                                    // 1x1 quad centered at origin
-                                                    // Front face: normal +Z; Back face: normal -Z (reversed winding)
-                                                    if plane_front {
-                                                        meshes.push(ClodDecodedMesh {
-                                                            name: obj_sym.clone(),
-                                                            positions: vec![[-0.5,-0.5,0.0],[0.5,-0.5,0.0],[0.5,0.5,0.0],[-0.5,0.5,0.0]],
-                                                            normals: vec![[0.0,0.0,1.0]; 4],
-                                                            tex_coords: vec![vec![[0.0,1.0],[1.0,1.0],[1.0,0.0],[0.0,0.0]]],
-                                                            faces: vec![[0,1,2],[0,2,3]],
-                                                            diffuse_colors: vec![], specular_colors: vec![],
-                                                            bone_indices: vec![], bone_weights: vec![],
-                                                        });
-                                                    }
-                                                    if plane_back {
-                                                        meshes.push(ClodDecodedMesh {
-                                                            name: obj_sym.clone(),
-                                                            positions: vec![[-0.5,-0.5,0.0],[0.5,-0.5,0.0],[0.5,0.5,0.0],[-0.5,0.5,0.0]],
-                                                            normals: vec![[0.0,0.0,-1.0]; 4],
-                                                            tex_coords: vec![vec![[1.0,1.0],[0.0,1.0],[0.0,0.0],[1.0,0.0]]],
-                                                            faces: vec![[0,2,1],[0,3,2]],
-                                                            diffuse_colors: vec![], specular_colors: vec![],
-                                                            bone_indices: vec![], bone_weights: vec![],
-                                                        });
-                                                    }
-                                                    // Return empty tuple — meshes already pushed above
-                                                    (vec![], vec![], vec![vec![]], vec![])
-                                                },
-                                                "particle" => {
-                                                    // Particle resources use a single quad billboard
-                                                    let p = vec![
-                                                        [-0.5, -0.5, 0.0_f32],
-                                                        [ 0.5, -0.5, 0.0],
-                                                        [ 0.5,  0.5, 0.0],
-                                                        [-0.5,  0.5, 0.0],
-                                                    ];
-                                                    let n = vec![[0.0, 0.0, 1.0_f32]; 4];
-                                                    let uv = vec![vec![[0.0, 1.0_f32], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]]];
-                                                    let f = vec![[0u32, 1, 2], [0, 2, 3]];
-                                                    (p, n, uv, f)
-                                                },
-                                                "box" => {
-                                                    // Unit cube centered at origin
-                                                    let p = vec![
-                                                        // Front face
-                                                        [-0.5, -0.5,  0.5_f32], [ 0.5, -0.5,  0.5], [ 0.5,  0.5,  0.5], [-0.5,  0.5,  0.5],
-                                                        // Back face
-                                                        [ 0.5, -0.5, -0.5], [-0.5, -0.5, -0.5], [-0.5,  0.5, -0.5], [ 0.5,  0.5, -0.5],
-                                                        // Top face
-                                                        [-0.5,  0.5,  0.5], [ 0.5,  0.5,  0.5], [ 0.5,  0.5, -0.5], [-0.5,  0.5, -0.5],
-                                                        // Bottom face
-                                                        [-0.5, -0.5, -0.5], [ 0.5, -0.5, -0.5], [ 0.5, -0.5,  0.5], [-0.5, -0.5,  0.5],
-                                                        // Right face
-                                                        [ 0.5, -0.5,  0.5], [ 0.5, -0.5, -0.5], [ 0.5,  0.5, -0.5], [ 0.5,  0.5,  0.5],
-                                                        // Left face
-                                                        [-0.5, -0.5, -0.5], [-0.5, -0.5,  0.5], [-0.5,  0.5,  0.5], [-0.5,  0.5, -0.5],
-                                                    ];
-                                                    let n = vec![
-                                                        [0.0, 0.0, 1.0_f32], [0.0, 0.0, 1.0], [0.0, 0.0, 1.0], [0.0, 0.0, 1.0],
-                                                        [0.0, 0.0, -1.0], [0.0, 0.0, -1.0], [0.0, 0.0, -1.0], [0.0, 0.0, -1.0],
-                                                        [0.0, 1.0, 0.0], [0.0, 1.0, 0.0], [0.0, 1.0, 0.0], [0.0, 1.0, 0.0],
-                                                        [0.0, -1.0, 0.0], [0.0, -1.0, 0.0], [0.0, -1.0, 0.0], [0.0, -1.0, 0.0],
-                                                        [1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 0.0, 0.0],
-                                                        [-1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], [-1.0, 0.0, 0.0],
-                                                    ];
-                                                    let face_uv = vec![[0.0, 1.0_f32], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
-                                                    let mut uv_all = Vec::with_capacity(24);
-                                                    for _ in 0..6 { uv_all.extend_from_slice(&face_uv); }
-                                                    let uv = vec![uv_all];
-                                                    let f = vec![
-                                                        [0u32,1,2],[0,2,3], [4,5,6],[4,6,7], [8,9,10],[8,10,11],
-                                                        [12,13,14],[12,14,15], [16,17,18],[16,18,19], [20,21,22],[20,22,23],
-                                                    ];
-                                                    (p, n, uv, f)
-                                                },
-                                                "sphere" => {
-                                                    // UV sphere matching Director's default tessellation
-                                                    let segments = 8u32;
-                                                    let rings = 6u32;
-                                                    let mut p = Vec::new();
-                                                    let mut n = Vec::new();
-                                                    let mut uv_data = Vec::new();
-                                                    let mut f = Vec::new();
-                                                    // UV scale 4× tiles the 2×2 checker into a dense grid matching Director
-                                                    let uv_scale = 1.0f32;
-                                                    for j in 0..=rings {
-                                                        let v = j as f32 / rings as f32;
-                                                        let phi = v * std::f32::consts::PI;
-                                                        for i in 0..=segments {
-                                                            let u = i as f32 / segments as f32;
-                                                            let theta = u * 2.0 * std::f32::consts::PI;
-                                                            let x = phi.sin() * theta.cos();
-                                                            let y = phi.cos();
-                                                            let z = phi.sin() * theta.sin();
-                                                            // let x = phi.sin() * theta.cos();
-                                                            // let y = phi.sin() * theta.sin();
-                                                            // let z = phi.cos();
-                                                            p.push([x * 0.5, y * 0.5, z * 0.5]);
-                                                            n.push([x, y, z]);
-                                                            uv_data.push([u * uv_scale, v * uv_scale]);
+                                            let (positions, normals, tex_coords, faces) =
+                                                match new_res_type.as_str() {
+                                                    "plane" => {
+                                                        // 1x1 quad centered at origin
+                                                        // Front face: normal +Z; Back face: normal -Z (reversed winding)
+                                                        if plane_front {
+                                                            meshes.push(ClodDecodedMesh {
+                                                                name: obj_sym.clone(),
+                                                                positions: vec![
+                                                                    [-0.5, -0.5, 0.0],
+                                                                    [0.5, -0.5, 0.0],
+                                                                    [0.5, 0.5, 0.0],
+                                                                    [-0.5, 0.5, 0.0],
+                                                                ],
+                                                                normals: vec![[0.0, 0.0, 1.0]; 4],
+                                                                tex_coords: vec![vec![
+                                                                    [0.0, 1.0],
+                                                                    [1.0, 1.0],
+                                                                    [1.0, 0.0],
+                                                                    [0.0, 0.0],
+                                                                ]],
+                                                                faces: vec![[0, 1, 2], [0, 2, 3]],
+                                                                diffuse_colors: vec![],
+                                                                specular_colors: vec![],
+                                                                bone_indices: vec![],
+                                                                bone_weights: vec![],
+                                                            });
                                                         }
+                                                        if plane_back {
+                                                            meshes.push(ClodDecodedMesh {
+                                                                name: obj_sym.clone(),
+                                                                positions: vec![
+                                                                    [-0.5, -0.5, 0.0],
+                                                                    [0.5, -0.5, 0.0],
+                                                                    [0.5, 0.5, 0.0],
+                                                                    [-0.5, 0.5, 0.0],
+                                                                ],
+                                                                normals: vec![[0.0, 0.0, -1.0]; 4],
+                                                                tex_coords: vec![vec![
+                                                                    [1.0, 1.0],
+                                                                    [0.0, 1.0],
+                                                                    [0.0, 0.0],
+                                                                    [1.0, 0.0],
+                                                                ]],
+                                                                faces: vec![[0, 2, 1], [0, 3, 2]],
+                                                                diffuse_colors: vec![],
+                                                                specular_colors: vec![],
+                                                                bone_indices: vec![],
+                                                                bone_weights: vec![],
+                                                            });
+                                                        }
+                                                        // Return empty tuple — meshes already pushed above
+                                                        (vec![], vec![], vec![vec![]], vec![])
                                                     }
-                                                    for j in 0..rings {
+                                                    "particle" => {
+                                                        // Particle resources use a single quad billboard
+                                                        let p = vec![
+                                                            [-0.5, -0.5, 0.0_f32],
+                                                            [0.5, -0.5, 0.0],
+                                                            [0.5, 0.5, 0.0],
+                                                            [-0.5, 0.5, 0.0],
+                                                        ];
+                                                        let n = vec![[0.0, 0.0, 1.0_f32]; 4];
+                                                        let uv = vec![vec![
+                                                            [0.0, 1.0_f32],
+                                                            [1.0, 1.0],
+                                                            [1.0, 0.0],
+                                                            [0.0, 0.0],
+                                                        ]];
+                                                        let f = vec![[0u32, 1, 2], [0, 2, 3]];
+                                                        (p, n, uv, f)
+                                                    }
+                                                    "box" => {
+                                                        // Unit cube centered at origin
+                                                        let p = vec![
+                                                            // Front face
+                                                            [-0.5, -0.5, 0.5_f32],
+                                                            [0.5, -0.5, 0.5],
+                                                            [0.5, 0.5, 0.5],
+                                                            [-0.5, 0.5, 0.5],
+                                                            // Back face
+                                                            [0.5, -0.5, -0.5],
+                                                            [-0.5, -0.5, -0.5],
+                                                            [-0.5, 0.5, -0.5],
+                                                            [0.5, 0.5, -0.5],
+                                                            // Top face
+                                                            [-0.5, 0.5, 0.5],
+                                                            [0.5, 0.5, 0.5],
+                                                            [0.5, 0.5, -0.5],
+                                                            [-0.5, 0.5, -0.5],
+                                                            // Bottom face
+                                                            [-0.5, -0.5, -0.5],
+                                                            [0.5, -0.5, -0.5],
+                                                            [0.5, -0.5, 0.5],
+                                                            [-0.5, -0.5, 0.5],
+                                                            // Right face
+                                                            [0.5, -0.5, 0.5],
+                                                            [0.5, -0.5, -0.5],
+                                                            [0.5, 0.5, -0.5],
+                                                            [0.5, 0.5, 0.5],
+                                                            // Left face
+                                                            [-0.5, -0.5, -0.5],
+                                                            [-0.5, -0.5, 0.5],
+                                                            [-0.5, 0.5, 0.5],
+                                                            [-0.5, 0.5, -0.5],
+                                                        ];
+                                                        let n = vec![
+                                                            [0.0, 0.0, 1.0_f32],
+                                                            [0.0, 0.0, 1.0],
+                                                            [0.0, 0.0, 1.0],
+                                                            [0.0, 0.0, 1.0],
+                                                            [0.0, 0.0, -1.0],
+                                                            [0.0, 0.0, -1.0],
+                                                            [0.0, 0.0, -1.0],
+                                                            [0.0, 0.0, -1.0],
+                                                            [0.0, 1.0, 0.0],
+                                                            [0.0, 1.0, 0.0],
+                                                            [0.0, 1.0, 0.0],
+                                                            [0.0, 1.0, 0.0],
+                                                            [0.0, -1.0, 0.0],
+                                                            [0.0, -1.0, 0.0],
+                                                            [0.0, -1.0, 0.0],
+                                                            [0.0, -1.0, 0.0],
+                                                            [1.0, 0.0, 0.0],
+                                                            [1.0, 0.0, 0.0],
+                                                            [1.0, 0.0, 0.0],
+                                                            [1.0, 0.0, 0.0],
+                                                            [-1.0, 0.0, 0.0],
+                                                            [-1.0, 0.0, 0.0],
+                                                            [-1.0, 0.0, 0.0],
+                                                            [-1.0, 0.0, 0.0],
+                                                        ];
+                                                        let face_uv = vec![
+                                                            [0.0, 1.0_f32],
+                                                            [1.0, 1.0],
+                                                            [1.0, 0.0],
+                                                            [0.0, 0.0],
+                                                        ];
+                                                        let mut uv_all = Vec::with_capacity(24);
+                                                        for _ in 0..6 {
+                                                            uv_all.extend_from_slice(&face_uv);
+                                                        }
+                                                        let uv = vec![uv_all];
+                                                        let f = vec![
+                                                            [0u32, 1, 2],
+                                                            [0, 2, 3],
+                                                            [4, 5, 6],
+                                                            [4, 6, 7],
+                                                            [8, 9, 10],
+                                                            [8, 10, 11],
+                                                            [12, 13, 14],
+                                                            [12, 14, 15],
+                                                            [16, 17, 18],
+                                                            [16, 18, 19],
+                                                            [20, 21, 22],
+                                                            [20, 22, 23],
+                                                        ];
+                                                        (p, n, uv, f)
+                                                    }
+                                                    "sphere" => {
+                                                        // UV sphere matching Director's default tessellation
+                                                        let segments = 8u32;
+                                                        let rings = 6u32;
+                                                        let mut p = Vec::new();
+                                                        let mut n = Vec::new();
+                                                        let mut uv_data = Vec::new();
+                                                        let mut f = Vec::new();
+                                                        // UV scale 4× tiles the 2×2 checker into a dense grid matching Director
+                                                        let uv_scale = 1.0f32;
+                                                        for j in 0..=rings {
+                                                            let v = j as f32 / rings as f32;
+                                                            let phi = v * std::f32::consts::PI;
+                                                            for i in 0..=segments {
+                                                                let u = i as f32 / segments as f32;
+                                                                let theta =
+                                                                    u * 2.0 * std::f32::consts::PI;
+                                                                let x = phi.sin() * theta.cos();
+                                                                let y = phi.cos();
+                                                                let z = phi.sin() * theta.sin();
+                                                                // let x = phi.sin() * theta.cos();
+                                                                // let y = phi.sin() * theta.sin();
+                                                                // let z = phi.cos();
+                                                                p.push([x * 0.5, y * 0.5, z * 0.5]);
+                                                                n.push([x, y, z]);
+                                                                uv_data.push([
+                                                                    u * uv_scale,
+                                                                    v * uv_scale,
+                                                                ]);
+                                                            }
+                                                        }
+                                                        for j in 0..rings {
+                                                            for i in 0..segments {
+                                                                let a = j * (segments + 1) + i;
+                                                                let b = a + 1;
+                                                                let c = a + segments + 1;
+                                                                let d = c + 1;
+                                                                f.push([a, c, d]);
+                                                                f.push([a, d, b]);
+                                                            }
+                                                        }
+                                                        (p, n, vec![uv_data], f)
+                                                    }
+                                                    "cylinder" => {
+                                                        // Simple cylinder (8 segments, height 1)
+                                                        let segments = 8u32;
+                                                        let mut p = Vec::new();
+                                                        let mut normals = Vec::new();
+                                                        let mut uv_data = Vec::new();
+                                                        let mut f = Vec::new();
+                                                        // Side vertices
+                                                        for j in 0..=1u32 {
+                                                            let y = j as f32 - 0.5;
+                                                            for i in 0..=segments {
+                                                                let u = i as f32 / segments as f32;
+                                                                let theta =
+                                                                    u * 2.0 * std::f32::consts::PI;
+                                                                let x = theta.cos();
+                                                                let z = theta.sin();
+                                                                p.push([x * 0.5, y, z * 0.5]);
+                                                                normals.push([x, 0.0, z]);
+                                                                uv_data.push([u, j as f32]);
+                                                            }
+                                                        }
                                                         for i in 0..segments {
-                                                            let a = j * (segments + 1) + i;
+                                                            let a = i;
                                                             let b = a + 1;
                                                             let c = a + segments + 1;
                                                             let d = c + 1;
                                                             f.push([a, c, d]);
                                                             f.push([a, d, b]);
                                                         }
+                                                        (p, normals, vec![uv_data], f)
                                                     }
-                                                    (p, n, vec![uv_data], f)
-                                                },
-                                                "cylinder" => {
-                                                    // Simple cylinder (8 segments, height 1)
-                                                    let segments = 8u32;
-                                                    let mut p = Vec::new();
-                                                    let mut normals = Vec::new();
-                                                    let mut uv_data = Vec::new();
-                                                    let mut f = Vec::new();
-                                                    // Side vertices
-                                                    for j in 0..=1u32 {
-                                                        let y = j as f32 - 0.5;
-                                                        for i in 0..=segments {
-                                                            let u = i as f32 / segments as f32;
-                                                            let theta = u * 2.0 * std::f32::consts::PI;
-                                                            let x = theta.cos();
-                                                            let z = theta.sin();
-                                                            p.push([x * 0.5, y, z * 0.5]);
-                                                            normals.push([x, 0.0, z]);
-                                                            uv_data.push([u, j as f32]);
-                                                        }
+                                                    _ => {
+                                                        // Unknown type or newMesh — empty geometry
+                                                        (vec![], vec![], vec![vec![]], vec![])
                                                     }
-                                                    for i in 0..segments {
-                                                        let a = i;
-                                                        let b = a + 1;
-                                                        let c = a + segments + 1;
-                                                        let d = c + 1;
-                                                        f.push([a, c, d]);
-                                                        f.push([a, d, b]);
-                                                    }
-                                                    (p, normals, vec![uv_data], f)
-                                                },
-                                                _ => {
-                                                    // Unknown type or newMesh — empty geometry
-                                                    (vec![], vec![], vec![vec![]], vec![])
-                                                }
-                                            };
+                                                };
 
                                             // For non-plane types, build a single mesh from the returned geometry
                                             if !positions.is_empty() && !faces.is_empty() {
@@ -2543,20 +3421,29 @@ impl Shockwave3dMemberHandlers {
                                                 });
                                             }
 
-                                            let total_faces: u32 = meshes.iter().map(|m| m.faces.len() as u32).sum();
-                                            let num_faces = if total_faces > 0 { total_faces } else { mesh_num_faces };
+                                            let total_faces: u32 =
+                                                meshes.iter().map(|m| m.faces.len() as u32).sum();
+                                            let num_faces = if total_faces > 0 {
+                                                total_faces
+                                            } else {
+                                                mesh_num_faces
+                                            };
                                             let mut mesh_info = ClodMeshInfo::default();
                                             mesh_info.num_faces = num_faces;
                                             // Store primitive type so dimension setters can regenerate
                                             let prim_type = if !new_res_type.is_empty() {
                                                 Some(new_res_type.clone())
-                                            } else { None };
+                                            } else {
+                                                None
+                                            };
                                             // Create a default shader + material for the
                                             // new resource so the renderer can bind it
                                             // (Director shows a red/white checkerboard on
                                             // untextured primitives).
-                                            let shader_name = symbols.intern(&format!("{}_Shader", obj_name));
-                                            let material_name = symbols.intern(&format!("{}_Material", obj_name));
+                                            let shader_name =
+                                                symbols.intern(&format!("{}_Shader", obj_name));
+                                            let material_name =
+                                                symbols.intern(&format!("{}_Material", obj_name));
                                             scene.materials.push(W3dMaterial {
                                                 name: material_name.clone(),
                                                 // Director's default for new primitives: ambient = diffuse = white
@@ -2569,34 +3456,40 @@ impl Shockwave3dMemberHandlers {
                                                 ..Default::default()
                                             });
                                             let num_meshes = meshes.len().max(1);
-                                            scene.model_resources.insert(obj_sym.clone(), ModelResourceInfo {
-                                                name: obj_sym.clone(),
-                                                mesh_infos: vec![mesh_info],
-                                                shader_bindings: vec![ModelShaderBinding {
-                                                    name: shader_name.clone(),
-                                                    mesh_bindings: vec![Symbol::empty(); num_meshes],
-                                                }],
-                                                primitive_type: prim_type,
-                                                primitive_width: 1.0,
-                                                primitive_length: 1.0,
-                                                primitive_height: 1.0,
-                                                primitive_radius: 1.0,
-                                                primitive_top_radius: 1.0,
-                                                primitive_resolution: 0, // 0 → default tessellation
-                                                primitive_start_angle: 0.0,
-                                                primitive_end_angle: 360.0,
-                                                // Spec lists topCap default FALSE / bottomCap TRUE, but every
-                                                // capped cylinder in these movies (Coke can, maze pipes) relies on
-                                                // BOTH caps without setting topCap, and Shockwave renders them
-                                                // sealed — so default both TRUE. Models that want an open tube set
-                                                // the flag explicitly (the ghost body sets topCap=0 AND bottomCap=0).
-                                                primitive_top_cap: true,
-                                                primitive_bottom_cap: true,
-                                                // #back/#both (e.g. skybox cylinder) → render two-sided
-                                                // so the inward-facing surface isn't backface-culled.
-                                                primitive_facing: new_res_facing.clone(),
-                                                ..Default::default()
-                                            });
+                                            scene.model_resources.insert(
+                                                obj_sym.clone(),
+                                                ModelResourceInfo {
+                                                    name: obj_sym.clone(),
+                                                    mesh_infos: vec![mesh_info],
+                                                    shader_bindings: vec![ModelShaderBinding {
+                                                        name: shader_name.clone(),
+                                                        mesh_bindings: vec![
+                                                            Symbol::empty();
+                                                            num_meshes
+                                                        ],
+                                                    }],
+                                                    primitive_type: prim_type,
+                                                    primitive_width: 1.0,
+                                                    primitive_length: 1.0,
+                                                    primitive_height: 1.0,
+                                                    primitive_radius: 1.0,
+                                                    primitive_top_radius: 1.0,
+                                                    primitive_resolution: 0, // 0 → default tessellation
+                                                    primitive_start_angle: 0.0,
+                                                    primitive_end_angle: 360.0,
+                                                    // Spec lists topCap default FALSE / bottomCap TRUE, but every
+                                                    // capped cylinder in these movies (Coke can, maze pipes) relies on
+                                                    // BOTH caps without setting topCap, and Shockwave renders them
+                                                    // sealed — so default both TRUE. Models that want an open tube set
+                                                    // the flag explicitly (the ghost body sets topCap=0 AND bottomCap=0).
+                                                    primitive_top_cap: true,
+                                                    primitive_bottom_cap: true,
+                                                    // #back/#both (e.g. skybox cylinder) → render two-sided
+                                                    // so the inward-facing surface isn't backface-culled.
+                                                    primitive_facing: new_res_facing.clone(),
+                                                    ..Default::default()
+                                                },
+                                            );
 
                                             // Store generated mesh geometry so the renderer can upload it
                                             if !meshes.is_empty() {
@@ -2621,7 +3514,8 @@ impl Shockwave3dMemberHandlers {
                                     // SWF bytes + native dims so we can kick off a Ruffle render below.
                                     // The synchronous bitmap path produces None for Flash members.
                                     let flash_dispatch: Option<(Vec<u8>, u32, u32)> = {
-                                        let src_member = player.movie.cast_manager.find_member_by_ref(&src_ref);
+                                        let src_member =
+                                            player.movie.cast_manager.find_member_by_ref(&src_ref);
                                         match src_member.map(|m| &m.member_type) {
                                             Some(CastMemberType::Flash(flash)) => {
                                                 let (l, t, r, b) = flash.effective_rect();
@@ -2639,14 +3533,21 @@ impl Shockwave3dMemberHandlers {
                                                 // bark/wood log textures came out the wrong size, so the logs looked
                                                 // gappy / "open caps". NPOT textures are fine in WebGL2; keep the raw
                                                 // stage size.
-                                                if flash.data.len() >= 9 && &flash.data[0..3] == b"FWS" {
+                                                if flash.data.len() >= 9
+                                                    && &flash.data[0..3] == b"FWS"
+                                                {
                                                     let bits = &flash.data[8..];
                                                     let mut bitpos = 0usize;
                                                     let mut read = |n: usize| -> u32 {
                                                         let mut v = 0u32;
                                                         for _ in 0..n {
-                                                            let byte = bits.get(bitpos >> 3).copied().unwrap_or(0);
-                                                            v = (v << 1) | ((byte >> (7 - (bitpos & 7))) & 1) as u32;
+                                                            let byte = bits
+                                                                .get(bitpos >> 3)
+                                                                .copied()
+                                                                .unwrap_or(0);
+                                                            v = (v << 1)
+                                                                | ((byte >> (7 - (bitpos & 7))) & 1)
+                                                                    as u32;
                                                             bitpos += 1;
                                                         }
                                                         v
@@ -2659,7 +3560,10 @@ impl Shockwave3dMemberHandlers {
                                                         let ymax = read(nbits);
                                                         let w = (xmax / 20).max(1); // twips → px
                                                         let h = (ymax / 20).max(1);
-                                                        if w > 1 && h > 1 { fw = w; fh = h; }
+                                                        if w > 1 && h > 1 {
+                                                            fw = w;
+                                                            fh = h;
+                                                        }
                                                     }
                                                 }
                                                 Some((flash.data.clone(), fw, fh))
@@ -2668,7 +3572,8 @@ impl Shockwave3dMemberHandlers {
                                         }
                                     };
                                     let rgba_data = {
-                                        let src_member = player.movie.cast_manager.find_member_by_ref(&src_ref);
+                                        let src_member =
+                                            player.movie.cast_manager.find_member_by_ref(&src_ref);
                                         src_member.and_then(|m| {
                                             match &m.member_type {
                                                 CastMemberType::Bitmap(bmp_member) => {
@@ -2722,15 +3627,27 @@ impl Shockwave3dMemberHandlers {
                                         })
                                     };
                                     if let Some((w, h, rgba)) = rgba_data {
-                                        let member = player.movie.cast_manager.find_mut_member_by_ref(&member_ref);
+                                        let member = player
+                                            .movie
+                                            .cast_manager
+                                            .find_mut_member_by_ref(&member_ref);
                                         if let Some(member) = member {
-                                            if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                            if let Some(w3d) =
+                                                member.member_type.as_shockwave3d_mut()
+                                            {
                                                 if let Some(scene) = w3d.scene_mut() {
-                                                    let mut tex_data = Vec::with_capacity(8 + rgba.len());
-                                                    tex_data.extend_from_slice(&(w as u32).to_le_bytes());
-                                                    tex_data.extend_from_slice(&(h as u32).to_le_bytes());
+                                                    let mut tex_data =
+                                                        Vec::with_capacity(8 + rgba.len());
+                                                    tex_data.extend_from_slice(
+                                                        &(w as u32).to_le_bytes(),
+                                                    );
+                                                    tex_data.extend_from_slice(
+                                                        &(h as u32).to_le_bytes(),
+                                                    );
                                                     tex_data.extend_from_slice(&rgba);
-                                                    scene.texture_images.insert(obj_sym.clone(), tex_data);
+                                                    scene
+                                                        .texture_images
+                                                        .insert(obj_sym.clone(), tex_data);
                                                     scene.texture_content_version += 1;
                                                     log(&format!(
                                                         "[W3D] newTexture(\"{}\", #fromCastMember): stored {}x{} RGBA",
@@ -2753,27 +3670,44 @@ impl Shockwave3dMemberHandlers {
                                                 + src_ref.cast_member.max(0);
                                             -(raw.min(30000)) as i16
                                         };
-                                        player.flash_texture_targets
-                                            .insert(synthetic, (member_ref.clone(), obj_name.clone()));
+                                        player.flash_texture_targets.insert(
+                                            synthetic,
+                                            (member_ref.clone(), obj_name.clone()),
+                                        );
                                         // Transparent 1×1 placeholder so the plane isn't the default
                                         // checker (primitive fallback) until the first Flash frame lands.
-                                        if let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) {
-                                            if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
+                                        if let Some(member) = player
+                                            .movie
+                                            .cast_manager
+                                            .find_mut_member_by_ref(&member_ref)
+                                        {
+                                            if let Some(w3d) =
+                                                member.member_type.as_shockwave3d_mut()
+                                            {
                                                 if let Some(scene) = w3d.scene_mut() {
-                                                    if !scene.texture_images.contains_key(&obj_sym) {
+                                                    if !scene.texture_images.contains_key(&obj_sym)
+                                                    {
                                                         let mut ph = Vec::with_capacity(12);
                                                         ph.extend_from_slice(&1u32.to_le_bytes());
                                                         ph.extend_from_slice(&1u32.to_le_bytes());
                                                         ph.extend_from_slice(&[0u8, 0, 0, 0]);
-                                                        scene.texture_images.insert(obj_sym.clone(), ph);
+                                                        scene
+                                                            .texture_images
+                                                            .insert(obj_sym.clone(), ph);
                                                         scene.texture_content_version += 1;
                                                     }
                                                 }
                                             }
                                         }
                                         crate::js_api::JsApi::dispatch_flash_member_loaded(
-                                            synthetic as i32, src_ref.cast_lib, src_ref.cast_member,
-                                            &swf, fw, fh, true, -1,
+                                            synthetic as i32,
+                                            src_ref.cast_lib,
+                                            src_ref.cast_member,
+                                            &swf,
+                                            fw,
+                                            fh,
+                                            true,
+                                            -1,
                                             &crate::player::owner_key_string(&player.owner),
                                         );
                                         log(&format!(
@@ -2785,70 +3719,109 @@ impl Shockwave3dMemberHandlers {
                             } else if tex_type == "fromImageObject" {
                                 if let Some(source) = new_texture_source.as_ref() {
                                     if let Ok(bitmap_ref) = source.to_bitmap_ref() {
-                                        let rgba_data = if let Some(bmp) = player.bitmap_manager.get_bitmap_handle(bitmap_ref) {
-                                        let w = bmp.width;
-                                        let h = bmp.height;
-                                        let palettes = player.movie.cast_manager.palettes();
-                                        let mut rgba = vec![0u8; (w as usize) * (h as usize) * 4];
-                                        for y in 0..h as usize {
-                                            for x in 0..w as usize {
-                                                let (r, g, b, a) = bmp.get_pixel_color_with_alpha(&palettes, x as u16, y as u16);
-                                                let idx = (y * w as usize + x) * 4;
-                                                rgba[idx] = r;
-                                                rgba[idx + 1] = g;
-                                                rgba[idx + 2] = b;
-                                                rgba[idx + 3] = a;
-                                            }
-                                        }
-                                        // Post-process: when bitmap has use_alpha, trailing rows of fully
-                                        // opaque white (255,255,255,255) are unfilled padding from power-of-2
-                                        // texture sizing. Make them transparent so 3D overlays don't show
-                                        // white blocks below the actual content.
-                                        if bmp.use_alpha {
-                                            let w_usize = w as usize;
-                                            let h_usize = h as usize;
-                                            // Scan from bottom row upward: stop at first row that isn't all white-opaque
-                                            for y in (0..h_usize).rev() {
-                                                let row_start = y * w_usize * 4;
-                                                let row_all_white_opaque = (0..w_usize).all(|x| {
-                                                    let i = row_start + x * 4;
-                                                    rgba[i] == 255 && rgba[i+1] == 255 && rgba[i+2] == 255 && rgba[i+3] == 255
-                                                });
-                                                if !row_all_white_opaque { break; }
-                                                // Make this row transparent
-                                                for x in 0..w_usize {
-                                                    let i = row_start + x * 4;
-                                                    rgba[i + 3] = 0;
+                                        let rgba_data = if let Some(bmp) =
+                                            player.bitmap_manager.get_bitmap_handle(bitmap_ref)
+                                        {
+                                            let w = bmp.width;
+                                            let h = bmp.height;
+                                            let palettes = player.movie.cast_manager.palettes();
+                                            let mut rgba =
+                                                vec![0u8; (w as usize) * (h as usize) * 4];
+                                            for y in 0..h as usize {
+                                                for x in 0..w as usize {
+                                                    let (r, g, b, a) = bmp
+                                                        .get_pixel_color_with_alpha(
+                                                            &palettes, x as u16, y as u16,
+                                                        );
+                                                    let idx = (y * w as usize + x) * 4;
+                                                    rgba[idx] = r;
+                                                    rgba[idx + 1] = g;
+                                                    rgba[idx + 2] = b;
+                                                    rgba[idx + 3] = a;
                                                 }
                                             }
-                                        }
-                                        Some((w, h, rgba))
-                                    } else {
-                                        None
-                                    };
+                                            // Post-process: when bitmap has use_alpha, trailing rows of fully
+                                            // opaque white (255,255,255,255) are unfilled padding from power-of-2
+                                            // texture sizing. Make them transparent so 3D overlays don't show
+                                            // white blocks below the actual content.
+                                            if bmp.use_alpha {
+                                                let w_usize = w as usize;
+                                                let h_usize = h as usize;
+                                                // Scan from bottom row upward: stop at first row that isn't all white-opaque
+                                                for y in (0..h_usize).rev() {
+                                                    let row_start = y * w_usize * 4;
+                                                    let row_all_white_opaque =
+                                                        (0..w_usize).all(|x| {
+                                                            let i = row_start + x * 4;
+                                                            rgba[i] == 255
+                                                                && rgba[i + 1] == 255
+                                                                && rgba[i + 2] == 255
+                                                                && rgba[i + 3] == 255
+                                                        });
+                                                    if !row_all_white_opaque {
+                                                        break;
+                                                    }
+                                                    // Make this row transparent
+                                                    for x in 0..w_usize {
+                                                        let i = row_start + x * 4;
+                                                        rgba[i + 3] = 0;
+                                                    }
+                                                }
+                                            }
+                                            Some((w, h, rgba))
+                                        } else {
+                                            None
+                                        };
 
-                                    if let Some((w, h, rgba)) = rgba_data {
-                                        let member = player.movie.cast_manager.find_mut_member_by_ref(&member_ref);
-                                        if let Some(member) = member {
-                                            if let Some(w3d) = member.member_type.as_shockwave3d_mut() {
-                                                if let Some(scene) = w3d.scene_mut() {
-                                                    let mut tex_data = Vec::with_capacity(8 + rgba.len());
-                                                    tex_data.extend_from_slice(&(w as u32).to_le_bytes());
-                                                    tex_data.extend_from_slice(&(h as u32).to_le_bytes());
-                                                    tex_data.extend_from_slice(&rgba);
-                                                    scene.texture_images.insert(obj_sym.clone(), tex_data);
-                                                    scene.texture_content_version += 1;
-                                                    // Log pixel stats
-                                                    let total = rgba.len() / 4;
-                                                    let alpha_lt255 = rgba.chunks(4).filter(|p| p[3] < 255).count();
-                                                    let alpha_eq0 = rgba.chunks(4).filter(|p| p[3] == 0).count();
-                                                    let first_lt255 = rgba.chunks(4).enumerate().find(|(_, p)| p[3] < 255)
-                                                        .map(|(i, p)| format!("px{}=({},{},{},{})", i, p[0], p[1], p[2], p[3]))
-                                                        .unwrap_or("none".to_string());
-                                                    log(&format!(
+                                        if let Some((w, h, rgba)) = rgba_data {
+                                            let member = player
+                                                .movie
+                                                .cast_manager
+                                                .find_mut_member_by_ref(&member_ref);
+                                            if let Some(member) = member {
+                                                if let Some(w3d) =
+                                                    member.member_type.as_shockwave3d_mut()
+                                                {
+                                                    if let Some(scene) = w3d.scene_mut() {
+                                                        let mut tex_data =
+                                                            Vec::with_capacity(8 + rgba.len());
+                                                        tex_data.extend_from_slice(
+                                                            &(w as u32).to_le_bytes(),
+                                                        );
+                                                        tex_data.extend_from_slice(
+                                                            &(h as u32).to_le_bytes(),
+                                                        );
+                                                        tex_data.extend_from_slice(&rgba);
+                                                        scene
+                                                            .texture_images
+                                                            .insert(obj_sym.clone(), tex_data);
+                                                        scene.texture_content_version += 1;
+                                                        // Log pixel stats
+                                                        let total = rgba.len() / 4;
+                                                        let alpha_lt255 = rgba
+                                                            .chunks(4)
+                                                            .filter(|p| p[3] < 255)
+                                                            .count();
+                                                        let alpha_eq0 = rgba
+                                                            .chunks(4)
+                                                            .filter(|p| p[3] == 0)
+                                                            .count();
+                                                        let first_lt255 = rgba
+                                                            .chunks(4)
+                                                            .enumerate()
+                                                            .find(|(_, p)| p[3] < 255)
+                                                            .map(|(i, p)| {
+                                                                format!(
+                                                                    "px{}=({},{},{},{})",
+                                                                    i, p[0], p[1], p[2], p[3]
+                                                                )
+                                                            })
+                                                            .unwrap_or("none".to_string());
+                                                        log(&format!(
                                                         "[W3D] newTexture(\"{}\", #fromImageObject): {}x{} alpha<255={}/{} alpha=0={} first_partial={}",
                                                         obj_name, w, h, alpha_lt255, total, alpha_eq0, first_lt255
                                                     ));
+                                                    }
                                                 }
                                             }
                                         }
@@ -2856,15 +3829,16 @@ impl Shockwave3dMemberHandlers {
                                 }
                             }
                         }
-                        }
 
                         use crate::director::lingo::datum::Shockwave3dObjectRef;
-                        return Ok(player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
-                            cast_lib: member_ref.cast_lib,
-                            cast_member: member_ref.cast_member,
-                            object_type: obj_type,
-                            name: obj_sym.clone(),
-                        })));
+                        return Ok(player.alloc_datum(Datum::Shockwave3dObjectRef(
+                            Shockwave3dObjectRef {
+                                cast_lib: member_ref.cast_lib,
+                                cast_member: member_ref.cast_member,
+                                object_type: obj_type,
+                                name: obj_sym.clone(),
+                            },
+                        )));
                     }
 
                     // image — return the rendered 3D world as a bitmap ref
@@ -2874,7 +3848,9 @@ impl Shockwave3dMemberHandlers {
 
                     // getPref, setPref — stubs. (`loadFile` is handled on the
                     // async path in cast_member_ref.rs; it must fetch the W3D.)
-                    if handler_name_builtin == BuiltInSymbol::GetPref || handler_name_builtin == BuiltInSymbol::SetPref {
+                    if handler_name_builtin == BuiltInSymbol::GetPref
+                        || handler_name_builtin == BuiltInSymbol::SetPref
+                    {
                         return Ok(player.alloc_datum(Datum::Void));
                     }
 
@@ -2903,15 +3879,22 @@ impl Shockwave3dMemberHandlers {
                         } else {
                             return Ok(player.alloc_datum(Datum::Void));
                         };
-                        let src_name = player.movie.cast_manager.find_member_by_ref(&member_ref)
-                            .map(|m| m.name.clone()).unwrap_or_else(|| "text".to_string());
+                        let src_name = player
+                            .movie
+                            .cast_manager
+                            .find_member_by_ref(&member_ref)
+                            .map(|m| m.name.clone())
+                            .unwrap_or_else(|| "text".to_string());
                         // Each extrude3d call returns a DISTINCT model resource — Director does
                         // too, even when the SAME text member is reused (set text → extrude →
                         // newModel → repeat), which frog01's title screen does. Keying the mesh
                         // by member name alone made every call overwrite the one "<name>_extrude3d"
                         // mesh, so every model showed the LAST text ("www.jellygames.com"). Make
                         // the name unique per call via the target scene's current resource count.
-                        let seq = player.movie.cast_manager.find_member_by_ref(&target_ref)
+                        let seq = player
+                            .movie
+                            .cast_manager
+                            .find_member_by_ref(&target_ref)
                             .and_then(|m| m.member_type.as_shockwave3d())
                             .map(|w| w.runtime_state.text3d_resources.len())
                             .unwrap_or(0);
@@ -2923,34 +3906,46 @@ impl Shockwave3dMemberHandlers {
                         };
                         mesh.name = res_symbol.clone();
                         let num_faces = mesh.faces.len() as u32;
-                        if let Some(target) = player.movie.cast_manager.find_mut_member_by_ref(&target_ref) {
+                        if let Some(target) = player
+                            .movie
+                            .cast_manager
+                            .find_mut_member_by_ref(&target_ref)
+                        {
                             if let Some(w3d_t) = target.member_type.as_shockwave3d_mut() {
                                 if let Some(scene) = w3d_t.scene_mut() {
                                     use crate::director::chunks::w3d::types::*;
                                     scene.clod_meshes.insert(res_symbol.clone(), vec![mesh]);
                                     let mut mi = ClodMeshInfo::default();
                                     mi.num_faces = num_faces;
-                                    scene.model_resources.insert(res_symbol.clone(), ModelResourceInfo {
-                                        name: res_symbol.clone(),
-                                        mesh_infos: vec![mi],
-                                        shader_bindings: vec![ModelShaderBinding {
-                                            name: Symbol::empty(),
-                                            mesh_bindings: vec![Symbol::empty()],
-                                        }],
-                                        ..Default::default()
-                                    });
+                                    scene.model_resources.insert(
+                                        res_symbol.clone(),
+                                        ModelResourceInfo {
+                                            name: res_symbol.clone(),
+                                            mesh_infos: vec![mi],
+                                            shader_bindings: vec![ModelShaderBinding {
+                                                name: Symbol::empty(),
+                                                mesh_bindings: vec![Symbol::empty()],
+                                            }],
+                                            ..Default::default()
+                                        },
+                                    );
                                     scene.mesh_content_version += 1;
                                 }
-                                w3d_t.runtime_state.text3d_resources.insert(res_symbol.clone(), (source, state));
+                                w3d_t
+                                    .runtime_state
+                                    .text3d_resources
+                                    .insert(res_symbol.clone(), (source, state));
                             }
                         }
                         use crate::director::lingo::datum::Shockwave3dObjectRef;
-                        return Ok(player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
-                            cast_lib: target_ref.cast_lib,
-                            cast_member: target_ref.cast_member,
-                            object_type: BuiltInSymbol::ModelResource,
-                            name: res_symbol,
-                        })));
+                        return Ok(player.alloc_datum(Datum::Shockwave3dObjectRef(
+                            Shockwave3dObjectRef {
+                                cast_lib: target_ref.cast_lib,
+                                cast_member: target_ref.cast_member,
+                                object_type: BuiltInSymbol::ModelResource,
+                                name: res_symbol,
+                            },
+                        )));
                     }
 
                     // If no parsed scene exists, create a minimal empty scene
@@ -2958,10 +3953,18 @@ impl Shockwave3dMemberHandlers {
                         use crate::director::chunks::w3d::types::*;
                         use std::collections::HashMap;
                         let mut empty_scene = W3dScene {
-                            materials: Vec::new(), shaders: Vec::new(), nodes: Vec::new(),
-                            lights: Vec::new(), texture_images: HashMap::new(), texture_infos: Vec::new(),
-                            skeletons: Vec::new(), motions: Vec::new(), model_resources: HashMap::new(),
-                            clod_meshes: HashMap::new(), clod_decoders: HashMap::new(), raw_meshes: Vec::new(),
+                            materials: Vec::new(),
+                            shaders: Vec::new(),
+                            nodes: Vec::new(),
+                            lights: Vec::new(),
+                            texture_images: HashMap::new(),
+                            texture_infos: Vec::new(),
+                            skeletons: Vec::new(),
+                            motions: Vec::new(),
+                            model_resources: HashMap::new(),
+                            clod_meshes: HashMap::new(),
+                            clod_decoders: HashMap::new(),
+                            raw_meshes: Vec::new(),
                             mesh_content_version: 0,
                             texture_content_version: 0,
                             model_root_com: HashMap::new(),
@@ -2974,10 +3977,15 @@ impl Shockwave3dMemberHandlers {
                             model_resource_name: Symbol::empty(),
                             shader_name: Symbol::empty(),
                             visibility: 1,
-                            near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
+                            near_plane: 1.0,
+                            far_plane: 10000.0,
+                            fov: 30.0,
                             screen_width: player.movie.rect.right as i32,
                             screen_height: player.movie.rect.bottom as i32,
-                            transform: [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0],
+                            transform: [
+                                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                                0.0, 0.0, 1.0,
+                            ],
                         });
                         empty_scene.nodes.push(W3dNode {
                             name: Symbol::builtin(BuiltInSymbol::DefaultView),
@@ -2987,26 +3995,39 @@ impl Shockwave3dMemberHandlers {
                             model_resource_name: Symbol::empty(),
                             shader_name: Symbol::empty(),
                             visibility: 1,
-                            near_plane: 1.0, far_plane: 10000.0, fov: 30.0,
+                            near_plane: 1.0,
+                            far_plane: 10000.0,
+                            fov: 30.0,
                             screen_width: player.movie.rect.right as i32,
                             screen_height: player.movie.rect.bottom as i32,
-                            transform: [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,500.0,1.0],
+                            transform: [
+                                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                                0.0, 500.0, 1.0,
+                            ],
                         });
                         empty_scene.shaders.push(W3dShader {
                             name: Symbol::builtin(BuiltInSymbol::DefaultShader),
                             ..Default::default()
                         });
                         // Built-in "defaultmodel" plane resource (used by overlay scripts)
-                        let member_mut = player.movie.cast_manager.find_mut_member_by_ref(&member_ref)
+                        let member_mut = player
+                            .movie
+                            .cast_manager
+                            .find_mut_member_by_ref(&member_ref)
                             .ok_or_else(|| ScriptError::new("Member not found".to_string()))?;
                         if let Some(w3d_mut) = member_mut.member_type.as_shockwave3d_mut() {
                             w3d_mut.parsed_scene = Some(std::rc::Rc::new(empty_scene));
                         }
                     }
                     // Re-fetch after potential mutation
-                    let cast_member = player.movie.cast_manager.find_member_by_ref(&member_ref)
+                    let cast_member = player
+                        .movie
+                        .cast_manager
+                        .find_member_by_ref(&member_ref)
                         .ok_or_else(|| ScriptError::new("Member not found".to_string()))?;
-                    let w3d = cast_member.member_type.as_shockwave3d()
+                    let w3d = cast_member
+                        .member_type
+                        .as_shockwave3d()
                         .ok_or_else(|| ScriptError::new("Not a 3D member".to_string()))?;
                     let scene = w3d.parsed_scene.as_ref().unwrap();
 
@@ -3018,10 +4039,13 @@ impl Shockwave3dMemberHandlers {
                         let arg = checked_datum(player, &args[0], symbols)?.clone();
                         match arg {
                             Datum::String(s) => symbols.intern(&s),
-                            Datum::Int(idx) => {
-                                Self::get_3d_object_name_by_index(scene, symbols, handler_name, idx as usize)
-                                    .unwrap_or_default()
-                            }
+                            Datum::Int(idx) => Self::get_3d_object_name_by_index(
+                                scene,
+                                symbols,
+                                handler_name,
+                                idx as usize,
+                            )
+                            .unwrap_or_default(),
                             _ => symbols.intern(&arg.string_value(symbols).unwrap_or_default()),
                         }
                     };
@@ -3029,32 +4053,50 @@ impl Shockwave3dMemberHandlers {
                     if obj_name.is_empty() {
                         return Ok(player.alloc_datum(Datum::Void));
                     }
-                    symbols
-                        .display(&obj_name)
-                        .map_err(|_| ScriptError::new("Cannot allocate foreign Shockwave3D object name symbol".to_string()))?;
+                    symbols.display(&obj_name).map_err(|_| {
+                        ScriptError::new(
+                            "Cannot allocate foreign Shockwave3D object name symbol".to_string(),
+                        )
+                    })?;
 
                     // Check if the named object actually exists in the scene.
                     // Per Director docs: "If no [object] exists for the specified parameter, returns void."
                     // Symbol equality is already case-insensitive (all strings interned as lowercase).
                     use crate::director::chunks::w3d::types::W3dNodeType;
                     let resolved_name: Option<Symbol> = match handler_name_builtin {
-                        BuiltInSymbol::ModelResource => scene.model_resources.keys()
-                            .find(|k| **k == obj_name).cloned(),
-                        BuiltInSymbol::Model => scene.nodes.iter()
+                        BuiltInSymbol::ModelResource => scene
+                            .model_resources
+                            .keys()
+                            .find(|k| **k == obj_name)
+                            .cloned(),
+                        BuiltInSymbol::Model => scene
+                            .nodes
+                            .iter()
                             .find(|n| n.node_type == W3dNodeType::Model && n.name == obj_name)
                             .map(|n| n.name.clone()),
-                        BuiltInSymbol::Shader => scene.shaders.iter()
+                        BuiltInSymbol::Shader => scene
+                            .shaders
+                            .iter()
                             .find(|s| s.name == obj_name)
                             .map(|s| s.name.clone()),
-                        BuiltInSymbol::Texture => scene.texture_images.keys()
-                            .find(|k| **k == obj_name).cloned(),
-                        BuiltInSymbol::Light => scene.lights.iter()
+                        BuiltInSymbol::Texture => scene
+                            .texture_images
+                            .keys()
+                            .find(|k| **k == obj_name)
+                            .cloned(),
+                        BuiltInSymbol::Light => scene
+                            .lights
+                            .iter()
                             .find(|l| l.name == obj_name)
                             .map(|l| l.name.clone()),
-                        BuiltInSymbol::Camera => scene.nodes.iter()
+                        BuiltInSymbol::Camera => scene
+                            .nodes
+                            .iter()
                             .find(|n| n.node_type == W3dNodeType::View && n.name == obj_name)
                             .map(|n| n.name.clone()),
-                        BuiltInSymbol::Group => scene.nodes.iter()
+                        BuiltInSymbol::Group => scene
+                            .nodes
+                            .iter()
                             .find(|n| n.node_type == W3dNodeType::Group && n.name == obj_name)
                             .map(|n| n.name.clone())
                             // "World" is the implicit scene root in W3D — there's
@@ -3064,10 +4106,16 @@ impl Shockwave3dMemberHandlers {
                             // name so the ref is valid; addChild's setter side
                             // already handles "World" by clearing the child's
                             // parent reference.
-                            .or_else(|| if obj_name == BuiltInSymbol::World {
-                                Some(Symbol::builtin(BuiltInSymbol::World))
-                            } else { None }),
-                        BuiltInSymbol::Motion => scene.motions.iter()
+                            .or_else(|| {
+                                if obj_name == BuiltInSymbol::World {
+                                    Some(Symbol::builtin(BuiltInSymbol::World))
+                                } else {
+                                    None
+                                }
+                            }),
+                        BuiltInSymbol::Motion => scene
+                            .motions
+                            .iter()
                             .find(|m| m.name == obj_name)
                             .map(|m| m.name.clone()),
                         _ => Some(obj_name), // Unknown collection types pass through
@@ -3078,12 +4126,14 @@ impl Shockwave3dMemberHandlers {
                     };
 
                     use crate::director::lingo::datum::Shockwave3dObjectRef;
-                    Ok(player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
-                        cast_lib: member_ref.cast_lib,
-                        cast_member: member_ref.cast_member,
-                        object_type: handler_name_builtin,
-                        name: resolved_name,
-                    })))
+                    Ok(
+                        player.alloc_datum(Datum::Shockwave3dObjectRef(Shockwave3dObjectRef {
+                            cast_lib: member_ref.cast_lib,
+                            cast_member: member_ref.cast_member,
+                            object_type: handler_name_builtin,
+                            name: resolved_name,
+                        })),
+                    )
                 })(player, symbols)
             }
             BuiltInSymbol::ModelsUnderRay => {
@@ -3094,7 +4144,9 @@ impl Shockwave3dMemberHandlers {
                     };
                     if args.len() < 2 {
                         return Ok(player.alloc_datum(Datum::List(
-                            crate::director::lingo::datum::DatumType::List, VecDeque::new(), false,
+                            crate::director::lingo::datum::DatumType::List,
+                            VecDeque::new(),
+                            false,
                         )));
                     }
                     let origin = checked_datum(player, &args[0], symbols)?.to_vector()?;
@@ -3123,52 +4175,116 @@ impl Shockwave3dMemberHandlers {
                     // not to modelList.) `model_list_present` keeps the two cases apart —
                     // conflating them made AreaZero's pre-spawn `#modelList: []` robot ray
                     // hit scenery, so the movie took its #Robots branch with a non-robot.
-                    let mut model_whitelist: std::collections::HashSet<Symbol> = std::collections::HashSet::new();
+                    let mut model_whitelist: std::collections::HashSet<Symbol> =
+                        std::collections::HashSet::new();
                     let mut model_list_present = false;
 
-                    let is_proplist = args.len() > 2 && matches!(checked_datum(player, &args[2], symbols)?, Datum::PropList(..));
+                    let is_proplist = args.len() > 2
+                        && matches!(
+                            checked_datum(player, &args[2], symbols)?,
+                            Datum::PropList(..)
+                        );
                     if is_proplist {
                         let (map, map_sorted) = {
-                            let (m, srt) = checked_datum(player, &args[2], symbols)?.to_map_tuple()?;
+                            let (m, srt) =
+                                checked_datum(player, &args[2], symbols)?.to_map_tuple()?;
                             (m.clone(), srt)
                         };
-                        let v = PropListUtils::get_by_concrete_key(&map, &Datum::Symbol(symbols.intern("maxNumberOfModels")), &player.allocator, symbols, map_sorted)?;
-                        if let Ok(n) = checked_datum(player, &v, symbols)?.int_value() { max_models = n; }
-                        let v = PropListUtils::get_by_concrete_key(&map, &Datum::Symbol(symbols.intern("levelOfDetail")), &player.allocator, symbols, map_sorted)?;
-                        if checked_datum(player, &v, symbols)?.string_value(symbols).unwrap_or_default().eq_ignore_ascii_case("detailed") { detailed = true; }
-                        let v = PropListUtils::get_by_concrete_key(&map, &Datum::Symbol(symbols.intern("maxDistance")), &player.allocator, symbols, map_sorted)?;
+                        let v = PropListUtils::get_by_concrete_key(
+                            &map,
+                            &Datum::Symbol(symbols.intern("maxNumberOfModels")),
+                            &player.allocator,
+                            symbols,
+                            map_sorted,
+                        )?;
+                        if let Ok(n) = checked_datum(player, &v, symbols)?.int_value() {
+                            max_models = n;
+                        }
+                        let v = PropListUtils::get_by_concrete_key(
+                            &map,
+                            &Datum::Symbol(symbols.intern("levelOfDetail")),
+                            &player.allocator,
+                            symbols,
+                            map_sorted,
+                        )?;
+                        if checked_datum(player, &v, symbols)?
+                            .string_value(symbols)
+                            .unwrap_or_default()
+                            .eq_ignore_ascii_case("detailed")
+                        {
+                            detailed = true;
+                        }
+                        let v = PropListUtils::get_by_concrete_key(
+                            &map,
+                            &Datum::Symbol(symbols.intern("maxDistance")),
+                            &player.allocator,
+                            symbols,
+                            map_sorted,
+                        )?;
                         match checked_datum(player, &v, symbols)? {
                             Datum::Int(i) => max_dist = *i as f32,
                             Datum::Float(f) => max_dist = *f as f32,
                             _ => {}
                         }
-                        let v = PropListUtils::get_by_concrete_key(&map, &Datum::Symbol(symbols.intern("modelList")), &player.allocator, symbols, map_sorted)?;
+                        let v = PropListUtils::get_by_concrete_key(
+                            &map,
+                            &Datum::Symbol(symbols.intern("modelList")),
+                            &player.allocator,
+                            symbols,
+                            map_sorted,
+                        )?;
                         let items = match checked_datum(player, &v, symbols)? {
-                            Datum::List(_, items, _) => { model_list_present = true; items.clone() }
+                            Datum::List(_, items, _) => {
+                                model_list_present = true;
+                                items.clone()
+                            }
                             _ => VecDeque::new(),
                         };
                         for item in &items {
-                            if let Datum::Shockwave3dObjectRef(r) = checked_datum(player, item, symbols)? { model_whitelist.insert(r.name.clone()); }
+                            if let Datum::Shockwave3dObjectRef(r) =
+                                checked_datum(player, item, symbols)?
+                            {
+                                model_whitelist.insert(r.name.clone());
+                            }
                         }
                     } else {
-                        if args.len() > 2 { max_models = checked_datum(player, &args[2], symbols)?.int_value().unwrap_or(100); }
-                        if args.len() > 3 { detailed = checked_datum(player, &args[3], symbols)?.string_value(symbols).unwrap_or_default().eq_ignore_ascii_case("detailed"); }
+                        if args.len() > 2 {
+                            max_models = checked_datum(player, &args[2], symbols)?
+                                .int_value()
+                                .unwrap_or(100);
+                        }
+                        if args.len() > 3 {
+                            detailed = checked_datum(player, &args[3], symbols)?
+                                .string_value(symbols)
+                                .unwrap_or_default()
+                                .eq_ignore_ascii_case("detailed");
+                        }
                         // Optional positional #modelList at args[4].
                         if args.len() > 4 {
                             let items = match checked_datum(player, &args[4], symbols)? {
-                                Datum::List(_, items, _) => { model_list_present = true; items.clone() }
+                                Datum::List(_, items, _) => {
+                                    model_list_present = true;
+                                    items.clone()
+                                }
                                 _ => VecDeque::new(),
                             };
                             for item in &items {
-                                if let Datum::Shockwave3dObjectRef(r) = checked_datum(player, item, symbols)? { model_whitelist.insert(r.name.clone()); }
+                                if let Datum::Shockwave3dObjectRef(r) =
+                                    checked_datum(player, item, symbols)?
+                                {
+                                    model_whitelist.insert(r.name.clone());
+                                }
                             }
                         }
                     }
-                    if max_models <= 0 { max_models = 100; }
+                    if max_models <= 0 {
+                        max_models = 100;
+                    }
 
                     let scene = {
                         let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
-                        member.and_then(|m| m.member_type.as_shockwave3d())
+                        member
+                            .and_then(|m| m.member_type.as_shockwave3d())
                             .and_then(|w3d| w3d.parsed_scene.clone())
                     };
 
@@ -3188,25 +4304,33 @@ impl Shockwave3dMemberHandlers {
                             // excluding it let the player walk off the map. Only
                             // removeFromWorld (detached_nodes) removes a model from raycasts.
                             for name in &w3d.runtime_state.detached_nodes {
-                                                excluded.insert(name.clone());
+                                excluded.insert(name.clone());
                             }
                             if let Some(ref scene) = w3d.parsed_scene {
                                 for node in &scene.nodes {
-                                    if excluded.contains(&node.name) { continue; }
+                                    if excluded.contains(&node.name) {
+                                        continue;
+                                    }
                                     let mut parent = &node.parent_name;
                                     for _ in 0..10 {
                                         if parent.is_empty() {
                                             excluded.insert(node.name.clone());
                                             break;
                                         }
-                                        if *parent == BuiltInSymbol::World { break; }
+                                        if *parent == BuiltInSymbol::World {
+                                            break;
+                                        }
                                         if w3d.runtime_state.detached_nodes.contains(parent) {
                                             excluded.insert(node.name.clone());
                                             break;
                                         }
-                                        if let Some(pn) = scene.nodes.iter().find(|n| n.name == *parent) {
+                                        if let Some(pn) =
+                                            scene.nodes.iter().find(|n| n.name == *parent)
+                                        {
                                             parent = &pn.parent_name;
-                                        } else { break; }
+                                        } else {
+                                            break;
+                                        }
                                     }
                                 }
                             }
@@ -3218,12 +4342,20 @@ impl Shockwave3dMemberHandlers {
 
                     let mut results = Vec::new();
                     if let Some(scene) = scene {
-                        use crate::director::chunks::w3d::raycast::{Ray, raycast_scene_multi};
+                        use crate::director::chunks::w3d::raycast::{raycast_scene_multi, Ray};
                         // Normalize direction to ensure unit vector — some models may have
                         // scaled world transforms that produce non-unit axis vectors.
-                        let dir_len = ((direction[0]*direction[0] + direction[1]*direction[1] + direction[2]*direction[2]) as f64).sqrt();
+                        let dir_len = ((direction[0] * direction[0]
+                            + direction[1] * direction[1]
+                            + direction[2] * direction[2])
+                            as f64)
+                            .sqrt();
                         let norm_dir = if dir_len > 1e-10 {
-                            [(direction[0] / dir_len) as f32, (direction[1] / dir_len) as f32, (direction[2] / dir_len) as f32]
+                            [
+                                (direction[0] / dir_len) as f32,
+                                (direction[1] / dir_len) as f32,
+                                (direction[2] / dir_len) as f32,
+                            ]
                         } else {
                             [0.0f32, 0.0, -1.0] // Default downward
                         };
@@ -3245,81 +4377,128 @@ impl Shockwave3dMemberHandlers {
                         } else {
                             max_dist
                         };
-                        let excluded_ref = if excluded_nodes.is_empty() { None } else { Some(&excluded_nodes) };
+                        let excluded_ref = if excluded_nodes.is_empty() {
+                            None
+                        } else {
+                            Some(&excluded_nodes)
+                        };
                         // Presence, not emptiness: a supplied-but-empty #modelList is a
                         // whitelist that includes nothing, which must yield no hits.
-                        let included_ref = if model_list_present { Some(&model_whitelist) } else { None };
+                        let included_ref = if model_list_present {
+                            Some(&model_whitelist)
+                        } else {
+                            None
+                        };
                         let hits = raycast_scene_multi(
-                            &ray, &scene, world_max_dist, max_models as usize,
+                            &ray,
+                            &scene,
+                            world_max_dist,
+                            max_models as usize,
                             node_transforms.as_ref(),
                             excluded_ref,
                             included_ref,
                             symbols,
-                        ).map_err(ScriptError::new)?;
+                        )
+                        .map_err(ScriptError::new)?;
                         for hit in &hits {
                             if detailed {
-                                let model_key = player.alloc_datum(Datum::Symbol(BuiltInSymbol::Model.into()));
+                                let model_key =
+                                    player.alloc_datum(Datum::Symbol(BuiltInSymbol::Model.into()));
                                 let model_val = player.alloc_datum(Datum::Shockwave3dObjectRef(
                                     crate::director::lingo::datum::Shockwave3dObjectRef {
-                                        cast_lib: member_ref.cast_lib, cast_member: member_ref.cast_member,
+                                        cast_lib: member_ref.cast_lib,
+                                        cast_member: member_ref.cast_member,
                                         object_type: BuiltInSymbol::Model.into(),
                                         name: symbols.intern(&hit.model_name),
-                                    }
+                                    },
                                 ));
-                                let dist_key = player.alloc_datum(Datum::Symbol(BuiltInSymbol::Distance.into()));
-                                let dist_val = player.alloc_datum(Datum::Float(hit.distance as f64));
-                                let pos_key = player.alloc_datum(Datum::Symbol(BuiltInSymbol::IsectPosition.into()));
+                                let dist_key = player
+                                    .alloc_datum(Datum::Symbol(BuiltInSymbol::Distance.into()));
+                                let dist_val =
+                                    player.alloc_datum(Datum::Float(hit.distance as f64));
+                                let pos_key = player.alloc_datum(Datum::Symbol(
+                                    BuiltInSymbol::IsectPosition.into(),
+                                ));
                                 let pos_val = player.alloc_datum(Datum::Vector([
-                                    hit.position[0] as f64, hit.position[1] as f64, hit.position[2] as f64,
+                                    hit.position[0] as f64,
+                                    hit.position[1] as f64,
+                                    hit.position[2] as f64,
                                 ]));
-                                let norm_key = player.alloc_datum(Datum::Symbol(BuiltInSymbol::IsectNormal.into()));
+                                let norm_key = player
+                                    .alloc_datum(Datum::Symbol(BuiltInSymbol::IsectNormal.into()));
                                 let norm_val = player.alloc_datum(Datum::Vector([
-                                    hit.normal[0] as f64, hit.normal[1] as f64, hit.normal[2] as f64,
+                                    hit.normal[0] as f64,
+                                    hit.normal[1] as f64,
+                                    hit.normal[2] as f64,
                                 ]));
-                                let mesh_key = player.alloc_datum(Datum::Symbol(BuiltInSymbol::MeshID.into()));
+                                let mesh_key =
+                                    player.alloc_datum(Datum::Symbol(BuiltInSymbol::MeshID.into()));
                                 let mesh_val = player.alloc_datum(Datum::Int(hit.mesh_id as i32));
-                                let face_key = player.alloc_datum(Datum::Symbol(BuiltInSymbol::FaceID.into()));
-                                let face_val = player.alloc_datum(Datum::Int(hit.face_index as i32 + 1));
-                                let vert_key = player.alloc_datum(Datum::Symbol(BuiltInSymbol::Vertices.into()));
+                                let face_key =
+                                    player.alloc_datum(Datum::Symbol(BuiltInSymbol::FaceID.into()));
+                                let face_val =
+                                    player.alloc_datum(Datum::Int(hit.face_index as i32 + 1));
+                                let vert_key = player
+                                    .alloc_datum(Datum::Symbol(BuiltInSymbol::Vertices.into()));
                                 let mut vert_items = VecDeque::new();
                                 for vtx in &hit.vertices {
                                     vert_items.push_back(player.alloc_datum(Datum::Vector([
-                                        vtx[0] as f64, vtx[1] as f64, vtx[2] as f64,
+                                        vtx[0] as f64,
+                                        vtx[1] as f64,
+                                        vtx[2] as f64,
                                     ])));
                                 }
                                 let vert_val = player.alloc_datum(Datum::List(
-                                    crate::director::lingo::datum::DatumType::List, vert_items, false,
+                                    crate::director::lingo::datum::DatumType::List,
+                                    vert_items,
+                                    false,
                                 ));
-                                let uv_key = player.alloc_datum(Datum::Symbol(BuiltInSymbol::UvCoord.into()));
-                                let u_key = player.alloc_datum(Datum::Symbol(BuiltInSymbol::U.into()));
-                                let u_val = player.alloc_datum(Datum::Float(hit.uv_coord[0] as f64));
-                                let v_key = player.alloc_datum(Datum::Symbol(BuiltInSymbol::V.into()));
-                                let v_val = player.alloc_datum(Datum::Float(hit.uv_coord[1] as f64));
+                                let uv_key = player
+                                    .alloc_datum(Datum::Symbol(BuiltInSymbol::UvCoord.into()));
+                                let u_key =
+                                    player.alloc_datum(Datum::Symbol(BuiltInSymbol::U.into()));
+                                let u_val =
+                                    player.alloc_datum(Datum::Float(hit.uv_coord[0] as f64));
+                                let v_key =
+                                    player.alloc_datum(Datum::Symbol(BuiltInSymbol::V.into()));
+                                let v_val =
+                                    player.alloc_datum(Datum::Float(hit.uv_coord[1] as f64));
                                 let uv_val = player.alloc_datum(Datum::PropList(
-                                    VecDeque::from(vec![(u_key, u_val), (v_key, v_val)]), false,
+                                    VecDeque::from(vec![(u_key, u_val), (v_key, v_val)]),
+                                    false,
                                 ));
 
-                                let hit_proplist = player.alloc_datum(Datum::PropList(VecDeque::from(vec![
-                                    (model_key, model_val), (dist_key, dist_val),
-                                    (pos_key, pos_val), (norm_key, norm_val),
-                                    (mesh_key, mesh_val), (face_key, face_val),
-                                    (vert_key, vert_val), (uv_key, uv_val),
-                                ]), false));
+                                let hit_proplist = player.alloc_datum(Datum::PropList(
+                                    VecDeque::from(vec![
+                                        (model_key, model_val),
+                                        (dist_key, dist_val),
+                                        (pos_key, pos_val),
+                                        (norm_key, norm_val),
+                                        (mesh_key, mesh_val),
+                                        (face_key, face_val),
+                                        (vert_key, vert_val),
+                                        (uv_key, uv_val),
+                                    ]),
+                                    false,
+                                ));
                                 results.push(hit_proplist);
                             } else {
                                 results.push(player.alloc_datum(Datum::Shockwave3dObjectRef(
                                     crate::director::lingo::datum::Shockwave3dObjectRef {
-                                        cast_lib: member_ref.cast_lib, cast_member: member_ref.cast_member,
+                                        cast_lib: member_ref.cast_lib,
+                                        cast_member: member_ref.cast_member,
                                         object_type: BuiltInSymbol::Model,
                                         name: symbols.intern(&hit.model_name),
-                                    }
+                                    },
                                 )));
                             }
                         }
                     }
 
                     Ok(player.alloc_datum(Datum::List(
-                        crate::director::lingo::datum::DatumType::List, VecDeque::from(results), false,
+                        crate::director::lingo::datum::DatumType::List,
+                        VecDeque::from(results),
+                        false,
                     )))
                 })(player, symbols)
             }
@@ -3329,13 +4508,16 @@ impl Shockwave3dMemberHandlers {
                         Ok(player.alloc_datum(Datum::Void))
                     } else {
                         Ok(player.alloc_datum(Datum::List(
-                            crate::director::lingo::datum::DatumType::List, VecDeque::new(), false,
+                            crate::director::lingo::datum::DatumType::List,
+                            VecDeque::new(),
+                            false,
                         )))
                     }
                 })(player, symbols)
             }
             _ => Err(ScriptError::new(format!(
-                "No Shockwave3D member handler for '{}'", handler_name_display
+                "No Shockwave3D member handler for '{}'",
+                handler_name_display
             ))),
         }
     }
@@ -3346,17 +4528,29 @@ impl Shockwave3dMemberHandlers {
         collection: Symbol,
     ) -> Result<i32, ScriptError> {
         use crate::director::chunks::w3d::types::W3dNodeType;
-        let collection = symbols
-            .lower(&collection)
-            .map_err(|_| ScriptError::new("Cannot inspect foreign Shockwave3D collection symbol".to_string()))?;
+        let collection = symbols.lower(&collection).map_err(|_| {
+            ScriptError::new("Cannot inspect foreign Shockwave3D collection symbol".to_string())
+        })?;
         Ok(match collection {
-            "model" => scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Model).count() as i32,
+            "model" => scene
+                .nodes
+                .iter()
+                .filter(|n| n.node_type == W3dNodeType::Model)
+                .count() as i32,
             "modelresource" => scene.model_resources.len() as i32,
             "shader" => scene.shaders.len() as i32,
             "texture" => scene.texture_images.len() as i32,
             "light" => scene.lights.len() as i32,
-            "camera" => scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::View).count() as i32,
-            "group" => scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Group).count() as i32,
+            "camera" => scene
+                .nodes
+                .iter()
+                .filter(|n| n.node_type == W3dNodeType::View)
+                .count() as i32,
+            "group" => scene
+                .nodes
+                .iter()
+                .filter(|n| n.node_type == W3dNodeType::Group)
+                .count() as i32,
             // +1 for the implicit default motion at index 1 (see DEFAULT_MOTION_NAME).
             "motion" => scene.motions.len() as i32 + 1,
             _ => 0,
@@ -3370,10 +4564,17 @@ impl Shockwave3dMemberHandlers {
         index: usize,
     ) -> Option<Symbol> {
         use crate::director::chunks::w3d::types::W3dNodeType;
-        if index == 0 { return None; }
+        if index == 0 {
+            return None;
+        }
         let idx = index - 1; // 1-based to 0-based
         match collection.into_builtin() {
-            Some(BuiltInSymbol::Model) => scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Model).nth(idx).map(|n| n.name.clone()),
+            Some(BuiltInSymbol::Model) => scene
+                .nodes
+                .iter()
+                .filter(|n| n.node_type == W3dNodeType::Model)
+                .nth(idx)
+                .map(|n| n.name.clone()),
             Some(BuiltInSymbol::ModelResource) => scene.model_resources.keys().nth(idx).cloned(),
             Some(BuiltInSymbol::Shader) => scene.shaders.get(idx).map(|s| s.name.clone()),
             Some(BuiltInSymbol::Texture) => scene.texture_images.keys().nth(idx).cloned(),
@@ -3382,18 +4583,28 @@ impl Shockwave3dMemberHandlers {
                 // Director puts DefaultView as camera[1], then other cameras in scene order
                 let mut cams: Vec<Symbol> = Vec::new();
                 // DefaultView first
-                if let Some(dv) = scene.nodes.iter().find(|n| n.node_type == W3dNodeType::View && n.name == Symbol::builtin(BuiltInSymbol::DefaultView)) {
+                if let Some(dv) = scene.nodes.iter().find(|n| {
+                    n.node_type == W3dNodeType::View
+                        && n.name == Symbol::builtin(BuiltInSymbol::DefaultView)
+                }) {
                     cams.push(dv.name.clone());
                 }
                 // Then other cameras in scene order
                 for n in &scene.nodes {
-                    if n.node_type == W3dNodeType::View && n.name != Symbol::builtin(BuiltInSymbol::DefaultView) {
+                    if n.node_type == W3dNodeType::View
+                        && n.name != Symbol::builtin(BuiltInSymbol::DefaultView)
+                    {
                         cams.push(n.name.clone());
                     }
                 }
                 cams.get(idx).cloned()
             }
-            Some(BuiltInSymbol::Group) => scene.nodes.iter().filter(|n| n.node_type == W3dNodeType::Group).nth(idx).map(|n| n.name.clone()),
+            Some(BuiltInSymbol::Group) => scene
+                .nodes
+                .iter()
+                .filter(|n| n.node_type == W3dNodeType::Group)
+                .nth(idx)
+                .map(|n| n.name.clone()),
             // motion[1] = implicit default; authored motions follow at 2.. (see DEFAULT_MOTION_NAME).
             Some(BuiltInSymbol::Motion) => {
                 if idx == 0 {
@@ -3455,13 +4666,14 @@ fn render_3d_to_rgba(
     context_attrs.depth(true);
     context_attrs.preserve_drawing_buffer(true); // needed for readPixels
 
-    let gl: WebGl2RenderingContext = match canvas.get_context_with_context_options("webgl2", &context_attrs) {
-        Ok(Some(ctx)) => match ctx.dyn_into() {
-            Ok(gl) => gl,
-            Err(_) => return vec![128u8; (width * height * 4) as usize],
-        },
-        _ => return vec![128u8; (width * height * 4) as usize],
-    };
+    let gl: WebGl2RenderingContext =
+        match canvas.get_context_with_context_options("webgl2", &context_attrs) {
+            Ok(Some(ctx)) => match ctx.dyn_into() {
+                Ok(gl) => gl,
+                Err(_) => return vec![128u8; (width * height * 4) as usize],
+            },
+            _ => return vec![128u8; (width * height * 4) as usize],
+        };
 
     let context = match crate::rendering_gpu::webgl2::context::WebGL2Context::new(gl.clone()) {
         Ok(c) => c,
@@ -3470,7 +4682,15 @@ fn render_3d_to_rgba(
 
     // Render directly to the default framebuffer (the offscreen canvas), not to FBO
     let mut renderer = crate::rendering_gpu::webgl2::scene3d::Scene3dRenderer::new();
-    match renderer.render_to_default_framebuffer(&context, (0, 0), scene, width, height, Some(runtime_state), symbols) {
+    match renderer.render_to_default_framebuffer(
+        &context,
+        (0, 0),
+        scene,
+        width,
+        height,
+        Some(runtime_state),
+        symbols,
+    ) {
         Ok(_) => {}
         Err(e) => {
             console_warn!("[W3D] render_3d_to_rgba failed: {:?}", e);
@@ -3481,7 +4701,10 @@ fn render_3d_to_rgba(
     // Read pixels from the default framebuffer
     let mut pixels = vec![0u8; (width * height * 4) as usize];
     let _ = gl.read_pixels_with_opt_u8_array(
-        0, 0, width as i32, height as i32,
+        0,
+        0,
+        width as i32,
+        height as i32,
         WebGl2RenderingContext::RGBA,
         WebGl2RenderingContext::UNSIGNED_BYTE,
         Some(&mut pixels),

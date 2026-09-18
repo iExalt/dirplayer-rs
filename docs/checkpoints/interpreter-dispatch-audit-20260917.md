@@ -130,3 +130,40 @@ The accounting batch is now implemented and its four named native tests pass.
 The navigator verified the live source hash and actual test output; bounded
 acceptance is recorded in `compiled-accounting-20260917/`. Production IR and
 debugger integration remain open as described above.
+
+Callback integration follow-up: classify_async_object produces SpriteAsync for
+SpriteRef receivers, but its default for other unsupported datums remains an
+ordinary Object request. The callback repair uses the typed result; it does not
+define new semantics for truly unsupported Object calls. Those may still
+requeue unchanged and fail to terminate. Track this residual behavior in the
+Stage 2.2 dispatch cutover; callback-specific success cannot close that gate.
+
+The real callback fixture observed Void for getVariable supplying the FlashObject
+argument to sprite.setCallback, both inline and standalone. Subsequent source
+trace attributes this to the browser runner's bridge transport converting
+object-valued getter results to null. This supersedes the tentative nested-eval
+diagnosis; these receipts do not establish a generic nested-expression defect.
+The callback fixture instead obtains a real bound object from callback delivery.
+Track object-return support in the Stage 2.5/2.6 bridge follow-up and do not infer
+it from callback-specific success.
+
+The later callback fixture also exposed SpriteAsync's shared waits_for_ready
+fallback: it uses numeric readiness and invokes SpriteDatumHandlers::call under
+with_player, whose callFunction uses the numeric host route. Overlapping owner
+sprite IDs make that host lookup ambiguous. The callback component now has an
+approved dedicated callFunction path with captured generation and detached host
+work, preserving its existing argument-string and String-or-Void contracts.
+Sprite setVariable still reaches the shared legacy block. Subsequent discovery
+finds that the recognized getVariable builtin already takes a partial classifier
+shortcut into BindGet, bypassing attached-script precedence and failing its
+missing-member case; its legacy getter body still exists. Both methods remain
+open work. Do not extend callback acceptance to their host-borrow, override or
+initial-readiness behavior. See sprite-variable-ownership-audit-20260918.md.
+
+Successor acceptance, 2026-09-18: the dedicated sprite get/set component is now
+accepted at `sprite-variable-20260918/`. It removes the getter classifier
+shortcut, preserves attached-script precedence, owns both host routes and
+verifies early retained-object use and replacement rejection in real Ruffle.
+The older open-work statements above describe discovery history. Production IR,
+debugger integration and unsupported ordinary Object dispatch remain separate
+open Stage 2.2 work.

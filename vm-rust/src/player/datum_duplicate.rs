@@ -10,11 +10,8 @@ use std::collections::HashSet;
 use crate::director::lingo::datum::{Datum, DatumType};
 
 use super::{
-    allocator::DatumAllocatorTrait,
-    datum_ref::DatumRef,
-    driver,
-    symbols::symbol_table::SymbolTable,
-    DirPlayer, ScriptError, ScriptErrorCode,
+    allocator::DatumAllocatorTrait, datum_ref::DatumRef, driver,
+    symbols::symbol_table::SymbolTable, DirPlayer, ScriptError, ScriptErrorCode,
 };
 
 fn invalid_reference(message: impl Into<String>) -> ScriptError {
@@ -45,10 +42,9 @@ fn validate_container_graph(player: &DirPlayer, root: &DatumRef) -> Result<(), S
                 if matches!(reference, DatumRef::Void) {
                     continue;
                 }
-                let datum = player
-                    .allocator
-                    .try_get_datum(&reference)
-                    .ok_or_else(|| invalid_reference(format!("invalid datum reference {reference}")))?;
+                let datum = player.allocator.try_get_datum(&reference).ok_or_else(|| {
+                    invalid_reference(format!("invalid datum reference {reference}"))
+                })?;
                 match datum {
                     Datum::List(_, items, _) => {
                         let id = reference.unwrap();
@@ -97,7 +93,11 @@ enum DuplicateFrame {
     },
 }
 
-fn cleanup_failed_duplicate(player: &mut DirPlayer, created: &mut Vec<DatumRef>, results: &mut Vec<DatumRef>) {
+fn cleanup_failed_duplicate(
+    player: &mut DirPlayer,
+    created: &mut Vec<DatumRef>,
+    results: &mut Vec<DatumRef>,
+) {
     results.clear();
     created.clear();
     // Representable allocator failures leave owned references queued for
@@ -139,7 +139,9 @@ fn duplicate_leaf(
             let copied_handle = player
                 .bitmap_manager
                 .add_ephemeral_bitmap_handle(bitmap)
-                .map_err(|error| ScriptError::new(format!("bitmap allocation failed: {error:?}")))?;
+                .map_err(|error| {
+                    ScriptError::new(format!("bitmap allocation failed: {error:?}"))
+                })?;
             Datum::BitmapRef(copied_handle)
         }
         other => other,
@@ -182,7 +184,9 @@ pub(crate) fn duplicate_datum(
                         .allocator
                         .try_get_datum(&source)
                         .cloned()
-                        .ok_or_else(|| invalid_reference(format!("invalid datum reference {source}")))?;
+                        .ok_or_else(|| {
+                            invalid_reference(format!("invalid datum reference {source}"))
+                        })?;
                     match datum {
                         Datum::List(list_type, items, sorted) => {
                             let child_count = items.len();
@@ -230,7 +234,9 @@ pub(crate) fn duplicate_datum(
                     child_count,
                 } => {
                     if child_count % 2 != 0 || results.len() < child_count {
-                        return Err(invalid_reference("duplicate property-list worklist underflow"));
+                        return Err(invalid_reference(
+                            "duplicate property-list worklist underflow",
+                        ));
                     }
                     let start = results.len() - child_count;
                     let children: Vec<_> = results.split_off(start);
@@ -264,10 +270,10 @@ pub(crate) fn duplicate_datum(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_std::channel;
     use crate::director::lingo::datum::Datum;
     use crate::player::bitmap::bitmap::{Bitmap, PaletteRef};
     use crate::player::ownership::{OwnerKey, OwnerToken};
+    use async_std::channel;
 
     fn test_player(player_id: u64) -> DirPlayer {
         let (tx, _rx) = channel::unbounded();
@@ -301,7 +307,10 @@ mod tests {
 
         let result = duplicate_datum(&mut player, &symbols, &cycle);
 
-        assert_eq!(result.err().map(|error| error.code), Some(ScriptErrorCode::InvalidReference));
+        assert_eq!(
+            result.err().map(|error| error.code),
+            Some(ScriptErrorCode::InvalidReference)
+        );
         assert_eq!(player.allocator.datum_count(), before);
     }
 
@@ -311,10 +320,7 @@ mod tests {
         let symbols = SymbolTable::new();
         let list = empty_list(&mut player);
         let key = player.alloc_datum(Datum::String("cycle".to_owned()));
-        let prop = player.alloc_datum(Datum::PropList(
-            std::collections::VecDeque::new(),
-            false,
-        ));
+        let prop = player.alloc_datum(Datum::PropList(std::collections::VecDeque::new(), false));
         if let Datum::List(_, items, _) = player.get_datum_mut(&list) {
             items.push_back(prop.clone());
         }
@@ -326,9 +332,14 @@ mod tests {
 
         let result = duplicate_datum(&mut player, &symbols, &list);
 
-        assert_eq!(result.err().map(|error| error.code), Some(ScriptErrorCode::InvalidReference));
+        assert_eq!(
+            result.err().map(|error| error.code),
+            Some(ScriptErrorCode::InvalidReference)
+        );
         assert_eq!(player.allocator.datum_count(), before);
-        assert!(matches!(player.get_datum(&existing), Datum::String(value) if value == "unchanged"));
+        assert!(
+            matches!(player.get_datum(&existing), Datum::String(value) if value == "unchanged")
+        );
     }
 
     #[test]
@@ -366,9 +377,13 @@ mod tests {
         };
         assert!(sorted);
         assert_eq!(entries.len(), 2);
-        assert!(matches!(player.get_datum(&entries[0].0), Datum::String(value) if value == "first"));
+        assert!(
+            matches!(player.get_datum(&entries[0].0), Datum::String(value) if value == "first")
+        );
         assert!(matches!(player.get_datum(&entries[0].1), Datum::String(value) if value == "one"));
-        assert!(matches!(player.get_datum(&entries[1].0), Datum::String(value) if value == "second"));
+        assert!(
+            matches!(player.get_datum(&entries[1].0), Datum::String(value) if value == "second")
+        );
         assert!(matches!(player.get_datum(&entries[1].1), Datum::String(value) if value == "two"));
         let Datum::PropList(void_entries, sorted) = player.get_datum(&items[1]) else {
             panic!("void copy is not a property list");
@@ -429,14 +444,7 @@ mod tests {
         let symbols = SymbolTable::new();
         let source_handle = player
             .bitmap_manager
-            .add_ephemeral_bitmap_handle(Bitmap::new(
-                1,
-                1,
-                32,
-                32,
-                8,
-                PaletteRef::Default,
-            ))
+            .add_ephemeral_bitmap_handle(Bitmap::new(1, 1, 32, 32, 8, PaletteRef::Default))
             .expect("source bitmap");
         player
             .bitmap_manager

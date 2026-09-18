@@ -23,7 +23,11 @@ impl DatumRef {
             if *mut_ref != u32::MAX {
                 *mut_ref += 1;
             }
-            DatumRef::Ref(DatumHandle { id, ref_count, owner })
+            DatumRef::Ref(DatumHandle {
+                id,
+                ref_count,
+                owner,
+            })
         } else {
             DatumRef::Void
         }
@@ -31,7 +35,11 @@ impl DatumRef {
 
     #[inline]
     pub(crate) fn from_allocated(id: DatumId, ref_count: *mut u32, owner: OwnerToken) -> DatumRef {
-        DatumRef::Ref(DatumHandle { id, ref_count, owner })
+        DatumRef::Ref(DatumHandle {
+            id,
+            ref_count,
+            owner,
+        })
     }
 
     #[inline]
@@ -113,7 +121,9 @@ impl Drop for DatumRef {
             }
             *rc -= 1;
             if *rc == 0 {
-                handle.owner.enqueue(super::ownership::ReclaimKind::Datum(handle.id));
+                handle
+                    .owner
+                    .enqueue(super::ownership::ReclaimKind::Datum(handle.id));
             }
         }
     }

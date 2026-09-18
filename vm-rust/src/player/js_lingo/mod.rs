@@ -26,10 +26,10 @@ pub mod variable_length;
 pub mod xdr;
 
 #[cfg(test)]
+mod interp_tests;
+#[cfg(test)]
 mod test_fixtures;
 #[cfg(test)]
 mod tests;
-#[cfg(test)]
-mod interp_tests;
 
 pub use xdr::{decode_script, JsAtom, JsScriptIR, JsTryNote, JsXdrError};

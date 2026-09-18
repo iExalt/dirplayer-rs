@@ -197,7 +197,10 @@ pub struct NativeScriptInstanceSnapshot {
 pub enum NativePlayerNotificationKind {
     ScoreChanged(NativeScoreSnapshot),
     ChannelChanged(NativeChannelSnapshot),
-    ChannelNameChanged { channel: i16, name: String },
+    ChannelNameChanged {
+        channel: i16,
+        name: String,
+    },
     ChannelNamesChanged(Vec<(i16, String)>),
     CastMemberChanged(NativeMemberSnapshot),
     CastMemberListChanged {
@@ -246,7 +249,10 @@ impl Default for NativePlayerNotificationMailbox {
 
 impl NativePlayerNotificationMailbox {
     pub fn new(capacity: usize) -> Self {
-        assert!(capacity > 0, "native notification capacity must be positive");
+        assert!(
+            capacity > 0,
+            "native notification capacity must be positive"
+        );
         Self {
             events: VecDeque::with_capacity(capacity),
             capacity,
@@ -443,8 +449,8 @@ impl HostEventMailbox {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::ownership::OwnerKey;
+    use super::*;
 
     #[test]
     fn bounded_mailbox_coalesces_only_state_snapshots() {
@@ -588,9 +594,7 @@ mod tests {
     #[test]
     fn detached_host_batch_is_prepended_ahead_of_reentrant_events() {
         let mut mailbox = HostEventMailbox::new(4);
-        mailbox
-            .push(HostEvent::FrameChanged { frame: 4 })
-            .unwrap();
+        mailbox.push(HostEvent::FrameChanged { frame: 4 }).unwrap();
         mailbox
             .prepend(vec![
                 HostEvent::MovieLoaded {

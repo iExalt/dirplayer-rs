@@ -2,7 +2,10 @@ use crate::player::symbols::{builtin::BuiltInSymbol, symbol::Symbol};
 
 use super::{
     cast_member::CastMemberType,
-    events::{player_invoke_event_to_instances, player_dispatch_movie_callback, player_invoke_frame_and_movie_scripts},
+    events::{
+        player_dispatch_movie_callback, player_invoke_event_to_instances,
+        player_invoke_frame_and_movie_scripts,
+    },
     player_is_playing, reserve_player_mut, DatumRef, DirPlayer, ScriptError,
 };
 
@@ -12,7 +15,10 @@ use super::{
 /// from XMED-misparsed STXT runs that store the field's box height instead
 /// of its real per-line height — honoring them sends the caret to the
 /// wrong line on click and breaks selection past the first line.
-pub(crate) fn effective_line_height(font: &crate::player::font::BitmapFont, fixed_line_space: u16) -> i32 {
+pub(crate) fn effective_line_height(
+    font: &crate::player::font::BitmapFont,
+    fixed_line_space: u16,
+) -> i32 {
     let natural_lh = if font.font_size > 0 {
         font.font_size as i32
     } else {
@@ -47,7 +53,10 @@ fn focused_member_is_editable(player: &DirPlayer) -> bool {
     if player.keyboard_focus_sprite < 0 {
         return false;
     }
-    let sprite = player.movie.score.get_sprite(player.keyboard_focus_sprite as i16);
+    let sprite = player
+        .movie
+        .score
+        .get_sprite(player.keyboard_focus_sprite as i16);
     let member = sprite
         .and_then(|s| s.member.clone())
         .and_then(|r| player.movie.cast_manager.find_member_by_ref(&r));
@@ -97,10 +106,10 @@ pub(crate) fn apply_text_edit(
     // Word-character predicate at byte level for the line-break helpers
     // (which only consult ASCII \r / \n -- safe with bytes).
     let _ = bytes_for_nav.len(); // suppress unused warning if only line helpers consult bytes
-    // Char-aware "is word char": alphanumeric or underscore. Unlike the
-    // earlier byte-based check, this returns true for umlauts (ä, é, ñ,
-    // å, etc.) so Ctrl+Arrow / double-click word-select treats "café" as
-    // one word instead of stopping at the multi-byte boundary.
+                                 // Char-aware "is word char": alphanumeric or underscore. Unlike the
+                                 // earlier byte-based check, this returns true for umlauts (ä, é, ñ,
+                                 // å, etc.) so Ctrl+Arrow / double-click word-select treats "café" as
+                                 // one word instead of stopping at the multi-byte boundary.
     let is_word_ch = |c: char| c.is_alphanumeric() || c == '_';
 
     // Pre-snapshot (byte_pos, char) for the whole text. Allocates once per
@@ -111,19 +120,30 @@ pub(crate) fn apply_text_edit(
     // the index where it would be inserted (== nav_chars.len() for EOS).
     let char_idx_of = |byte_pos: i32| -> usize {
         let bp = byte_pos.clamp(0, len) as usize;
-        nav_chars.iter().position(|(b, _)| *b >= bp).unwrap_or(nav_chars.len())
+        nav_chars
+            .iter()
+            .position(|(b, _)| *b >= bp)
+            .unwrap_or(nav_chars.len())
     };
     let prev_word_boundary = |from: i32| -> i32 {
         let mut i = char_idx_of(from);
-        while i > 0 && !is_word_ch(nav_chars[i - 1].1) { i -= 1; }
-        while i > 0 && is_word_ch(nav_chars[i - 1].1) { i -= 1; }
+        while i > 0 && !is_word_ch(nav_chars[i - 1].1) {
+            i -= 1;
+        }
+        while i > 0 && is_word_ch(nav_chars[i - 1].1) {
+            i -= 1;
+        }
         nav_chars.get(i).map(|(b, _)| *b as i32).unwrap_or(len)
     };
     let next_word_boundary = |from: i32| -> i32 {
         let n = nav_chars.len();
         let mut i = char_idx_of(from);
-        while i < n && is_word_ch(nav_chars[i].1) { i += 1; }
-        while i < n && !is_word_ch(nav_chars[i].1) { i += 1; }
+        while i < n && is_word_ch(nav_chars[i].1) {
+            i += 1;
+        }
+        while i < n && !is_word_ch(nav_chars[i].1) {
+            i += 1;
+        }
         nav_chars.get(i).map(|(b, _)| *b as i32).unwrap_or(len)
     };
     // Char-boundary helpers. The text buffer is UTF-8 (Rust String), so a
@@ -133,30 +153,44 @@ pub(crate) fn apply_text_edit(
     // nearest legal char boundary using `str::is_char_boundary`, which is
     // O(1) per step.
     let prev_char_boundary = |from: i32| -> i32 {
-        if from <= 0 { return 0; }
+        if from <= 0 {
+            return 0;
+        }
         let mut p = (from as usize).min(text.len());
-        if p == 0 { return 0; }
+        if p == 0 {
+            return 0;
+        }
         p -= 1;
-        while p > 0 && !text.is_char_boundary(p) { p -= 1; }
+        while p > 0 && !text.is_char_boundary(p) {
+            p -= 1;
+        }
         p as i32
     };
     let next_char_boundary = |from: i32| -> i32 {
         let n = text.len();
         let mut p = (from as usize).min(n);
-        if p >= n { return n as i32; }
+        if p >= n {
+            return n as i32;
+        }
         p += 1;
-        while p < n && !text.is_char_boundary(p) { p += 1; }
+        while p < n && !text.is_char_boundary(p) {
+            p += 1;
+        }
         p as i32
     };
     let line_start_of = |from: i32| -> i32 {
         let mut p = from.clamp(0, len) as usize;
-        while p > 0 && bytes_for_nav[p - 1] != b'\r' && bytes_for_nav[p - 1] != b'\n' { p -= 1; }
+        while p > 0 && bytes_for_nav[p - 1] != b'\r' && bytes_for_nav[p - 1] != b'\n' {
+            p -= 1;
+        }
         p as i32
     };
     let line_end_of = |from: i32| -> i32 {
         let n = bytes_for_nav.len();
         let mut p = from.clamp(0, len) as usize;
-        while p < n && bytes_for_nav[p] != b'\r' && bytes_for_nav[p] != b'\n' { p += 1; }
+        while p < n && bytes_for_nav[p] != b'\r' && bytes_for_nav[p] != b'\n' {
+            p += 1;
+        }
         p as i32
     };
 
@@ -216,9 +250,7 @@ pub(crate) fn apply_text_edit(
             // (panic on next edit). Snap to the nearest legal char
             // boundary, walking backwards so visual column stays close
             // to where the user expects.
-            while (new_pos as usize) < text.len()
-                && !text.is_char_boundary(new_pos as usize)
-            {
+            while (new_pos as usize) < text.len() && !text.is_char_boundary(new_pos as usize) {
                 new_pos -= 1;
             }
             if shift {
@@ -238,9 +270,7 @@ pub(crate) fn apply_text_edit(
                 let next_line_end = line_end_of(next_line_start);
                 next_line_start + col.min(next_line_end - next_line_start)
             };
-            while (new_pos as usize) < text.len()
-                && !text.is_char_boundary(new_pos as usize)
-            {
+            while (new_pos as usize) < text.len() && !text.is_char_boundary(new_pos as usize) {
                 new_pos -= 1;
             }
             if shift {
@@ -250,7 +280,11 @@ pub(crate) fn apply_text_edit(
             }
         }
         "Home" => {
-            let new_pos = if ctrl_or_meta { 0 } else { line_start_of(active) };
+            let new_pos = if ctrl_or_meta {
+                0
+            } else {
+                line_start_of(active)
+            };
             if shift {
                 extend(sel_start, sel_end, anchor, new_pos, len);
             } else {
@@ -258,7 +292,11 @@ pub(crate) fn apply_text_edit(
             }
         }
         "End" => {
-            let new_pos = if ctrl_or_meta { len } else { line_end_of(active) };
+            let new_pos = if ctrl_or_meta {
+                len
+            } else {
+                line_end_of(active)
+            };
             if shift {
                 extend(sel_start, sel_end, anchor, new_pos, len);
             } else {
@@ -355,230 +393,281 @@ pub(crate) fn set_caret_at_screen_for_player(
     movie_y: i32,
     mode: CaretAtMode,
 ) -> bool {
-        let Some(sprite) = player.movie.score.get_sprite(sprite_id) else { return false };
-        let Some(member_ref) = sprite.member.clone() else { return false };
-        let sprite_loc_h = sprite.loc_h;
-        let sprite_loc_v = sprite.loc_v;
-        let sprite_width = sprite.width;
-        // Match the renderer's stage-scaling: the GPU/PFR text path
-        // rasterises glyphs at `font_size * stage_scale` (see
-        // rendering_gpu/webgl2/mod.rs render-text entry), so the rasterised
-        // atlas's `char_widths` reflect the scaled-up glyph widths. Without
-        // applying the same scale here, `xy_to_caret_index` walks a
-        // differently-sized font's char_widths than the renderer drew --
-        // the click maps to half the visual position on a 2x-scaled stage.
-        let (scale_x, scale_y) = crate::player::stage::stage_scale(player);
-        let stage_scale = scale_x.min(scale_y);
+    let Some(sprite) = player.movie.score.get_sprite(sprite_id) else {
+        return false;
+    };
+    let Some(member_ref) = sprite.member.clone() else {
+        return false;
+    };
+    let sprite_loc_h = sprite.loc_h;
+    let sprite_loc_v = sprite.loc_v;
+    let sprite_width = sprite.width;
+    // Match the renderer's stage-scaling: the GPU/PFR text path
+    // rasterises glyphs at `font_size * stage_scale` (see
+    // rendering_gpu/webgl2/mod.rs render-text entry), so the rasterised
+    // atlas's `char_widths` reflect the scaled-up glyph widths. Without
+    // applying the same scale here, `xy_to_caret_index` walks a
+    // differently-sized font's char_widths than the renderer drew --
+    // the click maps to half the visual position on a 2x-scaled stage.
+    let (scale_x, scale_y) = crate::player::stage::stage_scale(player);
+    let stage_scale = scale_x.min(scale_y);
 
-        // Resolve which editable member kind we have, and its text + style
-        // properties needed to drive xy_to_caret_index. We work on a snapshot
-        // so we can borrow font_manager / cast_manager separately below.
-        enum MemberSnapshot {
-            Field {
-                text: String,
-                font: String,
-                font_size: u16,
-                font_id: Option<u16>,
-                alignment: crate::player::symbols::builtin::BuiltInSymbol,
-                fixed_line_space: u16,
-                top_spacing: i16,
-                word_wrap: bool,
+    // Resolve which editable member kind we have, and its text + style
+    // properties needed to drive xy_to_caret_index. We work on a snapshot
+    // so we can borrow font_manager / cast_manager separately below.
+    enum MemberSnapshot {
+        Field {
+            text: String,
+            font: String,
+            font_size: u16,
+            font_id: Option<u16>,
+            alignment: crate::player::symbols::builtin::BuiltInSymbol,
+            fixed_line_space: u16,
+            top_spacing: i16,
+            word_wrap: bool,
+        },
+        Text {
+            text: String,
+            font: String,
+            font_size: u16,
+            fixed_line_space: u16,
+            top_spacing: i16,
+        },
+    }
+    let snapshot = {
+        let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
+        let Some(member) = member else { return false };
+        match &member.member_type {
+            CastMemberType::Field(f) if f.editable => MemberSnapshot::Field {
+                text: f.text.clone(),
+                font: f.font.clone(),
+                font_size: f.font_size,
+                font_id: f.font_id,
+                alignment: f.alignment.clone(),
+                fixed_line_space: f.fixed_line_space,
+                top_spacing: f.top_spacing,
+                word_wrap: f.word_wrap,
             },
-            Text {
-                text: String,
-                font: String,
-                font_size: u16,
-                fixed_line_space: u16,
-                top_spacing: i16,
-            },
-        }
-        let snapshot = {
-            let member = player.movie.cast_manager.find_member_by_ref(&member_ref);
-            let Some(member) = member else { return false };
-            match &member.member_type {
-                CastMemberType::Field(f) if f.editable => MemberSnapshot::Field {
-                    text: f.text.clone(),
-                    font: f.font.clone(),
-                    font_size: f.font_size,
-                    font_id: f.font_id,
-                    alignment: f.alignment.clone(),
-                    fixed_line_space: f.fixed_line_space,
-                    top_spacing: f.top_spacing,
-                    word_wrap: f.word_wrap,
-                },
-                CastMemberType::Text(t)
-                    if t.info.as_ref().map_or(false, |i| i.editable) =>
-                {
-                    MemberSnapshot::Text {
-                        text: t.text.clone(),
-                        font: t.font.clone(),
-                        font_size: t.font_size,
-                        fixed_line_space: t.fixed_line_space,
-                        top_spacing: t.top_spacing,
-                    }
+            CastMemberType::Text(t) if t.info.as_ref().map_or(false, |i| i.editable) => {
+                MemberSnapshot::Text {
+                    text: t.text.clone(),
+                    font: t.font.clone(),
+                    font_size: t.font_size,
+                    fixed_line_space: t.fixed_line_space,
+                    top_spacing: t.top_spacing,
                 }
-                _ => return false,
             }
-        };
+            _ => return false,
+        }
+    };
 
-        // Compute caret index from movie coords, using the appropriate font.
-        let caret_idx = match &snapshot {
-            MemberSnapshot::Field { text, font, font_size, font_id, alignment,
-                                    fixed_line_space, top_spacing, word_wrap: _ } => {
-                // Mirror the renderer: rasterise the font at the SAME scaled
-                // size the PFR atlas uses (`font_size * stage_scale`), AND
-                // use the SAME font-lookup path as the renderer so we get
-                // the exact same cached BitmapFont (same char_widths, same
-                // first_char_num). The previous `get_or_load_font_with_id`
-                // path had a different cache-key scheme (case-sensitive)
-                // and could fall through to a fuzzy `starts_with` match
-                // that returned a DIFFERENT-size font than the renderer
-                // used -- when char_widths differed, multibyte chars
-                // diverged from ASCII chars because per-char proportional
-                // widths don't scale uniformly.
-                let scaled_font_size = ((*font_size as f64) * stage_scale)
-                    .round().max(1.0) as u16;
-                let font_opt = player.font_manager.get_font_with_cast_and_bitmap(
+    // Compute caret index from movie coords, using the appropriate font.
+    let caret_idx = match &snapshot {
+        MemberSnapshot::Field {
+            text,
+            font,
+            font_size,
+            font_id,
+            alignment,
+            fixed_line_space,
+            top_spacing,
+            word_wrap: _,
+        } => {
+            // Mirror the renderer: rasterise the font at the SAME scaled
+            // size the PFR atlas uses (`font_size * stage_scale`), AND
+            // use the SAME font-lookup path as the renderer so we get
+            // the exact same cached BitmapFont (same char_widths, same
+            // first_char_num). The previous `get_or_load_font_with_id`
+            // path had a different cache-key scheme (case-sensitive)
+            // and could fall through to a fuzzy `starts_with` match
+            // that returned a DIFFERENT-size font than the renderer
+            // used -- when char_widths differed, multibyte chars
+            // diverged from ASCII chars because per-char proportional
+            // widths don't scale uniformly.
+            let scaled_font_size = ((*font_size as f64) * stage_scale).round().max(1.0) as u16;
+            let font_opt = player
+                .font_manager
+                .get_font_with_cast_and_bitmap(
                     font,
                     &player.movie.cast_manager,
                     &mut player.bitmap_manager,
                     Some(scaled_font_size),
                     None,
-                ).or_else(|| {
+                )
+                .or_else(|| {
                     // Same font_id fallback the renderer uses when the
                     // name-based lookup misses (rich-text spans reference
                     // fonts by ID).
                     font_id.and_then(|id| {
-                        player.font_manager.font_by_id.get(&id).copied()
+                        player
+                            .font_manager
+                            .font_by_id
+                            .get(&id)
+                            .copied()
                             .and_then(|fr| player.font_manager.fonts.get(&fr).cloned())
                     })
                 });
-                let Some(f) = font_opt else { return false };
-                // Scale the click coords into the renderer's coordinate
-                // space too. movie_x is in unscaled movie space; the
-                // renderer's char_widths sum is in scaled space.
-                let local_x = ((movie_x - sprite_loc_h) as f64 * stage_scale).round() as i32;
-                let local_y = ((movie_y - sprite_loc_v - *top_spacing as i32) as f64 * stage_scale).round() as i32;
-                let scaled_width = ((sprite_width as f64) * stage_scale).round() as i32;
-                let line_h = effective_line_height(&f, *fixed_line_space);
-                crate::player::bitmap::bitmap::Bitmap::xy_to_caret_index(
-                    text, &f, scaled_width, alignment.as_str(), line_h, local_x, local_y,
-                )
-            }
-            MemberSnapshot::Text { text, font, font_size, fixed_line_space, top_spacing } => {
-                // Same stage-scaled font lookup + coord scaling as the
-                // Field branch above. See its comment for the rationale.
-                let scaled_font_size = ((*font_size as f64) * stage_scale)
-                    .round().max(1.0) as u16;
-                let font_opt = player.font_manager.get_font_with_cast_and_bitmap(
-                    font,
-                    &player.movie.cast_manager,
-                    &mut player.bitmap_manager,
-                    Some(scaled_font_size),
-                    None,
-                );
-                let Some(f) = font_opt else { return false };
-                // For TextMember bitmap path we treat width as unbounded, matching
-                // the renderer (see rendering.rs draw_text-with-caret block).
-                let local_x = ((movie_x - sprite_loc_h) as f64 * stage_scale).round() as i32;
-                let local_y = ((movie_y - sprite_loc_v - *top_spacing as i32) as f64 * stage_scale).round() as i32;
-                let line_h = effective_line_height(&f, *fixed_line_space);
-                crate::player::bitmap::bitmap::Bitmap::xy_to_caret_index(
-                    text, &f, 0, "left", line_h, local_x, local_y,
-                )
-            }
-        };
-
-        // Apply the selection update to the live member (re-fetch mutably).
-        let Some(member) = player.movie.cast_manager.find_mut_member_by_ref(&member_ref) else {
-            return false;
-        };
-
-        let (text_ref, sel_start_ref, sel_end_ref, sel_anchor_ref):
-            (&str, &mut i32, &mut i32, &mut i32) = match &mut member.member_type {
-            CastMemberType::Field(f) => (&f.text, &mut f.sel_start, &mut f.sel_end, &mut f.sel_anchor),
-            CastMemberType::Text(t) => (&t.text, &mut t.sel_start, &mut t.sel_end, &mut t.sel_anchor),
-            _ => return false,
-        };
-        let text_len = text_ref.len() as i32;
-        let bytes = text_ref.as_bytes();
-        let clamped = caret_idx.clamp(0, text_len);
-
-        match mode {
-            CaretAtMode::SetAndAnchor => {
-                *sel_start_ref = clamped;
-                *sel_end_ref = clamped;
-                *sel_anchor_ref = clamped;
-            }
-            CaretAtMode::ExtendToAnchor => {
-                let anchor = (*sel_anchor_ref).clamp(0, text_len);
-                *sel_start_ref = anchor.min(clamped);
-                *sel_end_ref = anchor.max(clamped);
-            }
-            CaretAtMode::DragExtend => {
-                let anchor = (*sel_anchor_ref).clamp(0, text_len);
-                *sel_start_ref = anchor.min(clamped);
-                *sel_end_ref = anchor.max(clamped);
-            }
-            CaretAtMode::SelectWord => {
-                // Char-aware word selection: double-clicking inside "café"
-                // selects the whole word instead of stopping at the lead
-                // byte of 'é'. We use `text_snapshot` (Rust String) and
-                // walk char_indices to find the surrounding word boundaries.
-                let click_b = clamped as usize;
-                let is_word_ch = |c: char| c.is_alphanumeric() || c == '_';
-                // Materialise (byte_pos, char) for the line. Strings in
-                // editable fields are short -- one-shot collection is fine.
-                let chars: Vec<(usize, char)> =
-                    text_ref.char_indices().collect();
-                // Locate the char-index whose byte_pos straddles click_b.
-                // `i` is the first char-index whose byte_pos >= click_b;
-                // if there's a char strictly before that, prefer it for
-                // the "click_b is on a char boundary" case.
-                let i = chars.iter().position(|(b, _)| *b >= click_b)
-                    .unwrap_or(chars.len());
-                let (mut s, mut e) = (i, i);
-                // If the click lands on a word char, expand both sides;
-                // if it's right after one (caret between word and non-
-                // word), grab the trailing word -- matches the byte
-                // behaviour for ASCII text.
-                let on_word = chars.get(i).map_or(false, |(_, c)| is_word_ch(*c));
-                let after_word = i > 0 && is_word_ch(chars[i - 1].1);
-                if on_word {
-                    while s > 0 && is_word_ch(chars[s - 1].1) { s -= 1; }
-                    while e < chars.len() && is_word_ch(chars[e].1) { e += 1; }
-                } else if after_word {
-                    while s > 0 && is_word_ch(chars[s - 1].1) { s -= 1; }
-                    e = i;
-                }
-                let start_b = chars.get(s).map(|(b, _)| *b).unwrap_or(text_ref.len());
-                let end_b = chars.get(e).map(|(b, _)| *b).unwrap_or(text_ref.len());
-                *sel_start_ref = start_b as i32;
-                *sel_end_ref = end_b as i32;
-                *sel_anchor_ref = start_b as i32;
-            }
-            CaretAtMode::SelectLine => {
-                let mut start = clamped as usize;
-                let mut end = clamped as usize;
-                let n = bytes.len();
-                while start > 0 && bytes[start - 1] != b'\r' && bytes[start - 1] != b'\n' { start -= 1; }
-                while end < n && bytes[end] != b'\r' && bytes[end] != b'\n' { end += 1; }
-                *sel_start_ref = start as i32;
-                *sel_end_ref = end as i32;
-                *sel_anchor_ref = start as i32;
-            }
+            let Some(f) = font_opt else { return false };
+            // Scale the click coords into the renderer's coordinate
+            // space too. movie_x is in unscaled movie space; the
+            // renderer's char_widths sum is in scaled space.
+            let local_x = ((movie_x - sprite_loc_h) as f64 * stage_scale).round() as i32;
+            let local_y = ((movie_y - sprite_loc_v - *top_spacing as i32) as f64 * stage_scale)
+                .round() as i32;
+            let scaled_width = ((sprite_width as f64) * stage_scale).round() as i32;
+            let line_h = effective_line_height(&f, *fixed_line_space);
+            crate::player::bitmap::bitmap::Bitmap::xy_to_caret_index(
+                text,
+                &f,
+                scaled_width,
+                alignment.as_str(),
+                line_h,
+                local_x,
+                local_y,
+            )
         }
+        MemberSnapshot::Text {
+            text,
+            font,
+            font_size,
+            fixed_line_space,
+            top_spacing,
+        } => {
+            // Same stage-scaled font lookup + coord scaling as the
+            // Field branch above. See its comment for the rationale.
+            let scaled_font_size = ((*font_size as f64) * stage_scale).round().max(1.0) as u16;
+            let font_opt = player.font_manager.get_font_with_cast_and_bitmap(
+                font,
+                &player.movie.cast_manager,
+                &mut player.bitmap_manager,
+                Some(scaled_font_size),
+                None,
+            );
+            let Some(f) = font_opt else { return false };
+            // For TextMember bitmap path we treat width as unbounded, matching
+            // the renderer (see rendering.rs draw_text-with-caret block).
+            let local_x = ((movie_x - sprite_loc_h) as f64 * stage_scale).round() as i32;
+            let local_y = ((movie_y - sprite_loc_v - *top_spacing as i32) as f64 * stage_scale)
+                .round() as i32;
+            let line_h = effective_line_height(&f, *fixed_line_space);
+            crate::player::bitmap::bitmap::Bitmap::xy_to_caret_index(
+                text, &f, 0, "left", line_h, local_x, local_y,
+            )
+        }
+    };
 
-        let new_start = *sel_start_ref;
-        let new_end = *sel_end_ref;
-        player.text_selection_start = new_start.max(0) as u16;
-        player.text_selection_end = new_end.max(0) as u16;
+    // Apply the selection update to the live member (re-fetch mutably).
+    let Some(member) = player
+        .movie
+        .cast_manager
+        .find_mut_member_by_ref(&member_ref)
+    else {
+        return false;
+    };
+
+    let (text_ref, sel_start_ref, sel_end_ref, sel_anchor_ref): (
+        &str,
+        &mut i32,
+        &mut i32,
+        &mut i32,
+    ) = match &mut member.member_type {
+        CastMemberType::Field(f) => (&f.text, &mut f.sel_start, &mut f.sel_end, &mut f.sel_anchor),
+        CastMemberType::Text(t) => (&t.text, &mut t.sel_start, &mut t.sel_end, &mut t.sel_anchor),
+        _ => return false,
+    };
+    let text_len = text_ref.len() as i32;
+    let bytes = text_ref.as_bytes();
+    let clamped = caret_idx.clamp(0, text_len);
+
+    match mode {
+        CaretAtMode::SetAndAnchor => {
+            *sel_start_ref = clamped;
+            *sel_end_ref = clamped;
+            *sel_anchor_ref = clamped;
+        }
+        CaretAtMode::ExtendToAnchor => {
+            let anchor = (*sel_anchor_ref).clamp(0, text_len);
+            *sel_start_ref = anchor.min(clamped);
+            *sel_end_ref = anchor.max(clamped);
+        }
+        CaretAtMode::DragExtend => {
+            let anchor = (*sel_anchor_ref).clamp(0, text_len);
+            *sel_start_ref = anchor.min(clamped);
+            *sel_end_ref = anchor.max(clamped);
+        }
+        CaretAtMode::SelectWord => {
+            // Char-aware word selection: double-clicking inside "café"
+            // selects the whole word instead of stopping at the lead
+            // byte of 'é'. We use `text_snapshot` (Rust String) and
+            // walk char_indices to find the surrounding word boundaries.
+            let click_b = clamped as usize;
+            let is_word_ch = |c: char| c.is_alphanumeric() || c == '_';
+            // Materialise (byte_pos, char) for the line. Strings in
+            // editable fields are short -- one-shot collection is fine.
+            let chars: Vec<(usize, char)> = text_ref.char_indices().collect();
+            // Locate the char-index whose byte_pos straddles click_b.
+            // `i` is the first char-index whose byte_pos >= click_b;
+            // if there's a char strictly before that, prefer it for
+            // the "click_b is on a char boundary" case.
+            let i = chars
+                .iter()
+                .position(|(b, _)| *b >= click_b)
+                .unwrap_or(chars.len());
+            let (mut s, mut e) = (i, i);
+            // If the click lands on a word char, expand both sides;
+            // if it's right after one (caret between word and non-
+            // word), grab the trailing word -- matches the byte
+            // behaviour for ASCII text.
+            let on_word = chars.get(i).map_or(false, |(_, c)| is_word_ch(*c));
+            let after_word = i > 0 && is_word_ch(chars[i - 1].1);
+            if on_word {
+                while s > 0 && is_word_ch(chars[s - 1].1) {
+                    s -= 1;
+                }
+                while e < chars.len() && is_word_ch(chars[e].1) {
+                    e += 1;
+                }
+            } else if after_word {
+                while s > 0 && is_word_ch(chars[s - 1].1) {
+                    s -= 1;
+                }
+                e = i;
+            }
+            let start_b = chars.get(s).map(|(b, _)| *b).unwrap_or(text_ref.len());
+            let end_b = chars.get(e).map(|(b, _)| *b).unwrap_or(text_ref.len());
+            *sel_start_ref = start_b as i32;
+            *sel_end_ref = end_b as i32;
+            *sel_anchor_ref = start_b as i32;
+        }
+        CaretAtMode::SelectLine => {
+            let mut start = clamped as usize;
+            let mut end = clamped as usize;
+            let n = bytes.len();
+            while start > 0 && bytes[start - 1] != b'\r' && bytes[start - 1] != b'\n' {
+                start -= 1;
+            }
+            while end < n && bytes[end] != b'\r' && bytes[end] != b'\n' {
+                end += 1;
+            }
+            *sel_start_ref = start as i32;
+            *sel_end_ref = end as i32;
+            *sel_anchor_ref = start as i32;
+        }
+    }
+
+    let new_start = *sel_start_ref;
+    let new_end = *sel_end_ref;
+    player.text_selection_start = new_start.max(0) as u16;
+    player.text_selection_end = new_end.max(0) as u16;
     true
 }
 
 /// Owner-bound wrapper retained for legacy callers.
 pub(crate) fn set_caret_at_screen(
-    sprite_id: i16, movie_x: i32, movie_y: i32, mode: CaretAtMode,
+    sprite_id: i16,
+    movie_x: i32,
+    movie_y: i32,
+    mode: CaretAtMode,
 ) -> bool {
     super::reserve_player_mut(|player| {
         set_caret_at_screen_for_player(player, sprite_id, movie_x, movie_y, mode)
@@ -661,12 +750,16 @@ async fn player_key_down_inner(key: String, code: u16) -> Result<DatumRef, Scrip
     if let Some(ref instances) = instance_ids {
         if !instances.is_empty() {
             handled = player_invoke_event_to_instances(
-                Symbol::builtin(BuiltInSymbol::KeyDown), &vec![], instances,
-            ).await?;
+                Symbol::builtin(BuiltInSymbol::KeyDown),
+                &vec![],
+                instances,
+            )
+            .await?;
         }
     }
     if !handled {
-        player_invoke_frame_and_movie_scripts(Symbol::builtin(BuiltInSymbol::KeyDown), &vec![]).await?;
+        player_invoke_frame_and_movie_scripts(Symbol::builtin(BuiltInSymbol::KeyDown), &vec![])
+            .await?;
     }
     player_dispatch_movie_callback(BuiltInSymbol::KeyDown).await?;
 
@@ -705,7 +798,8 @@ async fn player_key_down_inner(key: String, code: u16) -> Result<DatumRef, Scrip
 
             let sprite = player.movie.score.get_sprite(sprite_id);
             let member_ref = sprite.and_then(|s| s.member.clone());
-            let member = member_ref.and_then(|r| player.movie.cast_manager.find_mut_member_by_ref(&r));
+            let member =
+                member_ref.and_then(|r| player.movie.cast_manager.find_mut_member_by_ref(&r));
             let Some(member) = member else { return };
 
             match &mut member.member_type {
@@ -771,12 +865,16 @@ async fn player_key_up_inner(key: String, code: u16) -> Result<DatumRef, ScriptE
     if let Some(ref instances) = instance_ids {
         if !instances.is_empty() {
             handled = player_invoke_event_to_instances(
-                Symbol::builtin(BuiltInSymbol::KeyUp), &vec![], instances,
-            ).await?;
+                Symbol::builtin(BuiltInSymbol::KeyUp),
+                &vec![],
+                instances,
+            )
+            .await?;
         }
     }
     if !handled {
-        player_invoke_frame_and_movie_scripts(Symbol::builtin(BuiltInSymbol::KeyUp), &vec![]).await?;
+        player_invoke_frame_and_movie_scripts(Symbol::builtin(BuiltInSymbol::KeyUp), &vec![])
+            .await?;
     }
     player_dispatch_movie_callback(BuiltInSymbol::KeyUp).await?;
     Ok(DatumRef::Void)

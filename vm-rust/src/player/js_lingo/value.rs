@@ -113,11 +113,19 @@ pub struct JsObject {
 
 impl JsObject {
     pub fn new() -> Self {
-        JsObject { props: Vec::new(), proto: None, class_name: "Object" }
+        JsObject {
+            props: Vec::new(),
+            proto: None,
+            class_name: "Object",
+        }
     }
 
     pub fn get_own(&self, key: &str) -> Option<&JsValue> {
-        self.props.iter().rev().find(|(k, _)| k == key).map(|(_, v)| v)
+        self.props
+            .iter()
+            .rev()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v)
     }
 
     pub fn set_own(&mut self, key: &str, value: JsValue) {
@@ -177,14 +185,20 @@ pub struct JsError {
 
 impl JsError {
     pub fn new(s: impl Into<String>) -> Self {
-        JsError { message: s.into(), thrown: None }
+        JsError {
+            message: s.into(),
+            thrown: None,
+        }
     }
 
     /// Construct an error wrapping an explicit `throw` value. The message
     /// is rendered from the value so cross-frame propagation (when no
     /// catch handler matches) still surfaces something readable.
     pub fn from_thrown(v: JsValue) -> Self {
-        JsError { message: format!("uncaught: {}", v.to_string()), thrown: Some(v) }
+        JsError {
+            message: format!("uncaught: {}", v.to_string()),
+            thrown: Some(v),
+        }
     }
 }
 
@@ -203,7 +217,9 @@ impl JsValue {
             JsValue::Int(i) => *i != 0,
             JsValue::Number(n) => *n != 0.0 && !n.is_nan(),
             JsValue::String(s) => !s.is_empty(),
-            JsValue::Object(_) | JsValue::Array(_) | JsValue::Function(_) | JsValue::Native(_) => true,
+            JsValue::Object(_) | JsValue::Array(_) | JsValue::Function(_) | JsValue::Native(_) => {
+                true
+            }
             JsValue::Iterator(_) => true,
             JsValue::DirectorRef(_) => true,
         }
@@ -214,17 +230,27 @@ impl JsValue {
         match self {
             JsValue::Undefined => f64::NAN,
             JsValue::Null => 0.0,
-            JsValue::Bool(b) => if *b { 1.0 } else { 0.0 },
+            JsValue::Bool(b) => {
+                if *b {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
             JsValue::Int(i) => *i as f64,
             JsValue::Number(n) => *n,
             JsValue::String(s) => s.trim().parse::<f64>().unwrap_or(f64::NAN),
-            JsValue::Object(_) | JsValue::Array(_) | JsValue::Function(_) | JsValue::Native(_) => f64::NAN,
+            JsValue::Object(_) | JsValue::Array(_) | JsValue::Function(_) | JsValue::Native(_) => {
+                f64::NAN
+            }
             JsValue::Iterator(_) => f64::NAN,
             // Sprite / member refs as scalar: Director's Lingo converts to
             // the channel number / cast member number. Mirror that so
             // `sprite(3) + 1 == 4` matches Lingo intuition.
             JsValue::DirectorRef(DirectorRefKind::Sprite(n)) => *n as f64,
-            JsValue::DirectorRef(DirectorRefKind::Member { cast_member, .. }) => *cast_member as f64,
+            JsValue::DirectorRef(DirectorRefKind::Member { cast_member, .. }) => {
+                *cast_member as f64
+            }
         }
     }
 
@@ -248,17 +274,31 @@ impl JsValue {
             JsValue::Bool(b) => b.to_string(),
             JsValue::Int(i) => i.to_string(),
             JsValue::Number(n) => {
-                if n.is_nan() { "NaN".into() }
-                else if n.is_infinite() { if *n > 0.0 { "Infinity".into() } else { "-Infinity".into() } }
-                else if *n == 0.0 { "0".into() }
-                else if *n == n.trunc() && n.abs() < 1e21 { format!("{}", *n as i64) }
-                else { format!("{}", n) }
+                if n.is_nan() {
+                    "NaN".into()
+                } else if n.is_infinite() {
+                    if *n > 0.0 {
+                        "Infinity".into()
+                    } else {
+                        "-Infinity".into()
+                    }
+                } else if *n == 0.0 {
+                    "0".into()
+                } else if *n == n.trunc() && n.abs() < 1e21 {
+                    format!("{}", *n as i64)
+                } else {
+                    format!("{}", n)
+                }
             }
             JsValue::String(s) => (**s).clone(),
             JsValue::Object(_) => "[object Object]".into(),
-            JsValue::Array(a) => {
-                a.borrow().items.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",")
-            }
+            JsValue::Array(a) => a
+                .borrow()
+                .items
+                .iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
             JsValue::Function(f) => {
                 let name = f.atom.name.as_deref().unwrap_or("anonymous");
                 format!("function {}() {{ [native code] }}", name)
@@ -266,7 +306,10 @@ impl JsValue {
             JsValue::Native(f) => format!("function {}() {{ [native code] }}", f.name),
             JsValue::Iterator(_) => "[for-in iterator]".into(),
             JsValue::DirectorRef(DirectorRefKind::Sprite(n)) => format!("(sprite {})", n),
-            JsValue::DirectorRef(DirectorRefKind::Member { cast_lib, cast_member }) => {
+            JsValue::DirectorRef(DirectorRefKind::Member {
+                cast_lib,
+                cast_member,
+            }) => {
                 format!("(member {} of castLib {})", cast_member, cast_lib)
             }
         }
@@ -297,7 +340,16 @@ impl fmt::Debug for JsValue {
             JsValue::Number(n) => write!(f, "{}", n),
             JsValue::String(s) => write!(f, "{:?}", &**s),
             JsValue::Object(_) => write!(f, "[object]"),
-            JsValue::Array(a) => write!(f, "[{}]", a.borrow().items.iter().map(|v| format!("{:?}", v)).collect::<Vec<_>>().join(",")),
+            JsValue::Array(a) => write!(
+                f,
+                "[{}]",
+                a.borrow()
+                    .items
+                    .iter()
+                    .map(|v| format!("{:?}", v))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
             JsValue::Function(fun) => write!(f, "[fn {}]", fun.atom.name.as_deref().unwrap_or("?")),
             JsValue::Native(fun) => write!(f, "[native fn {}]", fun.name),
             JsValue::Iterator(it) => {

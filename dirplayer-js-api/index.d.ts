@@ -44,9 +44,8 @@ type TVmCallbacks = {
   onGlobalListChanged: (globals: Map<string, JsBridgeDatum>) => void,
   onDebugMessage: (message: string) => void,
   onDebugContent: (content: DebugContent) => void,
-  onScheduleTimeout: (timeoutName: string, periodMs: number) => void,
-  onClearTimeout: (timeoutName: string) => void,
-  onClearAllTimeouts: () => void,
+  onScheduleTimeoutOwned: (timeoutName: string, periodMs: number, incarnation: number, ownerKey: string) => void,
+  onClearTimeoutOwned: (timeoutName: string, incarnation: number, ownerKey: string) => void,
   onDatumSnapshot: (datumRef: DatumRef, datum: JsBridgeDatum) => void,
   onScriptInstanceSnapshot: (scriptInstanceRef: ScriptInstanceId, scriptInstance: JsBridgeDatum) => void,
   onChannelChanged: (channelNumber: number, channelData: ScoreSpriteSnapshot) => void,
@@ -70,8 +69,26 @@ type TVmCallbacks = {
 }
 declare let vmCallbacks: TVmCallbacks | undefined;
 
-export function registerVmCallbacks(callbacks: TVmCallbacks, ownerKey?: string): () => void;
+export function registerVmCallbacks(callbacks: TVmCallbacks, ownerKey?: string, setAsDefault?: boolean): () => void;
+export function registerNestedBrowserOwner(
+  parentOwnerKey: string,
+  childOwnerKey: string,
+  capability: any,
+): void;
+export function retireNestedBrowserOwner(parentOwnerKey: string, childOwnerKey: string): void;
 export function dispatchVmCallback(ownerKey: string, name: string, ...args: any[]): any;
+export function onFlashMemberLoadedPrepared(
+  spriteNum: number,
+  castLib: number,
+  castMember: number,
+  swfData: Uint8Array,
+  width: number,
+  height: number,
+  pausedAtStart: boolean,
+  assertedFrame: number,
+  ownerKey: string,
+  generation: number,
+): void;
 export function onDebugMessageOwned(ownerKey: string, message: string): any;
 export function onScriptErrorOwned(ownerKey: string, data: OnScriptErrorData): any;
 export function onDatumSnapshotOwned(ownerKey: string, datumRef: DatumRef, snapshot: JsBridgeDatum): any;
@@ -103,6 +120,12 @@ export function dirplayer_ruffleGetVariableOwnedAtGeneration(
   generation: number,
   path: string,
   returnAsObject?: boolean,
+): FlashOwnedResult;
+export function dirplayer_ruffleGetSpriteVariableOwnedAtGeneration(
+  ownerKey: string,
+  spriteNum: number,
+  generation: number,
+  path: string,
 ): FlashOwnedResult;
 export function dirplayer_isFlashInstanceReadyOwned(
   ownerKey: string,

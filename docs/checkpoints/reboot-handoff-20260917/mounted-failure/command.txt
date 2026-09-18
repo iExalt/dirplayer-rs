@@ -1,0 +1,1 @@
+env CARGO_TARGET_DIR=/private/tmp/dirplayer-parser-review-build/target CARGO_INCREMENTAL=0 mise exec -- cargo test --manifest-path vm-rust/Cargo.toml --lib --locked --offline player::nested::tests::owned_nested_start_mounts_d5_channel_one_in_child_context -- --exact --nocapture

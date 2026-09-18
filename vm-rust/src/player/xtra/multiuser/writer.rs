@@ -2,7 +2,7 @@ use binary_rw::{BinaryError, BinaryWriter, Endian, MemoryStream};
 
 use crate::{
     director::static_datum::StaticDatum,
-    player::xtra::multiuser::{MultiuserMessage, blowfish::MUSBlowfish, types::MusLingoValueTag},
+    player::xtra::multiuser::{blowfish::MUSBlowfish, types::MusLingoValueTag, MultiuserMessage},
 };
 
 pub trait MusWriter {

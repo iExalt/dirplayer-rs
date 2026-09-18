@@ -5,8 +5,7 @@ use super::{
     palette_map::PaletteMap,
 };
 use crate::player::{
-    cast_lib::CastMemberRef,
-    handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers,
+    cast_lib::CastMemberRef, handlers::datum_handlers::cast_member_ref::CastMemberRefHandlers,
 };
 
 /// A manager-local allocation identity.
@@ -85,7 +84,9 @@ pub(crate) struct BitmapResetGuard {
 
 fn palette_is_present(palettes: &PaletteMap, member_ref: &CastMemberRef) -> bool {
     if member_ref.cast_lib == 0 {
-        return palettes.find_by_member(member_ref.cast_member as u32).is_some();
+        return palettes
+            .find_by_member(member_ref.cast_member as u32)
+            .is_some();
     }
 
     let slot_number = CastMemberRefHandlers::get_cast_slot_number(
@@ -93,8 +94,12 @@ fn palette_is_present(palettes: &PaletteMap, member_ref: &CastMemberRef) -> bool
         member_ref.cast_member as u32,
     );
     palettes.get(slot_number as usize).is_some()
-        || palettes.find_by_member(member_ref.cast_member as u32).is_some()
-        || palettes.find_by_cast_lib(member_ref.cast_lib as u32).is_some()
+        || palettes
+            .find_by_member(member_ref.cast_member as u32)
+            .is_some()
+        || palettes
+            .find_by_cast_lib(member_ref.cast_lib as u32)
+            .is_some()
 }
 
 impl BitmapResetGuard {
@@ -442,7 +447,6 @@ impl BitmapManager {
             None
         }
     }
-
 }
 
 impl Drop for BitmapManager {
@@ -563,9 +567,15 @@ mod tests {
         );
 
         source.get_bitmap_handle_mut(&source_handle).unwrap().data[0] = 2;
-        assert_eq!(destination.get_bitmap_handle(&copied).unwrap().data, vec![10, 20, 30, 255]);
+        assert_eq!(
+            destination.get_bitmap_handle(&copied).unwrap().data,
+            vec![10, 20, 30, 255]
+        );
         palettes.palettes[0].member.colors[7] = (200, 210, 220);
-        assert_eq!(destination.get_bitmap_handle(&copied).unwrap().data, vec![10, 20, 30, 255]);
+        assert_eq!(
+            destination.get_bitmap_handle(&copied).unwrap().data,
+            vec![10, 20, 30, 255]
+        );
     }
 
     #[test]
@@ -592,8 +602,14 @@ mod tests {
             &PaletteRef::BuiltIn(BuiltInPalette::GrayScale),
             8,
         );
-        assert_eq!(copied_bitmap.palette_ref, PaletteRef::BuiltIn(BuiltInPalette::GrayScale));
-        assert_eq!(copied_bitmap.data, vec![expected.0, expected.1, expected.2, 255]);
+        assert_eq!(
+            copied_bitmap.palette_ref,
+            PaletteRef::BuiltIn(BuiltInPalette::GrayScale)
+        );
+        assert_eq!(
+            copied_bitmap.data,
+            vec![expected.0, expected.1, expected.2, 255]
+        );
     }
 
     #[test]
@@ -723,10 +739,7 @@ mod tests {
         manager.rotate_handles().unwrap();
 
         assert!(manager.get_bitmap_handle(&handle).is_none());
-        assert!(matches!(
-            manager.get_bitmap_handle_mut(&handle),
-            None
-        ));
+        assert!(matches!(manager.get_bitmap_handle_mut(&handle), None));
         assert!(matches!(
             manager.incref_ephemeral_handle(&handle),
             Err(BitmapHandleError::InvalidHandle)

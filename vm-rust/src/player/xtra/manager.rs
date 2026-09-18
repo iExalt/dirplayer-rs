@@ -1,7 +1,7 @@
 use crate::{
     director::lingo::datum::{Datum, XtraInstanceId},
     director::static_datum::StaticDatum,
-    player::{DatumRef, ScriptError, ownership::OwnerToken},
+    player::{ownership::OwnerToken, DatumRef, ScriptError},
 };
 
 /// Fully-owned transport payloads. Deferred executors consume these after
@@ -25,7 +25,9 @@ pub(crate) struct MultiuserConnectRequest {
 
 #[derive(Clone)]
 pub(crate) enum MultiuserSendRequest {
-    Text { message: String },
+    Text {
+        message: String,
+    },
     Binary {
         recipients: Vec<String>,
         subject: String,
@@ -114,9 +116,21 @@ impl XtraPendingIntent {
 
     pub(crate) fn instance(&self) -> (XtraInstanceId, u64) {
         match self {
-            Self::MultiuserConnect { instance_id, generation, .. }
-            | Self::MultiuserSend { instance_id, generation, .. }
-            | Self::CurlExec { instance_id, generation, .. } => (*instance_id, *generation),
+            Self::MultiuserConnect {
+                instance_id,
+                generation,
+                ..
+            }
+            | Self::MultiuserSend {
+                instance_id,
+                generation,
+                ..
+            }
+            | Self::CurlExec {
+                instance_id,
+                generation,
+                ..
+            } => (*instance_id, *generation),
             Self::FileIoOpen(request) => (request.instance_id, request.generation),
             Self::SysMenu(_) | Self::BudApi(_) | Self::OpenUrl(_) => (0, 0),
         }
@@ -199,7 +213,8 @@ impl XtraManagerState {
         self.budapi = BudApiState::default();
         self.teardown_requests
             .extend(self.multiuser.take_teardown_requests());
-        self.teardown_requests.extend(self.curl.take_teardown_requests());
+        self.teardown_requests
+            .extend(self.curl.take_teardown_requests());
     }
 
     pub(crate) fn rebind_owner(&mut self, owner: OwnerToken) {
@@ -216,7 +231,8 @@ impl XtraManagerState {
     pub(crate) fn take_teardown_requests(&mut self) -> Vec<XtraTeardownRequest> {
         self.teardown_requests
             .extend(self.multiuser.take_teardown_requests());
-        self.teardown_requests.extend(self.curl.take_teardown_requests());
+        self.teardown_requests
+            .extend(self.curl.take_teardown_requests());
         std::mem::take(&mut self.teardown_requests)
     }
 
@@ -229,21 +245,12 @@ impl XtraManagerState {
         intent: &XtraPendingIntent,
     ) -> Result<(), ScriptError> {
         let (manager_owner, current_generation) = match intent {
-            XtraPendingIntent::MultiuserConnect {
-                instance_id,
-                ..
-            }
-            | XtraPendingIntent::MultiuserSend {
-                instance_id,
-                ..
-            } => (
+            XtraPendingIntent::MultiuserConnect { instance_id, .. }
+            | XtraPendingIntent::MultiuserSend { instance_id, .. } => (
                 &self.multiuser.owner,
                 self.multiuser.instance_generation(*instance_id),
             ),
-            XtraPendingIntent::CurlExec {
-                instance_id,
-                ..
-            } => (
+            XtraPendingIntent::CurlExec { instance_id, .. } => (
                 &self.curl.owner,
                 self.curl.instance_generation(*instance_id),
             ),
@@ -252,9 +259,7 @@ impl XtraManagerState {
                 self.fileio.instance_generation(request.instance_id),
             ),
             XtraPendingIntent::SysMenu(request) => {
-                if !self.owner.same_identity(request.owner())
-                    || !request.owner().is_arena_live()
-                {
+                if !self.owner.same_identity(request.owner()) || !request.owner().is_arena_live() {
                     return Err(ScriptError::new_code(
                         crate::player::ScriptErrorCode::InvalidReference,
                         "stale or foreign SysMenu pending intent".to_owned(),
@@ -263,9 +268,7 @@ impl XtraManagerState {
                 return Ok(());
             }
             XtraPendingIntent::BudApi(request) => {
-                if !self.owner.same_identity(request.owner())
-                    || !request.owner().is_arena_live()
-                {
+                if !self.owner.same_identity(request.owner()) || !request.owner().is_arena_live() {
                     return Err(ScriptError::new_code(
                         crate::player::ScriptErrorCode::InvalidReference,
                         "stale BudAPI host intent".to_owned(),
@@ -274,9 +277,7 @@ impl XtraManagerState {
                 return Ok(());
             }
             XtraPendingIntent::OpenUrl(request) => {
-                if !self.owner.same_identity(&request.owner)
-                    || !request.owner.is_arena_live()
-                {
+                if !self.owner.same_identity(&request.owner) || !request.owner.is_arena_live() {
                     return Err(ScriptError::new_code(
                         crate::player::ScriptErrorCode::InvalidReference,
                         "stale OpenURL host intent".to_owned(),
@@ -297,7 +298,6 @@ impl XtraManagerState {
         }
         Ok(())
     }
-
 }
 
 /// Canonical synchronous instance dispatch for the owner-bound Xtras. Other
@@ -318,8 +318,7 @@ pub(crate) fn call_instance_handler_explicit(
             ))
         }
         _ => match player.allocator.try_get_datum(receiver) {
-            Some(Datum::XtraInstance(name, id))
-                if name.eq_ignore_ascii_case(xtra_name) => *id,
+            Some(Datum::XtraInstance(name, id)) if name.eq_ignore_ascii_case(xtra_name) => *id,
             Some(Datum::XtraInstance(_, _)) => {
                 return Err(ScriptError::new_code(
                     crate::player::ScriptErrorCode::InvalidReference,
@@ -351,7 +350,11 @@ pub(crate) fn call_instance_handler_explicit(
     match xtra_name_lower.as_str() {
         "multiuser" => player.with_xtra_manager_state(|state, player| {
             let outcome = state.multiuser.call_instance_handler_or_pending_explicit(
-                player, symbols, instance_id, handler_name, args,
+                player,
+                symbols,
+                instance_id,
+                handler_name,
+                args,
             )?;
             match outcome {
                 XtraPendingOrValue::Value(value) => Ok(value),
@@ -362,7 +365,11 @@ pub(crate) fn call_instance_handler_explicit(
         }),
         "curl" => player.with_xtra_manager_state(|state, player| {
             let outcome = state.curl.call_instance_handler_or_pending_explicit(
-                player, symbols, instance_id, handler_name, args,
+                player,
+                symbols,
+                instance_id,
+                handler_name,
+                args,
             )?;
             match outcome {
                 XtraPendingOrValue::Value(value) => Ok(value),
@@ -373,12 +380,20 @@ pub(crate) fn call_instance_handler_explicit(
         }),
         "fileio" => player.with_xtra_manager_state(|state, player| {
             state.fileio.call_instance_handler_explicit(
-                player, symbols, instance_id, handler_name, args,
+                player,
+                symbols,
+                instance_id,
+                handler_name,
+                args,
             )
         }),
         "xmlparser" => player.with_xtra_manager_state(|state, player| {
             state.xmlparser.call_instance_handler_explicit(
-                player, symbols, instance_id, handler_name, args,
+                player,
+                symbols,
+                instance_id,
+                handler_name,
+                args,
             )
         }),
         _ => Err(ScriptError::new(format!(
@@ -401,34 +416,50 @@ pub(crate) fn call_instance_handler_pending_explicit(
 ) -> Result<XtraPendingOrValue, ScriptError> {
     let instance_id = match player.allocator.try_get_datum(receiver) {
         Some(Datum::XtraInstance(name, id)) if name.eq_ignore_ascii_case(xtra_name) => *id,
-        _ => return Err(ScriptError::new_code(
-            crate::player::ScriptErrorCode::InvalidReference,
-            "foreign or stale Xtra instance receiver".to_owned(),
-        )),
+        _ => {
+            return Err(ScriptError::new_code(
+                crate::player::ScriptErrorCode::InvalidReference,
+                "foreign or stale Xtra instance receiver".to_owned(),
+            ))
+        }
     };
     match xtra_name.to_ascii_lowercase().as_str() {
         "multiuser" => player.with_xtra_manager_state(|state, player| {
             state.multiuser.call_instance_handler_or_pending_explicit(
-                player, symbols, instance_id, handler_name, args,
+                player,
+                symbols,
+                instance_id,
+                handler_name,
+                args,
             )
         }),
         "curl" => player.with_xtra_manager_state(|state, player| {
             state.curl.call_instance_handler_or_pending_explicit(
-                player, symbols, instance_id, handler_name, args,
+                player,
+                symbols,
+                instance_id,
+                handler_name,
+                args,
             )
         }),
         "fileio" => player.with_xtra_manager_state(|state, player| {
             state.fileio.call_instance_handler_pending_explicit(
-                player, symbols, instance_id, handler_name, args,
+                player,
+                symbols,
+                instance_id,
+                handler_name,
+                args,
             )
         }),
         "xmlparser" => player.with_xtra_manager_state(|state, player| {
-            state.xmlparser.call_instance_handler_explicit(
-                player, symbols, instance_id, handler_name, args,
-            ).map(XtraPendingOrValue::Value)
+            state
+                .xmlparser
+                .call_instance_handler_explicit(player, symbols, instance_id, handler_name, args)
+                .map(XtraPendingOrValue::Value)
         }),
         _ => Err(ScriptError::new(format!(
-            "Xtra {} requires its explicit owner migration", xtra_name
+            "Xtra {} requires its explicit owner migration",
+            xtra_name
         ))),
     }
 }
@@ -447,7 +478,10 @@ where
 {
     let pending = XtraPendingIntent::SysMenu(intent.clone());
     let valid = session.borrow_mut().with_player(player_id, |context| {
-        context.player.xtra_manager_state.validate_pending_intent(&pending)
+        context
+            .player
+            .xtra_manager_state
+            .validate_pending_intent(&pending)
     });
     match valid {
         Some(Ok(())) => {}
@@ -478,7 +512,10 @@ where
 {
     let pending = XtraPendingIntent::BudApi(intent.clone());
     let valid = session.borrow_mut().with_player(player_id, |context| {
-        context.player.xtra_manager_state.validate_pending_intent(&pending)
+        context
+            .player
+            .xtra_manager_state
+            .validate_pending_intent(&pending)
     });
     match valid {
         Some(Ok(())) => {}
@@ -494,7 +531,9 @@ where
             {
                 return Err(crate::player::cancelled_scope_error());
             }
-            Ok(context.player.alloc_datum(Datum::Int(if success { 1 } else { 0 })))
+            Ok(context
+                .player
+                .alloc_datum(Datum::Int(if success { 1 } else { 0 })))
         })
         .unwrap_or_else(|| Err(crate::player::cancelled_scope_error()))
 }
@@ -506,7 +545,10 @@ fn execute_budapi_clipboard_read(
 ) -> Result<DatumRef, ScriptError> {
     let pending = XtraPendingIntent::BudApi(intent.clone());
     let valid = session.borrow_mut().with_player(player_id, |context| {
-        context.player.xtra_manager_state.validate_pending_intent(&pending)
+        context
+            .player
+            .xtra_manager_state
+            .validate_pending_intent(&pending)
     });
     match valid {
         Some(Ok(())) => {}
@@ -521,7 +563,12 @@ fn execute_budapi_clipboard_read(
             {
                 return Err(crate::player::cancelled_scope_error());
             }
-            let text = context.player.xtra_manager_state.budapi.clipboard_text.clone();
+            let text = context
+                .player
+                .xtra_manager_state
+                .budapi
+                .clipboard_text
+                .clone();
             Ok(context.player.alloc_datum(Datum::String(text)))
         })
         .unwrap_or_else(|| Err(crate::player::cancelled_scope_error()))
@@ -534,7 +581,10 @@ async fn execute_budapi_clipboard_write(
 ) -> Result<DatumRef, ScriptError> {
     let pending = XtraPendingIntent::BudApi(intent.clone());
     let valid = session.borrow_mut().with_player(player_id, |context| {
-        context.player.xtra_manager_state.validate_pending_intent(&pending)
+        context
+            .player
+            .xtra_manager_state
+            .validate_pending_intent(&pending)
     });
     match valid {
         Some(Ok(())) => {}
@@ -589,10 +639,8 @@ async fn write_clipboard_best_effort(text: &str) -> bool {
         return false;
     };
     let navigator = window.navigator();
-    let clipboard = match js_sys::Reflect::get(
-        navigator.as_ref(),
-        &JsValue::from_str("clipboard"),
-    ) {
+    let clipboard = match js_sys::Reflect::get(navigator.as_ref(), &JsValue::from_str("clipboard"))
+    {
         Ok(value) if !value.is_null() && !value.is_undefined() => value,
         _ => return false,
     };
@@ -624,7 +672,10 @@ where
 {
     let pending = XtraPendingIntent::OpenUrl(intent.clone());
     let valid = session.borrow_mut().with_player(player_id, |context| {
-        context.player.xtra_manager_state.validate_pending_intent(&pending)
+        context
+            .player
+            .xtra_manager_state
+            .validate_pending_intent(&pending)
     });
     match valid {
         Some(Ok(())) => {}
@@ -635,12 +686,12 @@ where
     session
         .borrow_mut()
         .with_player(player_id, |context| {
-            if !intent.owner.same_identity(&context.player.owner)
-                || !intent.owner.is_arena_live()
-            {
+            if !intent.owner.same_identity(&context.player.owner) || !intent.owner.is_arena_live() {
                 return Err(crate::player::cancelled_scope_error());
             }
-            Ok(context.player.alloc_datum(Datum::Int(if success { 1 } else { 0 })))
+            Ok(context
+                .player
+                .alloc_datum(Datum::Int(if success { 1 } else { 0 })))
         })
         .unwrap_or_else(|| Err(crate::player::cancelled_scope_error()))
 }
@@ -665,7 +716,12 @@ pub(crate) async fn execute_pending_intent(
                     #[cfg(not(target_arch = "wasm32"))]
                     log::info!("[SysMenu] {}", message);
                 }
-                SysMenuHostIntent::MessageBox { message, caption, message_type, .. } => {
+                SysMenuHostIntent::MessageBox {
+                    message,
+                    caption,
+                    message_type,
+                    ..
+                } => {
                     let text = if caption.is_empty() {
                         message.to_owned()
                     } else {
@@ -705,21 +761,37 @@ pub(crate) async fn execute_pending_intent(
             execute_budapi_host_intent_with(session, player_id, request, |request| match request {
                 BudApiHostIntent::Open { target, .. } => {
                     #[cfg(target_arch = "wasm32")]
-                    { web_sys::window().map(|window| window.open_with_url_and_target(target, "_blank").is_ok()).unwrap_or(false) }
+                    {
+                        web_sys::window()
+                            .map(|window| window.open_with_url_and_target(target, "_blank").is_ok())
+                            .unwrap_or(false)
+                    }
                     #[cfg(not(target_arch = "wasm32"))]
-                    { let _ = target; unreachable!("BudAPI open requires the browser executor") }
+                    {
+                        let _ = target;
+                        unreachable!("BudAPI open requires the browser executor")
+                    }
                 }
                 BudApiHostIntent::Alert { text, .. } => {
                     #[cfg(target_arch = "wasm32")]
-                    { web_sys::window().map(|window| window.alert_with_message(text).is_ok()).unwrap_or(false) }
+                    {
+                        web_sys::window()
+                            .map(|window| window.alert_with_message(text).is_ok())
+                            .unwrap_or(false)
+                    }
                     #[cfg(not(target_arch = "wasm32"))]
-                    { let _ = text; unreachable!("BudAPI alert requires the browser executor") }
+                    {
+                        let _ = text;
+                        unreachable!("BudAPI alert requires the browser executor")
+                    }
                 }
                 BudApiHostIntent::ClipboardWrite { text, .. } => {
                     let _ = text;
                     unreachable!("clipboard writes use their async completion path")
                 }
-                BudApiHostIntent::ClipboardRead { .. } => unreachable!("clipboard reads use their string completion path"),
+                BudApiHostIntent::ClipboardRead { .. } => {
+                    unreachable!("clipboard reads use their string completion path")
+                }
             })
         }
         XtraPendingIntent::OpenUrl(request) => {
@@ -733,7 +805,15 @@ pub(crate) async fn execute_pending_intent(
             #[cfg(target_arch = "wasm32")]
             execute_openurl_host_intent_with(session, player_id, request, |request| {
                 #[cfg(target_arch = "wasm32")]
-                { web_sys::window().map(|window| window.open_with_url_and_target(&request.url, "_blank").is_ok()).unwrap_or(false) }
+                {
+                    web_sys::window()
+                        .map(|window| {
+                            window
+                                .open_with_url_and_target(&request.url, "_blank")
+                                .is_ok()
+                        })
+                        .unwrap_or(false)
+                }
             })
         }
         XtraPendingIntent::CurlExec {
@@ -749,8 +829,18 @@ pub(crate) async fn execute_pending_intent(
                 if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
                     return Err(crate::player::cancelled_scope_error());
                 }
-                if !context.player.xtra_manager_state.curl.owner.same_identity(&owner)
-                    || context.player.xtra_manager_state.curl.instance_generation(instance_id) != Some(generation)
+                if !context
+                    .player
+                    .xtra_manager_state
+                    .curl
+                    .owner
+                    .same_identity(&owner)
+                    || context
+                        .player
+                        .xtra_manager_state
+                        .curl
+                        .instance_generation(instance_id)
+                        != Some(generation)
                 {
                     return Err(ScriptError::new_code(
                         crate::player::ScriptErrorCode::InvalidReference,
@@ -765,17 +855,24 @@ pub(crate) async fn execute_pending_intent(
                     headers,
                     request.instance.requested_url().to_owned(),
                 )?;
-                let result = context.player.alloc_datum(Datum::Int(if status > 0 { 0 } else { status }));
-                let callback = context.player.xtra_manager_state.curl.completion_callback(instance_id, generation)?;
+                let result =
+                    context
+                        .player
+                        .alloc_datum(Datum::Int(if status > 0 { 0 } else { status }));
+                let callback = context
+                    .player
+                    .xtra_manager_state
+                    .curl
+                    .completion_callback(instance_id, generation)?;
                 let queue = context.player.queue_tx.clone();
                 if let Some((target, handler)) = callback {
                     let body_ref = context.player.alloc_datum(Datum::String(
                         body.iter().map(|byte| *byte as char).collect(),
                     ));
                     let status_ref = context.player.alloc_datum(Datum::Int(status));
-                    let headers_ref = context.player.alloc_datum(Datum::String(
-                        callback_headers.clone(),
-                    ));
+                    let headers_ref = context
+                        .player
+                        .alloc_datum(Datum::String(callback_headers.clone()));
                     let args = if request.return_mode == 1 {
                         vec![body_ref, status_ref, headers_ref]
                     } else {
@@ -800,7 +897,12 @@ pub(crate) async fn execute_pending_intent(
             let wait = session
                 .borrow_mut()
                 .with_player(player_id, |context| {
-                    if !owner_matches_fileio(context.player, &request.owner, request.instance_id, request.generation) {
+                    if !owner_matches_fileio(
+                        context.player,
+                        &request.owner,
+                        request.instance_id,
+                        request.generation,
+                    ) {
                         return Err(crate::player::cancelled_scope_error());
                     }
                     context
@@ -809,13 +911,22 @@ pub(crate) async fn execute_pending_intent(
                         .get_task(request.prepared.task.id)
                         .filter(|task| task.resolved_url == request.prepared.task.resolved_url)
                         .ok_or_else(crate::player::cancelled_scope_error)?;
-                    Ok(context.player.net_manager.create_task_future(request.prepared.task.id))
+                    Ok(context
+                        .player
+                        .net_manager
+                        .create_task_future(request.prepared.task.id))
                 })
                 .ok_or_else(crate::player::cancelled_scope_error)??;
-            crate::player::net_manager::NetManager::execute_prepared_task(request.prepared.clone()).await;
+            crate::player::net_manager::NetManager::execute_prepared_task(request.prepared.clone())
+                .await;
             wait.await;
             let applied = session.borrow_mut().with_player(player_id, |context| {
-                if !owner_matches_fileio(context.player, &request.owner, request.instance_id, request.generation) {
+                if !owner_matches_fileio(
+                    context.player,
+                    &request.owner,
+                    request.instance_id,
+                    request.generation,
+                ) {
                     return Err(crate::player::cancelled_scope_error());
                 }
                 let result = context
@@ -828,10 +939,12 @@ pub(crate) async fn execute_pending_intent(
                     .fileio
                     .instances
                     .get_mut(&request.instance_id)
-                    .ok_or_else(|| ScriptError::new_code(
-                        crate::player::ScriptErrorCode::InvalidReference,
-                        "stale or foreign FileIO completion".to_owned(),
-                    ))?;
+                    .ok_or_else(|| {
+                        ScriptError::new_code(
+                            crate::player::ScriptErrorCode::InvalidReference,
+                            "stale or foreign FileIO completion".to_owned(),
+                        )
+                    })?;
                 match result {
                     Some(Ok(bytes)) => {
                         instance.file_name = request.file_name.clone();
@@ -862,22 +975,20 @@ pub(crate) async fn execute_pending_intent(
             instance_id,
             generation,
             request,
-        } => {
-            session
-                .borrow_mut()
-                .with_player(player_id, |context| {
-                    if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
-                        return Err(crate::player::cancelled_scope_error());
-                    }
-                    context.player.xtra_manager_state.multiuser.send_owned(
-                        instance_id,
-                        generation,
-                        request,
-                    )
-                })
-                .unwrap_or_else(|| Err(crate::player::cancelled_scope_error()))
-                .map(|()| DatumRef::Void)
-        }
+        } => session
+            .borrow_mut()
+            .with_player(player_id, |context| {
+                if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                    return Err(crate::player::cancelled_scope_error());
+                }
+                context.player.xtra_manager_state.multiuser.send_owned(
+                    instance_id,
+                    generation,
+                    request,
+                )
+            })
+            .unwrap_or_else(|| Err(crate::player::cancelled_scope_error()))
+            .map(|()| DatumRef::Void),
         XtraPendingIntent::MultiuserConnect {
             owner,
             instance_id,
@@ -890,30 +1001,35 @@ pub(crate) async fn execute_pending_intent(
                     if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
                         return Err(crate::player::cancelled_scope_error());
                     }
-                    context.player.xtra_manager_state.multiuser.prepare_connect_owned(
-                        instance_id,
-                        generation,
-                        owner.clone(),
-                        request,
-                        context.player.queue_tx.clone(),
-                    )
+                    context
+                        .player
+                        .xtra_manager_state
+                        .multiuser
+                        .prepare_connect_owned(
+                            instance_id,
+                            generation,
+                            owner.clone(),
+                            request,
+                            context.player.queue_tx.clone(),
+                        )
                 })
                 .and_then(Result::ok)
                 .ok_or_else(crate::player::cancelled_scope_error)?;
             #[cfg(target_arch = "wasm32")]
             {
-                let mut connected = Some(super::multiuser::MultiuserXtraManager::execute_connect_owned(&preparation)?);
-                let install_result = session
-                    .borrow_mut()
-                    .with_player(player_id, |context| {
-                        if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
-                            return Err(crate::player::cancelled_scope_error());
-                        }
-                        context.player.xtra_manager_state.multiuser.install_connect_owned(
-                            &preparation,
-                            &mut connected,
-                        )
-                    });
+                let mut connected = Some(
+                    super::multiuser::MultiuserXtraManager::execute_connect_owned(&preparation)?,
+                );
+                let install_result = session.borrow_mut().with_player(player_id, |context| {
+                    if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                        return Err(crate::player::cancelled_scope_error());
+                    }
+                    context
+                        .player
+                        .xtra_manager_state
+                        .multiuser
+                        .install_connect_owned(&preparation, &mut connected)
+                });
                 let retired = match install_result {
                     Some(Ok(retired)) => retired,
                     Some(Err(error)) => {
@@ -934,7 +1050,9 @@ pub(crate) async fn execute_pending_intent(
             #[cfg(not(target_arch = "wasm32"))]
             {
                 let _ = preparation;
-                Err(ScriptError::new("Multiuser WebSocket executor unavailable on native target".to_owned()))
+                Err(ScriptError::new(
+                    "Multiuser WebSocket executor unavailable on native target".to_owned(),
+                ))
             }
         }
     }
@@ -949,12 +1067,16 @@ fn owner_matches_fileio(
     owner.same_identity(&player.owner)
         && owner.is_arena_live()
         && player.xtra_manager_state.fileio.owner.same_identity(owner)
-        && player.xtra_manager_state.fileio.instance_generation(instance_id) == Some(generation)
+        && player
+            .xtra_manager_state
+            .fileio
+            .instance_generation(instance_id)
+            == Some(generation)
 }
 
 pub(crate) fn create_xtra_instance_explicit(
     player: &mut crate::player::DirPlayer,
-    symbols: & crate::player::symbols::symbol_table::SymbolTable,
+    symbols: &crate::player::symbols::symbol_table::SymbolTable,
     xtra_name: &str,
     args: &[DatumRef],
 ) -> Result<XtraInstanceId, ScriptError> {
@@ -974,9 +1096,8 @@ pub(crate) fn create_xtra_instance_explicit(
         "curl" => player.with_xtra_manager_state(|state, player| {
             state.curl.create_instance_explicit(player, symbols, args)
         }),
-        "fileio" => player.with_xtra_manager_state(|state, _player| {
-            state.fileio.create_instance_explicit(args)
-        }),
+        "fileio" => player
+            .with_xtra_manager_state(|state, _player| state.fileio.create_instance_explicit(args)),
         "xmlparser" => player.with_xtra_manager_state(|state, _player| {
             state.xmlparser.create_instance_explicit(args)
         }),
@@ -999,10 +1120,14 @@ pub(crate) fn try_call_xtra_static_handler_explicit(
         }));
     }
     if CurlXtra::has_static_handler(name) {
-        return Some(CurlXtra::call_static_handler_explicit(player, symbols, name, args));
+        return Some(CurlXtra::call_static_handler_explicit(
+            player, symbols, name, args,
+        ));
     }
     if LeechProtectionXtra::has_handler(name) {
-        return Some(LeechProtectionXtra::call_handler_explicit(player, name, args, symbols));
+        return Some(LeechProtectionXtra::call_handler_explicit(
+            player, name, args, symbols,
+        ));
     }
     None
 }
@@ -1053,7 +1178,11 @@ pub fn is_xtra_registered(player: &crate::player::DirPlayer, name: &str) -> bool
     let name_lower = name.to_lowercase();
     // External plugin xtras win over built-ins (per the spec). This is
     // how a user-loaded plugin can shadow a stale built-in.
-    if player.xtra_manager_state.external.is_registered(&name_lower) {
+    if player
+        .xtra_manager_state
+        .external
+        .is_registered(&name_lower)
+    {
         return true;
     }
     return name == "Multiuser"
@@ -1111,7 +1240,9 @@ pub fn try_call_xtra_static_handler_with_symbols(
         }));
     }
     if CurlXtra::has_static_handler(name) {
-        return Some(CurlXtra::call_static_handler_explicit(player, symbols, name, args));
+        return Some(CurlXtra::call_static_handler_explicit(
+            player, symbols, name, args,
+        ));
     }
     None
 }
@@ -1142,10 +1273,10 @@ mod tests {
 
     #[test]
     fn sysmenu_host_reentry_is_borrow_free_and_late_result_is_rejected() {
-        use async_std::channel;
-        use std::{cell::RefCell, rc::Rc};
         use crate::player::session::RuntimeSession;
         use crate::player::symbols::symbol_table::SymbolOwner;
+        use async_std::channel;
+        use std::{cell::RefCell, rc::Rc};
 
         let session = Rc::new(RefCell::new(RuntimeSession::new(SymbolOwner {
             session: 903,
@@ -1161,26 +1292,25 @@ mod tests {
             owner: owner.clone(),
             message: "re-entry".to_owned(),
         };
-        let result = execute_sysmenu_host_intent_with(
-            &session,
-            1,
-            intent,
-            |_: &SysMenuHostIntent| {
+        let result =
+            execute_sysmenu_host_intent_with(&session, 1, intent, |_: &SysMenuHostIntent| {
                 assert!(session.try_borrow_mut().is_ok());
                 session
                     .borrow_mut()
                     .reset_player_owned(1, &owner)
                     .expect("host re-entry reset should succeed");
-            },
+            });
+        assert!(
+            result.is_err(),
+            "reset during host work must reject late result"
         );
-        assert!(result.is_err(), "reset during host work must reject late result");
     }
 
     #[test]
     fn multiuser_and_curl_instances_are_local_to_each_owner() {
-        use async_std::channel;
         use crate::player::session::RuntimeSession;
         use crate::player::symbols::symbol_table::SymbolOwner;
+        use async_std::channel;
 
         let mut session = RuntimeSession::new(SymbolOwner {
             session: 901,
@@ -1201,7 +1331,10 @@ mod tests {
             .with_player(1, |context| {
                 context.player.with_xtra_manager_state(|state, player| {
                     (
-                        state.multiuser.create_instance_explicit(player, &[]).unwrap(),
+                        state
+                            .multiuser
+                            .create_instance_explicit(player, &[])
+                            .unwrap(),
                         state
                             .curl
                             .create_instance_explicit(
@@ -1218,7 +1351,10 @@ mod tests {
             .with_player(2, |context| {
                 context.player.with_xtra_manager_state(|state, player| {
                     (
-                        state.multiuser.create_instance_explicit(player, &[]).unwrap(),
+                        state
+                            .multiuser
+                            .create_instance_explicit(player, &[])
+                            .unwrap(),
                         state
                             .curl
                             .create_instance_explicit(
@@ -1268,18 +1404,25 @@ mod tests {
 
     #[test]
     fn external_multiuser_and_curl_dispatch_respects_precedence() {
-        use async_std::channel;
         use crate::director::lingo::datum::Datum;
         use crate::player::driver::{GlobalDispatch, InternalVmRequest};
         use crate::player::session::RuntimeSession;
         use crate::player::symbols::symbol_table::SymbolOwner;
+        use async_std::channel;
 
-        let mut session = RuntimeSession::new(SymbolOwner { session: 902, generation: 1 });
+        let mut session = RuntimeSession::new(SymbolOwner {
+            session: 902,
+            generation: 1,
+        });
         let (tx, _rx) = channel::unbounded();
         assert!(session.add_player(1, tx));
         let (multi_receiver, curl_receiver, handler, builtin_handler) = session
             .with_player(1, |context| {
-                context.player.xtra_manager_state.external.register("Multiuser");
+                context
+                    .player
+                    .xtra_manager_state
+                    .external
+                    .register("Multiuser");
                 context.player.xtra_manager_state.external.register("Curl");
                 (
                     context
@@ -1328,23 +1471,27 @@ mod tests {
 
     #[test]
     fn prepared_intent_is_rejected_after_close_and_id_reuse() {
-        use async_std::channel;
         use crate::director::lingo::datum::Datum;
         use crate::player::symbols::symbol_table::SymbolTable;
+        use async_std::channel;
 
         let owner = OwnerToken::transitional();
         let (tx, _rx) = channel::unbounded();
         let mut player = crate::player::DirPlayer::new_with_owner(tx, owner);
-        player.external_params.insert("multiuser_websocket_path".to_owned(), "/owned".to_owned());
-        player.external_params.insert("multiuser_websocket_ssl".to_owned(), "1".to_owned());
+        player
+            .external_params
+            .insert("multiuser_websocket_path".to_owned(), "/owned".to_owned());
+        player
+            .external_params
+            .insert("multiuser_websocket_ssl".to_owned(), "1".to_owned());
         let mut symbols = SymbolTable::new();
         let instance_id = player.with_xtra_manager_state(|state, player| {
-            state.multiuser.create_instance_explicit(player, &[]).unwrap()
+            state
+                .multiuser
+                .create_instance_explicit(player, &[])
+                .unwrap()
         });
-        let receiver = player.alloc_datum(Datum::XtraInstance(
-            "Multiuser".to_owned(),
-            instance_id,
-        ));
+        let receiver = player.alloc_datum(Datum::XtraInstance("Multiuser".to_owned(), instance_id));
         let args = vec![
             player.alloc_datum(Datum::String("user".to_owned())),
             player.alloc_datum(Datum::String("password".to_owned())),
@@ -1420,7 +1567,10 @@ mod tests {
             state.reset();
         });
         let replacement_id = player.with_xtra_manager_state(|state, player| {
-            state.multiuser.create_instance_explicit(player, &[]).unwrap()
+            state
+                .multiuser
+                .create_instance_explicit(player, &[])
+                .unwrap()
         });
         assert_eq!(replacement_id, instance_id);
         player.with_xtra_manager_state(|state, _| {
@@ -1444,10 +1594,10 @@ mod tests {
 
     #[test]
     fn session_drains_normal_close_teardown_after_borrow_release() {
-        use async_std::channel;
         use crate::director::lingo::datum::Datum;
         use crate::player::session::RuntimeSession;
         use crate::player::symbols::symbol_table::SymbolOwner;
+        use async_std::channel;
         use std::{cell::RefCell, rc::Rc};
 
         let session = Rc::new(RefCell::new(RuntimeSession::new(SymbolOwner {
@@ -1505,14 +1655,17 @@ mod tests {
             .expect("session player exists");
         session.borrow_mut().collect_player_host_teardowns(1);
         crate::player::commands::drain_host_teardowns(&session);
-        assert!(fired.get(), "production drain must drop the queued resource");
+        assert!(
+            fired.get(),
+            "production drain must drop the queued resource"
+        );
     }
 
     #[test]
     fn session_reset_drains_active_xtra_teardown_after_borrow_release() {
-        use async_std::channel;
         use crate::player::session::RuntimeSession;
         use crate::player::symbols::symbol_table::SymbolOwner;
+        use async_std::channel;
         use std::{cell::RefCell, rc::Rc};
 
         let session = Rc::new(RefCell::new(RuntimeSession::new(SymbolOwner {
@@ -1570,9 +1723,9 @@ mod tests {
 
     #[test]
     fn remove_moves_active_xtra_resources_before_player_drop() {
-        use async_std::channel;
         use crate::player::session::RuntimeSession;
         use crate::player::symbols::symbol_table::SymbolOwner;
+        use async_std::channel;
         use std::{cell::RefCell, rc::Rc};
 
         let session = Rc::new(RefCell::new(RuntimeSession::new(SymbolOwner {
@@ -1630,7 +1783,10 @@ mod tests {
             );
         }
         crate::player::commands::drain_host_teardowns(&session);
-        assert!(fired.get(), "production drain must drop the removed resource");
+        assert!(
+            fired.get(),
+            "production drain must drop the removed resource"
+        );
         assert!(session
             .borrow_mut()
             .with_player(2, |context| context.player.owner.same_identity(&owner_two))
@@ -1641,12 +1797,18 @@ mod tests {
     fn fileio_virtual_files_survive_instance_reset_but_instances_do_not() {
         let owner = OwnerToken::transitional();
         let mut state = XtraManagerState::new(owner.clone());
-        state.fileio.virtual_fs.insert("remote.txt".to_owned(), b"owned".to_vec());
+        state
+            .fileio
+            .virtual_fs
+            .insert("remote.txt".to_owned(), b"owned".to_vec());
         let id = state.fileio.create_instance_explicit(&[]).unwrap();
         assert_eq!(state.fileio.instance_generation(id), Some(1));
         state.fileio.reset();
         assert!(state.fileio.instance_generation(id).is_none());
-        assert_eq!(state.fileio.virtual_fs.get("remote.txt"), Some(&b"owned".to_vec()));
+        assert_eq!(
+            state.fileio.virtual_fs.get("remote.txt"),
+            Some(&b"owned".to_vec())
+        );
     }
 
     #[test]
@@ -1689,7 +1851,9 @@ mod tests {
         let owner = OwnerToken::transitional();
         let (tx, _rx) = channel::unbounded();
         let mut player = crate::player::DirPlayer::new_with_owner(tx, owner.clone());
-        player.net_manager.set_base_path(url::Url::parse("https://example.invalid/").unwrap());
+        player
+            .net_manager
+            .set_base_path(url::Url::parse("https://example.invalid/").unwrap());
         let mut symbols = crate::player::symbols::symbol_table::SymbolTable::new();
         let instance_id = player
             .with_xtra_manager_state(|state, _| state.fileio.create_instance_explicit(&[]))
@@ -1729,7 +1893,9 @@ mod tests {
         let owner = OwnerToken::transitional();
         let (tx, _rx) = channel::unbounded();
         let mut player = crate::player::DirPlayer::new_with_owner(tx, owner.clone());
-        player.net_manager.set_base_path(Url::parse("https://first.example/").unwrap());
+        player
+            .net_manager
+            .set_base_path(Url::parse("https://first.example/").unwrap());
         let mut symbols = crate::player::symbols::symbol_table::SymbolTable::new();
         let instance_id = player
             .with_xtra_manager_state(|state, _| state.fileio.create_instance_explicit(&[]))
@@ -1749,10 +1915,20 @@ mod tests {
             XtraPendingOrValue::Pending(XtraPendingIntent::FileIoOpen(request)) => request,
             _ => panic!("missing remote open request"),
         };
-        assert_eq!(request.prepared.task.resolved_url.to_string(), "https://first.example/remote.txt");
-        player.net_manager.set_base_path(Url::parse("https://second.example/").unwrap());
         assert_eq!(
-            player.net_manager.get_task(request.prepared.task.id).unwrap().resolved_url.to_string(),
+            request.prepared.task.resolved_url.to_string(),
+            "https://first.example/remote.txt"
+        );
+        player
+            .net_manager
+            .set_base_path(Url::parse("https://second.example/").unwrap());
+        assert_eq!(
+            player
+                .net_manager
+                .get_task(request.prepared.task.id)
+                .unwrap()
+                .resolved_url
+                .to_string(),
             request.prepared.task.resolved_url.to_string()
         );
     }
@@ -1773,14 +1949,23 @@ mod tests {
         let owner = OwnerToken::transitional();
         let (tx, _rx) = channel::unbounded();
         let mut player = crate::player::DirPlayer::new_with_owner(tx, owner.clone());
-        player.net_manager.set_base_path(Url::parse("https://old.example/").unwrap());
+        player
+            .net_manager
+            .set_base_path(Url::parse("https://old.example/").unwrap());
         let old = player.net_manager.prepare_net_thing("same.txt".to_owned());
         let old_shared = old.shared_state.clone();
         let old_task_id = old.task.id;
-        player.net_manager.reset_owner(owner.key().next_generation());
-        player.net_manager.set_base_path(Url::parse("https://new.example/").unwrap());
+        player
+            .net_manager
+            .reset_owner(owner.key().next_generation());
+        player
+            .net_manager
+            .set_base_path(Url::parse("https://new.example/").unwrap());
         let new = player.net_manager.prepare_net_thing("same.txt".to_owned());
-        assert_eq!(old.task.id, new.task.id, "reset deliberately reuses task ids");
+        assert_eq!(
+            old.task.id, new.task.id,
+            "reset deliberately reuses task ids"
+        );
         async_std::task::block_on(async {
             old_shared
                 .lock()
@@ -1788,15 +1973,21 @@ mod tests {
                 .fulfill_task(old_task_id, Ok(b"old".to_vec()))
                 .await;
         });
-        assert!(player.net_manager.get_task_result(Some(new.task.id)).is_none());
-        assert_eq!(new.task.resolved_url.to_string(), "https://new.example/same.txt");
+        assert!(player
+            .net_manager
+            .get_task_result(Some(new.task.id))
+            .is_none());
+        assert_eq!(
+            new.task.resolved_url.to_string(),
+            "https://new.example/same.txt"
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     fn execute_failed_fileio_open(mode: i32) -> i32 {
-        use async_std::channel;
         use crate::player::session::RuntimeSession;
         use crate::player::symbols::symbol_table::SymbolOwner;
+        use async_std::channel;
         use std::{cell::RefCell, rc::Rc};
 
         let session = Rc::new(RefCell::new(RuntimeSession::new(SymbolOwner {
@@ -1816,8 +2007,12 @@ mod tests {
                     .player
                     .with_xtra_manager_state(|state, _| state.fileio.create_instance_explicit(&[]))
                     .unwrap();
-                let receiver = context.player.alloc_datum(Datum::XtraInstance("FileIO".to_owned(), instance_id));
-                let file_name = context.player.alloc_datum(Datum::String("missing.txt".to_owned()));
+                let receiver = context
+                    .player
+                    .alloc_datum(Datum::XtraInstance("FileIO".to_owned(), instance_id));
+                let file_name = context
+                    .player
+                    .alloc_datum(Datum::String("missing.txt".to_owned()));
                 let mode_ref = context.player.alloc_datum(Datum::Int(mode));
                 let pending = call_instance_handler_pending_explicit(
                     context.player,
@@ -1856,7 +2051,10 @@ mod tests {
                 (instance.is_open, instance.last_error)
             })
             .unwrap();
-        assert!(is_open, "completed FileIO failure must still open the instance");
+        assert!(
+            is_open,
+            "completed FileIO failure must still open the instance"
+        );
         last_error
     }
 
@@ -1870,11 +2068,11 @@ mod tests {
 
     #[test]
     fn budapi_state_is_owner_local_and_foreign_args_are_rejected() {
-        use async_std::channel;
-        use std::{cell::RefCell, rc::Rc};
         use crate::director::lingo::datum::Datum;
         use crate::player::session::RuntimeSession;
         use crate::player::symbols::symbol_table::SymbolOwner;
+        use async_std::channel;
+        use std::{cell::RefCell, rc::Rc};
 
         let session = Rc::new(RefCell::new(RuntimeSession::new(SymbolOwner {
             session: 915,
@@ -1889,37 +2087,47 @@ mod tests {
             let receiver = context.player.alloc_datum(Datum::Void);
             let value = context.player.alloc_datum(Datum::Int(37));
             let symbols = &*context.symbols;
-            context.player.with_xtra_manager_state(|state, player| {
-                BudApiXtra::call_handler(
-                    player,
-                    &mut state.budapi,
-                    "baSetVolume",
-                    &vec![receiver, value],
-                    symbols,
-                )
-            }).unwrap();
+            context
+                .player
+                .with_xtra_manager_state(|state, player| {
+                    BudApiXtra::call_handler(
+                        player,
+                        &mut state.budapi,
+                        "baSetVolume",
+                        &vec![receiver, value],
+                        symbols,
+                    )
+                })
+                .unwrap();
         });
-        session.borrow_mut().with_player(2, |context| {
-            let receiver = context.player.alloc_datum(Datum::Void);
-            let value = context.player.alloc_datum(Datum::Int(91));
-            let symbols = &*context.symbols;
-            context.player.with_xtra_manager_state(|state, player| {
-                BudApiXtra::call_handler(
-                    player,
-                    &mut state.budapi,
-                    "baSetVolume",
-                    &vec![receiver, value],
-                    symbols,
-                )
+        session
+            .borrow_mut()
+            .with_player(2, |context| {
+                let receiver = context.player.alloc_datum(Datum::Void);
+                let value = context.player.alloc_datum(Datum::Int(91));
+                let symbols = &*context.symbols;
+                context.player.with_xtra_manager_state(|state, player| {
+                    BudApiXtra::call_handler(
+                        player,
+                        &mut state.budapi,
+                        "baSetVolume",
+                        &vec![receiver, value],
+                        symbols,
+                    )
+                })
             })
-        }).unwrap();
+            .unwrap();
         let volume_a = session
             .borrow_mut()
-            .with_player(1, |context| context.player.xtra_manager_state.budapi.sound_volume)
+            .with_player(1, |context| {
+                context.player.xtra_manager_state.budapi.sound_volume
+            })
             .unwrap();
         let volume_b = session
             .borrow_mut()
-            .with_player(2, |context| context.player.xtra_manager_state.budapi.sound_volume)
+            .with_player(2, |context| {
+                context.player.xtra_manager_state.budapi.sound_volume
+            })
             .unwrap();
         let volumes = (volume_a, volume_b);
         assert_eq!(volumes, (37, 91));
@@ -1934,63 +2142,106 @@ mod tests {
             .expect("owner A reset should succeed");
         let reset_volume_a = session
             .borrow_mut()
-            .with_player(1, |context| context.player.xtra_manager_state.budapi.sound_volume)
+            .with_player(1, |context| {
+                context.player.xtra_manager_state.budapi.sound_volume
+            })
             .unwrap();
         let reset_volume_b = session
             .borrow_mut()
-            .with_player(2, |context| context.player.xtra_manager_state.budapi.sound_volume)
+            .with_player(2, |context| {
+                context.player.xtra_manager_state.budapi.sound_volume
+            })
             .unwrap();
         let reset_volumes = (reset_volume_a, reset_volume_b);
-        assert_eq!(reset_volumes, (100, 91), "reset must clear only owner A BudAPI state");
+        assert_eq!(
+            reset_volumes,
+            (100, 91),
+            "reset must clear only owner A BudAPI state"
+        );
 
-        let owner_a_after_reset = session.borrow_mut().with_player(1, |context| {
-            context.player.xtra_manager_state.budapi.clipboard_text = "A clipboard".to_owned();
-            context.player.owner.clone()
-        }).unwrap();
-        let owner_b = session.borrow_mut().with_player(2, |context| {
-            context.player.xtra_manager_state.budapi.clipboard_text = "B clipboard".to_owned();
-            context.player.owner.clone()
-        }).unwrap();
+        let owner_a_after_reset = session
+            .borrow_mut()
+            .with_player(1, |context| {
+                context.player.xtra_manager_state.budapi.clipboard_text = "A clipboard".to_owned();
+                context.player.owner.clone()
+            })
+            .unwrap();
+        let owner_b = session
+            .borrow_mut()
+            .with_player(2, |context| {
+                context.player.xtra_manager_state.budapi.clipboard_text = "B clipboard".to_owned();
+                context.player.owner.clone()
+            })
+            .unwrap();
         let read_clipboard = |player_id, owner: OwnerToken| {
             let value = execute_budapi_clipboard_read(
                 &session,
                 player_id,
                 BudApiHostIntent::ClipboardRead { owner },
-            ).expect("owner-local clipboard read should succeed");
-            session.borrow_mut().with_player(player_id, |context| {
-                match context.player.allocator.try_get_datum(&value) {
-                    Some(Datum::String(text)) => text.clone(),
-                    _ => panic!("unexpected clipboard datum"),
-                }
-            }).unwrap()
+            )
+            .expect("owner-local clipboard read should succeed");
+            session
+                .borrow_mut()
+                .with_player(player_id, |context| {
+                    match context.player.allocator.try_get_datum(&value) {
+                        Some(Datum::String(text)) => text.clone(),
+                        _ => panic!("unexpected clipboard datum"),
+                    }
+                })
+                .unwrap()
         };
-        assert_eq!(read_clipboard(1, owner_a_after_reset.clone()), "A clipboard");
+        assert_eq!(
+            read_clipboard(1, owner_a_after_reset.clone()),
+            "A clipboard"
+        );
         assert_eq!(read_clipboard(2, owner_b), "B clipboard");
-        session.borrow_mut().reset_player_owned(1, &owner_a_after_reset)
+        session
+            .borrow_mut()
+            .reset_player_owned(1, &owner_a_after_reset)
             .expect("owner A reset should succeed");
-        let owner_a_replacement = session.borrow_mut().with_player(1, |context| context.player.owner.clone()).unwrap();
+        let owner_a_replacement = session
+            .borrow_mut()
+            .with_player(1, |context| context.player.owner.clone())
+            .unwrap();
         assert_eq!(read_clipboard(1, owner_a_replacement), "");
-        let owner_b_replacement = session.borrow_mut().with_player(2, |context| context.player.owner.clone()).unwrap();
+        let owner_b_replacement = session
+            .borrow_mut()
+            .with_player(2, |context| context.player.owner.clone())
+            .unwrap();
         assert_eq!(read_clipboard(2, owner_b_replacement), "B clipboard");
 
         let foreign_arg = session
             .borrow_mut()
-            .with_player(1, |context| context.player.alloc_datum(Datum::String("foreign".to_owned())))
+            .with_player(1, |context| {
+                context
+                    .player
+                    .alloc_datum(Datum::String("foreign".to_owned()))
+            })
             .unwrap();
         let rejected = session.borrow_mut().with_player(2, |context| {
-            prepare_openurl_handler_explicit(context.player, context.symbols, "gsOpenURL", &[foreign_arg])
-                .expect("OpenURL handler should be recognized")
+            prepare_openurl_handler_explicit(
+                context.player,
+                context.symbols,
+                "gsOpenURL",
+                &[foreign_arg],
+            )
+            .expect("OpenURL handler should be recognized")
         });
-        assert!(matches!(rejected, Some(Err(error)) if error.code == crate::player::ScriptErrorCode::InvalidReference));
+        assert!(
+            matches!(rejected, Some(Err(error)) if error.code == crate::player::ScriptErrorCode::InvalidReference)
+        );
     }
 
     #[test]
     fn budapi_host_intent_reentry_is_borrow_free_and_reset_rejects_late_result() {
-        use async_std::channel;
-        use std::{cell::{Cell, RefCell}, rc::Rc};
         use crate::director::lingo::datum::Datum;
         use crate::player::session::RuntimeSession;
         use crate::player::symbols::symbol_table::SymbolOwner;
+        use async_std::channel;
+        use std::{
+            cell::{Cell, RefCell},
+            rc::Rc,
+        };
 
         let session = Rc::new(RefCell::new(RuntimeSession::new(SymbolOwner {
             session: 916,
@@ -2001,7 +2252,9 @@ mod tests {
         let (intent, owner) = session
             .borrow_mut()
             .with_player(1, |context| {
-                let message = context.player.alloc_datum(Datum::String("owned".to_owned()));
+                let message = context
+                    .player
+                    .alloc_datum(Datum::String("owned".to_owned()));
                 let outcome = prepare_budapi_handler_explicit(
                     context.player,
                     context.symbols,
@@ -2030,16 +2283,22 @@ mod tests {
             true
         });
         assert!(reentered.get());
-        assert!(result.is_err(), "completion after owner reset must be rejected");
+        assert!(
+            result.is_err(),
+            "completion after owner reset must be rejected"
+        );
     }
 
     #[test]
     fn budapi_host_intent_cannot_cross_players() {
-        use async_std::channel;
-        use std::{cell::{Cell, RefCell}, rc::Rc};
         use crate::director::lingo::datum::Datum;
         use crate::player::session::RuntimeSession;
         use crate::player::symbols::symbol_table::SymbolOwner;
+        use async_std::channel;
+        use std::{
+            cell::{Cell, RefCell},
+            rc::Rc,
+        };
 
         let session = Rc::new(RefCell::new(RuntimeSession::new(SymbolOwner {
             session: 917,
@@ -2052,10 +2311,17 @@ mod tests {
         let intent = session
             .borrow_mut()
             .with_player(1, |context| {
-                let message = context.player.alloc_datum(Datum::String("cross-owner".to_owned()));
-                match prepare_budapi_handler_explicit(context.player, context.symbols, "baMsgBox", &[message])
-                    .expect("BudAPI handler should be recognized")
-                    .expect("BudAPI message box should prepare")
+                let message = context
+                    .player
+                    .alloc_datum(Datum::String("cross-owner".to_owned()));
+                match prepare_budapi_handler_explicit(
+                    context.player,
+                    context.symbols,
+                    "baMsgBox",
+                    &[message],
+                )
+                .expect("BudAPI handler should be recognized")
+                .expect("BudAPI message box should prepare")
                 {
                     XtraPendingOrValue::Pending(XtraPendingIntent::BudApi(intent)) => intent,
                     _ => panic!("message box did not produce a typed BudAPI intent"),
@@ -2068,8 +2334,14 @@ mod tests {
             invoked_by_host.set(true);
             true
         });
-        assert!(result.is_err(), "foreign player must reject the host intent");
-        assert!(!invoked.get(), "foreign host intent must not invoke the browser");
+        assert!(
+            result.is_err(),
+            "foreign player must reject the host intent"
+        );
+        assert!(
+            !invoked.get(),
+            "foreign host intent must not invoke the browser"
+        );
     }
 }
 
@@ -2084,12 +2356,28 @@ pub fn call_xtra_instance_handler(
     let xtra_name_lower = xtra_name.to_lowercase();
     match xtra_name_lower.as_str() {
         "xmlparser" => {
-            let receiver = player.alloc_datum(Datum::XtraInstance(xtra_name.to_owned(), instance_id));
-            return call_instance_handler_explicit(player, symbols, xtra_name, &receiver, handler_name, args)
+            let receiver =
+                player.alloc_datum(Datum::XtraInstance(xtra_name.to_owned(), instance_id));
+            return call_instance_handler_explicit(
+                player,
+                symbols,
+                xtra_name,
+                &receiver,
+                handler_name,
+                args,
+            );
         }
         "fileio" => {
-            let receiver = player.alloc_datum(Datum::XtraInstance(xtra_name.to_owned(), instance_id));
-            return call_instance_handler_explicit(player, symbols, xtra_name, &receiver, handler_name, args)
+            let receiver =
+                player.alloc_datum(Datum::XtraInstance(xtra_name.to_owned(), instance_id));
+            return call_instance_handler_explicit(
+                player,
+                symbols,
+                xtra_name,
+                &receiver,
+                handler_name,
+                args,
+            );
         }
         // Static-only, but stateless: its handlers write to player-level
         // overrides, so an instance-syntax call (`lprh.setTheMoviePath(…)`)

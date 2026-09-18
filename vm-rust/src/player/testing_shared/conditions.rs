@@ -1,7 +1,7 @@
+use super::{now_ms, TestHarness, DEFAULT_TIMEOUT_SECS};
+use crate::director::static_datum::StaticDatum;
 use std::future::IntoFuture;
 use std::pin::Pin;
-use crate::director::static_datum::StaticDatum;
-use super::{now_ms, TestHarness, DEFAULT_TIMEOUT_SECS};
 
 // --- Query & check types ---
 
@@ -30,9 +30,17 @@ pub enum SpriteCheck {
 
 /// A condition that `step_until` polls each frame.
 pub enum StepCondition {
-    Sprite { query: SpriteQuery, check: SpriteCheck },
-    ExprEquals { expr: String, expected: StaticDatum },
-    ExprTruthy { expr: String },
+    Sprite {
+        query: SpriteQuery,
+        check: SpriteCheck,
+    },
+    ExprEquals {
+        expr: String,
+        expected: StaticDatum,
+    },
+    ExprTruthy {
+        expr: String,
+    },
 }
 
 impl std::fmt::Display for StepCondition {
@@ -45,10 +53,8 @@ impl std::fmt::Display for StepCondition {
                     SpriteCheck::Visible(min) => write!(f, " visible >= {:.0}%", min * 100.0),
                 }
             }
-            StepCondition::ExprEquals { expr, expected } =>
-                write!(f, "{} == {:?}", expr, expected),
-            StepCondition::ExprTruthy { expr } =>
-                write!(f, "{} is truthy", expr),
+            StepCondition::ExprEquals { expr, expected } => write!(f, "{} == {:?}", expr, expected),
+            StepCondition::ExprTruthy { expr } => write!(f, "{} is truthy", expr),
         }
     }
 }
@@ -73,7 +79,9 @@ pub fn sprite() -> SpriteConditionBuilder {
 /// datum("gReady").is_truthy()
 /// ```
 pub fn datum(expr: &str) -> DatumConditionBuilder {
-    DatumConditionBuilder { expr: expr.to_string() }
+    DatumConditionBuilder {
+        expr: expr.to_string(),
+    }
 }
 
 pub struct SpriteConditionBuilder {
@@ -83,7 +91,9 @@ pub struct SpriteConditionBuilder {
 /// Allow `sprite().member("x")` to be passed directly to `click_sprite()` etc.
 impl From<SpriteConditionBuilder> for SpriteQuery {
     fn from(builder: SpriteConditionBuilder) -> Self {
-        builder.query.expect("sprite query needs .member(), .member_prefix(), or .number()")
+        builder
+            .query
+            .expect("sprite query needs .member(), .member_prefix(), or .number()")
     }
 }
 
@@ -105,14 +115,18 @@ impl SpriteConditionBuilder {
 
     pub fn visible(self, min_visibility: f64) -> StepCondition {
         StepCondition::Sprite {
-            query: self.query.expect("sprite condition needs a query (.member(), .member_prefix(), or .number())"),
+            query: self.query.expect(
+                "sprite condition needs a query (.member(), .member_prefix(), or .number())",
+            ),
             check: SpriteCheck::Visible(min_visibility),
         }
     }
 
     pub fn exists(self) -> StepCondition {
         StepCondition::Sprite {
-            query: self.query.expect("sprite condition needs a query (.member(), .member_prefix(), or .number())"),
+            query: self.query.expect(
+                "sprite condition needs a query (.member(), .member_prefix(), or .number())",
+            ),
             check: SpriteCheck::Exists,
         }
     }
@@ -124,7 +138,10 @@ pub struct DatumConditionBuilder {
 
 impl DatumConditionBuilder {
     pub fn equals(self, expected: StaticDatum) -> StepCondition {
-        StepCondition::ExprEquals { expr: self.expr, expected }
+        StepCondition::ExprEquals {
+            expr: self.expr,
+            expected,
+        }
     }
 
     pub fn is_truthy(self) -> StepCondition {
@@ -173,7 +190,10 @@ impl<'a, H: TestHarness + ?Sized> IntoFuture for StepUntilBuilder<'a, H> {
                     return Ok(());
                 }
                 if !self.harness.step_frame().await {
-                    return Err(format!("Movie stopped while waiting for {}", self.condition));
+                    return Err(format!(
+                        "Movie stopped while waiting for {}",
+                        self.condition
+                    ));
                 }
                 frames += 1;
             }
@@ -209,7 +229,10 @@ async fn check_condition(harness: &(impl TestHarness + ?Sized), condition: &Step
 }
 
 /// Build a detail string for timeout error messages.
-async fn condition_detail(harness: &(impl TestHarness + ?Sized), condition: &StepCondition) -> String {
+async fn condition_detail(
+    harness: &(impl TestHarness + ?Sized),
+    condition: &StepCondition,
+) -> String {
     match condition {
         StepCondition::Sprite { query, check } => {
             if let Some(sprite_num) = harness.find_sprite(query) {
@@ -224,17 +247,13 @@ async fn condition_detail(harness: &(impl TestHarness + ?Sized), condition: &Ste
                 " (sprite not found)".to_string()
             }
         }
-        StepCondition::ExprEquals { expr, .. } => {
-            match harness.eval_datum(expr).await {
-                Ok(actual) => format!(" (actual: {:?})", actual),
-                Err(e) => format!(" (eval error: {})", e),
-            }
-        }
-        StepCondition::ExprTruthy { expr } => {
-            match harness.eval_datum(expr).await {
-                Ok(actual) => format!(" (actual: {:?})", actual),
-                Err(e) => format!(" (eval error: {})", e),
-            }
-        }
+        StepCondition::ExprEquals { expr, .. } => match harness.eval_datum(expr).await {
+            Ok(actual) => format!(" (actual: {:?})", actual),
+            Err(e) => format!(" (eval error: {})", e),
+        },
+        StepCondition::ExprTruthy { expr } => match harness.eval_datum(expr).await {
+            Ok(actual) => format!(" (actual: {:?})", actual),
+            Err(e) => format!(" (eval error: {})", e),
+        },
     }
 }

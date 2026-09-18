@@ -1,7 +1,7 @@
-use std::collections::HashMap;
-use log::debug;
-use crate::director::chunks::score::{ScoreFrameChannelData, FrameIntervalPrimary, TweenInfo};
+use crate::director::chunks::score::{FrameIntervalPrimary, ScoreFrameChannelData, TweenInfo};
 use crate::player::sprite::ColorRef;
+use log::debug;
+use std::collections::HashMap;
 
 pub trait DirectorProperty: Clone + PartialEq {
     type Raw;
@@ -12,8 +12,8 @@ pub trait DirectorProperty: Clone + PartialEq {
     fn extract_raw(data: &ScoreFrameChannelData) -> Option<Self::Raw>;
 
     /// Convert raw value into a resolved property value
-    fn resolve_raw(raw: Self::Raw) -> Self;  
-    
+    fn resolve_raw(raw: Self::Raw) -> Self;
+
     /// Default value when property never appears
     fn default() -> Self;
 
@@ -21,7 +21,7 @@ pub trait DirectorProperty: Clone + PartialEq {
     fn resolve_with_prev(raw: Self::Raw, prev: Option<&Self>) -> Self {
         Self::resolve_raw(raw)
     }
-    
+
     /// Check if this value is a standard default (e.g., PaletteIndex 0 or 255 for colors)
     /// Used to filter out false positive "animations" between default values
     fn is_standard_default(&self) -> bool {
@@ -124,18 +124,18 @@ pub fn has_real_animation<P: DirectorProperty + std::fmt::Debug>(
         // Standard defaults are PaletteIndex(0) and PaletteIndex(255)
         // If all frames only have 0 or 255, it's just sprite initialization, not animation
         // But if any frame has a different color (like 14), that's real animation
-        
+
         for (_, _, data) in frames {
             if let Some(raw) = P::extract_raw(data) {
                 let current = P::resolve_raw(raw);
-                
+
                 if !current.is_standard_default() {
                     // Found a non-standard-default color - that's real animation!
                     return true;
                 }
             }
         }
-        
+
         // All frames only have standard defaults (0 or 255) - no animation
         return false;
     }
@@ -144,7 +144,7 @@ pub fn has_real_animation<P: DirectorProperty + std::fmt::Debug>(
     for (_, _, data) in frames {
         if let Some(raw) = P::extract_raw(data) {
             let current = P::resolve_raw(raw);
-            
+
             // Only consider non-default values
             if current != default_val {
                 values.push(current);
@@ -236,17 +236,13 @@ impl DirectorProperty for ForeColor {
         let color_ref = match data.color_flag {
             // fore is palette index
             0 | 2 => ColorRef::PaletteIndex(data.fore_color),
-            
+
             // fore is RGB
-            1 | 3 => ColorRef::Rgb(
-                data.fore_color,
-                data.fore_color_g,
-                data.fore_color_b,
-            ),
-            
+            1 | 3 => ColorRef::Rgb(data.fore_color, data.fore_color_g, data.fore_color_b),
+
             _ => ColorRef::PaletteIndex(data.fore_color),
         };
-        
+
         Some(color_ref)
     }
 
@@ -265,7 +261,7 @@ impl DirectorProperty for ForeColor {
     fn default() -> Self {
         ForeColor(ColorRef::PaletteIndex(255))
     }
-    
+
     fn is_standard_default(&self) -> bool {
         match &self.0 {
             ColorRef::PaletteIndex(0) | ColorRef::PaletteIndex(255) => true,
@@ -285,17 +281,13 @@ impl DirectorProperty for BackColor {
         let color_ref = match data.color_flag {
             // back is palette index
             0 | 1 => ColorRef::PaletteIndex(data.back_color),
-            
+
             // back is RGB
-            2 | 3 => ColorRef::Rgb(
-                data.back_color,
-                data.back_color_g,
-                data.back_color_b,
-            ),
-            
+            2 | 3 => ColorRef::Rgb(data.back_color, data.back_color_g, data.back_color_b),
+
             _ => ColorRef::PaletteIndex(data.back_color),
         };
-        
+
         Some(color_ref)
     }
 
@@ -314,7 +306,7 @@ impl DirectorProperty for BackColor {
     fn default() -> Self {
         BackColor(ColorRef::PaletteIndex(0))
     }
-    
+
     fn is_standard_default(&self) -> bool {
         match &self.0 {
             ColorRef::PaletteIndex(0) | ColorRef::PaletteIndex(255) => true,
@@ -463,7 +455,6 @@ impl DirectorProperty for Height {
     }
 }
 
-
 /// Convert channel index (stored in score) to channel number (displayed in Director)
 pub fn index_to_channel_number(index: u16) -> u16 {
     if index <= 5 {
@@ -476,9 +467,9 @@ pub fn index_to_channel_number(index: u16) -> u16 {
 /// Curvature type for path interpolation
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum CurvatureType {
-    Linear = 0,   // Straight line
-    Normal = 1,   // Curved path inside keyframes
-    Extreme = 2,  // Curved path outside keyframes
+    Linear = 0,  // Straight line
+    Normal = 1,  // Curved path inside keyframes
+    Extreme = 2, // Curved path outside keyframes
 }
 
 impl From<u32> for CurvatureType {
@@ -500,17 +491,17 @@ fn apply_easing(t: f64, ease_in: u32, ease_out: u32, smooth_speed: bool) -> f64 
     if !smooth_speed {
         return t;
     }
-    
+
     let ease_in_pct = ease_in as f64 / 100.0;
     let ease_out_pct = ease_out as f64 / 100.0;
-    
+
     let total_ease = ease_in_pct + ease_out_pct;
     let (ease_in_norm, ease_out_norm) = if total_ease > 1.0 {
         (ease_in_pct / total_ease, ease_out_pct / total_ease)
     } else {
         (ease_in_pct, ease_out_pct)
     };
-    
+
     if t < ease_in_norm {
         let local_t = t / ease_in_norm;
         ease_in_norm * local_t * local_t
@@ -650,50 +641,50 @@ pub struct SpriteBackColorKeyframes {
     pub intervals: Vec<(u32, u32)>,
 }
 
-
 pub trait KeyframeTrack {
     // Add these new methods to access the common fields
     type Keyframe: KeyframeData;
     fn get_keyframes(&self) -> &[Self::Keyframe];
     fn get_intervals(&self) -> &[(u32, u32)];
-    
+
     fn frame_range(&self) -> Option<(u32, u32)>;
 
     fn is_active_at_frame(&self, frame: u32) -> bool {
         let keyframes = self.get_keyframes();
         let intervals = self.get_intervals();
-        
+
         if keyframes.is_empty() {
             return false;
         }
-        
+
         // Case 1: Frame is exactly on a keyframe - always active
         if keyframes.iter().any(|kf| kf.frame() == frame) {
             return true;
         }
-        
+
         // Case 2: Frame is between two keyframes - check if they're in same interval
-        let prev_kf = keyframes.iter()
-            .rev()
-            .find(|kf| kf.frame() <= frame);
-        
-        let next_kf = keyframes.iter()
-            .find(|kf| kf.frame() > frame);
-        
+        let prev_kf = keyframes.iter().rev().find(|kf| kf.frame() <= frame);
+
+        let next_kf = keyframes.iter().find(|kf| kf.frame() > frame);
+
         if let (Some(prev), Some(next)) = (prev_kf, next_kf) {
             let prev_frame = prev.frame();
             let next_frame = next.frame();
-            
+
             // Check if both keyframes and current frame are in the same interval
             for (start, end) in intervals {
-                if prev_frame >= *start && prev_frame <= *end &&
-                   next_frame >= *start && next_frame <= *end &&
-                   frame >= *start && frame <= *end {
+                if prev_frame >= *start
+                    && prev_frame <= *end
+                    && next_frame >= *start
+                    && next_frame <= *end
+                    && frame >= *start
+                    && frame <= *end
+                {
                     return true;
                 }
             }
         }
-        
+
         false
     }
 }
@@ -703,151 +694,163 @@ pub trait KeyframeData {
 }
 
 impl KeyframeData for BlendKeyframe {
-    fn frame(&self) -> u32 { self.frame }
+    fn frame(&self) -> u32 {
+        self.frame
+    }
 }
 
 impl KeyframeData for RotationKeyframe {
-    fn frame(&self) -> u32 { self.frame }
+    fn frame(&self) -> u32 {
+        self.frame
+    }
 }
 
 impl KeyframeData for SkewKeyframe {
-    fn frame(&self) -> u32 { self.frame }
+    fn frame(&self) -> u32 {
+        self.frame
+    }
 }
 
 impl KeyframeData for PathKeyframe {
-    fn frame(&self) -> u32 { self.frame }
+    fn frame(&self) -> u32 {
+        self.frame
+    }
 }
 
 impl KeyframeData for SizeKeyframe {
-    fn frame(&self) -> u32 { self.frame }
+    fn frame(&self) -> u32 {
+        self.frame
+    }
 }
 
 impl KeyframeData for ColorKeyframe {
-    fn frame(&self) -> u32 { self.frame }
+    fn frame(&self) -> u32 {
+        self.frame
+    }
 }
 
 impl KeyframeTrack for SpriteBlendKeyframes {
     type Keyframe = BlendKeyframe;
-    
+
     fn get_keyframes(&self) -> &[Self::Keyframe] {
         &self.keyframes
     }
-    
+
     fn get_intervals(&self) -> &[(u32, u32)] {
         &self.intervals
     }
-    
+
     fn frame_range(&self) -> Option<(u32, u32)> {
         let first = self.keyframes.first()?.frame;
-        let last  = self.keyframes.last()?.frame;
+        let last = self.keyframes.last()?.frame;
         Some((first, last))
     }
 }
 
 impl KeyframeTrack for SpriteRotationKeyframes {
     type Keyframe = RotationKeyframe;
-    
+
     fn get_keyframes(&self) -> &[Self::Keyframe] {
         &self.keyframes
     }
-    
+
     fn get_intervals(&self) -> &[(u32, u32)] {
         &self.intervals
     }
-    
+
     fn frame_range(&self) -> Option<(u32, u32)> {
         let first = self.keyframes.first()?.frame;
-        let last  = self.keyframes.last()?.frame;
+        let last = self.keyframes.last()?.frame;
         Some((first, last))
     }
 }
 
 impl KeyframeTrack for SpriteSkewKeyframes {
     type Keyframe = SkewKeyframe;
-    
+
     fn get_keyframes(&self) -> &[Self::Keyframe] {
         &self.keyframes
     }
-    
+
     fn get_intervals(&self) -> &[(u32, u32)] {
         &self.intervals
     }
-    
+
     fn frame_range(&self) -> Option<(u32, u32)> {
         let first = self.keyframes.first()?.frame;
-        let last  = self.keyframes.last()?.frame;
+        let last = self.keyframes.last()?.frame;
         Some((first, last))
     }
 }
 
 impl KeyframeTrack for SpritePathKeyframes {
     type Keyframe = PathKeyframe;
-    
+
     fn get_keyframes(&self) -> &[Self::Keyframe] {
         &self.keyframes
     }
-    
+
     fn get_intervals(&self) -> &[(u32, u32)] {
         &self.intervals
     }
-    
+
     fn frame_range(&self) -> Option<(u32, u32)> {
         let first = self.keyframes.first()?.frame;
-        let last  = self.keyframes.last()?.frame;
+        let last = self.keyframes.last()?.frame;
         Some((first, last))
     }
 }
 
 impl KeyframeTrack for SpriteSizeKeyframes {
     type Keyframe = SizeKeyframe;
-    
+
     fn get_keyframes(&self) -> &[Self::Keyframe] {
         &self.keyframes
     }
-    
+
     fn get_intervals(&self) -> &[(u32, u32)] {
         &self.intervals
     }
-    
+
     fn frame_range(&self) -> Option<(u32, u32)> {
         let first = self.keyframes.first()?.frame;
-        let last  = self.keyframes.last()?.frame;
+        let last = self.keyframes.last()?.frame;
         Some((first, last))
     }
 }
 
 impl KeyframeTrack for SpriteForeColorKeyframes {
     type Keyframe = ColorKeyframe;
-    
+
     fn get_keyframes(&self) -> &[Self::Keyframe] {
         &self.keyframes
     }
-    
+
     fn get_intervals(&self) -> &[(u32, u32)] {
         &self.intervals
     }
-    
+
     fn frame_range(&self) -> Option<(u32, u32)> {
         let first = self.keyframes.first()?.frame;
-        let last  = self.keyframes.last()?.frame;
+        let last = self.keyframes.last()?.frame;
         Some((first, last))
     }
 }
 
 impl KeyframeTrack for SpriteBackColorKeyframes {
     type Keyframe = ColorKeyframe;
-    
+
     fn get_keyframes(&self) -> &[Self::Keyframe] {
         &self.keyframes
     }
-    
+
     fn get_intervals(&self) -> &[(u32, u32)] {
         &self.intervals
     }
-    
+
     fn frame_range(&self) -> Option<(u32, u32)> {
         let first = self.keyframes.first()?.frame;
-        let last  = self.keyframes.last()?.frame;
+        let last = self.keyframes.last()?.frame;
         Some((first, last))
     }
 }
@@ -876,7 +879,8 @@ impl SpriteBlendKeyframes {
         let mut keyframes = Self::new(channel_index, tween_info);
 
         // Store the interval ranges
-        keyframes.intervals = intervals.iter()
+        keyframes.intervals = intervals
+            .iter()
             .map(|i| (i.start_frame, i.end_frame))
             .collect();
 
@@ -979,10 +983,7 @@ impl SpriteBlendKeyframes {
             return None;
         }
 
-        let current_kf = self.keyframes
-            .iter()
-            .rev()
-            .find(|kf| kf.frame <= frame);
+        let current_kf = self.keyframes.iter().rev().find(|kf| kf.frame <= frame);
 
         current_kf.map(|kf| kf.blend_percent)
     }
@@ -1016,7 +1017,8 @@ impl SpriteRotationKeyframes {
         let mut keyframes = Self::new(channel_index, tween_info);
 
         // Store the interval ranges
-        keyframes.intervals = intervals.iter()
+        keyframes.intervals = intervals
+            .iter()
             .map(|i| (i.start_frame, i.end_frame))
             .collect();
 
@@ -1081,10 +1083,9 @@ impl SpriteRotationKeyframes {
             let property_frames = collect_property_keyframes::<Rotation>(&sorted_frames);
 
             for (frame, Rotation(rotation)) in property_frames {
-                keyframes.keyframes.push(RotationKeyframe {
-                    frame,
-                    rotation,
-                });
+                keyframes
+                    .keyframes
+                    .push(RotationKeyframe { frame, rotation });
             }
         }
 
@@ -1099,13 +1100,9 @@ impl SpriteRotationKeyframes {
                 keyframes.keyframes.len(),
                 intervals.len()
             );
-            
+
             for kf in &keyframes.keyframes {
-                debug!(
-                    "   Frame {}: {:.2}°",
-                    kf.frame,
-                    kf.rotation
-                );
+                debug!("   Frame {}: {:.2}°", kf.frame, kf.rotation);
             }
         }
 
@@ -1122,19 +1119,12 @@ impl SpriteRotationKeyframes {
             return None;
         }
 
-        let current_kf = self.keyframes
-            .iter()
-            .rev()
-            .find(|kf| kf.frame <= frame);
+        let current_kf = self.keyframes.iter().rev().find(|kf| kf.frame <= frame);
 
         current_kf.map(|kf| kf.rotation)
     }
 
-    pub fn get_delta_at_frame(
-        &self,
-        frame: u32,
-        base_rotation: f64,
-    ) -> Option<f64> {
+    pub fn get_delta_at_frame(&self, frame: u32, base_rotation: f64) -> Option<f64> {
         let r = self.get_rotation_at_frame(frame)? as f64;
         Some(r - base_rotation)
     }
@@ -1164,7 +1154,8 @@ impl SpriteSkewKeyframes {
         let mut keyframes = Self::new(channel_index, tween_info);
 
         // Store the interval ranges
-        keyframes.intervals = intervals.iter()
+        keyframes.intervals = intervals
+            .iter()
             .map(|i| (i.start_frame, i.end_frame))
             .collect();
 
@@ -1229,10 +1220,7 @@ impl SpriteSkewKeyframes {
             let property_frames = collect_property_keyframes::<Skew>(&sorted_frames);
 
             for (frame, Skew(skew)) in property_frames {
-                keyframes.keyframes.push(SkewKeyframe {
-                    frame,
-                    skew,
-                });
+                keyframes.keyframes.push(SkewKeyframe { frame, skew });
             }
         }
 
@@ -1266,19 +1254,12 @@ impl SpriteSkewKeyframes {
             return None;
         }
 
-        let current_kf = self.keyframes
-            .iter()
-            .rev()
-            .find(|kf| kf.frame <= frame);
+        let current_kf = self.keyframes.iter().rev().find(|kf| kf.frame <= frame);
 
         current_kf.map(|kf| kf.skew)
     }
 
-    pub fn get_delta_at_frame(
-        &self,
-        frame: u32,
-        base_skew: f64,
-    ) -> Option<f64> {
+    pub fn get_delta_at_frame(&self, frame: u32, base_skew: f64) -> Option<f64> {
         let s = self.get_skew_at_frame(frame)?;
         Some(s - base_skew)
     }
@@ -1308,7 +1289,8 @@ impl SpritePathKeyframes {
         let mut keyframes = Self::new(channel_index, tween_info);
 
         // Store the interval ranges
-        keyframes.intervals = intervals.iter()
+        keyframes.intervals = intervals
+            .iter()
             .map(|i| (i.start_frame, i.end_frame))
             .collect();
 
@@ -1408,25 +1390,14 @@ impl SpritePathKeyframes {
             return None;
         }
 
-        let current_kf = self.keyframes
-            .iter()
-            .rev()
-            .find(|kf| kf.frame <= frame);
+        let current_kf = self.keyframes.iter().rev().find(|kf| kf.frame <= frame);
 
         current_kf.map(|kf| (kf.x, kf.y))
     }
 
-    pub fn get_delta_at_frame(
-        &self,
-        frame: u32,
-        base_x: i32,
-        base_y: i32,
-    ) -> Option<(i32, i32)> {
+    pub fn get_delta_at_frame(&self, frame: u32, base_x: i32, base_y: i32) -> Option<(i32, i32)> {
         let (x, y) = self.get_position_at_frame(frame)?;
-        Some((
-            x as i32 - base_x as i32,
-            y as i32 - base_y as i32,
-        ))
+        Some((x as i32 - base_x as i32, y as i32 - base_y as i32))
     }
 }
 
@@ -1454,7 +1425,8 @@ impl SpriteSizeKeyframes {
         let mut keyframes = Self::new(channel_index, tween_info);
 
         // Store the interval ranges
-        keyframes.intervals = intervals.iter()
+        keyframes.intervals = intervals
+            .iter()
             .map(|i| (i.start_frame, i.end_frame))
             .collect();
 
@@ -1554,25 +1526,14 @@ impl SpriteSizeKeyframes {
             return None;
         }
 
-        let current_kf = self.keyframes
-            .iter()
-            .rev()
-            .find(|kf| kf.frame <= frame);
+        let current_kf = self.keyframes.iter().rev().find(|kf| kf.frame <= frame);
 
         current_kf.map(|kf| (kf.width, kf.height))
     }
 
-    pub fn get_delta_at_frame(
-        &self,
-        frame: u32,
-        base_x: i32,
-        base_y: i32,
-    ) -> Option<(i32, i32)> {
+    pub fn get_delta_at_frame(&self, frame: u32, base_x: i32, base_y: i32) -> Option<(i32, i32)> {
         let (x, y) = self.get_size_at_frame(frame)?;
-        Some((
-            x as i32 - base_x as i32,
-            y as i32 - base_y as i32,
-        ))
+        Some((x as i32 - base_x as i32, y as i32 - base_y as i32))
     }
 }
 
@@ -1600,7 +1561,8 @@ impl SpriteForeColorKeyframes {
         let mut keyframes = Self::new(channel_index, tween_info);
 
         // Store the interval ranges
-        keyframes.intervals = intervals.iter()
+        keyframes.intervals = intervals
+            .iter()
             .map(|i| (i.start_frame, i.end_frame))
             .collect();
 
@@ -1665,10 +1627,7 @@ impl SpriteForeColorKeyframes {
             let property_frames = collect_property_keyframes::<ForeColor>(&sorted_frames);
 
             for (frame, ForeColor(color)) in property_frames {
-                keyframes.keyframes.push(ColorKeyframe {
-                    frame,
-                    color,
-                });
+                keyframes.keyframes.push(ColorKeyframe { frame, color });
             }
         }
 
@@ -1702,10 +1661,7 @@ impl SpriteForeColorKeyframes {
             return None;
         }
 
-        let current_kf = self.keyframes
-            .iter()
-            .rev()
-            .find(|kf| kf.frame <= frame);
+        let current_kf = self.keyframes.iter().rev().find(|kf| kf.frame <= frame);
 
         current_kf.map(|kf| kf.color.clone())
     }
@@ -1735,7 +1691,8 @@ impl SpriteBackColorKeyframes {
         let mut keyframes = Self::new(channel_index, tween_info);
 
         // Store the interval ranges
-        keyframes.intervals = intervals.iter()
+        keyframes.intervals = intervals
+            .iter()
             .map(|i| (i.start_frame, i.end_frame))
             .collect();
 
@@ -1800,10 +1757,7 @@ impl SpriteBackColorKeyframes {
             let property_frames = collect_property_keyframes::<BackColor>(&sorted_frames);
 
             for (frame, BackColor(color)) in property_frames {
-                keyframes.keyframes.push(ColorKeyframe {
-                    frame,
-                    color,
-                });
+                keyframes.keyframes.push(ColorKeyframe { frame, color });
             }
         }
 
@@ -1837,10 +1791,7 @@ impl SpriteBackColorKeyframes {
             return None;
         }
 
-        let current_kf = self.keyframes
-            .iter()
-            .rev()
-            .find(|kf| kf.frame <= frame);
+        let current_kf = self.keyframes.iter().rev().find(|kf| kf.frame <= frame);
 
         current_kf.map(|kf| kf.color.clone())
     }
@@ -1861,30 +1812,24 @@ pub fn build_blend_keyframes_cache(
     frame_intervals: &HashMap<u16, Vec<FrameIntervalPrimary>>,
 ) -> HashMap<u16, SpriteBlendKeyframes> {
     let mut keyframes_cache = HashMap::new();
-    
-    let mut channel_indices: Vec<u16> = frame_channel_data
-        .iter()
-        .map(|(_, ch, _)| *ch)
-        .collect();
+
+    let mut channel_indices: Vec<u16> = frame_channel_data.iter().map(|(_, ch, _)| *ch).collect();
     channel_indices.sort();
     channel_indices.dedup();
-    
+
     for channel_index in channel_indices {
         let channel_num = index_to_channel_number(channel_index);
-        
+
         let intervals = frame_intervals.get(&channel_num);
-        
-        let keyframes = SpriteBlendKeyframes::from_frame_data(
-            frame_channel_data, 
-            channel_index,
-            intervals
-        );
-        
+
+        let keyframes =
+            SpriteBlendKeyframes::from_frame_data(frame_channel_data, channel_index, intervals);
+
         if !keyframes.keyframes.is_empty() {
             keyframes_cache.insert(keyframes.channel, keyframes);
         }
     }
-    
+
     if keyframes_cache.is_empty() {
         debug!("ℹ️ No blend keyframes found");
     } else {
@@ -1902,30 +1847,24 @@ pub fn build_rotation_keyframes_cache(
     frame_intervals: &HashMap<u16, Vec<FrameIntervalPrimary>>,
 ) -> HashMap<u16, SpriteRotationKeyframes> {
     let mut keyframes_cache = HashMap::new();
-    
-    let mut channel_indices: Vec<u16> = frame_channel_data
-        .iter()
-        .map(|(_, ch, _)| *ch)
-        .collect();
+
+    let mut channel_indices: Vec<u16> = frame_channel_data.iter().map(|(_, ch, _)| *ch).collect();
     channel_indices.sort();
     channel_indices.dedup();
-    
+
     for channel_index in channel_indices {
         let channel_num = index_to_channel_number(channel_index);
-        
+
         let intervals = frame_intervals.get(&channel_num);
-        
-        let keyframes = SpriteRotationKeyframes::from_frame_data(
-            frame_channel_data, 
-            channel_index,
-            intervals
-        );
-        
+
+        let keyframes =
+            SpriteRotationKeyframes::from_frame_data(frame_channel_data, channel_index, intervals);
+
         if !keyframes.keyframes.is_empty() {
             keyframes_cache.insert(keyframes.channel, keyframes);
         }
     }
-    
+
     if keyframes_cache.is_empty() {
         debug!("ℹ️ No rotation keyframes found");
     } else {
@@ -1943,30 +1882,24 @@ pub fn build_skew_keyframes_cache(
     frame_intervals: &HashMap<u16, Vec<FrameIntervalPrimary>>,
 ) -> HashMap<u16, SpriteSkewKeyframes> {
     let mut keyframes_cache = HashMap::new();
-    
-    let mut channel_indices: Vec<u16> = frame_channel_data
-        .iter()
-        .map(|(_, ch, _)| *ch)
-        .collect();
+
+    let mut channel_indices: Vec<u16> = frame_channel_data.iter().map(|(_, ch, _)| *ch).collect();
     channel_indices.sort();
     channel_indices.dedup();
-    
+
     for channel_index in channel_indices {
         let channel_num = index_to_channel_number(channel_index);
-        
+
         let intervals = frame_intervals.get(&channel_num);
-        
-        let keyframes = SpriteSkewKeyframes::from_frame_data(
-            frame_channel_data, 
-            channel_index,
-            intervals
-        );
-        
+
+        let keyframes =
+            SpriteSkewKeyframes::from_frame_data(frame_channel_data, channel_index, intervals);
+
         if !keyframes.keyframes.is_empty() {
             keyframes_cache.insert(keyframes.channel, keyframes);
         }
     }
-    
+
     if keyframes_cache.is_empty() {
         debug!("ℹ️ No skew keyframes found");
     } else {
@@ -1984,30 +1917,24 @@ pub fn build_path_keyframes_cache(
     frame_intervals: &HashMap<u16, Vec<FrameIntervalPrimary>>,
 ) -> HashMap<u16, SpritePathKeyframes> {
     let mut keyframes_cache = HashMap::new();
-    
-    let mut channel_indices: Vec<u16> = frame_channel_data
-        .iter()
-        .map(|(_, ch, _)| *ch)
-        .collect();
+
+    let mut channel_indices: Vec<u16> = frame_channel_data.iter().map(|(_, ch, _)| *ch).collect();
     channel_indices.sort();
     channel_indices.dedup();
-    
+
     for channel_index in channel_indices {
         let channel_num = index_to_channel_number(channel_index);
-        
+
         let intervals = frame_intervals.get(&channel_num);
-        
-        let keyframes = SpritePathKeyframes::from_frame_data(
-            frame_channel_data, 
-            channel_index,
-            intervals
-        );
-        
+
+        let keyframes =
+            SpritePathKeyframes::from_frame_data(frame_channel_data, channel_index, intervals);
+
         if !keyframes.keyframes.is_empty() {
             keyframes_cache.insert(keyframes.channel, keyframes);
         }
     }
-    
+
     if keyframes_cache.is_empty() {
         debug!("ℹ️ No path keyframes found");
     } else {
@@ -2025,30 +1952,24 @@ pub fn build_size_keyframes_cache(
     frame_intervals: &HashMap<u16, Vec<FrameIntervalPrimary>>,
 ) -> HashMap<u16, SpriteSizeKeyframes> {
     let mut keyframes_cache = HashMap::new();
-    
-    let mut channel_indices: Vec<u16> = frame_channel_data
-        .iter()
-        .map(|(_, ch, _)| *ch)
-        .collect();
+
+    let mut channel_indices: Vec<u16> = frame_channel_data.iter().map(|(_, ch, _)| *ch).collect();
     channel_indices.sort();
     channel_indices.dedup();
-    
+
     for channel_index in channel_indices {
         let channel_num = index_to_channel_number(channel_index);
-        
+
         let intervals = frame_intervals.get(&channel_num);
-        
-        let keyframes = SpriteSizeKeyframes::from_frame_data(
-            frame_channel_data, 
-            channel_index,
-            intervals
-        );
-        
+
+        let keyframes =
+            SpriteSizeKeyframes::from_frame_data(frame_channel_data, channel_index, intervals);
+
         if !keyframes.keyframes.is_empty() {
             keyframes_cache.insert(keyframes.channel, keyframes);
         }
     }
-    
+
     if keyframes_cache.is_empty() {
         debug!("ℹ️ No size keyframes found");
     } else {
@@ -2064,32 +1985,26 @@ pub fn build_size_keyframes_cache(
 pub fn build_fore_color_keyframes_cache(
     frame_channel_data: &Vec<(u32, u16, ScoreFrameChannelData)>,
     frame_intervals: &HashMap<u16, Vec<FrameIntervalPrimary>>,
-) -> HashMap<u16, SpriteForeColorKeyframes> {   
+) -> HashMap<u16, SpriteForeColorKeyframes> {
     let mut keyframes_cache = HashMap::new();
-    
-    let mut channel_indices: Vec<u16> = frame_channel_data
-        .iter()
-        .map(|(_, ch, _)| *ch)
-        .collect();
+
+    let mut channel_indices: Vec<u16> = frame_channel_data.iter().map(|(_, ch, _)| *ch).collect();
     channel_indices.sort();
     channel_indices.dedup();
-    
+
     for channel_index in channel_indices {
         let channel_num = index_to_channel_number(channel_index);
-        
+
         let intervals = frame_intervals.get(&channel_num);
-        
-        let keyframes = SpriteForeColorKeyframes::from_frame_data(
-            frame_channel_data, 
-            channel_index,
-            intervals
-        );
-        
+
+        let keyframes =
+            SpriteForeColorKeyframes::from_frame_data(frame_channel_data, channel_index, intervals);
+
         if !keyframes.keyframes.is_empty() {
             keyframes_cache.insert(keyframes.channel, keyframes);
         }
     }
-    
+
     if keyframes_cache.is_empty() {
         debug!("ℹ️ No fore color keyframes found");
     } else {
@@ -2107,30 +2022,24 @@ pub fn build_back_color_keyframes_cache(
     frame_intervals: &HashMap<u16, Vec<FrameIntervalPrimary>>,
 ) -> HashMap<u16, SpriteBackColorKeyframes> {
     let mut keyframes_cache = HashMap::new();
-    
-    let mut channel_indices: Vec<u16> = frame_channel_data
-        .iter()
-        .map(|(_, ch, _)| *ch)
-        .collect();
+
+    let mut channel_indices: Vec<u16> = frame_channel_data.iter().map(|(_, ch, _)| *ch).collect();
     channel_indices.sort();
     channel_indices.dedup();
-    
+
     for channel_index in channel_indices {
         let channel_num = index_to_channel_number(channel_index);
-        
+
         let intervals = frame_intervals.get(&channel_num);
-        
-        let keyframes = SpriteBackColorKeyframes::from_frame_data(
-            frame_channel_data, 
-            channel_index,
-            intervals
-        );
-        
+
+        let keyframes =
+            SpriteBackColorKeyframes::from_frame_data(frame_channel_data, channel_index, intervals);
+
         if !keyframes.keyframes.is_empty() {
             keyframes_cache.insert(keyframes.channel, keyframes);
         }
     }
-    
+
     if keyframes_cache.is_empty() {
         debug!("ℹ️ No back color keyframes found");
     } else {
@@ -2159,34 +2068,42 @@ pub struct ChannelKeyframes {
 /// Build combined keyframes cache for all channels
 pub fn build_all_keyframes_cache(
     frame_channel_data: &Vec<(u32, u16, ScoreFrameChannelData)>,
-    frame_intervals: &Vec<(FrameIntervalPrimary, Option<crate::director::chunks::score::FrameIntervalSecondary>)>,
+    frame_intervals: &Vec<(
+        FrameIntervalPrimary,
+        Option<crate::director::chunks::score::FrameIntervalSecondary>,
+    )>,
 ) -> HashMap<u16, ChannelKeyframes> {
     debug!(
         "🎬 Building keyframes cache from {} frame entries and {} intervals",
         frame_channel_data.len(),
         frame_intervals.len()
     );
-    
+
     // Build map of channel → Vec<FrameIntervalPrimary> (channels can have multiple intervals!)
     let mut intervals_by_channel: HashMap<u16, Vec<FrameIntervalPrimary>> = HashMap::new();
     for (primary, _) in frame_intervals {
         let channel_num = index_to_channel_number(primary.channel_index as u16);
-        intervals_by_channel.entry(channel_num).or_insert_with(Vec::new).push(primary.clone());
+        intervals_by_channel
+            .entry(channel_num)
+            .or_insert_with(Vec::new)
+            .push(primary.clone());
     }
 
-    
     // Build keyframes with proper flag checking
     let blend_cache = build_blend_keyframes_cache(frame_channel_data, &intervals_by_channel);
     let rotation_cache = build_rotation_keyframes_cache(frame_channel_data, &intervals_by_channel);
     let skew_cache = build_skew_keyframes_cache(frame_channel_data, &intervals_by_channel);
     let path_cache = build_path_keyframes_cache(frame_channel_data, &intervals_by_channel);
     let size_cache = build_size_keyframes_cache(frame_channel_data, &intervals_by_channel);
-    let fore_color_cache = build_fore_color_keyframes_cache(frame_channel_data, &intervals_by_channel);
-    let back_color_cache = build_back_color_keyframes_cache(frame_channel_data, &intervals_by_channel);
-    
+    let fore_color_cache =
+        build_fore_color_keyframes_cache(frame_channel_data, &intervals_by_channel);
+    let back_color_cache =
+        build_back_color_keyframes_cache(frame_channel_data, &intervals_by_channel);
+
     // Combine into ChannelKeyframes
     let mut combined_cache = HashMap::new();
-    let mut channels: Vec<u16> = blend_cache.keys()
+    let mut channels: Vec<u16> = blend_cache
+        .keys()
         .chain(rotation_cache.keys())
         .chain(skew_cache.keys())
         .chain(path_cache.keys())
@@ -2197,24 +2114,27 @@ pub fn build_all_keyframes_cache(
         .collect();
     channels.sort();
     channels.dedup();
-    
+
     for channel in channels {
-        combined_cache.insert(channel, ChannelKeyframes {
+        combined_cache.insert(
             channel,
-            blend: blend_cache.get(&channel).cloned(),
-            rotation: rotation_cache.get(&channel).cloned(),
-            skew: skew_cache.get(&channel).cloned(),
-            path: path_cache.get(&channel).cloned(),
-            size: size_cache.get(&channel).cloned(),
-            fore_color: fore_color_cache.get(&channel).cloned(),
-            back_color: back_color_cache.get(&channel).cloned(),
-        });
+            ChannelKeyframes {
+                channel,
+                blend: blend_cache.get(&channel).cloned(),
+                rotation: rotation_cache.get(&channel).cloned(),
+                skew: skew_cache.get(&channel).cloned(),
+                path: path_cache.get(&channel).cloned(),
+                size: size_cache.get(&channel).cloned(),
+                fore_color: fore_color_cache.get(&channel).cloned(),
+                back_color: back_color_cache.get(&channel).cloned(),
+            },
+        );
     }
 
     debug!(
         "✅ Built keyframes cache for {} channels",
         combined_cache.len()
     );
-    
+
     combined_cache
 }

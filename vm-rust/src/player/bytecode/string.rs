@@ -4,10 +4,11 @@ use crate::{
     },
     player::{
         context_vars::{player_get_context_var, player_set_context_var, read_context_var_args},
-        datum_formatting::{format_concrete_datum, datum_to_string_for_concat},
+        datum_formatting::{datum_to_string_for_concat, format_concrete_datum},
         datum_ref::DatumRef,
         handlers::datum_handlers::string_chunk::StringChunkUtils,
-        symbols::symbol_table::SymbolTable, DirPlayer, HandlerExecutionResult, ScriptError,
+        symbols::symbol_table::SymbolTable,
+        DirPlayer, HandlerExecutionResult, ScriptError,
     },
 };
 
@@ -37,7 +38,10 @@ mod tests {
     use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
     use crate::director::{
-        chunks::{handler::{Bytecode, HandlerDef}, script::ScriptChunk},
+        chunks::{
+            handler::{Bytecode, HandlerDef},
+            script::ScriptChunk,
+        },
         enums::ScriptType,
         lingo::opcode::OpCode,
     };
@@ -55,7 +59,11 @@ mod tests {
         let (tx, _rx) = async_std::channel::unbounded();
         DirPlayer::new_with_owner(
             tx,
-            OwnerToken::new(OwnerKey { session: 29, player: 6, generation: 1 }),
+            OwnerToken::new(OwnerKey {
+                session: 29,
+                player: 6,
+                generation: 1,
+            }),
         )
     }
 
@@ -75,7 +83,10 @@ mod tests {
             compiled_ir: RefCell::new(None),
         });
         let script = Rc::new(Script {
-            member_ref: CastMemberRef { cast_lib: 0, cast_member: 0 },
+            member_ref: CastMemberRef {
+                cast_lib: 0,
+                cast_member: 0,
+            },
             name: String::new(),
             chunk: ScriptChunk {
                 script_number: 0,
@@ -133,31 +144,51 @@ mod tests {
         let null = player.alloc_datum(Datum::Null);
         let suffix = player.alloc_datum(Datum::String("tail".to_owned()));
         let custom = StringBytecodeHandler::concat_datums(
-            null.clone(), suffix.clone(), &mut player, &symbols, false,
+            null.clone(),
+            suffix.clone(),
+            &mut player,
+            &symbols,
+            false,
         )
         .unwrap();
         assert!(matches!(player.get_datum(&custom), Datum::String(value) if value == "<Null>tail"));
         let padded = StringBytecodeHandler::concat_datums(
-            null.clone(), suffix.clone(), &mut player, &symbols, true,
+            null.clone(),
+            suffix.clone(),
+            &mut player,
+            &symbols,
+            true,
         )
         .unwrap();
-        assert!(matches!(player.get_datum(&padded), Datum::String(value) if value == "<Null> tail"));
-        let canonical = datum_to_string_for_concat(player.get_datum(&null), &symbols, &player)
-            .unwrap();
+        assert!(
+            matches!(player.get_datum(&padded), Datum::String(value) if value == "<Null> tail")
+        );
+        let canonical =
+            datum_to_string_for_concat(player.get_datum(&null), &symbols, &player).unwrap();
         assert_eq!(format!("{canonical}tail"), "tail");
 
         let symbol = symbols.intern_authoritative("MiXeDKey");
         let symbol_ref = player.alloc_datum(Datum::Symbol(symbol));
         let custom = StringBytecodeHandler::concat_datums(
-            symbol_ref, suffix.clone(), &mut player, &symbols, false,
+            symbol_ref,
+            suffix.clone(),
+            &mut player,
+            &symbols,
+            false,
         )
         .unwrap();
-        assert!(matches!(player.get_datum(&custom), Datum::String(value) if value == "MiXeDKeytail"));
+        assert!(
+            matches!(player.get_datum(&custom), Datum::String(value) if value == "MiXeDKeytail")
+        );
 
         let mut foreign_table = SymbolTable::new();
         let foreign = player.alloc_datum(Datum::Symbol(foreign_table.intern("foreignConcat")));
         assert!(StringBytecodeHandler::concat_datums(
-            foreign, suffix, &mut player, &symbols, false,
+            foreign,
+            suffix,
+            &mut player,
+            &symbols,
+            false,
         )
         .is_err());
     }
@@ -311,8 +342,14 @@ impl StringBytecodeHandler {
         runtime.with_player_and_symbols(|player, symbols| {
             let (search_in, search_str) = {
                 let scope = player.scopes.get_mut(ctx.scope_ref()).unwrap();
-                let search_str = scope.stack.pop_ref_with(&mut player.allocator, &mut player.bitmap_manager).unwrap();
-                let search_in = scope.stack.pop_ref_with(&mut player.allocator, &mut player.bitmap_manager).unwrap();
+                let search_str = scope
+                    .stack
+                    .pop_ref_with(&mut player.allocator, &mut player.bitmap_manager)
+                    .unwrap();
+                let search_in = scope
+                    .stack
+                    .pop_ref_with(&mut player.allocator, &mut player.bitmap_manager)
+                    .unwrap();
                 (search_in, search_str)
             };
             let search_str = player.get_datum(&search_str).string_value(symbols)?;
@@ -327,7 +364,10 @@ impl StringBytecodeHandler {
                     let item = player.get_datum(item);
                     if item.is_string() {
                         let item = item.string_value(symbols)?;
-                        if item.to_ascii_lowercase().contains(search_str_lower.as_str()) {
+                        if item
+                            .to_ascii_lowercase()
+                            .contains(search_str_lower.as_str())
+                        {
                             contains = true;
                             break;
                         }
@@ -336,7 +376,9 @@ impl StringBytecodeHandler {
                 Ok(contains)
             } else if search_in.is_string() {
                 let search_in = search_in.string_value(symbols)?;
-                Ok(search_in.to_ascii_lowercase().contains(search_str_lower.as_str()))
+                Ok(search_in
+                    .to_ascii_lowercase()
+                    .contains(search_str_lower.as_str()))
             } else if search_in.is_symbol() {
                 Ok(false)
             } else if search_in.is_number() {
@@ -363,8 +405,14 @@ impl StringBytecodeHandler {
         runtime.with_player_and_symbols(|player, symbols| {
             let (left_id, right_id) = {
                 let scope = player.scopes.get_mut(ctx.scope_ref()).unwrap();
-                let right = scope.stack.pop_ref_with(&mut player.allocator, &mut player.bitmap_manager).unwrap();
-                let left = scope.stack.pop_ref_with(&mut player.allocator, &mut player.bitmap_manager).unwrap();
+                let right = scope
+                    .stack
+                    .pop_ref_with(&mut player.allocator, &mut player.bitmap_manager)
+                    .unwrap();
+                let left = scope
+                    .stack
+                    .pop_ref_with(&mut player.allocator, &mut player.bitmap_manager)
+                    .unwrap();
                 (left, right)
             };
 
@@ -375,37 +423,47 @@ impl StringBytecodeHandler {
         })
     }
 
-    pub fn join_str(runtime: &mut crate::player::session::ExecutionContext,
-        ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+    pub fn join_str(
+        runtime: &mut crate::player::session::ExecutionContext,
+        ctx: &BytecodeHandlerContext,
+    ) -> Result<HandlerExecutionResult, ScriptError> {
         runtime.with_player_and_symbols(|player, symbols| {
             let (left_ref, right_ref) = {
                 let scope = player.scopes.get_mut(ctx.scope_ref()).unwrap();
-                let right_ref = scope.stack.pop_ref_with(&mut player.allocator, &mut player.bitmap_manager).unwrap();
-                let left_ref = scope.stack.pop_ref_with(&mut player.allocator, &mut player.bitmap_manager).unwrap();
+                let right_ref = scope
+                    .stack
+                    .pop_ref_with(&mut player.allocator, &mut player.bitmap_manager)
+                    .unwrap();
+                let left_ref = scope
+                    .stack
+                    .pop_ref_with(&mut player.allocator, &mut player.bitmap_manager)
+                    .unwrap();
                 (left_ref, right_ref)
             };
-            
+
             // Get the actual datums
             let left = player.get_datum(&left_ref);
             let right = player.get_datum(&right_ref);
-            
+
             let left_str = datum_to_string_for_concat(left, symbols, player)?;
             let right_str = datum_to_string_for_concat(right, symbols, player)?;
-            
+
             // Concatenate
             let result = Datum::String(format!("{}{}", left_str, right_str));
             let result_ref = player.alloc_datum(result);
-            
+
             // Push result back to stack
             let scope = player.scopes.get_mut(ctx.scope_ref()).unwrap();
             scope.stack.push(result_ref);
-            
+
             Ok(HandlerExecutionResult::Advance)
         })
     }
 
-    pub fn put(runtime: &mut crate::player::session::ExecutionContext,
-        ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+    pub fn put(
+        runtime: &mut crate::player::session::ExecutionContext,
+        ctx: &BytecodeHandlerContext,
+    ) -> Result<HandlerExecutionResult, ScriptError> {
         runtime.with_player_and_symbols(|player, symbols| {
             let bytecode = player.get_ctx_current_bytecode(ctx);
             let put_type = PutType::from(((bytecode.obj >> 4) & 0xF) as u8);
@@ -413,7 +471,10 @@ impl StringBytecodeHandler {
             let (id_ref, cast_id_ref) = read_context_var_args(player, var_type, ctx.scope_ref());
             let value_ref = {
                 let scope = player.scopes.get_mut(ctx.scope_ref()).unwrap();
-                scope.stack.pop_ref_with(&mut player.allocator, &mut player.bitmap_manager).unwrap()
+                scope
+                    .stack
+                    .pop_ref_with(&mut player.allocator, &mut player.bitmap_manager)
+                    .unwrap()
             };
 
             match put_type {
@@ -506,13 +567,17 @@ impl StringBytecodeHandler {
             Some(StackDatum::Void) | None => Ok(0),
             Some(StackDatum::Float(f)) => Ok(f as i32),
             Some(other) => {
-                let value_ref = other.into_ref_with(&mut player.allocator, &mut player.bitmap_manager);
+                let value_ref =
+                    other.into_ref_with(&mut player.allocator, &mut player.bitmap_manager);
                 player.get_datum(&value_ref).int_value()
             }
         }
     }
 
-    fn read_single_chunk_ref(player: &mut DirPlayer, ctx: &BytecodeHandlerContext) -> Result<StringChunkExpr, ScriptError> {
+    fn read_single_chunk_ref(
+        player: &mut DirPlayer,
+        ctx: &BytecodeHandlerContext,
+    ) -> Result<StringChunkExpr, ScriptError> {
         // Pop the eight chunk operands WITHOUT materializing them. `pop_value`
         // keeps inline integers out of the arena; an explicit `into_ref_with`
         // is reserved for consumers that need a `DatumRef`, avoiding the
@@ -520,7 +585,16 @@ impl StringBytecodeHandler {
         // ~30 ns/op under WASM (vs ~5 ns native — the worst tax on the board).
         // Every one of them is a `pushzero`/`pushint8` already sitting inline on
         // the stack. Same inline-aware pattern `jmp_if_zero` uses.
-        let (last_line, first_line, last_item, first_item, last_word, first_word, last_char, first_char) = {
+        let (
+            last_line,
+            first_line,
+            last_item,
+            first_item,
+            last_word,
+            first_word,
+            last_char,
+            first_char,
+        ) = {
             let scope = player.scopes.get_mut(ctx.scope_ref()).unwrap();
             let last_line = scope.stack.pop_value();
             let first_line = scope.stack.pop_value();
@@ -530,7 +604,10 @@ impl StringBytecodeHandler {
             let first_word = scope.stack.pop_value();
             let last_char = scope.stack.pop_value();
             let first_char = scope.stack.pop_value();
-            (last_line, first_line, last_item, first_item, last_word, first_word, last_char, first_char)
+            (
+                last_line, first_line, last_item, first_item, last_word, first_word, last_char,
+                first_char,
+            )
         };
 
         let last_line = Self::stack_int(player, last_line)?;
@@ -571,11 +648,16 @@ impl StringBytecodeHandler {
                 item_delimiter: player.movie.item_delimiter.to_owned(),
             })
         } else {
-            Err(ScriptError::new("getChunk: invalid chunk range".to_string()))
+            Err(ScriptError::new(
+                "getChunk: invalid chunk range".to_string(),
+            ))
         }
     }
 
-    fn read_all_chunks(player: &mut DirPlayer,ctx: &BytecodeHandlerContext) -> Result<Vec<StringChunkExpr>, ScriptError> {
+    fn read_all_chunks(
+        player: &mut DirPlayer,
+        ctx: &BytecodeHandlerContext,
+    ) -> Result<Vec<StringChunkExpr>, ScriptError> {
         // Pop the eight chunk operands WITHOUT materializing them. `pop_value`
         // keeps inline integers out of the arena; an explicit `into_ref_with`
         // is reserved for consumers that need a `DatumRef`, avoiding the
@@ -583,7 +665,16 @@ impl StringBytecodeHandler {
         // ~30 ns/op under WASM (vs ~5 ns native — the worst tax on the board).
         // Every one of them is a `pushzero`/`pushint8` already sitting inline on
         // the stack. Same inline-aware pattern `jmp_if_zero` uses.
-        let (last_line, first_line, last_item, first_item, last_word, first_word, last_char, first_char) = {
+        let (
+            last_line,
+            first_line,
+            last_item,
+            first_item,
+            last_word,
+            first_word,
+            last_char,
+            first_char,
+        ) = {
             let scope = player.scopes.get_mut(ctx.scope_ref()).unwrap();
             let last_line = scope.stack.pop_value();
             let first_line = scope.stack.pop_value();
@@ -593,7 +684,10 @@ impl StringBytecodeHandler {
             let first_word = scope.stack.pop_value();
             let last_char = scope.stack.pop_value();
             let first_char = scope.stack.pop_value();
-            (last_line, first_line, last_item, first_item, last_word, first_word, last_char, first_char)
+            (
+                last_line, first_line, last_item, first_item, last_word, first_word, last_char,
+                first_char,
+            )
         };
 
         let last_line = Self::stack_int(player, last_line)?;
@@ -606,7 +700,7 @@ impl StringBytecodeHandler {
         let first_char = Self::stack_int(player, first_char)?;
 
         let mut chunks = Vec::new();
-        
+
         // Add chunks in the order they should be applied
         if first_line != 0 || last_line != 0 {
             chunks.push(StringChunkExpr {
@@ -640,20 +734,27 @@ impl StringBytecodeHandler {
                 item_delimiter: player.movie.item_delimiter.to_owned(),
             });
         }
-        
+
         if chunks.is_empty() {
-            return Err(ScriptError::new("getChunk: no valid chunks specified".to_string()));
+            return Err(ScriptError::new(
+                "getChunk: no valid chunks specified".to_string(),
+            ));
         }
-        
+
         Ok(chunks)
     }
 
-    pub fn get_chunk(runtime: &mut crate::player::session::ExecutionContext,
-        ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+    pub fn get_chunk(
+        runtime: &mut crate::player::session::ExecutionContext,
+        ctx: &BytecodeHandlerContext,
+    ) -> Result<HandlerExecutionResult, ScriptError> {
         runtime.with_player_and_symbols(|player, symbols| {
             let string_ref = {
                 let scope = player.scopes.get_mut(ctx.scope_ref()).unwrap();
-                scope.stack.pop_ref_with(&mut player.allocator, &mut player.bitmap_manager).unwrap()
+                scope
+                    .stack
+                    .pop_ref_with(&mut player.allocator, &mut player.bitmap_manager)
+                    .unwrap()
             };
 
             // Read all chunk parameters
@@ -675,11 +776,14 @@ impl StringBytecodeHandler {
             // Inspect the source by REFERENCE. This used to `.clone()` the whole
             // Datum — a full String copy on every chunk read — purely to check
             // which variant it was.
-            let initial_chain_source: Option<StringChunkSource> = match player.get_datum(&string_ref) {
-                Datum::CastMember(member_ref) => Some(StringChunkSource::Member(member_ref.clone())),
-                Datum::StringChunk(..) => Some(StringChunkSource::Datum(string_ref.clone())),
-                _ => None,
-            };
+            let initial_chain_source: Option<StringChunkSource> =
+                match player.get_datum(&string_ref) {
+                    Datum::CastMember(member_ref) => {
+                        Some(StringChunkSource::Member(member_ref.clone()))
+                    }
+                    Datum::StringChunk(..) => Some(StringChunkSource::Datum(string_ref.clone())),
+                    _ => None,
+                };
 
             let result_ref = if let Some(initial_source) = initial_chain_source {
                 let mut current_source = initial_source;
@@ -759,7 +863,9 @@ impl StringBytecodeHandler {
             let current = match current_datum.string_value(symbols) {
                 Ok(s) => s,
                 Err(_) => crate::player::datum_formatting::datum_to_string_for_concat(
-                    current_datum, symbols, player,
+                    current_datum,
+                    symbols,
+                    player,
                 )?,
             };
             let new_string = StringChunkUtils::string_by_deleting_chunk(&current, &chunk_expr)?;
@@ -786,8 +892,14 @@ impl StringBytecodeHandler {
         runtime.with_player_and_symbols(|player, symbols| {
             let (search_str_ref, search_in_ref) = {
                 let scope = player.scopes.get_mut(ctx.scope_ref()).unwrap();
-                let search_str_ref = scope.stack.pop_ref_with(&mut player.allocator, &mut player.bitmap_manager).unwrap();
-                let search_in_ref = scope.stack.pop_ref_with(&mut player.allocator, &mut player.bitmap_manager).unwrap();
+                let search_str_ref = scope
+                    .stack
+                    .pop_ref_with(&mut player.allocator, &mut player.bitmap_manager)
+                    .unwrap();
+                let search_in_ref = scope
+                    .stack
+                    .pop_ref_with(&mut player.allocator, &mut player.bitmap_manager)
+                    .unwrap();
                 (search_str_ref, search_in_ref)
             };
             let search_in = player.get_datum(&search_in_ref);
@@ -797,7 +909,9 @@ impl StringBytecodeHandler {
                 // Director's `starts` operator is case-insensitive
                 let search_str = player.get_datum(&search_str_ref).string_value(symbols)?;
                 let search_in = search_in.string_value(symbols)?;
-                search_in.to_ascii_lowercase().starts_with(search_str.to_ascii_lowercase().as_str())
+                search_in
+                    .to_ascii_lowercase()
+                    .starts_with(search_str.to_ascii_lowercase().as_str())
             };
             let result = player.alloc_datum(datum_bool(result));
             let scope = player.scopes.get_mut(ctx.scope_ref()).unwrap();
@@ -806,13 +920,15 @@ impl StringBytecodeHandler {
         })
     }
 
-    pub fn put_chunk(runtime: &mut crate::player::session::ExecutionContext,
-        ctx: &BytecodeHandlerContext) -> Result<HandlerExecutionResult, ScriptError> {
+    pub fn put_chunk(
+        runtime: &mut crate::player::session::ExecutionContext,
+        ctx: &BytecodeHandlerContext,
+    ) -> Result<HandlerExecutionResult, ScriptError> {
         runtime.with_player_and_symbols(|player, symbols| {
             let bytecode = player.get_ctx_current_bytecode(ctx);
             let put_type = PutType::from(((bytecode.obj >> 4) & 0xF) as u8);
             let var_type = (bytecode.obj & 0xF) as u32;
-            
+
             // Read the target variable (top of stack: cast_id if field type, then id)
             let (id_ref, cast_id_ref) = read_context_var_args(player, var_type, ctx.scope_ref());
 
@@ -822,7 +938,10 @@ impl StringBytecodeHandler {
             // Pop the value to put from the stack (pushed before chunk params)
             let value_ref = {
                 let scope = player.scopes.get_mut(ctx.scope_ref()).unwrap();
-                scope.stack.pop_ref_with(&mut player.allocator, &mut player.bitmap_manager).unwrap()
+                scope
+                    .stack
+                    .pop_ref_with(&mut player.allocator, &mut player.bitmap_manager)
+                    .unwrap()
             };
 
             // Field lookups historically swallow ordinary missing-member
@@ -831,15 +950,18 @@ impl StringBytecodeHandler {
             // field miss and silently discarded.
             if var_type == 0x6 {
                 crate::player::context_vars::validate_direct_identifier(
-                    player.get_datum(&id_ref), symbols,
+                    player.get_datum(&id_ref),
+                    symbols,
                 )?;
                 if let Some(cast_id_ref) = cast_id_ref.as_ref() {
                     crate::player::context_vars::validate_direct_identifier(
-                        player.get_datum(cast_id_ref), symbols,
+                        player.get_datum(cast_id_ref),
+                        symbols,
                     )?;
                 }
                 crate::player::context_vars::validate_direct_identifier(
-                    player.get_datum(&value_ref), symbols,
+                    player.get_datum(&value_ref),
+                    symbols,
                 )?;
             }
 
@@ -859,9 +981,10 @@ impl StringBytecodeHandler {
                 Ok(r) => r,
                 Err(err) => {
                     if var_type == 0x6 {
-                        web_sys::console::warn_1(&format!(
-                            "putchunk: field lookup failed (ignored): {}", err.message
-                        ).into());
+                        web_sys::console::warn_1(
+                            &format!("putchunk: field lookup failed (ignored): {}", err.message)
+                                .into(),
+                        );
                         return Ok(HandlerExecutionResult::Advance);
                     }
                     return Err(err);
@@ -873,15 +996,21 @@ impl StringBytecodeHandler {
 
             // Apply the chunk operation based on put type
             let new_string = match put_type {
-                PutType::Into => {
-                    StringChunkUtils::string_by_putting_into_chunk(&current_string, &chunk_expr, &value_string)?
-                }
-                PutType::Before => {
-                    StringChunkUtils::string_by_putting_before_chunk(&current_string, &chunk_expr, &value_string)?
-                }
-                PutType::After => {
-                    StringChunkUtils::string_by_putting_after_chunk(&current_string, &chunk_expr, &value_string)?
-                }
+                PutType::Into => StringChunkUtils::string_by_putting_into_chunk(
+                    &current_string,
+                    &chunk_expr,
+                    &value_string,
+                )?,
+                PutType::Before => StringChunkUtils::string_by_putting_before_chunk(
+                    &current_string,
+                    &chunk_expr,
+                    &value_string,
+                )?,
+                PutType::After => StringChunkUtils::string_by_putting_after_chunk(
+                    &current_string,
+                    &chunk_expr,
+                    &value_string,
+                )?,
             };
 
             let new_string_ref = player.alloc_datum(Datum::String(new_string));
@@ -900,14 +1029,14 @@ impl StringBytecodeHandler {
             // For field variables, silently ignore set failures too
             if let Err(err) = set_result {
                 if var_type == 0x6 {
-                    web_sys::console::warn_1(&format!(
-                        "putchunk: field set failed (ignored): {}", err.message
-                    ).into());
+                    web_sys::console::warn_1(
+                        &format!("putchunk: field set failed (ignored): {}", err.message).into(),
+                    );
                     return Ok(HandlerExecutionResult::Advance);
                 }
                 return Err(err);
             }
-            
+
             Ok(HandlerExecutionResult::Advance)
         })
     }

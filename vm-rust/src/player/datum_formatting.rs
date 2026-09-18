@@ -1,11 +1,8 @@
 use crate::{
     director::lingo::datum::Datum,
     player::{
-        allocator::ScriptInstanceAllocatorTrait,
-        bitmap::bitmap::PaletteRef,
-        sprite::ColorRef,
-        symbols::symbol_table::SymbolTable,
-        DirPlayer, ScriptError, ScriptErrorCode,
+        allocator::ScriptInstanceAllocatorTrait, bitmap::bitmap::PaletteRef, sprite::ColorRef,
+        symbols::symbol_table::SymbolTable, DirPlayer, ScriptError, ScriptErrorCode,
     },
 };
 
@@ -255,9 +252,10 @@ pub fn format_datum_with_depth(
 ) -> Result<String, ScriptError> {
     let datum = match datum_ref {
         DatumRef::Void => &Datum::Void,
-        _ => player.allocator.try_get_datum(datum_ref).ok_or_else(|| {
-            invalid_reference(format!("invalid datum reference {datum_ref}"))
-        })?,
+        _ => player
+            .allocator
+            .try_get_datum(datum_ref)
+            .ok_or_else(|| invalid_reference(format!("invalid datum reference {datum_ref}")))?,
     };
     if depth >= max_depth {
         return Ok(format!("<{datum_ref}>"));
@@ -270,22 +268,22 @@ pub fn format_float_with_precision(val: f64, player: &DirPlayer) -> String {
     let val = if val == 0.0 { 0.0 } else { val };
 
     let fp = player.float_precision as i32;
-    
+
     // Calculate how many characters the decimal notation would take
     let integer_digits = if val.abs() < 1.0 {
         1 // Just "0"
     } else {
         (val.abs().log10().floor() as i32 + 1).max(1)
     };
-    
+
     let decimal_places = if fp > 0 { fp } else { 0 };
     let total_chars = integer_digits + 1 + decimal_places; // digits + '.' + decimals
-    
+
     // Director switches to scientific notation when formatted string >= 18 chars
     if total_chars >= 18 {
         return format!("{:.14e}", val);
     }
-    
+
     // Normal formatting based on floatPrecision
     if fp > 0 {
         let p = fp.min(15) as usize;
@@ -297,9 +295,7 @@ pub fn format_float_with_precision(val: f64, player: &DirPlayer) -> String {
         let pow = 10f64.powi(p);
         let rounded = (val * pow).round() / pow;
         let s = format!("{:.*}", p as usize, rounded);
-        s.trim_end_matches('0')
-            .trim_end_matches('.')
-            .to_string()
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
     }
 }
 
@@ -348,10 +344,7 @@ mod tests {
         let key = symbols.intern_authoritative("MiXeDKey");
         let value = player.alloc_datum(Datum::String("value".to_string()));
         let key_ref = player.alloc_datum(Datum::Symbol(key.clone()));
-        let nested = player.alloc_datum(Datum::PropList(
-            VecDeque::from([(key_ref, value)]),
-            false,
-        ));
+        let nested = player.alloc_datum(Datum::PropList(VecDeque::from([(key_ref, value)]), false));
         let list = player.alloc_datum(Datum::List(
             crate::director::lingo::datum::DatumType::List,
             VecDeque::from([nested]),

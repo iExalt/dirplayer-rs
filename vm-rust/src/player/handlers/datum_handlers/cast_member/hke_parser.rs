@@ -8,7 +8,6 @@
 /// Rigid body properties (mass, restitution, friction, etc.) are in the tail,
 /// identified by 4-byte tokens followed by their values.
 /// Mass is stored per-primitive; total body mass = sum of primitive masses.
-
 use log::debug;
 
 use crate::player::symbols::{symbol::Symbol, symbol_table::SymbolTable};
@@ -131,17 +130,13 @@ const HEADER_WORLD_SCALE_TOKEN: [u8; 4] = [0x05, 0x33, 0x1B, 0x0A];
 
 // Rigid body markers (3 variants: full 16-byte, short 12-byte, tiny 4-byte)
 const RIGID_BODY_MARKER: [u8; 16] = [
-    0xEF, 0xCD, 0xAB, 0x12, 0x85, 0xCB, 0x34, 0x08,
-    0x89, 0x1A, 0x47, 0x0F, 0x99, 0x77, 0xE3, 0x03,
+    0xEF, 0xCD, 0xAB, 0x12, 0x85, 0xCB, 0x34, 0x08, 0x89, 0x1A, 0x47, 0x0F, 0x99, 0x77, 0xE3, 0x03,
 ];
 const SHORT_RIGID_BODY_MARKER: [u8; 12] = [
-    0x85, 0xCB, 0x34, 0x08, 0x89, 0x1A, 0x47, 0x0F,
-    0x99, 0x77, 0xE3, 0x03,
+    0x85, 0xCB, 0x34, 0x08, 0x89, 0x1A, 0x47, 0x0F, 0x99, 0x77, 0xE3, 0x03,
 ];
 const TINY_RIGID_BODY_MARKER: [u8; 4] = [0x99, 0x77, 0xE3, 0x03];
-const TINY_RIGID_BODY_PREFIX: [u8; 8] = [
-    0x85, 0xCB, 0x34, 0x08, 0x89, 0x1A, 0x47, 0x0F,
-];
+const TINY_RIGID_BODY_PREFIX: [u8; 8] = [0x85, 0xCB, 0x34, 0x08, 0x89, 0x1A, 0x47, 0x0F];
 
 // Primitive markers
 const PRIMITIVE_MESH_MARKER: [u8; 8] = [0x55, 0x8D, 0xFA, 0x07, 0x85, 0x54, 0x73, 0x01];
@@ -150,12 +145,10 @@ const PRIMITIVE_PLANE_MARKER: [u8; 8] = [0x55, 0x8D, 0xFA, 0x07, 0x65, 0x90, 0x8
 
 // Action markers
 const DRAG_ACTION_MARKER: [u8; 16] = [
-    0xEF, 0xCD, 0xAB, 0x12, 0x8E, 0x06, 0x3B, 0x02,
-    0x7E, 0x34, 0x31, 0x07, 0x77, 0xB8, 0x04, 0x00,
+    0xEF, 0xCD, 0xAB, 0x12, 0x8E, 0x06, 0x3B, 0x02, 0x7E, 0x34, 0x31, 0x07, 0x77, 0xB8, 0x04, 0x00,
 ];
 const DEACTIVATOR_ACTION_MARKER: [u8; 16] = [
-    0xEF, 0xCD, 0xAB, 0x12, 0x9E, 0x30, 0x5C, 0x03,
-    0x7E, 0x34, 0x31, 0x07, 0xC2, 0x3E, 0x46, 0x0B,
+    0xEF, 0xCD, 0xAB, 0x12, 0x9E, 0x30, 0x5C, 0x03, 0x7E, 0x34, 0x31, 0x07, 0xC2, 0x3E, 0x46, 0x0B,
 ];
 const SUBSPACE_MARKER: [u8; 4] = [0x95, 0x05, 0xC6, 0x00];
 
@@ -237,53 +230,81 @@ pub fn parse_hke(data: &[u8], symbols: &mut SymbolTable) -> HkeWorld {
     parse_cables(data, &mut world);
 
     // Log results
-    let movable: Vec<&str> = world.bodies.iter()
+    let movable: Vec<&str> = world
+        .bodies
+        .iter()
         .filter(|b| b.total_mass > 0.0)
         .filter_map(|b| symbols.display(&b.name).ok())
         .collect();
     debug!(
         "HKE parsed: {} meshes, {} bodies ({} movable: {:?}), worldScale={}",
-        world.meshes.len(), world.bodies.len(), movable.len(), movable, world.world_scale
+        world.meshes.len(),
+        world.bodies.len(),
+        movable.len(),
+        movable,
+        world.world_scale
     );
 
     world
 }
 
-fn parse_mesh_entry(data: &[u8], marker_pos: usize, symbols: &mut SymbolTable) -> Option<(HkeCollisionMesh, usize)> {
+fn parse_mesh_entry(
+    data: &[u8],
+    marker_pos: usize,
+    symbols: &mut SymbolTable,
+) -> Option<(HkeCollisionMesh, usize)> {
     let mut pos = marker_pos + ENTRY_MARKER.len();
 
-    if pos + 2 > data.len() { return None; }
+    if pos + 2 > data.len() {
+        return None;
+    }
     let entry_type = u16::from_le_bytes(data[pos..pos + 2].try_into().ok()?);
     pos += 2;
 
     let name = read_null_string(data, &mut pos);
-    if name.is_empty() { return None; }
+    if name.is_empty() {
+        return None;
+    }
 
-    if pos + 4 > data.len() { return None; }
+    if pos + 4 > data.len() {
+        return None;
+    }
     let vert_count = read_u32(data, pos) as usize;
     pos += 4;
-    if vert_count > 100_000 { return None; }
+    if vert_count > 100_000 {
+        return None;
+    }
 
     let vert_bytes = vert_count * 12;
-    if pos + vert_bytes > data.len() { return None; }
+    if pos + vert_bytes > data.len() {
+        return None;
+    }
     let mut vertices = Vec::with_capacity(vert_count);
     for i in 0..vert_count {
         let off = pos + i * 12;
         let x = read_f32(data, off);
         let y = read_f32(data, off + 4);
         let z = read_f32(data, off + 8);
-        if !x.is_finite() || !y.is_finite() || !z.is_finite() { return None; }
+        if !x.is_finite() || !y.is_finite() || !z.is_finite() {
+            return None;
+        }
         vertices.push([x, y, z]);
     }
     pos += vert_bytes;
 
-    if pos + 4 > data.len() { return None; }
+    if pos + 4 > data.len() {
+        return None;
+    }
     let tri_count = read_u32(data, pos) as usize;
     pos += 4;
-    if tri_count > 500_000 { return None; }
+    if tri_count > 500_000 {
+        return None;
+    }
 
     let idx_bytes = tri_count * 12;
-    if pos + idx_bytes > data.len() { return None; }
+    if pos + idx_bytes > data.len() {
+        return None;
+    }
     let mut triangles = Vec::with_capacity(tri_count);
     for i in 0..tri_count {
         let off = pos + i * 12;
@@ -302,7 +323,15 @@ fn parse_mesh_entry(data: &[u8], marker_pos: usize, symbols: &mut SymbolTable) -
         pos += ENTRY_SEPARATOR.len();
     }
 
-    Some((HkeCollisionMesh { name: symbols.intern(&name), entry_type, vertices, triangles }, pos))
+    Some((
+        HkeCollisionMesh {
+            name: symbols.intern(&name),
+            entry_type,
+            vertices,
+            triangles,
+        },
+        pos,
+    ))
 }
 
 /// Parse the tail section after all collision meshes.
@@ -341,7 +370,13 @@ fn parse_tail(data: &[u8], start: usize, world: &mut HkeWorld, symbols: &mut Sym
 
         // Short rigid body marker (12 bytes) — must NOT be preceded by separator prefix
         if match_short_rb_marker(data, pos) {
-            parse_rigid_body(data, &mut pos, SHORT_RIGID_BODY_MARKER.len(), world, symbols);
+            parse_rigid_body(
+                data,
+                &mut pos,
+                SHORT_RIGID_BODY_MARKER.len(),
+                world,
+                symbols,
+            );
             continue;
         }
 
@@ -360,7 +395,10 @@ fn parse_tail(data: &[u8], start: usize, world: &mut HkeWorld, symbols: &mut Sym
             if world.drag.is_none() {
                 let linear = try_read_f32_after_token(payload, &DRAG_LINEAR_TOKEN).unwrap_or(0.0);
                 let angular = try_read_f32_after_token(payload, &DRAG_ANGULAR_TOKEN).unwrap_or(0.0);
-                world.drag = Some(HkeDragAction { linear_drag: linear, angular_drag: angular });
+                world.drag = Some(HkeDragAction {
+                    linear_drag: linear,
+                    angular_drag: angular,
+                });
             }
             pos = end;
             continue;
@@ -407,7 +445,11 @@ fn parse_cables(data: &[u8], world: &mut HkeWorld) {
         while let Some(bi) = find_bytes(seg, &CABLE_BODY_REF, bsearch) {
             let mut np = bi + CABLE_BODY_REF.len();
             let name = read_null_string(seg, &mut np);
-            if body_a.is_empty() { body_a = name; } else if body_b.is_empty() { body_b = name; }
+            if body_a.is_empty() {
+                body_a = name;
+            } else if body_b.is_empty() {
+                body_b = name;
+            }
             bsearch = bi + CABLE_BODY_REF.len();
         }
 
@@ -416,13 +458,25 @@ fn parse_cables(data: &[u8], world: &mut HkeWorld) {
         let length = try_read_f32_after_token(seg, &CABLE_LENGTH).unwrap_or(0.0);
 
         if !body_b.is_empty() {
-            world.cables.push(HkeCable { body_a, pivot_a, body_b, pivot_b, length });
+            world.cables.push(HkeCable {
+                body_a,
+                pivot_a,
+                body_b,
+                pivot_b,
+                length,
+            });
         }
         search = end;
     }
 }
 
-fn parse_rigid_body(data: &[u8], pos: &mut usize, marker_len: usize, world: &mut HkeWorld, symbols: &mut SymbolTable) {
+fn parse_rigid_body(
+    data: &[u8],
+    pos: &mut usize,
+    marker_len: usize,
+    world: &mut HkeWorld,
+    symbols: &mut SymbolTable,
+) {
     *pos += marker_len;
     let name = read_null_string(data, pos);
 
@@ -460,7 +514,10 @@ fn parse_rigid_body(data: &[u8], pos: &mut usize, marker_len: usize, world: &mut
         } else {
             None
         };
-        let (marker_len, kind_id) = match kind_marker { Some(v) => v, None => break };
+        let (marker_len, kind_id) = match kind_marker {
+            Some(v) => v,
+            None => break,
+        };
 
         if let Some(prim) = parse_primitive(data, pos, marker_len, kind_id) {
             body.total_mass += prim.mass;
@@ -473,14 +530,20 @@ fn parse_rigid_body(data: &[u8], pos: &mut usize, marker_len: usize, world: &mut
 
 /// Parse a single collision primitive: name, transform, geometry, mass.
 /// `kind_id`: 0 = mesh, 1 = sphere, 2 = plane.
-fn parse_primitive(data: &[u8], pos: &mut usize, marker_len: usize, kind_id: u8) -> Option<HkePrimitive> {
+fn parse_primitive(
+    data: &[u8],
+    pos: &mut usize,
+    marker_len: usize,
+    kind_id: u8,
+) -> Option<HkePrimitive> {
     *pos += marker_len;
     let name = read_null_string(data, pos);
 
     let prim_end = find_next_primitive_boundary(data, *pos).unwrap_or(data.len());
     let payload = &data[*pos..prim_end];
     let mass = try_read_f32_after_token(payload, &PRIMITIVE_MASS_TOKEN).unwrap_or(0.0);
-    let local_translation = try_read_vec3_after_token(payload, &TRANSLATION_TOKEN).unwrap_or([0.0; 3]);
+    let local_translation =
+        try_read_vec3_after_token(payload, &TRANSLATION_TOKEN).unwrap_or([0.0; 3]);
 
     let kind = match kind_id {
         1 => {
@@ -488,14 +551,22 @@ fn parse_primitive(data: &[u8], pos: &mut usize, marker_len: usize, kind_id: u8)
             HkePrimitiveKind::Sphere { radius }
         }
         2 => {
-            let p = try_read_vec4_after_token(payload, &PLANE_NORMAL_TOKEN).unwrap_or([0.0, 0.0, 1.0, 0.0]);
-            HkePrimitiveKind::Plane { normal: [p[0], p[1], p[2]], dist: p[3] }
+            let p = try_read_vec4_after_token(payload, &PLANE_NORMAL_TOKEN)
+                .unwrap_or([0.0, 0.0, 1.0, 0.0]);
+            HkePrimitiveKind::Plane {
+                normal: [p[0], p[1], p[2]],
+                dist: p[3],
+            }
         }
         _ => HkePrimitiveKind::Mesh { mesh_name: name },
     };
 
     *pos = prim_end;
-    Some(HkePrimitive { kind, local_translation, mass })
+    Some(HkePrimitive {
+        kind,
+        local_translation,
+        mass,
+    })
 }
 
 // --- Token readers ---
@@ -548,31 +619,52 @@ fn try_read_vec3_after_token(data: &[u8], token: &[u8; 4]) -> Option<[f32; 3]> {
 // --- Marker matching helpers ---
 
 fn match_short_rb_marker(data: &[u8], pos: usize) -> bool {
-    if !match_bytes(data, pos, &SHORT_RIGID_BODY_MARKER) { return false; }
+    if !match_bytes(data, pos, &SHORT_RIGID_BODY_MARKER) {
+        return false;
+    }
     // Must NOT be preceded by separator prefix (EF CD AB 12)
-    if pos >= 4 && data[pos-4] == 0xEF && data[pos-3] == 0xCD && data[pos-2] == 0xAB && data[pos-1] == 0x12 {
+    if pos >= 4
+        && data[pos - 4] == 0xEF
+        && data[pos - 3] == 0xCD
+        && data[pos - 2] == 0xAB
+        && data[pos - 1] == 0x12
+    {
         return false;
     }
     true
 }
 
 fn match_tiny_rb_marker(data: &[u8], pos: usize) -> bool {
-    if !match_bytes(data, pos, &TINY_RIGID_BODY_MARKER) { return false; }
+    if !match_bytes(data, pos, &TINY_RIGID_BODY_MARKER) {
+        return false;
+    }
     // Must NOT be preceded by the longer prefix
-    if pos >= TINY_RIGID_BODY_PREFIX.len() && match_bytes(data, pos - TINY_RIGID_BODY_PREFIX.len(), &TINY_RIGID_BODY_PREFIX) {
+    if pos >= TINY_RIGID_BODY_PREFIX.len()
+        && match_bytes(
+            data,
+            pos - TINY_RIGID_BODY_PREFIX.len(),
+            &TINY_RIGID_BODY_PREFIX,
+        )
+    {
         return false;
     }
     // Next byte must be printable ASCII (start of name)
     let name_start = pos + TINY_RIGID_BODY_MARKER.len();
-    if name_start >= data.len() || !data[name_start].is_ascii_graphic() { return false; }
+    if name_start >= data.len() || !data[name_start].is_ascii_graphic() {
+        return false;
+    }
     true
 }
 
 /// Find the offset of the next top-level marker (rigid body, action, subspace).
 fn find_next_top_level_marker(data: &[u8], start: usize) -> Option<usize> {
     let markers: &[&[u8]] = &[
-        &RIGID_BODY_MARKER, &SHORT_RIGID_BODY_MARKER, &TINY_RIGID_BODY_MARKER,
-        &DRAG_ACTION_MARKER, &DEACTIVATOR_ACTION_MARKER, &SUBSPACE_MARKER,
+        &RIGID_BODY_MARKER,
+        &SHORT_RIGID_BODY_MARKER,
+        &TINY_RIGID_BODY_MARKER,
+        &DRAG_ACTION_MARKER,
+        &DEACTIVATOR_ACTION_MARKER,
+        &SUBSPACE_MARKER,
     ];
     find_next_any_marker(data, start, markers)
 }
@@ -580,9 +672,14 @@ fn find_next_top_level_marker(data: &[u8], start: usize) -> Option<usize> {
 /// Find offset of next body/primitive boundary marker.
 fn find_next_body_boundary(data: &[u8], start: usize) -> Option<usize> {
     let markers: &[&[u8]] = &[
-        &PRIMITIVE_MESH_MARKER, &PRIMITIVE_SPHERE_MARKER, &PRIMITIVE_PLANE_MARKER,
-        &RIGID_BODY_MARKER, &SHORT_RIGID_BODY_MARKER, &TINY_RIGID_BODY_MARKER,
-        &DRAG_ACTION_MARKER, &DEACTIVATOR_ACTION_MARKER,
+        &PRIMITIVE_MESH_MARKER,
+        &PRIMITIVE_SPHERE_MARKER,
+        &PRIMITIVE_PLANE_MARKER,
+        &RIGID_BODY_MARKER,
+        &SHORT_RIGID_BODY_MARKER,
+        &TINY_RIGID_BODY_MARKER,
+        &DRAG_ACTION_MARKER,
+        &DEACTIVATOR_ACTION_MARKER,
     ];
     find_next_any_marker(data, start, markers)
 }
@@ -590,9 +687,14 @@ fn find_next_body_boundary(data: &[u8], start: usize) -> Option<usize> {
 /// Find offset of next primitive boundary marker.
 fn find_next_primitive_boundary(data: &[u8], start: usize) -> Option<usize> {
     let markers: &[&[u8]] = &[
-        &PRIMITIVE_MESH_MARKER, &PRIMITIVE_SPHERE_MARKER, &PRIMITIVE_PLANE_MARKER,
-        &RIGID_BODY_MARKER, &SHORT_RIGID_BODY_MARKER, &TINY_RIGID_BODY_MARKER,
-        &DRAG_ACTION_MARKER, &DEACTIVATOR_ACTION_MARKER,
+        &PRIMITIVE_MESH_MARKER,
+        &PRIMITIVE_SPHERE_MARKER,
+        &PRIMITIVE_PLANE_MARKER,
+        &RIGID_BODY_MARKER,
+        &SHORT_RIGID_BODY_MARKER,
+        &TINY_RIGID_BODY_MARKER,
+        &DRAG_ACTION_MARKER,
+        &DEACTIVATOR_ACTION_MARKER,
     ];
     find_next_any_marker(data, start, markers)
 }
@@ -619,19 +721,29 @@ fn read_u32(data: &[u8], pos: usize) -> u32 {
 
 fn read_null_string(data: &[u8], pos: &mut usize) -> String {
     let start = *pos;
-    while *pos < data.len() && data[*pos] != 0 { *pos += 1; }
-    let s = std::str::from_utf8(&data[start..*pos]).unwrap_or("").to_string();
-    if *pos < data.len() { *pos += 1; } // skip null
+    while *pos < data.len() && data[*pos] != 0 {
+        *pos += 1;
+    }
+    let s = std::str::from_utf8(&data[start..*pos])
+        .unwrap_or("")
+        .to_string();
+    if *pos < data.len() {
+        *pos += 1;
+    } // skip null
     s
 }
 
 fn match_bytes(data: &[u8], offset: usize, pattern: &[u8]) -> bool {
-    if offset + pattern.len() > data.len() { return false; }
+    if offset + pattern.len() > data.len() {
+        return false;
+    }
     data[offset..offset + pattern.len()] == *pattern
 }
 
 fn find_bytes(data: &[u8], needle: &[u8], start: usize) -> Option<usize> {
-    if needle.is_empty() || data.len() < needle.len() + start { return None; }
+    if needle.is_empty() || data.len() < needle.len() + start {
+        return None;
+    }
     for i in start..=data.len() - needle.len() {
         if data[i..i + needle.len()] == *needle {
             return Some(i);

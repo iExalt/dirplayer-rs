@@ -11,7 +11,6 @@ use async_std::{channel::{unbounded, Receiver, Sender}, task::spawn_local};
 use log::{debug, warn};
 use manual_future::ManualFuture;
 use std::cell::{Cell, RefCell};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::rc::Rc;
 use js_api::JsApi;
 use num::ToPrimitive;
@@ -28,14 +27,14 @@ pub mod director;
 use player::{
     cast_lib::{cast_member_ref, CastMemberRef},
     cast_member::CastMemberType,
-    commands::{player_dispatch, PlayerVMCommand},
+    commands::{player_dispatch, FlashCallbackArgs, PlayerVMCommand},
     datum_ref::DatumId,
     init_player, reserve_player_mut, reserve_player_ref,
     score::get_sprite_at,
     ownership::OwnerToken,
     host_events::{BrowserHostSink, HostEvent, HostEventDelivery},
     owner_key_string,
-    session::{ExecutionContext, PlayerId, RuntimeSession, RuntimeSessionHandle},
+    session::{allocate_session_id, ExecutionContext, PlayerId, RuntimeSession, RuntimeSessionHandle},
     symbols::symbol_table::SymbolOwner,
     PlayerVMExecutionItem,
     PLAYER_OPT,
@@ -48,8 +47,6 @@ extern "C" {
     fn alert(s: &str);
 }
 
-static NEXT_BROWSER_SESSION: AtomicU64 = AtomicU64::new(1);
-
 fn checked_flash_sprite_number(value: f64) -> Result<i16, JsValue> {
     if !value.is_finite() || value.fract() != 0.0 || value < 1.0 || value > i16::MAX as f64 {
         return Err(JsValue::from_str("Flash sprite number is outside the supported range"));
@@ -60,6 +57,17 @@ fn checked_flash_sprite_number(value: f64) -> Result<i16, JsValue> {
 fn checked_flash_generation(value: f64) -> Result<u64, JsValue> {
     if !value.is_finite() || value.fract() != 0.0 || value < 1.0 || value > 9_007_199_254_740_991.0 {
         return Err(JsValue::from_str("Flash instance generation is not a safe integer"));
+    }
+    Ok(value as u64)
+}
+
+fn checked_timeout_incarnation(value: f64) -> Result<u64, JsValue> {
+    if !value.is_finite()
+        || value.fract() != 0.0
+        || value < 1.0
+        || value > 9_007_199_254_740_991.0
+    {
+        return Err(JsValue::from_str("timeout incarnation is not a safe integer"));
     }
     Ok(value as u64)
 }
@@ -472,7 +480,8 @@ pub async fn test_browser_host_event_guard_drops_attempted_callback() -> Result<
     // Keep this guard test independent from the public handle's command loop.
     // The loop is intentionally absent so the held RuntimeSession borrow can
     // isolate deferred Drop cleanup from unrelated PumpPending work.
-    let session_key = NEXT_BROWSER_SESSION.fetch_add(1, Ordering::Relaxed);
+    let session_key = allocate_session_id()
+        .map_err(|error| JsValue::from_str(&error.message))?;
     let session = RuntimeSession::new(SymbolOwner {
         session: session_key,
         generation: 1,
@@ -683,16 +692,17 @@ pub struct BrowserPlayerTestContext {
 /// the existing session/player/owner capability but never removes the player
 /// when dropped; the harness controls retirement explicitly.
 #[wasm_bindgen]
-pub struct BrowserFlashCapability {
+pub struct BrowserOwnerCapability {
     session: RuntimeSessionHandle,
     player_id: PlayerId,
     owner: OwnerToken,
     flash_scripted_access_pending: Rc<Cell<bool>>,
     flash_binding_state: Rc<RefCell<player::FlashBindingState>>,
     command_tx: Sender<PlayerVMExecutionItem>,
+    local_channels_only: bool,
 }
 
-impl BrowserFlashCapability {
+impl BrowserOwnerCapability {
     pub(crate) fn new(
         session: RuntimeSessionHandle,
         player_id: PlayerId,
@@ -704,7 +714,33 @@ impl BrowserFlashCapability {
             .borrow_mut()
             .with_player(player_id, |context| context.player.flash_binding_state.clone())
             .expect("browser flash capability player must expose binding state");
-        Self { session, player_id, owner, flash_scripted_access_pending, flash_binding_state, command_tx }
+        Self {
+            session,
+            player_id,
+            owner,
+            flash_scripted_access_pending,
+            flash_binding_state,
+            command_tx,
+            local_channels_only: false,
+        }
+    }
+
+    pub(crate) fn new_child(
+        session: RuntimeSessionHandle,
+        player_id: PlayerId,
+        owner: OwnerToken,
+        flash_scripted_access_pending: Rc<Cell<bool>>,
+        command_tx: Sender<PlayerVMExecutionItem>,
+    ) -> Self {
+        let mut capability = Self::new(
+            session,
+            player_id,
+            owner,
+            flash_scripted_access_pending,
+            command_tx,
+        );
+        capability.local_channels_only = true;
+        capability
     }
 
     fn with_context<R>(
@@ -735,13 +771,31 @@ impl BrowserFlashCapability {
             .map_err(|_| JsValue::from_str("browser player command loop stopped"))?;
         Ok(true)
     }
+
 }
 
 #[wasm_bindgen]
-impl BrowserFlashCapability {
+impl BrowserOwnerCapability {
     pub fn owner_identity(&self) -> String {
         let key = self.owner.key();
         format!("{}:{}:{}", key.session, key.player, key.generation)
+    }
+
+    pub fn trigger_timeout(&self, name: String, incarnation: f64) -> Result<(), JsValue> {
+        let incarnation = checked_timeout_incarnation(incarnation)?;
+        if !self.owner.is_arena_live() {
+            return Err(JsValue::from_str("browser player capability is stale"));
+        }
+        self.command_tx
+            .try_send(PlayerVMExecutionItem {
+                command: PlayerVMCommand::TimeoutTriggered {
+                    owner: self.owner.clone(),
+                    name,
+                    incarnation,
+                },
+                completer: None,
+            })
+            .map_err(|_| JsValue::from_str("browser player command loop stopped"))
     }
 
     /// Publish Flash scripted-access readiness without borrowing the VM.
@@ -801,6 +855,9 @@ impl BrowserFlashCapability {
         height: u32,
         rgba_data: &[u8],
     ) -> Result<(), JsValue> {
+        if self.local_channels_only && !(1..=i16::MAX as i32).contains(&sprite_num) {
+            return Err(JsValue::from_str("nested Flash channel must be a local i16"));
+        }
         self.with_context(|context| {
             update_flash_frame_for_player(context.player, context.symbols, sprite_num, width, height, rgba_data)
         })
@@ -808,6 +865,9 @@ impl BrowserFlashCapability {
 
     pub fn trigger_lingo_callback_on_script(
         &self,
+        origin_owner_key: String,
+        origin_sprite_num: f64,
+        origin_generation: f64,
         cast_lib: i32,
         cast_member: i32,
         handler_name: String,
@@ -815,13 +875,63 @@ impl BrowserFlashCapability {
         flash_cast_lib: i32,
         flash_cast_member: i32,
     ) -> Result<bool, JsValue> {
+        let origin_sprite_num = checked_flash_sprite_number(origin_sprite_num)?;
+        let origin_generation = checked_flash_generation(origin_generation)?;
+        if origin_owner_key != self.owner_identity() {
+            return Err(JsValue::from_str("Flash callback owner key is stale"));
+        }
+        if !self.owner.is_arena_live()
+            || !self.flash_binding_state.borrow().is_current(origin_sprite_num, origin_generation)
+        {
+            return Err(JsValue::from_str("Flash callback binding is stale"));
+        }
         self.enqueue_raw(PlayerVMCommand::TriggerLingoCallbackOnScriptRaw {
             cast_lib,
             cast_member,
             handler_name,
-            args_json,
+            args: FlashCallbackArgs::PlainJson(args_json),
             flash_cast_lib,
             flash_cast_member,
+            origin_owner: self.owner.clone(),
+            origin_sprite_num,
+            origin_generation,
+        })
+    }
+
+    /// Ruffle's receiver preserves its encoded wire payload. The VM owns the
+    /// later decode so stale queued callbacks are rejected before parsing.
+    pub fn trigger_lingo_callback_on_script_ruffle(
+        &self,
+        origin_owner_key: String,
+        origin_sprite_num: f64,
+        origin_generation: f64,
+        cast_lib: i32,
+        cast_member: i32,
+        handler_name: String,
+        args_json: String,
+        flash_cast_lib: i32,
+        flash_cast_member: i32,
+    ) -> Result<bool, JsValue> {
+        let origin_sprite_num = checked_flash_sprite_number(origin_sprite_num)?;
+        let origin_generation = checked_flash_generation(origin_generation)?;
+        if origin_owner_key != self.owner_identity() {
+            return Err(JsValue::from_str("Flash callback owner key is stale"));
+        }
+        if !self.owner.is_arena_live()
+            || !self.flash_binding_state.borrow().is_current(origin_sprite_num, origin_generation)
+        {
+            return Err(JsValue::from_str("Flash callback binding is stale"));
+        }
+        self.enqueue_raw(PlayerVMCommand::TriggerLingoCallbackOnScriptRaw {
+            cast_lib,
+            cast_member,
+            handler_name,
+            args: FlashCallbackArgs::RuffleBase64Json(args_json),
+            flash_cast_lib,
+            flash_cast_member,
+            origin_owner: self.owner.clone(),
+            origin_sprite_num,
+            origin_generation,
         })
     }
 
@@ -960,7 +1070,8 @@ impl BrowserPlayerHandle {
     /// it reuses the same numeric id.
     #[wasm_bindgen(constructor)]
     pub fn new() -> Result<BrowserPlayerHandle, JsValue> {
-        let session_key = NEXT_BROWSER_SESSION.fetch_add(1, Ordering::Relaxed);
+        let session_key = allocate_session_id()
+            .map_err(|error| JsValue::from_str(&error.message))?;
         let session = RuntimeSession::new(SymbolOwner {
             session: session_key,
             generation: 1,
@@ -1394,6 +1505,9 @@ impl BrowserPlayerHandle {
 
     pub fn trigger_lingo_callback_on_script(
         &self,
+        origin_owner_key: String,
+        origin_sprite_num: f64,
+        origin_generation: f64,
         cast_lib: i32,
         cast_member: i32,
         handler_name: String,
@@ -1401,38 +1515,74 @@ impl BrowserPlayerHandle {
         flash_cast_lib: i32,
         flash_cast_member: i32,
     ) -> Result<bool, JsValue> {
-        let args_value = js_sys::JSON::parse(&args_json)
-            .map_err(|_| JsValue::from_str("invalid Flash callback JSON"))?;
-        self.with_context(|context| -> Result<bool, JsValue> {
-            if !js_sys::Array::is_array(&args_value) {
-                return Err(JsValue::from_str("Flash callback arguments are not an array"));
-            }
-            let array = js_sys::Array::from(&args_value);
-            let mut args = vec![context.player.alloc_datum(director::lingo::datum::Datum::Void)];
-            for item in array.iter() {
-                args.push(js_value_to_datum_ref_for_context(
-                    &item,
-                    context.player,
-                    context.symbols,
+        let origin_sprite_num = checked_flash_sprite_number(origin_sprite_num)?;
+        let origin_generation = checked_flash_generation(origin_generation)?;
+        if origin_owner_key != self.owner_identity() {
+            return Err(JsValue::from_str("Flash callback owner key is stale"));
+        }
+        if !self.owner.is_arena_live()
+            || !self.flash_binding_state.borrow().is_current(origin_sprite_num, origin_generation)
+        {
+            return Err(JsValue::from_str("Flash callback binding is stale"));
+        }
+        self.command_tx
+            .try_send(PlayerVMExecutionItem {
+                command: PlayerVMCommand::TriggerLingoCallbackOnScriptRaw {
+                    cast_lib,
+                    cast_member,
+                    handler_name,
+                    args: FlashCallbackArgs::PlainJson(args_json),
                     flash_cast_lib,
                     flash_cast_member,
-                ));
-            }
-            context
-                .player
-                .queue_tx
-                .try_send(PlayerVMExecutionItem {
-                    command: PlayerVMCommand::TriggerLingoCallbackOnScript {
-                        cast_lib,
-                        cast_member,
-                        handler_name: context.symbols.intern(&handler_name),
-                        args,
-                    },
-                    completer: None,
-                })
-                .map_err(|_| JsValue::from_str("browser player command loop stopped"))?;
-            Ok(true)
-        }).and_then(|result| result)
+                    origin_owner: self.owner.clone(),
+                    origin_sprite_num,
+                    origin_generation,
+                },
+                completer: None,
+            })
+            .map_err(|_| JsValue::from_str("browser player command loop stopped"))?;
+        Ok(true)
+    }
+
+    pub fn trigger_lingo_callback_on_script_ruffle(
+        &self,
+        origin_owner_key: String,
+        origin_sprite_num: f64,
+        origin_generation: f64,
+        cast_lib: i32,
+        cast_member: i32,
+        handler_name: String,
+        args_json: String,
+        flash_cast_lib: i32,
+        flash_cast_member: i32,
+    ) -> Result<bool, JsValue> {
+        let origin_sprite_num = checked_flash_sprite_number(origin_sprite_num)?;
+        let origin_generation = checked_flash_generation(origin_generation)?;
+        if origin_owner_key != self.owner_identity() {
+            return Err(JsValue::from_str("Flash callback owner key is stale"));
+        }
+        if !self.owner.is_arena_live()
+            || !self.flash_binding_state.borrow().is_current(origin_sprite_num, origin_generation)
+        {
+            return Err(JsValue::from_str("Flash callback binding is stale"));
+        }
+        self.command_tx
+            .try_send(PlayerVMExecutionItem {
+                command: PlayerVMCommand::TriggerLingoCallbackOnScriptRaw {
+                    cast_lib,
+                    cast_member,
+                    handler_name,
+                    args: FlashCallbackArgs::RuffleBase64Json(args_json),
+                    flash_cast_lib,
+                    flash_cast_member,
+                    origin_owner: self.owner.clone(),
+                    origin_sprite_num,
+                    origin_generation,
+                },
+                completer: None,
+            })
+            .map_err(|_| JsValue::from_str("browser player command loop stopped"))?;
+        Ok(true)
     }
 
     pub fn local_connection_send(
@@ -1593,6 +1743,13 @@ impl BrowserPlayerHandle {
         // generations while removing their stale bound/content notifications.
         session.clear_pending_host_event_deliveries(self.player_id);
 
+        // Carry pending timeout actions across the owner rotation. Reset adds
+        // exact Clear actions for every live timeout; the retired Schedule
+        // actions must also be drained so they cannot strand a browser handle.
+        let retired_timeout_actions = session
+            .with_player(self.player_id, |context| context.player.take_timeout_host_actions())
+            .unwrap_or_default();
+
         let (command_tx, command_rx) = unbounded();
         let owner = session
             .reset_player_owned(self.player_id, &self.owner)
@@ -1608,6 +1765,11 @@ impl BrowserPlayerHandle {
                     context.player.flash_binding_state.clone(),
                 )
             });
+        if !retired_timeout_actions.is_empty() {
+            let _ = session.with_player(self.player_id, |context| {
+                context.player.timeout_host_actions.extend(retired_timeout_actions);
+            });
+        }
         if queue_result.is_none() {
             drop(session);
             drop(teardowns);
@@ -1615,6 +1777,7 @@ impl BrowserPlayerHandle {
         }
         drop(session);
         drop(teardowns);
+        crate::player::commands::drain_host_teardowns(&self.session);
         // Close the old sender only after reset has succeeded and the player
         // has received its replacement queue.
         self.command_tx.close();
@@ -1631,6 +1794,11 @@ impl BrowserPlayerHandle {
                 .bind_host_sink(self.player_id, &self.owner, sink)
                 .map_err(|error| JsValue::from_str(&error.message))?;
         }
+        crate::player::commands::drain_timeout_host_actions(
+            &self.session,
+            self.player_id,
+            &self.owner,
+        );
         rendering::rebind_renderer_owner(
             &self.renderer,
             self.session.clone(),
@@ -2477,13 +2645,18 @@ impl BrowserPlayerHandle {
         self.with_context(|context| context.player.step_into_line(skip_bytecode_indices))
     }
 
-    pub fn trigger_timeout(&self, name: String) -> Result<(), JsValue> {
+    pub fn trigger_timeout(&self, name: String, incarnation: f64) -> Result<(), JsValue> {
+        let incarnation = checked_timeout_incarnation(incarnation)?;
         if !self.owner.is_arena_live() {
             return Err(JsValue::from_str("browser player handle is stale"));
         }
         self.command_tx
             .try_send(PlayerVMExecutionItem {
-                command: PlayerVMCommand::TimeoutTriggered(name),
+                command: PlayerVMCommand::TimeoutTriggered {
+                    owner: self.owner.clone(),
+                    name,
+                    incarnation,
+                },
                 completer: None,
             })
             .map_err(|_| JsValue::from_str("browser player command loop stopped"))
@@ -2878,6 +3051,7 @@ impl Drop for BrowserPlayerHandle {
             drop(session);
             drop(teardowns);
         }
+        crate::player::commands::drain_host_teardowns(&self.session);
     }
 }
 
@@ -3185,11 +3359,6 @@ pub fn get_trace_log() -> JsValue {
 #[wasm_bindgen]
 pub fn set_stage_size(width: u32, height: u32) {
     player_dispatch(PlayerVMCommand::SetStageSize(width, height));
-}
-
-#[wasm_bindgen]
-pub fn trigger_timeout(name: &str) {
-    player_dispatch(PlayerVMCommand::TimeoutTriggered(name.to_string()));
 }
 
 // ── Interpreter instrumentation ─────────────────────────────────────────

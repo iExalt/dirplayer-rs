@@ -109,7 +109,11 @@ impl std::fmt::Display for JsXdrError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::UnexpectedEof { offset, want } => {
-                write!(f, "unexpected EOF at offset {} (wanted {} bytes)", offset, want)
+                write!(
+                    f,
+                    "unexpected EOF at offset {} (wanted {} bytes)",
+                    offset, want
+                )
             }
             Self::BadMagic(m) => write!(f, "bad XDR script magic: 0x{:08x}", m),
             Self::BadAtomTag(t) => write!(f, "bad XDR atom tag: 0x{:x}", t),
@@ -132,7 +136,10 @@ impl<'a> XdrReader<'a> {
 
     fn need(&self, want: usize) -> Result<(), JsXdrError> {
         if self.pos + want > self.buf.len() {
-            return Err(JsXdrError::UnexpectedEof { offset: self.pos, want });
+            return Err(JsXdrError::UnexpectedEof {
+                offset: self.pos,
+                want,
+            });
         }
         Ok(())
     }
@@ -176,8 +183,7 @@ impl<'a> XdrReader<'a> {
             .chunks_exact(2)
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect();
-        let s = String::from_utf16(&units)
-            .map_err(|_| JsXdrError::BadUtf16(self.pos - nbytes))?;
+        let s = String::from_utf16(&units).map_err(|_| JsXdrError::BadUtf16(self.pos - nbytes))?;
         // Mozilla pads the underlying byte count, not the char count.
         if nbytes % JSXDR_ALIGN != 0 {
             let pad = JSXDR_ALIGN - (nbytes % JSXDR_ALIGN);
@@ -191,7 +197,11 @@ impl<'a> XdrReader<'a> {
     fn c_string(&mut self) -> Result<String, JsXdrError> {
         let len = self.u32()? as usize;
         let bytes = self.bytes(len)?;
-        let pad = if len % JSXDR_ALIGN != 0 { JSXDR_ALIGN - (len % JSXDR_ALIGN) } else { 0 };
+        let pad = if len % JSXDR_ALIGN != 0 {
+            JSXDR_ALIGN - (len % JSXDR_ALIGN)
+        } else {
+            0
+        };
         if pad != 0 {
             self.need(pad)?;
             self.pos += pad;
@@ -227,7 +237,6 @@ pub fn decode_script(buf: &[u8]) -> Result<JsScriptIR, JsXdrError> {
 }
 
 fn decode_script_into(r: &mut XdrReader<'_>) -> Result<JsScriptIR, JsXdrError> {
-
     let magic = r.u32()?;
     if magic != JSXDR_MAGIC_SCRIPT_1
         && magic != JSXDR_MAGIC_SCRIPT_2
@@ -298,7 +307,11 @@ fn decode_script_into(r: &mut XdrReader<'_>) -> Result<JsScriptIR, JsXdrError> {
         let start = r.u32()?;
         let length = r.u32()?;
         let catch_start = r.u32()?;
-        try_notes.push(JsTryNote { start, length, catch_start });
+        try_notes.push(JsTryNote {
+            start,
+            length,
+            catch_start,
+        });
     }
 
     Ok(JsScriptIR {
@@ -370,7 +383,11 @@ fn decode_function_object(r: &mut XdrReader<'_>) -> Result<JsAtom, JsXdrError> {
             JSXDR_FUNCONST => JsBindingKind::Constant,
             other => return Err(JsXdrError::BadAtomTag(other)),
         };
-        bindings.push(JsFunctionBinding { kind, short_id, name: prop_name });
+        bindings.push(JsFunctionBinding {
+            kind,
+            short_id,
+            name: prop_name,
+        });
     }
 
     // Inner script — same XDR format, recursively decoded.
@@ -416,7 +433,12 @@ impl<'a> Iterator for JsOpIter<'a> {
         let byte = self.bc[self.pos];
         let op = match JsOp::from_byte(byte) {
             Some(op) => op,
-            None => return Some(Err(format!("unknown opcode 0x{:02x} at {}", byte, self.pos))),
+            None => {
+                return Some(Err(format!(
+                    "unknown opcode 0x{:02x} at {}",
+                    byte, self.pos
+                )))
+            }
         };
         let info = op.info();
         let len = if info.length < 0 {
