@@ -3,9 +3,10 @@
 Status: accepted N1, deterministic native Director slice. N2 is the next
 active item and remains unimplemented.
 
-The active publication state is base/replay tip
-`9bb412c21c27f5e81b0300c4b223222d483238d1` plus the uncommitted N1 `vm-rust`
-patch identified by SHA-256
+The active source is committed N1 tip
+`cf91292b3bd2f17f56976efd949198f684e6f595`, whose parent/integration base is
+`9bb412c21c27f5e81b0300c4b223222d483238d1`.
+The N1 `vm-rust` source range has SHA-256
 `41d1065972ffe75a1012218770d9c8ed4b6c24888396d67ba1a813504f491a27`.
 The durable evidence root is
 `/Users/clliaw/Projects/dirplayer-rs/.cache/native-bevy/native-n1-20260918/evidence`
@@ -65,10 +66,11 @@ NATIVE_LIFECYCLE_EVIDENCE_DIR=/Users/clliaw/Projects/dirplayer-rs/.cache/native-
 NATIVE_LIFECYCLE_EVIDENCE_DIR=/Users/clliaw/Projects/dirplayer-rs/.cache/native-bevy/native-n1-20260918/evidence/lifecycle-correction-3 CARGO_TARGET_DIR=/Users/clliaw/Projects/dirplayer-rs/.cache/native-bevy/native-n1-20260918/target mise exec -- cargo test --manifest-path vm-rust/Cargo.toml --lib player::testing::native_lifecycle_tests::native_test_player_lifecycle --locked --offline -- --exact --nocapture
 ```
 
-The stable raw runtime patch identity excludes documentation changes:
+The stable raw runtime patch identity for the committed N1 source range,
+excluding documentation changes, is:
 
 ```sh
-git --no-pager diff --no-ext-diff --no-textconv --binary -- vm-rust | shasum -a 256
+git --no-pager diff --no-ext-diff --no-textconv --binary 9bb412c21c27f5e81b0300c4b223222d483238d1 cf91292b3bd2f17f56976efd949198f684e6f595 -- vm-rust | shasum -a 256
 ```
 
 It produced `41d1065972ffe75a1012218770d9c8ed4b6c24888396d67ba1a813504f491a27`.
@@ -79,12 +81,12 @@ runtime source mismatch.
 ## Publication and integration boundary
 
 The accepted integration base is a 14-commit replay ending at tip `9bb412c2`;
-the N1 runtime patch remains uncommitted and is identified separately above.
+the committed N1 source tip follows that base as `cf91292b`.
 The replay excludes the local-only Ruffle gitlink `093de1f3` and retains public
 Ruffle gitlink `79d1ca0f4`. Native Director code is identical across the
 accepted replay boundary. Historical browser receipts describe their recorded
-source snapshots and are not current public validation of this uncommitted N1
-patch.
+source snapshots and are not current public validation of the committed N1
+source.
 
 Dirty-work preservation is recorded by root commit `1d9c4408` and nested Ruffle
 commit `456c2448`. At discovery, the preserved stashes were:
@@ -98,7 +100,9 @@ commit `456c2448`. At discovery, the preserved stashes were:
 
 Direct-dev validation passed from cwd `/Users/clliaw/Projects/dirplayer-rs`
 against public replay baseline
-`9bb412c21c27f5e81b0300c4b223222d483238d1` plus N1 patch
+`9bb412c21c27f5e81b0300c4b223222d483238d1`. The run was performed on the
+then-uncommitted bytes now captured exactly by committed N1 tip
+`cf91292b3bd2f17f56976efd949198f684e6f595`, with the same range hash
 `41d1065972ffe75a1012218770d9c8ed4b6c24888396d67ba1a813504f491a27`:
 
 - `dev-integrated-lib.receipt` / `.log`:
@@ -113,7 +117,7 @@ against public replay baseline
   **4 passed, 0 failed**.
 
 The moved target and evidence were validated by the navigator; this documentation
-update did not rerun them. Push has not occurred, so publication is not complete.
+update did not rerun them.
 
 The generator executable identity was checked with:
 
@@ -131,7 +135,11 @@ fixture generator.
 Verify every changed runtime file against the accepted source identity:
 
 ```sh
-git --no-pager diff --name-only -- vm-rust | while IFS= read -r changed_file; do shasum -a 256 "$changed_file"; done
+git --no-pager diff --name-only 9bb412c21c27f5e81b0300c4b223222d483238d1 cf91292b3bd2f17f56976efd949198f684e6f595 -- vm-rust |
+while IFS= read -r changed_file; do
+  blob_hash=$(git show "cf91292b3bd2f17f56976efd949198f684e6f595:$changed_file" | shasum -a 256 | cut -d ' ' -f 1)
+  printf '%s  %s\n' "$blob_hash" "$changed_file"
+done
 ```
 
 The twelve accepted per-file hashes are:
