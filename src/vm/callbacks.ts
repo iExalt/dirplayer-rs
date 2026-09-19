@@ -10,7 +10,7 @@ import {
   getXtraRegistry,
   dispatchVmCallback,
 } from "dirplayer-js-api";
-import { callFunctionForOwner, createFlashInstanceForOwner, destroyFlashInstance, destroyFlashInstanceAtGeneration, destroyAllFlashInstances, getVariableForOwner, goToFrameAndStopForOwner, goToFrameForOwner, initFlashBridge, isFlashInstanceReadyForOwner, localConnectionSendForOwner, playFlashForOwner, resizeFlashInstanceForOwnerAtGeneration, setVariableForOwner } from "../services/flashPlayerManager";
+import { createFlashOwnerController, createOwnedFlashCallbacks, initFlashBridge } from "../services/flashPlayerManager";
 import store from "../store";
 import { breakpointListChanged, castLibNameChanged, castListChanged, castMemberChanged, castMemberListChanged, channelChanged, channelDisplayNameChanged, channelDisplayNamesChanged, datumSnapshot, debugContentAdded, debugMessageAdded, debugMessagesCleared, frameChanged, globalsChanged, movieLoaded, movieLoadFailed, onScriptError, removeTimeoutHandle, scopeListChanged, scoreChanged, scriptErrorCleared, scriptInstanceSnapshot, setTimeoutHandle } from "../store/vmSlice";
 import type { BrowserPlayerHandle, OnMovieLoadedCallbackData } from 'vm-rust'
@@ -54,11 +54,31 @@ export function clearAllTimeouts() {
   });
 }
 
+const nestedController = createFlashOwnerController((callbacks, ownerKey, setAsDefault) =>
+  registerVmCallbacks(callbacks as any, ownerKey, setAsDefault),
+);
+
+function installNestedCallbackBridge(): void {
+  const win = window as any;
+  if (win.dirplayer_registerNestedFlashOwner) return;
+  win.dirplayer_registerNestedFlashOwner = (
+    parentOwnerKey: string,
+    childOwnerKey: string,
+    capability: any,
+  ) => nestedController.registerNested(parentOwnerKey, childOwnerKey, capability);
+  win.dirplayer_retireNestedFlashOwner = (
+    parentOwnerKey: string,
+    childOwnerKey: string,
+  ) => nestedController.retireNested(parentOwnerKey, childOwnerKey);
+}
+
 export function initVmCallbacks(browserHandle: BrowserPlayerHandle): VmCallbackRegistration {
   // Initialize the Flash/Ruffle bridge (registers global JS functions for WASM to call)
   let disposeFlashBridge = initFlashBridge(browserHandle);
   let flashHost = disposeFlashBridge.host;
   const disposeExternalXtraHost = registerExternalXtraHost(browserHandle);
+  installNestedCallbackBridge();
+  const w = window as any;
 
   // Expose W3D debug tools on window for console access
   (window as any).exportW3dObj = (castLib: number, castMember: number) =>
@@ -79,7 +99,6 @@ export function initVmCallbacks(browserHandle: BrowserPlayerHandle): VmCallbackR
   //   dirplayer_setXtraRegistry({ BobbaXtra: '~/bobba.wasm' })
   //   await dirplayer_resolveAndLoadMovieXtras()
   //   dirplayer_getXtraRegistry()
-  const w = window as any;
   w.dirplayer_loadExternalXtra = (url: string) => loadExternalXtra(url, browserHandle);
   w.dirplayer_setXtraRegistry = setXtraRegistry;
   w.dirplayer_getXtraRegistry = getXtraRegistry;
@@ -109,7 +128,7 @@ export function initVmCallbacks(browserHandle: BrowserPlayerHandle): VmCallbackR
     }
   };
 
-  const callbacks = {
+  let callbacks = {
     onMovieLoaded: (result: OnMovieLoadedCallbackData) => {
       // Offer trace log download if one was recorded
       try {
@@ -231,46 +250,7 @@ export function initVmCallbacks(browserHandle: BrowserPlayerHandle): VmCallbackR
     onChannelDisplayNamesChanged: (names: Record<number, string>) => {
       store.dispatch(channelDisplayNamesChanged(names));
     },
-    onFlashMemberLoaded: (spriteNum: number, castLib: number, castMember: number, swfData: Uint8Array, width: number, height: number, pausedAtStart: boolean, assertedFrame: number, ownerKey: string, preparedGeneration?: number) => {
-      // Copy immediately - swfData is a view into WASM memory that may be invalidated
-      const swfDataCopy = new Uint8Array(swfData);
-      console.log(`Flash member loaded: sprite#${spriteNum} ${castLib}:${castMember} ${width}x${height} (${swfDataCopy.length} bytes, first=[${Array.from(swfDataCopy.slice(0, 4)).join(',')}], pausedAtStart=${pausedAtStart}, assertedFrame=${assertedFrame})`);
-      if (ownerKey !== flashHost.ownerKey || flashHost.disposed) return;
-      createFlashInstanceForOwner(flashHost, spriteNum, castLib, castMember, swfDataCopy, width, height, pausedAtStart, assertedFrame, preparedGeneration)
-        .catch(e => console.error('Failed to create Flash instance:', e));
-    },
-    onFlashMemberResized: (spriteNum: number, generation: number, width: number, height: number, ownerKey: string) => {
-      if (ownerKey !== flashHost.ownerKey || flashHost.disposed) return;
-      resizeFlashInstanceForOwnerAtGeneration(flashHost, spriteNum, generation, width, height);
-    },
-    onFlashMemberUnloaded: (spriteNum: number, ownerKey: string) => {
-      if (ownerKey === flashHost.ownerKey) destroyFlashInstance(flashHost, spriteNum);
-    },
-    onFlashMemberUnloadedAtGeneration: (spriteNum: number, generation: number, ownerKey: string) => {
-      if (ownerKey === flashHost.ownerKey) destroyFlashInstanceAtGeneration(flashHost, spriteNum, generation);
-    },
-    onFlashResetAll: (ownerKey: string) => {
-      // Rust holds the handle mutably while dispatching this callback. Use the
-      // captured owner capability instead of re-entering owner_identity().
-      if (ownerKey === flashHost.ownerKey) destroyAllFlashInstances(flashHost);
-    },
-    onFlashPlayOwned: (spriteNum: number) => {
-      if (!flashHost.disposed) playFlashForOwner(flashHost, spriteNum);
-    },
-    onFlashLocalConnectionSendOwned: (name: string, method: string, argsJson: string) =>
-      localConnectionSendForOwner(flashHost, name, method, argsJson),
-    onFlashGetVariable: (spriteNum: number, path: string) =>
-      getVariableForOwner(flashHost, spriteNum, path),
-    onFlashSetVariable: (spriteNum: number, path: string, value: string) =>
-      setVariableForOwner(flashHost, spriteNum, path, value),
-    onFlashCallFunction: (spriteNum: number, path: string, argsXml: string) =>
-      callFunctionForOwner(flashHost, spriteNum, path, argsXml),
-    onFlashGotoFrame: (spriteNum: number, frameOrLabel: string) =>
-      goToFrameForOwner(flashHost, spriteNum, frameOrLabel),
-    onFlashGotoFrameAndStop: (spriteNum: number, frameOrLabel: string) =>
-      goToFrameAndStopForOwner(flashHost, spriteNum, frameOrLabel),
-    onFlashInstanceReady: (spriteNum: number) =>
-      isFlashInstanceReadyForOwner(flashHost, spriteNum),
+    ...createOwnedFlashCallbacks(flashHost),
     onStageSizeChanged: (width: number, height: number, center: boolean) => {
       const inner = document.getElementById('stage_canvas_container');
       if (inner) {
@@ -288,6 +268,7 @@ export function initVmCallbacks(browserHandle: BrowserPlayerHandle): VmCallbackR
   installOwnerVmRouters();
   let disposeRegistered = registerVmCallbacks(callbacks, browserHandle.owner_identity());
   const disposeVmCallbacks = (() => {
+    nestedController.disposeNestedTree(flashHost);
     disposeFlashBridge();
     disposeExternalXtraHost();
     disposeRegistered();
@@ -296,11 +277,13 @@ export function initVmCallbacks(browserHandle: BrowserPlayerHandle): VmCallbackR
     // Rebind the closure-held Flash host together with VM callbacks. The old
     // generation is disposed before the new bridge is published, so late
     // Ruffle loads cannot attach to a replacement owner.
+    nestedController.disposeNestedTree(flashHost);
     disposeFlashBridge();
     disposeFlashBridge = initFlashBridge(browserHandle);
     flashHost = disposeFlashBridge.host;
     disposeExternalXtraHost.rebindOwner();
     disposeRegistered();
+    callbacks = { ...callbacks, ...createOwnedFlashCallbacks(flashHost) };
     disposeRegistered = registerVmCallbacks(callbacks, ownerKey);
   };
   return disposeVmCallbacks;

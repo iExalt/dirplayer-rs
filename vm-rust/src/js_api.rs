@@ -323,7 +323,31 @@ extern "C" {
     pub fn onFlashMemberUnloadedAtGeneration(sprite_num: i32, generation: f64, owner_key: &str);
     pub fn onFlashMemberResized(sprite_num: i32, generation: f64, width: u32, height: u32, owner_key: &str);
     pub fn onFlashResetAll(owner_key: &str);
+    #[wasm_bindgen(js_name = "dirplayer_registerLingoCallbackOwned", catch)]
+    pub fn registerLingoCallbackOwned(
+        owner_key: &str,
+        sprite_num: i32,
+        generation: f64,
+        movie_clip_path: &str,
+        method_name: &str,
+        lingo_cast_lib: i32,
+        lingo_cast_member: i32,
+        lingo_handler: &str,
+        flash_cast_lib: i32,
+        flash_cast_member: i32,
+    ) -> Result<JsValue, JsValue>;
     pub fn onStageSizeChanged(width: u32, height: u32, center: bool);
+    #[wasm_bindgen(catch)]
+    pub fn registerNestedFlashOwner(
+        parent_owner_key: &str,
+        child_owner_key: &str,
+        capability: &JsValue,
+    ) -> Result<(), JsValue>;
+    #[wasm_bindgen(catch)]
+    pub fn retireNestedFlashOwner(
+        parent_owner_key: &str,
+        child_owner_key: &str,
+    ) -> Result<(), JsValue>;
 }
 
 pub struct JsApi {}
@@ -382,6 +406,51 @@ impl JsApi {
     /// per-sprite unload path only fires for sprites the new frame changed.
     pub fn dispatch_flash_reset_all(owner_key: &str) {
         onFlashResetAll(owner_key);
+    }
+    pub fn register_flash_lingo_callback(
+        owner_key: &str,
+        sprite_num: i16,
+        generation: u64,
+        movie_clip_path: &str,
+        method_name: &str,
+        lingo_cast_lib: i32,
+        lingo_cast_member: i32,
+        lingo_handler: &str,
+        flash_cast_lib: i32,
+        flash_cast_member: i32,
+    ) -> Result<(), ScriptError> {
+        let result = registerLingoCallbackOwned(
+            owner_key,
+            sprite_num as i32,
+            generation as f64,
+            movie_clip_path,
+            method_name,
+            lingo_cast_lib,
+            lingo_cast_member,
+            lingo_handler,
+            flash_cast_lib,
+            flash_cast_member,
+        )
+        .map_err(|error| ScriptError::new(format!("Flash callback registration failed: {error:?}")))?;
+        if result.as_bool() != Some(true) {
+            return Err(ScriptError::new("Flash callback registration was not acknowledged".to_owned()));
+        }
+        Ok(())
+    }
+    pub fn register_nested_flash_owner(
+        parent_owner_key: &str,
+        child_owner_key: &str,
+        capability: &JsValue,
+    ) -> Result<(), ScriptError> {
+        registerNestedFlashOwner(parent_owner_key, child_owner_key, capability)
+            .map_err(|error| ScriptError::new(format!("nested Flash owner registration failed: {error:?}")))
+    }
+    pub fn retire_nested_flash_owner(
+        parent_owner_key: &str,
+        child_owner_key: &str,
+    ) -> Result<(), ScriptError> {
+        retireNestedFlashOwner(parent_owner_key, child_owner_key)
+            .map_err(|error| ScriptError::new(format!("nested Flash owner retirement failed: {error:?}")))
     }
     pub fn dispatch_stage_size_changed(width: u32, height: u32, center: bool) {
         // Only the host player (id 0) owns the frontend stage. A nested `#movie`
@@ -2738,6 +2807,13 @@ impl JsApi {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl JsApi {
+    pub fn retire_nested_flash_owner(
+        _parent_owner_key: &str,
+        _child_owner_key: &str,
+    ) -> Result<(), ScriptError> {
+        Ok(())
+    }
+
     fn native_host_event_overflow(capacity: usize) -> JsValue {
         // JsValue has no native string payload. Keep the Result error signal
         // for callers while avoiding wasm-bindgen's native panic path; the
@@ -3940,6 +4016,20 @@ impl JsApi {
     pub fn dispatch_flash_member_unloaded_at_generation(_: i32, _: u64, _: &str) -> Result<(), ScriptError> { Err(ScriptError::new("Flash host unload is unavailable on native".to_owned())) }
     pub fn dispatch_flash_member_resized(_: i32, _: u64, _: u32, _: u32, _: &str) -> Result<(), ScriptError> { Err(ScriptError::new("Flash host resize is unavailable on native".to_owned())) }
     pub fn dispatch_flash_reset_all(_: &str) {}
+    pub fn register_flash_lingo_callback(
+        _: &str,
+        _: i16,
+        _: u64,
+        _: &str,
+        _: &str,
+        _: i32,
+        _: i32,
+        _: &str,
+        _: i32,
+        _: i32,
+    ) -> Result<(), ScriptError> {
+        Err(ScriptError::new("Flash host is unavailable on native".to_owned()))
+    }
     pub fn dispatch_stage_size_changed(_: u32, _: u32, _: bool) {}
     pub fn dispatch_cast_name_changed(_: u32) {}
     pub fn dispatch_cast_list_changed() {}

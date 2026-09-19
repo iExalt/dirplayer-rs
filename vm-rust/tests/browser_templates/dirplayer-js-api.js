@@ -1,5 +1,12 @@
 import {
   registerVmCallbacks as registerRealVmCallbacks,
+  dispatchVmCallback as dispatchRealVmCallback,
+  onFlashMemberLoaded as onRealFlashMemberLoaded,
+  onFlashMemberLoadedPrepared as onRealFlashMemberLoadedPrepared,
+  onFlashMemberResized as onRealFlashMemberResized,
+  onFlashMemberUnloaded as onRealFlashMemberUnloaded,
+  onFlashMemberUnloadedAtGeneration as onRealFlashMemberUnloadedAtGeneration,
+  onFlashResetAll as onRealFlashResetAll,
   onScoreChanged as onRealScoreChanged,
   onChannelChanged as onRealChannelChanged,
   onChannelDisplayNameChanged as onRealChannelDisplayNameChanged,
@@ -10,10 +17,23 @@ import {
   onScriptInstanceSnapshotOwned as onRealScriptInstanceSnapshotOwned,
   dirplayer_ruffleGetVariableOwnedForBinding as onRealRuffleGetVariableOwnedForBinding,
   dirplayer_ruffleGetVariableOwnedAtGeneration as onRealRuffleGetVariableOwnedAtGeneration,
+  dirplayer_ruffleGetSpriteVariableOwnedAtGeneration as onRealRuffleGetSpriteVariableOwnedAtGeneration,
   dirplayer_isFlashInstanceReadyOwned as onRealFlashInstanceReadyOwned,
   dirplayer_ruffleSetVariableOwnedAtGeneration as onRealRuffleSetVariableOwnedAtGeneration,
   dirplayer_ruffleCallFunctionOwnedAtGeneration as onRealRuffleCallFunctionOwnedAtGeneration,
 } from './dirplayer-js-api-real.js';
+
+const _realVmOwnerKeys = new Set();
+let _failNextNestedCallbackRegistration = false;
+let _lastFailedNestedOwnerKey = null;
+function registerTrackedVmCallbacks(callbacks, ownerKey, setAsDefault = true) {
+  const dispose = registerRealVmCallbacks(callbacks, ownerKey, setAsDefault);
+  if (ownerKey) _realVmOwnerKeys.add(ownerKey);
+  return () => {
+    dispose?.();
+    if (ownerKey) _realVmOwnerKeys.delete(ownerKey);
+  };
+}
 
 // Stubs for the dirplayer-js-api module.
 // In production, these are provided by the Electron host.
@@ -94,6 +114,9 @@ export function dirplayer_ruffleGetVariableOwnedForBinding(ownerKey, spriteNum, 
 export function dirplayer_ruffleGetVariableOwnedAtGeneration(ownerKey, spriteNum, generation, path, returnAsObject = false) {
   return onRealRuffleGetVariableOwnedAtGeneration(ownerKey, spriteNum, generation, path, returnAsObject);
 }
+export function dirplayer_ruffleGetSpriteVariableOwnedAtGeneration(ownerKey, spriteNum, generation, path) {
+  return onRealRuffleGetSpriteVariableOwnedAtGeneration(ownerKey, spriteNum, generation, path);
+}
 export function dirplayer_isFlashInstanceReadyOwned(ownerKey, spriteNum, generation) {
   return onRealFlashInstanceReadyOwned(ownerKey, spriteNum, generation);
 }
@@ -154,59 +177,119 @@ export function onExternalEvent() {}
 // imports resolve to no-ops so tests without Flash still run.
 let _flashManager = null;
 let _flashManagerPromise = null;
+let _nestedFlashController = null;
+const _nestedFlashOwnerKeys = new Set();
 // Existing owner callback routing is the temporary browser-harness boundary.
 // The FlashOwnerHost itself remains captured by each registration closure.
 const _flashOwnerCallbacks = new Map();
-const _pendingFlashOwnerActions = new Map();
-const _cancelledFlashOwnerActions = new Set();
-const _drainingFlashOwnerActions = new Set();
-
-function dispatchFlashOwnerAction(ownerKey, method, ...args) {
-  if (typeof ownerKey !== 'string' || ownerKey.length === 0) return;
-  if (_cancelledFlashOwnerActions.has(ownerKey)) return;
-  const callbacks = _flashOwnerCallbacks.get(ownerKey);
-  if (callbacks) {
-    callbacks[method]?.(...args);
-    return;
+function installProductionNestedFlashController(manager) {
+  if (typeof window.dirplayer_registerNestedFlashOwner === 'function') return;
+  if (typeof manager.createFlashOwnerController !== 'function') {
+    throw new Error('production nested Flash controller factory is unavailable');
   }
-  const pending = _pendingFlashOwnerActions.get(ownerKey) ?? [];
-  if (pending.length >= 128) {
-    _pendingFlashOwnerActions.delete(ownerKey);
-    _cancelledFlashOwnerActions.add(ownerKey);
-    console.error(`[Flash] browser prepared action queue overflow for owner ${ownerKey}`);
-    return;
-  }
-  pending.push({ method, args });
-  _pendingFlashOwnerActions.set(ownerKey, pending);
+  _nestedFlashController = manager.createFlashOwnerController((callbacks, ownerKey, setAsDefault) =>
+    (() => {
+      if (_failNextNestedCallbackRegistration) {
+        _failNextNestedCallbackRegistration = false;
+        _lastFailedNestedOwnerKey = ownerKey;
+        onRealFlashMemberLoadedPrepared(
+          1,
+          1,
+          1,
+          new Uint8Array([70, 87, 83]),
+          1,
+          1,
+          true,
+          1,
+          ownerKey,
+          1,
+        );
+        return registerRealVmCallbacks({
+          ...callbacks,
+          onFlashMemberLoaded: () => {
+            throw new Error(`test nested callback flush failure for ${ownerKey}`);
+          },
+        }, ownerKey, setAsDefault);
+      }
+      return registerTrackedVmCallbacks(callbacks, ownerKey, setAsDefault);
+    })());
+  window.dirplayer_registerNestedFlashOwner = (parentOwnerKey, childOwnerKey, capability) => {
+    const result = _nestedFlashController.registerNested(parentOwnerKey, childOwnerKey, capability);
+    _nestedFlashOwnerKeys.add(childOwnerKey);
+    return result;
+  };
+  window.dirplayer_retireNestedFlashOwner = (parentOwnerKey, childOwnerKey) => {
+    try {
+      return _nestedFlashController.retireNested(parentOwnerKey, childOwnerKey);
+    } finally {
+      _nestedFlashOwnerKeys.delete(childOwnerKey);
+    }
+  };
 }
 
-function flushFlashOwnerActions(callbacks, ownerKey) {
-  if (_drainingFlashOwnerActions.has(ownerKey)) return;
-  _drainingFlashOwnerActions.add(ownerKey);
+export function dirplayer_testNestedFlashOwnerKeys() {
+  return Array.from(_nestedFlashOwnerKeys);
+}
+
+export function dirplayer_testDispatchFlashOwnerAction(ownerKey, method, ...args) {
+  if (!_realVmOwnerKeys.has(ownerKey)) return false;
+  dispatchRealVmCallback(ownerKey, method, ...args);
+  return true;
+}
+
+export function dirplayer_testQueuePreparedFlashAction(ownerKey) {
+  onRealFlashMemberLoadedPrepared(
+    1,
+    1,
+    1,
+    new Uint8Array([70, 87, 83]),
+    1,
+    1,
+    true,
+    1,
+    ownerKey,
+    1,
+  );
+}
+
+export function dirplayer_testProbePreparedFlashOwner(ownerKey) {
+  let adopted = false;
+  const dispose = registerRealVmCallbacks({
+    onFlashMemberLoaded: () => { adopted = true; },
+  }, ownerKey, false);
+  dispose?.();
+  return adopted;
+}
+
+export function dirplayer_testFailNextNestedCallbackRegistration() {
+  _failNextNestedCallbackRegistration = true;
+}
+
+export function dirplayer_testLastFailedNestedOwnerKey() {
+  return _lastFailedNestedOwnerKey;
+}
+
+// The failed registration deliberately installs a callback that throws during
+// the real registrar's synchronous prepared-action flush. If rollback leaked
+// the callback table, this direct production dispatch would still throw.
+export function dirplayer_testProbeFailedNestedCallbackAbsent(ownerKey) {
   try {
-    let activeCallbacks = callbacks;
-    let pending = _pendingFlashOwnerActions.get(ownerKey) ?? [];
-    _pendingFlashOwnerActions.delete(ownerKey);
-    let index = 0;
-    for (;;) {
-      while (index < pending.length) {
-        if (_cancelledFlashOwnerActions.has(ownerKey)) return;
-        const currentCallbacks = _flashOwnerCallbacks.get(ownerKey);
-        if (!currentCallbacks) {
-          _pendingFlashOwnerActions.set(ownerKey, pending.slice(index));
-          return;
-        }
-        if (currentCallbacks !== activeCallbacks) activeCallbacks = currentCallbacks;
-        const action = pending[index++];
-        activeCallbacks[action.method]?.(...action.args);
-      }
-      pending = _pendingFlashOwnerActions.get(ownerKey) ?? [];
-      _pendingFlashOwnerActions.delete(ownerKey);
-      if (pending.length === 0) return;
-      index = 0;
-    }
-  } finally {
-    _drainingFlashOwnerActions.delete(ownerKey);
+    dispatchRealVmCallback(ownerKey, 'onFlashMemberLoaded');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Probe the manager's owner route rather than the fixture's bookkeeping set.
+// A disposed child host must be rejected by the production generation-aware
+// route with the typed unknown-owner result.
+export function dirplayer_testProbeFailedNestedHostAbsent(ownerKey) {
+  try {
+    const result = onRealRuffleGetVariableOwnedForBinding(ownerKey, 1, '/', false);
+    return result?.ok === false && result.code === 'unknown-owner';
+  } catch {
+    return false;
   }
 }
 
@@ -219,88 +302,75 @@ export function dirplayer_registerFlashOwner(ownerKey, capability) {
   let registration;
   const registrationReady = flashManager().then(m => {
     if (disposed) return undefined;
+    installProductionNestedFlashController(m);
     const ownerRegistration = m.registerFlashOwner?.(ownerKey, capability);
     const bridgeDisposer = m.initFlashBridge?.(capability, ownerRegistration);
-    registration = bridgeDisposer
-      ? { host: bridgeDisposer.host, dispose: () => bridgeDisposer() }
-      : ownerRegistration;
+    if (!bridgeDisposer && !ownerRegistration) {
+      throw new Error(`Flash owner ${ownerKey} could not be registered`);
+    }
+    const host = bridgeDisposer?.host ?? ownerRegistration?.host;
+    if (!host || typeof m.createOwnedFlashCallbacks !== 'function') {
+      bridgeDisposer?.();
+      if (!bridgeDisposer) ownerRegistration?.dispose?.();
+      throw new Error(`Flash owner ${ownerKey} lacks the production callback factory`);
+    }
+    const ownedCallbacks = m.createOwnedFlashCallbacks(host);
+    Object.assign(callbacks, ownedCallbacks);
+    const disposeCallbacks = registerTrackedVmCallbacks(ownedCallbacks, ownerKey, false);
+    registration = {
+      host,
+      dispose: () => {
+        disposeCallbacks?.();
+        bridgeDisposer?.();
+        if (!bridgeDisposer) ownerRegistration?.dispose?.();
+      },
+    };
     if (disposed) registration?.dispose?.();
     return registration;
   });
   const callbacks = {
-    onLoaded: (...args) => {
-      if (disposed) return;
-      const create = (reg) => {
-        if (!reg || reg.host.disposed) return;
-        return _flashManager?.createFlashInstanceForOwner?.(reg.host, ...args)
-          ?? flashManager().then(m => m.createFlashInstanceForOwner?.(reg.host, ...args));
-      };
-      if (registration) {
-        try {
-          const pendingCreate = create(registration);
-          pendingCreate?.catch(e => console.error('createFlashInstance failed:', e));
-        } catch (e) { console.error('createFlashInstance failed:', e); }
-      } else {
-        registrationReady.then(create).catch(e => console.error('createFlashInstance failed:', e));
-      }
-    },
-    onUnloaded: (spriteNum) => {
-      if (disposed) return;
-      registrationReady.then(reg => {
-        if (reg && !reg.host.disposed) flashManager().then(m => m.destroyFlashInstance?.(reg.host, spriteNum));
-      });
-    },
-    onUnloadedAtGeneration: (spriteNum, generation) => {
-      if (disposed) return;
-      registrationReady.then(reg => {
-        if (reg && !reg.host.disposed) flashManager().then(m => m.destroyFlashInstanceAtGeneration?.(reg.host, spriteNum, generation));
-      });
-    },
-    onResized: (spriteNum, generation, width, height) => {
-      if (disposed) return;
-      registrationReady.then(reg => {
-        if (reg && !reg.host.disposed) flashManager().then(m => m.resizeFlashInstanceForOwnerAtGeneration?.(reg.host, spriteNum, generation, width, height));
-      });
-    },
-    onReset: () => {
-      if (disposed) return;
-      registrationReady.then(reg => {
-        if (reg && !reg.host.disposed) flashManager().then(m => m.destroyAllFlashInstances?.(reg.host));
-      });
-    },
-    onPlayOwned: (spriteNum) => {
-      if (disposed || !registration) return;
-      return flashManager().then(m => m.playFlashForOwner?.(registration.host, spriteNum));
-    },
-    onLocalConnectionSendOwned: (name, method, argsJson) => {
-      if (disposed || !registration || !registration.host || registration.host.disposed) return false;
-      return !!_flashManager?.localConnectionSendForOwner?.(registration.host, name, method, argsJson);
-    },
     dispose: () => {
       disposed = true;
       registration?.dispose?.();
     },
   };
   _flashOwnerCallbacks.set(ownerKey, callbacks);
-  flushFlashOwnerActions(callbacks, ownerKey);
+  registrationReady.catch(error => {
+    callbacks.dispose();
+    console.error(`Flash owner ${ownerKey} registration failed:`, error);
+  });
   // These routers are stable for the page lifetime and resolve the exact
   // owner closure, so registering a later player cannot replace an earlier
   // owner's play callback. The unqualified legacy LocalConnection function
   // remains the production single-owner path; new owner-aware callers use the
   // explicit suffix below.
   window.dirplayer_rufflePlayOwned = (requestedOwnerKey, spriteNum) =>
-    _flashOwnerCallbacks.get(requestedOwnerKey)?.onPlayOwned(spriteNum);
+    dispatchRealVmCallback(requestedOwnerKey, 'onFlashPlayOwned', spriteNum);
   window.dirplayer_localConnectionSendOwned = (requestedOwnerKey, name, method, argsJson) =>
-    _flashOwnerCallbacks.get(requestedOwnerKey)?.onLocalConnectionSendOwned(name, method, argsJson) ?? false;
+    dispatchRealVmCallback(requestedOwnerKey, 'onFlashLocalConnectionSendOwned', name, method, argsJson) ?? false;
   return registrationReady;
 }
 export function dirplayer_unregisterFlashOwner(ownerKey) {
   if (typeof ownerKey !== 'string') return;
   const callbacks = _flashOwnerCallbacks.get(ownerKey);
   _flashOwnerCallbacks.delete(ownerKey);
-  _pendingFlashOwnerActions.delete(ownerKey);
-  _cancelledFlashOwnerActions.add(ownerKey);
   callbacks?.dispose();
+}
+
+// Owner-bound Lingo callback exports mirror the production browser module.
+// The template only forwards the exact window route and accepts a strict
+// boolean acknowledgement; it never falls back to a current owner.
+export function registerLingoCallbackOwned(ownerKey, ...args) {
+  const register = globalThis.window?.dirplayer_registerLingoCallbackOwned;
+  return typeof register === 'function' ? register(ownerKey, ...args) === true : false;
+}
+export function dirplayer_registerLingoCallbackOwned(ownerKey, ...args) {
+  return registerLingoCallbackOwned(ownerKey, ...args);
+}
+export function triggerLingoCallbackOnScriptRuffle(...args) {
+  const trigger = globalThis.window?.dirplayer_triggerLingoCallbackOnScriptRuffle
+    ?? globalThis.window?.dirplayer_triggerLingoCallbackOnScript;
+  return typeof trigger === 'function' ? trigger(...args) === true : false;
 }
 
 // BrowserPlayerHandle capability regression helper. This instantiates the
@@ -359,29 +429,22 @@ function flashManager() {
 flashManager();
 
 export function onFlashMemberLoaded(spriteNum, castLib, castMember, swfData, width, height, pausedAtStart, assertedFrame, ownerKey) {
-  const copy = new Uint8Array(swfData);
-  dispatchFlashOwnerAction(ownerKey, 'onLoaded', spriteNum, castLib, castMember, copy, width, height, pausedAtStart, assertedFrame);
+  return onRealFlashMemberLoaded(spriteNum, castLib, castMember, swfData, width, height, pausedAtStart, assertedFrame, ownerKey);
 }
 export function onFlashMemberLoadedPrepared(spriteNum, castLib, castMember, swfData, width, height, pausedAtStart, assertedFrame, ownerKey, generation) {
-  const copy = new Uint8Array(swfData);
-  dispatchFlashOwnerAction(ownerKey, 'onLoaded', spriteNum, castLib, castMember, copy, width, height, pausedAtStart, assertedFrame, generation);
+  return onRealFlashMemberLoadedPrepared(spriteNum, castLib, castMember, swfData, width, height, pausedAtStart, assertedFrame, ownerKey, generation);
 }
 export function onFlashMemberResized(spriteNum, generation, width, height, ownerKey) {
-  dispatchFlashOwnerAction(ownerKey, 'onResized', spriteNum, generation, width, height);
+  return onRealFlashMemberResized(spriteNum, generation, width, height, ownerKey);
 }
 export function onFlashMemberUnloaded(spriteNum, ownerKey) {
-  dispatchFlashOwnerAction(ownerKey, 'onUnloaded', spriteNum);
+  return onRealFlashMemberUnloaded(spriteNum, ownerKey);
 }
 export function onFlashMemberUnloadedAtGeneration(spriteNum, generation, ownerKey) {
-  dispatchFlashOwnerAction(ownerKey, 'onUnloadedAtGeneration', spriteNum, generation);
+  return onRealFlashMemberUnloadedAtGeneration(spriteNum, generation, ownerKey);
 }
 export function onFlashResetAll(ownerKey) {
-  // Only tear down if the Flash bundle was actually loaded by a prior movie;
-  // don't import it just to reset nothing on a pure non-Flash test run.
-  if (typeof ownerKey !== 'string' || ownerKey.length === 0) return;
-  _pendingFlashOwnerActions.delete(ownerKey);
-  _cancelledFlashOwnerActions.add(ownerKey);
-  _flashOwnerCallbacks.get(ownerKey)?.onReset();
+  return onRealFlashResetAll(ownerKey);
 }
 export function onStageSizeChanged() {}
 
@@ -416,4 +479,12 @@ export {
   setVmModule,
   loadDefaultXtraRegistry,
   resolveAndLoadMovieXtras,
+} from './dirplayer-js-api-real.js';
+
+// The generated wasm module imports these owner-routed Flash ABI names
+// directly. Forward them through the real production bridge so the browser
+// fixture exercises the same window controller without duplicating it here.
+export {
+  registerNestedFlashOwner,
+  retireNestedFlashOwner,
 } from './dirplayer-js-api-real.js';

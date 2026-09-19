@@ -298,6 +298,11 @@ impl EvalContinuation {
                 request: crate::player::driver::InternalVmRequest::Flash(request),
                 reason: None,
             },
+            crate::player::driver::InternalVmRequest::SpriteAsync(request) => EvalPending::Object {
+                capability,
+                request: crate::player::driver::InternalVmRequest::SpriteAsync(request),
+                reason: None,
+            },
             crate::player::driver::InternalVmRequest::ObjectProperty { receiver, name } => EvalPending::Object {
                 capability,
                 request: crate::player::driver::InternalVmRequest::ObjectProperty { receiver, name },
@@ -2431,6 +2436,7 @@ pub(crate) async fn invoke_script_callback_owned(
             crate::player::driver::DriverTurn::Error(_),
         ) => {}
         crate::player::session::EvalRequestTurn::Evaluator(EvalTurn::Pending { .. })
+        | crate::player::session::EvalRequestTurn::SpriteAsync(_)
         | crate::player::session::EvalRequestTurn::MovieAsync(_)
         | crate::player::session::EvalRequestTurn::Flash(_) => {
             return Err(ScriptError::new(

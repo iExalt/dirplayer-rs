@@ -404,36 +404,6 @@ pub(crate) fn classify_async_object(
             )
             .map(InternalVmRequest::Flash)?
         }
-        Datum::SpriteRef(sprite_num) if name.eq_builtin(BuiltInSymbol::GetVariable) => {
-            let path = args
-                .first()
-                .ok_or_else(|| ScriptError::new("getVariable requires a path".to_owned()))
-                .and_then(|arg| checked_internal_datum(runtime.player, runtime.symbols, arg))?
-                .string_value(runtime.symbols)?;
-            let return_as_object = args.get(1)
-                .map(|arg| checked_internal_datum(runtime.player, runtime.symbols, arg)
-                    .map(|datum| datum.int_value().unwrap_or(1) == 0))
-                .transpose()?
-                .unwrap_or(false);
-            let (cast_lib, cast_member) = runtime
-                .player
-                .movie
-                .score
-                .get_sprite(sprite_num)
-                .and_then(|sprite| sprite.member.as_ref())
-                .map(|member| (member.cast_lib, member.cast_member))
-                .unwrap_or((0, 0));
-            InternalVmRequest::Flash(
-                crate::player::handlers::datum_handlers::flash_object::FlashObjectDatumHandlers::prepare_bind_get(
-                    runtime.player,
-                    sprite_num,
-                    crate::player::handlers::datum_handlers::sprite::root_flash_path(&path),
-                    return_as_object,
-                    cast_lib,
-                    cast_member,
-                )?,
-            )
-        }
         Datum::SpriteRef(sprite_num) => InternalVmRequest::SpriteAsync(SpriteAsyncRequest {
             player_id,
             owner,
@@ -4210,6 +4180,18 @@ impl ActionRegistry {
             return None;
         }
         Some((entry.kind, entry.resume))
+    }
+
+    pub(crate) fn is_current(
+        &self,
+        ticket: &CompletionTicket,
+        owner: &OwnerToken,
+    ) -> bool {
+        self.pending.get(&ticket.id).is_some_and(|entry| {
+            Arc::ptr_eq(&entry.capability, &ticket.capability)
+                && entry.owner.same_identity(owner)
+                && entry.owner.is_arena_live()
+        })
     }
 
     pub(crate) fn validate(

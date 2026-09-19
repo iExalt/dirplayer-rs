@@ -175,6 +175,10 @@ function fakeBindingAuthority(state = {}) {
     is_flash_instance_generation_current(spriteNum, expectedGeneration) {
       return bindingState.current.get(spriteNum) === expectedGeneration;
     },
+    // The owner-bound Ruffle callback receiver is the registration authority
+    // used by production. Keep the legacy callback below on individual mocks
+    // so LocalConnection and old callback assertions remain unchanged.
+    trigger_lingo_callback_on_script_ruffle: () => true,
   };
 }
 
@@ -1436,7 +1440,7 @@ test('same-owner replacement invalidates an unpublished Flash generation', async
     dispatch_flash_lingo: async () => false,
   };
 
-  bridge.dirplayer_registerFlashOwner(key, capability);
+  await bridge.dirplayer_registerFlashOwner(key, capability);
   // The production bridge does not expose its host; the owner registry and
   // instance map are the lifecycle boundary exercised by this fixture.
   assert.equal(typeof window.dirplayer_ruffleGetVariableOwned, 'function');
@@ -1482,7 +1486,7 @@ test('unloading a pending Flash creation invalidates its reserved generation', a
     dispatch_flash_lingo: async () => false,
   };
 
-  bridge.dirplayer_registerFlashOwner(key, capability);
+  await bridge.dirplayer_registerFlashOwner(key, capability);
   ownerBeingCreated = key;
   holdLoadResponses = true;
   bridge.onFlashMemberLoaded(10, 2, 3, swfFixture(), 32, 24, false, -1, key);

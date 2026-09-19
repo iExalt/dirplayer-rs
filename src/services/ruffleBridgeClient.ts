@@ -214,6 +214,58 @@ export function bridgeGetVariableSync(
   return String(r);
 }
 
+export type OwnedFlashVariable = string | number | boolean | {
+  readonly __dirplayer_stored_path: string;
+} | null;
+
+const STORED_FLASH_PATH = /^_level0\.__dirplayer_ref_([0-9]{1,10})$/;
+
+/**
+ * Keep the small JSON shape emitted by Ruffle's stored-object path, while
+ * rejecting values that could have acquired meaning during world crossing.
+ * The descriptor check also prevents an accessor from running during decode.
+ */
+export function normalizeOwnedFlashVariable(value: unknown): OwnedFlashVariable {
+  if (value == null) return null;
+  if (typeof value === 'string' || typeof value === 'boolean') return value;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value !== 'object' || Array.isArray(value)) return null;
+
+  try {
+    const objectValue = value as object;
+    const prototype = Object.getPrototypeOf(objectValue);
+    if (prototype !== Object.prototype && prototype !== null) return null;
+
+    const ownKeys = Reflect.ownKeys(objectValue);
+    if (ownKeys.length !== 1 || ownKeys[0] !== '__dirplayer_stored_path') return null;
+    const descriptor = Object.getOwnPropertyDescriptor(objectValue, '__dirplayer_stored_path');
+    if (!descriptor || !('value' in descriptor) || descriptor.enumerable !== true) return null;
+    if (typeof descriptor.value !== 'string') return null;
+
+    const match = STORED_FLASH_PATH.exec(descriptor.value);
+    if (!match) return null;
+    const suffix = Number(match[1]);
+    if (!Number.isSafeInteger(suffix) || suffix > 0xFFFF_FFFF) return null;
+    return value as OwnedFlashVariable;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Synchronous sprite getter for the owner-qualified ABI. Unlike the legacy
+ * helper, this preserves JSON primitive types and admits only Ruffle's
+ * canonical stored-object marker across the MV3 world boundary.
+ */
+export function bridgeGetVariableOwnedSync(
+  playerId: string,
+  path: string,
+): OwnedFlashVariable {
+  return normalizeOwnedFlashVariable(
+    bridgeCallSync({ method: 'getVariableSync', playerId, args: [path] }),
+  );
+}
+
 export function bridgeSetVariableSync(
   playerId: string,
   path: string,
