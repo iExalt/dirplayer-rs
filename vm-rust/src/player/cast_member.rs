@@ -4438,17 +4438,15 @@ impl CastMember {
         let payload = &raw[flsh_start + 8..];
         let vector_member = Self::parse_flsh_payload(payload);
 
-        web_sys::console::log_1(
-            &format!(
-                "OLE member #{} identified as vectorShape: {} vertices, strokeWidth={}, fillMode={}, closed={}, bbox=({},{},{},{})",
-                number,
-                vector_member.vertices.len(),
-                vector_member.stroke_width,
-                vector_member.fill_mode,
-                vector_member.closed,
-                vector_member.bbox_left, vector_member.bbox_top,
-                vector_member.bbox_right, vector_member.bbox_bottom,
-            ).into(),
+        debug!(
+            "OLE member #{} identified as vectorShape: {} vertices, strokeWidth={}, fillMode={}, closed={}, bbox=({},{},{},{})",
+            number,
+            vector_member.vertices.len(),
+            vector_member.stroke_width,
+            vector_member.fill_mode,
+            vector_member.closed,
+            vector_member.bbox_left, vector_member.bbox_top,
+            vector_member.bbox_right, vector_member.bbox_bottom,
         );
 
         let reg_point = (
@@ -6765,5 +6763,58 @@ impl CastMember {
             bg_color: initial_bg_color,
             reg_point,
         }
+    }
+}
+
+#[cfg(test)]
+mod vector_shape_tests {
+    use super::{CastMember, CastMemberType};
+    use crate::director::{
+        chunks::cast_member::{CastMemberChunk, CastMemberSpecificData},
+        enums::MemberType,
+    };
+
+    fn chunk() -> CastMemberChunk {
+        CastMemberChunk {
+            member_type: MemberType::Ole,
+            specific_data: CastMemberSpecificData::None,
+            specific_data_raw: Vec::new(),
+            member_info: None,
+        }
+    }
+
+    fn vector_shape_raw(fourcc: &[u8; 4], payload_len: usize) -> Vec<u8> {
+        let mut raw = Vec::with_capacity(4 + 11 + 8 + payload_len);
+        raw.extend_from_slice(&(11_u32).to_be_bytes());
+        raw.extend_from_slice(b"vectorShape");
+        raw.extend_from_slice(&((payload_len as u32) + 4).to_be_bytes());
+        raw.extend_from_slice(fourcc);
+        raw.resize(raw.len() + payload_len, 0);
+        raw
+    }
+
+    #[test]
+    fn native_vector_shape_success_constructs_member() {
+        let raw = vector_shape_raw(b"FLSH", 224);
+        let member = CastMember::try_parse_vector_shape(&raw, 7, &chunk())
+            .expect("valid vectorShape FLSH payload should parse");
+
+        assert!(
+            matches!(member.member_type, CastMemberType::VectorShape(shape) if shape.vertices.is_empty())
+        );
+    }
+
+    #[test]
+    fn malformed_vector_shape_headers_return_none() {
+        let mut truncated_length = Vec::new();
+        truncated_length.extend_from_slice(&(20_u32).to_be_bytes());
+        truncated_length.extend_from_slice(b"vectorShape");
+        assert!(CastMember::try_parse_vector_shape(&truncated_length, 7, &chunk()).is_none());
+
+        let missing_flsh = vector_shape_raw(b"FLSH", 0)[..15].to_vec();
+        assert!(CastMember::try_parse_vector_shape(&missing_flsh, 7, &chunk()).is_none());
+
+        let wrong_flsh = vector_shape_raw(b"NOPE", 0);
+        assert!(CastMember::try_parse_vector_shape(&wrong_flsh, 7, &chunk()).is_none());
     }
 }

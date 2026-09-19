@@ -897,19 +897,53 @@ impl FlashHostAction {
                 )?;
                 #[cfg(not(target_arch = "wasm32"))]
                 {
-                    let _ = (
-                        host_sprite,
-                        cast_lib,
-                        cast_member,
+                    let Some(session) = fence.session.as_ref() else {
+                        return Err(ScriptError::new(
+                            "Flash host is unavailable on native".to_owned(),
+                        ));
+                    };
+                    let Some(player_id) = fence.player_id else {
+                        return Err(ScriptError::new(
+                            "Flash host is unavailable on native".to_owned(),
+                        ));
+                    };
+                    let host = session
+                        .borrow()
+                        .native_flash(player_id)
+                        .and_then(|binding| binding.upgrade())
+                        .ok_or_else(|| {
+                            ScriptError::new("Flash host is unavailable on native".to_owned())
+                        })?;
+                    host.borrow_mut().load(
+                        session,
+                        player_id,
+                        &fence.owner,
+                        *local_sprite,
+                        *generation,
                         data,
-                        width,
-                        height,
-                        paused_at_start,
-                        asserted_frame,
-                    );
-                    return Err(ScriptError::new(
-                        "Flash host is unavailable on native".to_owned(),
-                    ));
+                        *width,
+                        *height,
+                        *paused_at_start,
+                        *asserted_frame,
+                    )?;
+                    fence.revalidated(
+                        *local_sprite,
+                        Some(*generation),
+                        Some((*cast_lib, *cast_member)),
+                    )?;
+                    if !fence.binding.borrow_mut().publish_first(
+                        *local_sprite,
+                        *cast_lib,
+                        *cast_member,
+                        *generation,
+                    ) {
+                        return Err(ScriptError::new_code(
+                            ScriptErrorCode::InvalidReference,
+                            "native Flash publication generation is stale".to_owned(),
+                        ));
+                    }
+                    let _ = host_sprite;
+                    Ok(())
                 }
                 #[cfg(target_arch = "wasm32")]
                 {
@@ -966,19 +1000,32 @@ impl FlashHostAction {
                 fence.revalidated(*local_sprite, None, None)?;
                 #[cfg(not(target_arch = "wasm32"))]
                 {
-                    let _ = host_sprite;
-                    // Native has no frontend instance to unload. Settle the
-                    // exact authority immediately while preserving the
-                    // explicit unsupported-host result.
+                    let Some(session) = fence.session.as_ref() else {
+                        return Err(ScriptError::new(
+                            "Flash host is unavailable on native".to_owned(),
+                        ));
+                    };
+                    let Some(player_id) = fence.player_id else {
+                        return Err(ScriptError::new(
+                            "Flash host is unavailable on native".to_owned(),
+                        ));
+                    };
+                    let host = session
+                        .borrow()
+                        .native_flash(player_id)
+                        .and_then(|binding| binding.upgrade())
+                        .ok_or_else(|| {
+                            ScriptError::new("Flash host is unavailable on native".to_owned())
+                        })?;
+                    host.borrow_mut().unload(*local_sprite, *generation)?;
                     fence.binding.borrow_mut().clear_retired_generation(
                         *local_sprite,
                         *cast_lib,
                         *cast_member,
                         *generation,
                     );
-                    return Err(ScriptError::new(
-                        "Flash host is unavailable on native".to_owned(),
-                    ));
+                    let _ = host_sprite;
+                    return Ok(());
                 }
                 #[cfg(target_arch = "wasm32")]
                 crate::js_api::JsApi::dispatch_flash_member_unloaded_at_generation(
@@ -1015,10 +1062,39 @@ impl FlashHostAction {
                 )?;
                 #[cfg(not(target_arch = "wasm32"))]
                 {
-                    let _ = (host_sprite, width, height);
-                    return Err(ScriptError::new(
-                        "Flash host is unavailable on native".to_owned(),
-                    ));
+                    let Some(session) = fence.session.as_ref() else {
+                        return Err(ScriptError::new(
+                            "Flash host is unavailable on native".to_owned(),
+                        ));
+                    };
+                    let Some(player_id) = fence.player_id else {
+                        return Err(ScriptError::new(
+                            "Flash host is unavailable on native".to_owned(),
+                        ));
+                    };
+                    let host = session
+                        .borrow()
+                        .native_flash(player_id)
+                        .and_then(|binding| binding.upgrade())
+                        .ok_or_else(|| {
+                            ScriptError::new("Flash host is unavailable on native".to_owned())
+                        })?;
+                    host.borrow_mut().resize(
+                        session,
+                        player_id,
+                        &fence.owner,
+                        *local_sprite,
+                        *generation,
+                        *width,
+                        *height,
+                    )?;
+                    fence.revalidated(
+                        *local_sprite,
+                        Some(*generation),
+                        Some((*cast_lib, *cast_member)),
+                    )?;
+                    let _ = host_sprite;
+                    return Ok(());
                 }
                 #[cfg(target_arch = "wasm32")]
                 crate::js_api::JsApi::dispatch_flash_member_resized(

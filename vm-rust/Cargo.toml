@@ -71,6 +71,10 @@ binary_rw = "4.1.0"
 earcutr = "0.4"
 lasso = "0.7.3"
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ruffle_core = { path = "../ruffle/core", features = ["deterministic"] }
+ruffle_render_wgpu = { path = "../ruffle/render/wgpu" }
+
 [dev-dependencies]
 wasm-bindgen-test = "0.3.34"
 

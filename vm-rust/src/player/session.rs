@@ -324,6 +324,9 @@ pub struct RuntimeSession {
     #[cfg(not(target_arch = "wasm32"))]
     native_presentation_bindings:
         HashMap<PlayerId, std::rc::Weak<crate::rendering::NativePresentationPolicy>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    native_flash_bindings:
+        HashMap<PlayerId, std::rc::Weak<std::cell::RefCell<crate::native_flash::NativeFlashHost>>>,
     /// Host resources retired while this session is mutably borrowed. The
     /// owner boundary drains this queue only after releasing the RefMut.
     pending_host_teardowns: Vec<crate::player::xtra::manager::XtraTeardownRequest>,
@@ -945,6 +948,8 @@ impl RuntimeSession {
             renderer_bindings: HashMap::new(),
             #[cfg(not(target_arch = "wasm32"))]
             native_presentation_bindings: HashMap::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            native_flash_bindings: HashMap::new(),
             pending_host_teardowns: Vec::new(),
             nested_browser_owner_retirements: Vec::new(),
             pending_timeout_host_actions: Vec::new(),
@@ -2750,6 +2755,29 @@ impl RuntimeSession {
         self.native_presentation_bindings.remove(&player_id);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn bind_native_flash(
+        &mut self,
+        player_id: PlayerId,
+        host: &std::rc::Rc<std::cell::RefCell<crate::native_flash::NativeFlashHost>>,
+    ) {
+        self.native_flash_bindings
+            .insert(player_id, std::rc::Rc::downgrade(host));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn native_flash(
+        &self,
+        player_id: PlayerId,
+    ) -> Option<std::rc::Weak<std::cell::RefCell<crate::native_flash::NativeFlashHost>>> {
+        self.native_flash_bindings.get(&player_id).cloned()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn unbind_native_flash(&mut self, player_id: PlayerId) {
+        self.native_flash_bindings.remove(&player_id);
+    }
+
     pub fn players(&self) -> &PlayerGraph {
         &self.players
     }
@@ -3529,6 +3557,14 @@ impl RuntimeSession {
         // carried by the separate host-event queue.
         self.native_player_notifications.remove(&player_id);
         self.native_notification_errors.remove(&player_id);
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(host) = self
+            .native_flash_bindings
+            .get(&player_id)
+            .and_then(std::rc::Weak::upgrade)
+        {
+            host.borrow_mut().clear();
+        }
         // Cancellation can drop an old suspended guard while the session is
         // still mutably borrowed, which queues cleanup after the first
         // retirement pass above.  Discard those records before installing the
@@ -3594,6 +3630,8 @@ impl RuntimeSession {
         self.renderer_bindings.remove(&id);
         #[cfg(not(target_arch = "wasm32"))]
         self.native_presentation_bindings.remove(&id);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.native_flash_bindings.remove(&id);
         self.active_input_scopes.remove(&id);
         self.input_flag_cleanups
             .borrow_mut()

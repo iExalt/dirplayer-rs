@@ -5,14 +5,18 @@
 //! checkout's Cargo workspace or game adapters.
 
 use std::{
+    collections::{BTreeMap, BTreeSet, HashSet},
     io::{self, Read, Write},
+    panic::{AssertUnwindSafe, catch_unwind},
     path::{Path, PathBuf},
 };
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use url::Url;
 
+use crate::director::file::{DirectorFile, read_director_file_bytes};
 use crate::player::testing::{NativeGlobalReadError, NativeGlobalValue, TestPlayer};
 
 const PROTOCOL_VERSION: u16 = 1;
@@ -237,6 +241,60 @@ struct AdapterConfig {
     movie: String,
     source_dcr_sha256: String,
     loading_policy: String,
+    resource_aliases: Option<BTreeMap<String, ExternalCastAlias>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExternalCastAlias {
+    path: String,
+    sha256: String,
+}
+
+/// Opaque proof that all external cast declarations and their local resources
+/// were validated by the native worker before a player was constructed.
+#[derive(Debug)]
+pub(crate) struct QualifiedExternalCasts {
+    entries: BTreeMap<String, QualifiedExternalCast>,
+}
+
+#[derive(Debug)]
+struct QualifiedExternalCast {
+    requested_url: String,
+    bytes: Vec<u8>,
+}
+
+impl QualifiedExternalCasts {
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub(crate) fn entry_for_request(&self, requested_url: &str) -> Option<(&str, &[u8])> {
+        self.entries
+            .iter()
+            .find(|(_, entry)| entry.requested_url == requested_url)
+            .map(|(key, entry)| (key.as_str(), entry.bytes.as_slice()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_test_entries(
+        entries: impl IntoIterator<Item = (String, String, Vec<u8>)>,
+    ) -> Self {
+        Self {
+            entries: entries
+                .into_iter()
+                .map(|(key, requested_url, bytes)| {
+                    (
+                        key,
+                        QualifiedExternalCast {
+                            requested_url,
+                            bytes,
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -421,17 +479,38 @@ impl Worker {
             ));
         }
 
+        let qualified_external_casts = config
+            .adapter
+            .resource_aliases
+            .as_ref()
+            .map(|aliases| {
+                qualify_external_casts(
+                    &canonical_resource_root(&config.adapter.resource_root)?,
+                    &movie_path,
+                    &bytes,
+                    aliases,
+                )
+                .map_err(|message| error(ErrorCode::InvalidRequest, message))
+            })
+            .transpose()?;
+
         let mut player = TestPlayer::try_new().map_err(runtime_error)?;
         player.set_deterministic_seed(seed).map_err(runtime_error)?;
-        let load_result = async_std::task::block_on(player.load_movie_quiet(
-            movie_path.to_str().ok_or_else(|| {
-                error(
-                    ErrorCode::InvalidRequest,
-                    "configured movie path is not valid UTF-8",
-                )
-            })?,
-            bytes,
-        ))
+        let movie_path_string = movie_path.to_str().ok_or_else(|| {
+            error(
+                ErrorCode::InvalidRequest,
+                "configured movie path is not valid UTF-8",
+            )
+        })?;
+        let load_result = if let Some(qualification) = qualified_external_casts.as_ref() {
+            async_std::task::block_on(player.load_movie_quiet_with_qualified_casts(
+                movie_path_string,
+                bytes,
+                qualification,
+            ))
+        } else {
+            async_std::task::block_on(player.load_movie_quiet(movie_path_string, bytes))
+        }
         .map_err(|load_error| match load_error {
             crate::player::testing::NativeMovieLoadError::Unsupported(message) => {
                 unsupported(message)
@@ -693,7 +772,7 @@ fn validate_parent_storage() -> Result<(), StructuredError> {
     Ok(())
 }
 
-fn resolve_movie_path(root: &str, movie: &str) -> Result<PathBuf, StructuredError> {
+fn canonical_resource_root(root: &str) -> Result<PathBuf, StructuredError> {
     let root = PathBuf::from(root);
     let root = std::fs::canonicalize(if root.is_absolute() {
         root
@@ -721,6 +800,11 @@ fn resolve_movie_path(root: &str, movie: &str) -> Result<PathBuf, StructuredErro
             "resource_root must be a directory",
         ));
     }
+    Ok(root)
+}
+
+fn resolve_movie_path(root: &str, movie: &str) -> Result<PathBuf, StructuredError> {
+    let root = canonical_resource_root(root)?;
     let movie = std::fs::canonicalize(root.join(movie)).map_err(|error| {
         error_with(
             ErrorCode::InvalidRequest,
@@ -735,6 +819,191 @@ fn resolve_movie_path(root: &str, movie: &str) -> Result<PathBuf, StructuredErro
         ));
     }
     Ok(movie)
+}
+
+fn qualify_external_casts(
+    resource_root: &Path,
+    movie_path: &Path,
+    movie_bytes: &[u8],
+    aliases: &BTreeMap<String, ExternalCastAlias>,
+) -> Result<QualifiedExternalCasts, String> {
+    let movie_name = movie_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "configured movie path is not valid UTF-8".to_owned())?;
+    let movie_dir = movie_path
+        .parent()
+        .ok_or_else(|| "configured movie path has no parent".to_owned())?;
+    let movie_base_url = Url::from_directory_path(movie_dir)
+        .map_err(|_| "configured movie parent is not a file URL path".to_owned())?
+        .to_string();
+    let movie = parse_director_file(movie_bytes, movie_name, &movie_base_url)
+        .map_err(|error| format!("configured movie is not a valid Director file: {error}"))?;
+
+    let mut required = BTreeSet::new();
+    for entry in movie
+        .cast_entries
+        .iter()
+        .filter(|entry| !entry.file_path.is_empty())
+    {
+        let key = normalize_external_cast_key(&entry.file_path)?;
+        if !required.insert(key.clone()) {
+            return Err(format!(
+                "external cast declarations normalize to duplicate alias key '{key}'"
+            ));
+        }
+    }
+    validate_alias_keys(&required, aliases)?;
+
+    let root_base_url = Url::from_directory_path(resource_root)
+        .map_err(|_| "resource_root is not a file URL path".to_owned())?
+        .to_string();
+    let movie_base = Url::parse(&movie_base_url)
+        .map_err(|_| "configured movie parent is not a valid file URL".to_owned())?;
+    let mut targets = HashSet::new();
+    let mut entries = BTreeMap::new();
+    for key in required {
+        let alias = aliases
+            .get(&key)
+            .expect("exact alias-set validation must include every key");
+        validate_sha256(&alias.sha256)?;
+        let target = resolve_alias_path(resource_root, &alias.path)?;
+        insert_unique_target(&mut targets, target.clone(), &key)?;
+        let bytes = std::fs::read(&target)
+            .map_err(|error| format!("cannot read resource alias '{key}': {error}"))?;
+        validate_alias_hash(&key, &bytes, &alias.sha256)?;
+        parse_director_file(&bytes, &key, &root_base_url).map_err(|error| {
+            format!("resource alias '{key}' is not a valid Director cast: {error}")
+        })?;
+        let requested_url = movie_base
+            .join(&key)
+            .map_err(|_| format!("external cast alias '{key}' cannot form a request URL"))?
+            .to_string();
+        entries.insert(
+            key,
+            QualifiedExternalCast {
+                requested_url,
+                bytes,
+            },
+        );
+    }
+    Ok(QualifiedExternalCasts { entries })
+}
+
+fn parse_director_file(
+    bytes: &[u8],
+    file_name: &str,
+    base_url: &str,
+) -> Result<DirectorFile, String> {
+    if !(bytes.starts_with(b"XFIR") || bytes.starts_with(b"RIFX")) {
+        return Err("missing XFIR/RIFX Director signature".to_owned());
+    }
+    let owned = bytes.to_vec();
+    catch_unwind(AssertUnwindSafe(|| {
+        read_director_file_bytes(&owned, file_name, base_url)
+    }))
+    .map_err(|_| "Director parser panicked on malformed bytes".to_owned())?
+}
+
+fn validate_alias_keys(
+    required: &BTreeSet<String>,
+    aliases: &BTreeMap<String, ExternalCastAlias>,
+) -> Result<(), String> {
+    let supplied = aliases.keys().cloned().collect::<BTreeSet<_>>();
+    if supplied == *required {
+        return Ok(());
+    }
+    let missing = required.difference(&supplied).cloned().collect::<Vec<_>>();
+    let extra = supplied.difference(required).cloned().collect::<Vec<_>>();
+    Err(format!(
+        "resource_aliases must exactly match declared external casts (missing: {:?}, extra: {:?})",
+        missing, extra
+    ))
+}
+
+fn normalize_external_cast_key(path: &str) -> Result<String, String> {
+    let normalized = path.replace('\\', "/");
+    let basename = normalized
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .last()
+        .ok_or_else(|| "external cast declaration has no basename".to_owned())?;
+    if basename == "." || basename == ".." || basename.contains('\0') {
+        return Err("external cast declaration has an invalid basename".to_owned());
+    }
+    let key = match basename.rsplit_once('.') {
+        Some((stem, _)) if !stem.is_empty() => format!("{stem}.cct"),
+        _ => format!("{basename}.cct"),
+    };
+    Ok(key)
+}
+
+fn validate_sha256(value: &str) -> Result<(), String> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err("resource alias sha256 must be 64 lowercase hexadecimal characters".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_alias_hash(key: &str, bytes: &[u8], expected: &str) -> Result<(), String> {
+    let actual = hex_sha256(bytes);
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(format!(
+            "resource alias '{key}' SHA-256 mismatch: expected {expected}, got {actual}"
+        ))
+    }
+}
+
+fn resolve_alias_path(resource_root: &Path, raw: &str) -> Result<PathBuf, String> {
+    let normalized = raw.replace('\\', "/");
+    if normalized.is_empty()
+        || normalized.starts_with('/')
+        || normalized.starts_with("//")
+        || normalized.as_bytes().get(1) == Some(&b':')
+    {
+        return Err(format!("resource alias path must be relative: '{raw}'"));
+    }
+    for component in normalized.split('/') {
+        if component == ".." {
+            return Err(format!(
+                "resource alias path may not traverse parents: '{raw}'"
+            ));
+        }
+        if component.contains(':') {
+            return Err(format!(
+                "resource alias path contains an unsafe drive or URI component: '{raw}'"
+            ));
+        }
+    }
+    let target = std::fs::canonicalize(resource_root.join(Path::new(&normalized)))
+        .map_err(|error| format!("resource alias path is not readable: {error}"))?;
+    if !target.starts_with(resource_root) || !target.is_file() {
+        return Err(format!(
+            "resource alias path must remain beneath resource_root and be a regular file: '{raw}'"
+        ));
+    }
+    Ok(target)
+}
+
+fn insert_unique_target(
+    targets: &mut HashSet<PathBuf>,
+    target: PathBuf,
+    key: &str,
+) -> Result<(), String> {
+    if targets.insert(target.clone()) {
+        Ok(())
+    } else {
+        Err(format!(
+            "resource_aliases contains duplicate target '{}': alias '{key}'",
+            target.display()
+        ))
+    }
 }
 
 fn checked_coordinate(value: f32, name: &str) -> Result<i32, StructuredError> {
@@ -858,6 +1127,7 @@ fn error_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     #[test]
     fn global_symbol_uses_typed_wire_shape() {
@@ -878,5 +1148,123 @@ mod tests {
             error.details,
             Some(json!({"datum_type": "null", "reason": null}))
         );
+    }
+
+    #[test]
+    fn normalizes_arbitrary_external_cast_declarations() {
+        assert_eq!(
+            normalize_external_cast_key(r"C:\phase\Alpha.CST").unwrap(),
+            "Alpha.cct"
+        );
+        assert_eq!(
+            normalize_external_cast_key("nested/beta").unwrap(),
+            "beta.cct"
+        );
+        assert_eq!(
+            normalize_external_cast_key("A/one.cst").unwrap(),
+            normalize_external_cast_key(r"B\one.cst").unwrap()
+        );
+    }
+
+    #[test]
+    fn requires_exact_alias_keys_for_one_or_many_declarations() {
+        let one = BTreeSet::from(["alpha.cct".to_owned()]);
+        let one_alias = BTreeMap::from([(
+            "alpha.cct".to_owned(),
+            ExternalCastAlias {
+                path: "alpha.cct".to_owned(),
+                sha256: "0".repeat(64),
+            },
+        )]);
+        assert!(validate_alias_keys(&one, &one_alias).is_ok());
+
+        let five = BTreeSet::from([
+            "a.cct".to_owned(),
+            "b.cct".to_owned(),
+            "c.cct".to_owned(),
+            "d.cct".to_owned(),
+            "e.cct".to_owned(),
+        ]);
+        assert!(validate_alias_keys(&five, &one_alias).is_err());
+        let extra = BTreeMap::from([
+            (
+                "alpha.cct".to_owned(),
+                ExternalCastAlias {
+                    path: "alpha.cct".to_owned(),
+                    sha256: "0".repeat(64),
+                },
+            ),
+            (
+                "extra.cct".to_owned(),
+                ExternalCastAlias {
+                    path: "extra.cct".to_owned(),
+                    sha256: "0".repeat(64),
+                },
+            ),
+        ]);
+        assert!(validate_alias_keys(&one, &extra).is_err());
+    }
+
+    #[test]
+    fn rejects_malformed_hash_and_hostile_paths() {
+        assert!(validate_sha256(&"A".repeat(64)).is_err());
+        assert!(validate_sha256("short").is_err());
+        assert!(validate_alias_hash("valid.cct", b"actual", &hex_sha256(b"other")).is_err());
+        let root = std::env::temp_dir().join(format!(
+            "dirplayer-alias-path-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = std::fs::canonicalize(root).unwrap();
+        std::fs::write(root.join("valid.cct"), b"valid").unwrap();
+        std::fs::create_dir(root.join("directory.cct")).unwrap();
+        for path in ["/absolute.cct", r"C:\absolute.cct", r"nested\..\escape.cct"] {
+            assert!(resolve_alias_path(&root, path).is_err());
+        }
+        assert!(resolve_alias_path(&root, "missing.cct").is_err());
+        assert!(resolve_alias_path(&root, "directory.cct").is_err());
+        assert!(resolve_alias_path(&root, "valid.cct").is_ok());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn catches_signature_and_parser_failures_as_errors() {
+        assert!(parse_director_file(b"not-a-cast", "bad.cct", "file:///tmp/").is_err());
+        assert!(parse_director_file(b"XFIR malformed", "bad.cct", "file:///tmp/").is_err());
+    }
+
+    #[test]
+    fn rejects_duplicate_targets() {
+        let mut targets = HashSet::new();
+        let target = PathBuf::from("/resource-root/shared.cct");
+        assert!(insert_unique_target(&mut targets, target.clone(), "a.cct").is_ok());
+        assert!(insert_unique_target(&mut targets, target, "b.cct").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!(
+            "dirplayer-alias-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = std::fs::canonicalize(root).unwrap();
+        let outside = root.with_extension("outside");
+        std::fs::write(&outside, b"outside").unwrap();
+        symlink(&outside, root.join("escape.cct")).unwrap();
+        assert!(resolve_alias_path(&root, "escape.cct").is_err());
+        std::fs::remove_file(root.join("escape.cct")).unwrap();
+        std::fs::remove_file(outside).unwrap();
+        std::fs::remove_dir(root).unwrap();
     }
 }

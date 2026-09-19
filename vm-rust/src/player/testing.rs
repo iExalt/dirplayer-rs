@@ -1,6 +1,10 @@
-use std::{path::{Path, PathBuf}, rc::Rc, time::Duration};
 use std::collections::HashSet;
 use std::sync::Mutex;
+use std::{
+    path::{Path, PathBuf},
+    rc::Rc,
+    time::Duration,
+};
 
 use async_std::channel;
 use manual_future::ManualFuture;
@@ -8,13 +12,14 @@ use rand::SeedableRng;
 
 use crate::director::file::read_director_file_bytes;
 pub use crate::director::static_datum::StaticDatum;
-use crate::player::{
-    commands::{run_command_loop, PlayerVMCommand},
-    session::{NativeAdvanceReport, NativeFramePump, NativeInputPump},
-    PlayerVMExecutionItem,
-};
-pub use crate::player::testing_shared::{TestHarness, SnapshotOutput};
+use crate::native_parity_worker::QualifiedExternalCasts;
 use crate::player::testing_shared::HarnessRuntime;
+pub use crate::player::testing_shared::{SnapshotOutput, TestHarness};
+use crate::player::{
+    PlayerVMExecutionItem,
+    commands::{PlayerVMCommand, run_command_loop},
+    session::{NativeAdvanceReport, NativeFramePump, NativeInputPump},
+};
 
 /// Global lock to ensure only one TestPlayer runs at a time.
 /// The player uses global mutable statics, so tests must be serialized.
@@ -26,6 +31,7 @@ pub struct TestPlayer {
     _lock: std::sync::MutexGuard<'static, ()>,
     runtime: HarnessRuntime,
     native_presentation: Rc<crate::rendering::NativePresentationPolicy>,
+    native_flash: Rc<std::cell::RefCell<crate::native_flash::NativeFlashHost>>,
     native_frame_pump: NativeFramePump,
     native_input_pump: NativeInputPump,
 }
@@ -89,6 +95,13 @@ impl TestPlayer {
             .session()
             .borrow_mut()
             .bind_native_presentation(runtime.player_id(), &native_presentation);
+        let native_flash = Rc::new(std::cell::RefCell::new(
+            crate::native_flash::NativeFlashHost::new(),
+        ));
+        runtime
+            .session()
+            .borrow_mut()
+            .bind_native_flash(runtime.player_id(), &native_flash);
         let native_frame_pump = NativeFramePump::new(
             runtime.session(),
             runtime.player_id(),
@@ -110,6 +123,7 @@ impl TestPlayer {
             _lock: lock,
             runtime,
             native_presentation,
+            native_flash,
             native_frame_pump,
             native_input_pump,
         })
@@ -164,7 +178,9 @@ impl TestPlayer {
 
     /// Consume native host-unsupported receipts; native logical timers should
     /// leave this sink empty while legacy/browser paths retain their receipts.
-    pub fn take_native_timeout_host_unsupported(&mut self) -> Vec<crate::js_api::TimeoutHostDispatch> {
+    pub fn take_native_timeout_host_unsupported(
+        &mut self,
+    ) -> Vec<crate::js_api::TimeoutHostDispatch> {
         self.runtime
             .session()
             .borrow_mut()
@@ -205,6 +221,25 @@ impl TestPlayer {
         path: &str,
         data_bytes: Vec<u8>,
     ) -> Result<(), NativeMovieLoadError> {
+        self.load_movie_quiet_inner(path, data_bytes, None).await
+    }
+
+    pub(crate) async fn load_movie_quiet_with_qualified_casts(
+        &mut self,
+        path: &str,
+        data_bytes: Vec<u8>,
+        qualification: &QualifiedExternalCasts,
+    ) -> Result<(), NativeMovieLoadError> {
+        self.load_movie_quiet_inner(path, data_bytes, Some(qualification))
+            .await
+    }
+
+    async fn load_movie_quiet_inner(
+        &mut self,
+        path: &str,
+        data_bytes: Vec<u8>,
+        qualification: Option<&QualifiedExternalCasts>,
+    ) -> Result<(), NativeMovieLoadError> {
         let movie_path = Path::new(path);
         let file_name = movie_path
             .file_name()
@@ -227,9 +262,10 @@ impl TestPlayer {
                 ))
             })?
             .to_string();
-        let dir_file = read_director_file_bytes(&data_bytes, &file_name, &base_url).map_err(
-            |error| NativeMovieLoadError::Runtime(crate::player::ScriptError::new(error)),
-        )?;
+        let dir_file =
+            read_director_file_bytes(&data_bytes, &file_name, &base_url).map_err(|error| {
+                NativeMovieLoadError::Runtime(crate::player::ScriptError::new(error))
+            })?;
         let external_casts: Vec<_> = dir_file
             .cast_entries
             .iter()
@@ -258,7 +294,12 @@ impl TestPlayer {
                 })
             })
             .count();
-        validate_native_movie_features(&external_casts, embedded_flash, javascript_scripts)?;
+        validate_native_movie_features(
+            &external_casts,
+            embedded_flash,
+            javascript_scripts,
+            qualification,
+        )?;
         self.runtime
             .with_context(|context| {
                 context.player.is_playing = true;
@@ -276,7 +317,91 @@ impl TestPlayer {
             dir_file,
         )
         .await
-        .map_err(NativeMovieLoadError::Runtime)
+        .map_err(NativeMovieLoadError::Runtime)?;
+        if let Some(qualification) = qualification {
+            self.apply_qualified_external_casts(qualification)?;
+        }
+        Ok(())
+    }
+
+    fn apply_qualified_external_casts(
+        &mut self,
+        qualification: &QualifiedExternalCasts,
+    ) -> Result<(), NativeMovieLoadError> {
+        use crate::player::cast_lib::CastLibState;
+        use crate::player::cast_manager::{CastPreloadReason, CastPreloadState};
+
+        let requests = self
+            .runtime
+            .session()
+            .borrow_mut()
+            .prepare_cast_loads(self.runtime.player_id(), CastPreloadReason::MovieLoaded);
+        if requests.len() != qualification.len() {
+            return Err(NativeMovieLoadError::Runtime(
+                crate::player::ScriptError::new(format!(
+                    "validated external cast count {} does not match preload request count {}",
+                    qualification.len(),
+                    requests.len()
+                )),
+            ));
+        }
+        let mut seen = HashSet::new();
+        for request in requests {
+            let (key, bytes) = qualification
+                .entry_for_request(request.requested_url())
+                .ok_or_else(|| {
+                    NativeMovieLoadError::Runtime(crate::player::ScriptError::new(format!(
+                        "preload request '{}' has no validated alias",
+                        request.requested_url()
+                    )))
+                })?;
+            if !seen.insert(key.to_owned()) {
+                return Err(NativeMovieLoadError::Runtime(
+                    crate::player::ScriptError::new(format!(
+                        "duplicate preload request for validated alias '{key}'"
+                    )),
+                ));
+            }
+            let applied = self.runtime.session().borrow_mut().apply_cast_load(
+                request.complete(request.requested_url().to_owned(), Ok(bytes.to_vec())),
+            );
+            if !applied {
+                return Err(NativeMovieLoadError::Runtime(
+                    crate::player::ScriptError::new(format!(
+                        "owner-qualified preload application failed for alias '{key}'"
+                    )),
+                ));
+            }
+        }
+        if seen.len() != qualification.len() {
+            return Err(NativeMovieLoadError::Runtime(
+                crate::player::ScriptError::new(
+                    "validated external cast aliases were not all requested".to_owned(),
+                ),
+            ));
+        }
+        let ready = self.runtime.with_context(|context| {
+            let mut external_casts = context
+                .player
+                .movie
+                .cast_manager
+                .casts
+                .iter()
+                .filter(|cast| cast.is_external);
+            if qualification.len() == 0 {
+                return external_casts.count() == 0;
+            }
+            context.player.movie.cast_manager.preload_state == CastPreloadState::Ready
+                && external_casts.all(|cast| cast.state == CastLibState::Loaded)
+        });
+        if ready != Some(true) {
+            return Err(NativeMovieLoadError::Runtime(
+                crate::player::ScriptError::new(
+                    "qualified external casts did not reach the ready preload barrier".to_owned(),
+                ),
+            ));
+        }
+        Ok(())
     }
 
     pub(crate) async fn eval_datum_quiet(
@@ -302,7 +427,10 @@ impl TestPlayer {
                     .globals
                     .iter()
                     .find(|(symbol, _)| {
-                        context.symbols.lower(symbol).is_ok_and(|name| name == lower_name)
+                        context
+                            .symbols
+                            .lower(symbol)
+                            .is_ok_and(|name| name == lower_name)
                     })
                     .map(|(_, value)| value)
                 else {
@@ -347,7 +475,6 @@ impl TestPlayer {
             data: bitmap.data,
         })
     }
-
 }
 
 fn strict_native_global_value(
@@ -381,25 +508,20 @@ fn strict_native_global_value(
             reason: Some("cycle"),
         });
     }
-    let datum = player
-        .allocator
-        .try_get_datum(value_ref)
-        .ok_or_else(|| {
-            NativeGlobalReadError::Runtime(crate::player::ScriptError::new(
-                "global contains a foreign or stale datum reference".to_owned(),
-            ))
-        })?;
+    let datum = player.allocator.try_get_datum(value_ref).ok_or_else(|| {
+        NativeGlobalReadError::Runtime(crate::player::ScriptError::new(
+            "global contains a foreign or stale datum reference".to_owned(),
+        ))
+    })?;
     let result = match datum {
         crate::director::lingo::datum::Datum::Int(value) => Ok(NativeGlobalValue::Int(*value)),
         crate::director::lingo::datum::Datum::Float(value) if value.is_finite() => {
             Ok(NativeGlobalValue::Float(*value))
         }
-        crate::director::lingo::datum::Datum::Float(_) => Err(
-            NativeGlobalReadError::Unsupported {
-                datum_type: "float",
-                reason: Some("non_finite"),
-            },
-        ),
+        crate::director::lingo::datum::Datum::Float(_) => Err(NativeGlobalReadError::Unsupported {
+            datum_type: "float",
+            reason: Some("non_finite"),
+        }),
         crate::director::lingo::datum::Datum::String(value) => {
             Ok(NativeGlobalValue::String(value.clone()))
         }
@@ -464,8 +586,9 @@ fn validate_native_movie_features(
     external_casts: &[String],
     embedded_flash: usize,
     javascript_scripts: usize,
+    qualification: Option<&QualifiedExternalCasts>,
 ) -> Result<(), NativeMovieLoadError> {
-    if !external_casts.is_empty() {
+    if !external_casts.is_empty() && qualification.is_none() {
         return Err(NativeMovieLoadError::Unsupported(format!(
             "native single-dcr worker does not support external casts: {}",
             external_casts.join(", ")
@@ -485,7 +608,9 @@ fn validate_native_movie_features(
 }
 
 impl TestHarness for TestPlayer {
-    fn harness_runtime(&self) -> &HarnessRuntime { &self.runtime }
+    fn harness_runtime(&self) -> &HarnessRuntime {
+        &self.runtime
+    }
 
     fn asset_path(&self, relative: &str) -> String {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
@@ -519,11 +644,14 @@ impl TestHarness for TestPlayer {
             abs.to_string_lossy().to_string()
         };
 
-        let data_bytes =
-            std::fs::read(&abs_path).unwrap_or_else(|e| panic!("Failed to read {}: {}", abs_path, e));
+        let data_bytes = std::fs::read(&abs_path)
+            .unwrap_or_else(|e| panic!("Failed to read {}: {}", abs_path, e));
 
         let file_name = Path::new(&abs_path)
-            .file_name().unwrap().to_string_lossy().to_string();
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
 
         // A correct file URL for the movie's DIRECTORY, built with
         // `Url::from_directory_path` rather than string concatenation.
@@ -582,10 +710,13 @@ impl TestHarness for TestPlayer {
         )
         .await
         .unwrap_or_else(|error| panic!("frame execution failed: {}", error));
-        let delay_ms = self.runtime.with_context(|context| {
-            let tempo = context.player.movie.get_effective_tempo();
-            if tempo > 0 { 1000 / tempo } else { 33 }
-        }).unwrap_or(33);
+        let delay_ms = self
+            .runtime
+            .with_context(|context| {
+                let tempo = context.player.movie.get_effective_tempo();
+                if tempo > 0 { 1000 / tempo } else { 33 }
+            })
+            .unwrap_or(33);
         std::thread::sleep(std::time::Duration::from_millis(delay_ms as u64));
         is_playing
     }
@@ -611,6 +742,10 @@ impl Drop for TestPlayer {
             .session()
             .borrow_mut()
             .unbind_native_presentation(self.runtime.player_id());
+        self.runtime
+            .session()
+            .borrow_mut()
+            .unbind_native_flash(self.runtime.player_id());
         self.native_presentation.dispose();
         self.runtime.retire_current();
     }
@@ -643,8 +778,8 @@ static NATIVE_TEST_LOGGER: NativeTestLogger = NativeTestLogger;
 pub fn run_test<F: std::future::Future<Output = ()>>(f: F) {
     // `set_logger` errors if one is already installed (a second test in the same
     // process); that is fine, ignore it.
-    let _ = log::set_logger(&NATIVE_TEST_LOGGER)
-        .map(|()| log::set_max_level(log::LevelFilter::Warn));
+    let _ =
+        log::set_logger(&NATIVE_TEST_LOGGER).map(|()| log::set_max_level(log::LevelFilter::Warn));
     async_std::task::block_on(f);
 }
 
@@ -660,7 +795,15 @@ impl StageSnapshot {
     /// Create from a SnapshotOutput (native only).
     pub fn from_output(output: SnapshotOutput) -> Self {
         match output {
-            SnapshotOutput::Rgba { width, height, data } => StageSnapshot { width, height, data },
+            SnapshotOutput::Rgba {
+                width,
+                height,
+                data,
+            } => StageSnapshot {
+                width,
+                height,
+                data,
+            },
             _ => panic!("Expected Rgba snapshot on native"),
         }
     }
@@ -672,9 +815,13 @@ impl StageSnapshot {
         let mut buf: Vec<u8> = Vec::new();
         let encoder = image::codecs::png::PngEncoder::new(&mut buf);
         image::ImageEncoder::write_image(
-            encoder, img.as_raw(), self.width, self.height,
+            encoder,
+            img.as_raw(),
+            self.width,
+            self.height,
             image::ExtendedColorType::Rgba8,
-        ).expect("Failed to encode PNG");
+        )
+        .expect("Failed to encode PNG");
         buf
     }
 
@@ -687,8 +834,15 @@ impl StageSnapshot {
     /// Returns `Ok(Some(ratio))` when a comparison was made and passed,
     /// `Ok(None)` when there is no reference or the reference was updated,
     /// and `Err` when the diff exceeds the threshold.
-    pub fn assert_snapshot(&self, snapshot_path: &str, name: &str, max_diff_ratio: f64, pixel_tolerance: u8) -> Result<Option<f64>, String> {
-        let (suite, test) = snapshot_path.split_once('/')
+    pub fn assert_snapshot(
+        &self,
+        snapshot_path: &str,
+        name: &str,
+        max_diff_ratio: f64,
+        pixel_tolerance: u8,
+    ) -> Result<Option<f64>, String> {
+        let (suite, test) = snapshot_path
+            .split_once('/')
             .unwrap_or((snapshot_path, "default"));
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let base = Path::new(manifest_dir).join("tests/snapshots");
@@ -712,8 +866,8 @@ impl StageSnapshot {
 
         if reference_path.exists() {
             let reference_data = std::fs::read(&reference_path).unwrap();
-            let reference_img = image::load_from_memory(&reference_data)
-                .expect("Failed to decode reference PNG");
+            let reference_img =
+                image::load_from_memory(&reference_data).expect("Failed to decode reference PNG");
             let reference_rgba = reference_img.to_rgba8();
 
             let gw = reference_rgba.width();
@@ -733,9 +887,12 @@ impl StageSnapshot {
             for i in 0..pixel_count {
                 let off = i * 4;
                 let dr = (self.data[off] as i16 - reference_raw[off] as i16).unsigned_abs() as u8;
-                let dg = (self.data[off+1] as i16 - reference_raw[off+1] as i16).unsigned_abs() as u8;
-                let db = (self.data[off+2] as i16 - reference_raw[off+2] as i16).unsigned_abs() as u8;
-                let da = (self.data[off+3] as i16 - reference_raw[off+3] as i16).unsigned_abs() as u8;
+                let dg = (self.data[off + 1] as i16 - reference_raw[off + 1] as i16).unsigned_abs()
+                    as u8;
+                let db = (self.data[off + 2] as i16 - reference_raw[off + 2] as i16).unsigned_abs()
+                    as u8;
+                let da = (self.data[off + 3] as i16 - reference_raw[off + 3] as i16).unsigned_abs()
+                    as u8;
                 let ch_max = dr.max(dg).max(db).max(da);
                 if ch_max > pixel_tolerance {
                     diff_pixels += 1;
@@ -755,7 +912,12 @@ impl StageSnapshot {
             }
 
             let ratio = diff_pixels as f64 / pixel_count as f64;
-            let diff_path = base.join("diff").join(suite).join("native").join(test).join(&file_name);
+            let diff_path = base
+                .join("diff")
+                .join(suite)
+                .join("native")
+                .join(test)
+                .join(&file_name);
             if ratio > max_diff_ratio {
                 // Save diff image for failing snapshots only.
                 std::fs::create_dir_all(diff_path.parent().unwrap()).unwrap();
@@ -767,8 +929,12 @@ impl StageSnapshot {
                     "Snapshot '{}' differs from reference: {:.4}% pixels changed \
                      (max channel diff: {}, threshold: {:.4}%)\n  \
                      actual: {}\n  reference: {}",
-                    name, ratio * 100.0, max_diff, max_diff_ratio * 100.0,
-                    output_path.display(), reference_path.display(),
+                    name,
+                    ratio * 100.0,
+                    max_diff,
+                    max_diff_ratio * 100.0,
+                    output_path.display(),
+                    reference_path.display(),
                 ));
             }
             // Snapshot passed — remove any stale diff so the report doesn't flag it as changed.
@@ -783,11 +949,75 @@ impl StageSnapshot {
 
 #[cfg(test)]
 mod native_movie_validation_tests {
-    use super::{validate_native_movie_features, NativeMovieLoadError};
+    use super::{NativeMovieLoadError, TestPlayer, run_test, validate_native_movie_features};
+    use crate::native_parity_worker::QualifiedExternalCasts;
+    use crate::player::cast_lib::{CastLib, CastLibState};
+    use crate::player::cast_manager::CastPreloadState;
+
+    const PROBE_MOVIE: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/native_director_probe.dcr"
+    );
+
+    #[test]
+    fn applies_qualified_casts_through_owner_pipeline_before_movie_init() {
+        run_test(async {
+            let mut player = TestPlayer::try_new().expect("test player construction failed");
+            let movie_bytes = std::fs::read(PROBE_MOVIE).expect("probe fixture must exist");
+            player
+                .load_movie_quiet(PROBE_MOVIE, movie_bytes.clone())
+                .await
+                .expect("probe fixture must load");
+
+            player
+                .runtime
+                .with_context(|context| {
+                    context
+                        .player
+                        .movie
+                        .cast_manager
+                        .casts
+                        .push(CastLib::test_external(2, 0));
+                })
+                .expect("test player must remain live");
+            let movie_dir = std::path::Path::new(PROBE_MOVIE)
+                .parent()
+                .expect("probe fixture must have a parent");
+            let requested_url = url::Url::from_directory_path(movie_dir)
+                .expect("probe fixture directory must form a file URL")
+                .join("external-2.cct")
+                .expect("external cast URL must resolve")
+                .to_string();
+            let qualification = QualifiedExternalCasts::from_test_entries([(
+                "external-2.cct".to_owned(),
+                requested_url,
+                movie_bytes,
+            )]);
+
+            player
+                .apply_qualified_external_casts(&qualification)
+                .expect("owner-qualified cast application must succeed");
+
+            let state = player
+                .runtime
+                .with_context(|context| {
+                    (
+                        context.player.movie.cast_manager.preload_state,
+                        context.player.movie.cast_manager.casts[0].state,
+                        context.player.movie.cast_manager.casts[1].state,
+                    )
+                })
+                .expect("test player must remain live");
+            assert_eq!(state.0, CastPreloadState::Ready);
+            assert_eq!(state.1, CastLibState::Loaded);
+            assert_eq!(state.2, CastLibState::Loaded);
+        });
+    }
 
     #[test]
     fn rejects_external_casts_with_paths() {
-        let error = validate_native_movie_features(&["shared.cst".to_owned()], 0, 0).unwrap_err();
+        let error =
+            validate_native_movie_features(&["shared.cst".to_owned()], 0, 0, None).unwrap_err();
         let NativeMovieLoadError::Unsupported(message) = error else {
             panic!("external cast was not classified as unsupported");
         };
@@ -796,14 +1026,18 @@ mod native_movie_validation_tests {
 
     #[test]
     fn rejects_embedded_flash() {
-        let error = validate_native_movie_features(&[], 1, 0).unwrap_err();
-        assert!(matches!(error, NativeMovieLoadError::Unsupported(message) if message.contains("Flash")));
+        let error = validate_native_movie_features(&[], 1, 0, None).unwrap_err();
+        assert!(
+            matches!(error, NativeMovieLoadError::Unsupported(message) if message.contains("Flash"))
+        );
     }
 
     #[test]
     fn rejects_javascript_lingo_scripts() {
-        let error = validate_native_movie_features(&[], 0, 1).unwrap_err();
-        assert!(matches!(error, NativeMovieLoadError::Unsupported(message) if message.contains("JavaScript")));
+        let error = validate_native_movie_features(&[], 0, 1, None).unwrap_err();
+        assert!(
+            matches!(error, NativeMovieLoadError::Unsupported(message) if message.contains("JavaScript"))
+        );
     }
 }
 
@@ -914,12 +1148,21 @@ mod native_lifecycle_tests {
         };
         std::fs::create_dir_all(evidence_dir).unwrap();
         let stem = format!("iteration-{iteration}");
-        std::fs::write(evidence_dir.join(format!("{stem}-before.rgba")), &record.before_rgba)
-            .unwrap();
-        std::fs::write(evidence_dir.join(format!("{stem}-input.rgba")), &record.input_rgba)
-            .unwrap();
-        std::fs::write(evidence_dir.join(format!("{stem}-final.rgba")), &record.final_rgba)
-            .unwrap();
+        std::fs::write(
+            evidence_dir.join(format!("{stem}-before.rgba")),
+            &record.before_rgba,
+        )
+        .unwrap();
+        std::fs::write(
+            evidence_dir.join(format!("{stem}-input.rgba")),
+            &record.input_rgba,
+        )
+        .unwrap();
+        std::fs::write(
+            evidence_dir.join(format!("{stem}-final.rgba")),
+            &record.final_rgba,
+        )
+        .unwrap();
         let state = format!(
             "schema=NATIVE_LIFECYCLE_V1\n\
              initial_frame={}\n\
@@ -983,7 +1226,10 @@ mod native_lifecycle_tests {
         let mut player = TestPlayer::new();
         player.load_movie(PROBE_MOVIE).await;
         player.init_movie_at(0).await;
-        assert_eq!(player.try_advance_to(0).await.unwrap(), NativeAdvanceReport::default());
+        assert_eq!(
+            player.try_advance_to(0).await.unwrap(),
+            NativeAdvanceReport::default()
+        );
 
         let initial_frame = player.current_frame();
         let initial_frame_state = player.eval_datum("value(\"frameState\")").await.unwrap();
@@ -1028,7 +1274,13 @@ mod native_lifecycle_tests {
         let at_100 = player.advance_to(100).await;
         let at_100_frame = player.current_frame();
         let at_100_frame_state = player.eval_datum("value(\"frameState\")").await.unwrap();
-        assert_eq!(at_100, NativeAdvanceReport { frames: 3, timeouts: 2 });
+        assert_eq!(
+            at_100,
+            NativeAdvanceReport {
+                frames: 3,
+                timeouts: 2
+            }
+        );
         assert_eq!(at_100_frame, 1);
         assert_eq!(at_100_frame_state, StaticDatum::Int(141));
         assert!(player.take_native_timeout_host_unsupported().is_empty());
@@ -1036,7 +1288,13 @@ mod native_lifecycle_tests {
         let at_300 = player.advance_to(300).await;
         let at_300_frame = player.current_frame();
         let at_300_frame_state = player.eval_datum("value(\"frameState\")").await.unwrap();
-        assert_eq!(at_300, NativeAdvanceReport { frames: 6, timeouts: 1 });
+        assert_eq!(
+            at_300,
+            NativeAdvanceReport {
+                frames: 6,
+                timeouts: 1
+            }
+        );
         assert_eq!(at_300_frame, 1);
         assert_eq!(at_300_frame_state, StaticDatum::Int(157));
         assert!(player.take_native_timeout_host_unsupported().is_empty());
@@ -1083,19 +1341,26 @@ mod native_lifecycle_tests {
         drop(player);
         assert!(weak_presentation.upgrade().is_none());
         assert!(session.borrow().native_presentation(player_id).is_none());
-        assert!(session.borrow_mut().with_player(player_id, |_| ()).is_none());
+        assert!(
+            session
+                .borrow_mut()
+                .with_player(player_id, |_| ())
+                .is_none()
+        );
         assert!(session.borrow_mut().take_timeout_host_actions().is_empty());
-        assert!(session.borrow_mut().take_native_timeout_host_unsupported().is_empty());
+        assert!(
+            session
+                .borrow_mut()
+                .take_native_timeout_host_unsupported()
+                .is_empty()
+        );
         assert!(
             async_std::future::timeout(Duration::from_secs(1), command_future)
                 .await
                 .is_ok(),
             "retired command completer hung"
         );
-        assert!(stale_frame_pump
-            .advance_to(301)
-            .await
-            .is_err());
+        assert!(stale_frame_pump.advance_to(301).await.is_err());
         assert!(stale_input_pump.mouse_down(0, 0).await.is_err());
         assert!(snapshot_native_for_owner(&session, player_id, &owner).is_err());
         assert!(snapshot_native_fresh_for_owner(&session, player_id, &owner).is_err());

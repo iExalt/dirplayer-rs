@@ -4,6 +4,8 @@ pub mod io;
 pub mod js_api;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native_parity_worker;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod native_flash;
 pub mod player;
 pub mod rendering;
 pub mod rendering_gpu;
@@ -5062,7 +5064,7 @@ pub(crate) fn parse_flash_event_body(body: &str) -> Option<(String, Vec<String>)
     Some((handler, raw_args))
 }
 
-fn update_flash_frame_for_player(
+pub(crate) fn update_flash_frame_for_player(
     player: &mut player::DirPlayer,
     symbols: &mut player::symbols::symbol_table::SymbolTable,
     sprite_num: i32,

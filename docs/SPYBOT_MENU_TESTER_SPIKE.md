@@ -4,195 +4,184 @@ Decision date: 2026-09-19.
 
 ## Outcome and priority
 
-Deliver a native DirPlayer reference that supports useful automated testing of
-the existing Bevy Spybot menu, then achieve exact parity for that bounded menu
-scope. Only after this gate passes should Spybot development and the broader
-DirPlayer ownership refactor proceed as parallel workstreams.
+The user authorized implementation of the native DirPlayer reference and its
+bounded evidence probe. The chosen target remains exact comparison of the
+existing Bevy Spybot menu through START activation, including deterministic
+timing, RGBA, and later PCM qualification. A blocked native probe is accepted
+as a dependency checkpoint; it is not menu completion.
 
-The user selected complete menu coverage, including deterministic audio, and
-exact Bevy menu parity before that split. A reliable reference that merely
-reports the existing Bevy differences is an intermediate result, not completion.
+The boundary is START activation. Verify source behavior and the one mapped
+Bevy StartRequested event before implementing the destination screen. The
+destination, tower entry, gameplay, campaign coverage, browser retirement,
+worker pooling, concurrent sessions, and broad ownership refactor remain
+deferred.
 
-This document records the agreed direction and proposes a bounded discovery
-item. Writing this plan does not start a runtime experiment or authorize the
-full implementation campaign. No experiment has been run for this spike.
+## Scope and constraints
 
-## Scope
+- Use the original Spybot DCR and the normal source startup path.
+- Preserve the existing native load guard and one-scenario-per-process worker.
+- Keep source mappings and assertions in childhood-redux and runtime semantics
+  in dirplayer-rs.
+- Stop at the first structured unsupported capability. Do not use a direct-title
+  or frame-419 request as a fallback, weaken the guard, or silently waive an
+  exact-parity difference.
+- Accept P0 only when the first structured result and explicit teardown/reap
+  evidence are recorded, or when startup itself fails before a worker exists.
 
-- Startup/opening and title presentation, including direct-title test entry.
-- Menu state observations and deterministic input/time advancement.
-- START button feedback, valid activation, and cancellation behavior supported
-  by the original source.
-- Menu music and cues, including audio attributable to START activation.
-- Exact decoded RGBA and PCM comparisons against the production Bevy systems.
-- Repeatability, process isolation, failure reporting, and bounded teardown.
+## Source contract
 
-The boundary is START activation. Verify that Bevy emits the expected request
-once; do not implement its destination screen. The original proceeds to another
-menu while Bevy currently remains on the title. That post-activation divergence
-is explicitly outside this milestone, not a passing state comparison.
+The tested DCR is
+`spybot-nightfall-incident.dcr`, SHA-256
+`ddf24b667a8d014856d9db42e1658cbf9714847f1cadc2c2c14d21f8e5950c77`.
+Director metadata is 650x440 at 20 fps. `BehaviorScript 18 - startFrame.ls`
+sets the embedded `opening_anim` Flash sprite to frame 371 and enters
+`title`. Flash frame 419 calls `introTitleReady`; its callback then settles
+the Director state at `start`. Therefore frame 419 is a transient Flash
+`title` observation, while the post-callback Director `start` is a separate
+settled state. They must not be collapsed into one checkpoint.
 
-The dependency audit must define the precise last comparable state/frame and
-audio interval. If activation audio continues after the source transition,
-identify and validate that cue separately without treating destination visuals,
-state, or unrelated audio as part of title parity. Do not silently truncate a
-required cue or suppress original behavior to obtain equality.
+The source button is sprite 6 at (322,381), with top-left (259,370).
+`B_ Rollover.ls` maps enter to `_up`, leave to the base member, down to
+`_down`, and up to the base member plus `pass`. The attached title behavior
+calls `snd_start`, loads data, and transitions to `menu`; the related visual
+behavior transitions to `edit`. Those source transitions are semantic
+evidence, not destination acceptance.
 
-Deferred: the START destination, tower entry, legal gameplay actions, full
-campaign coverage, Battalion, browser retirement, broad reset/worker pooling,
-in-process concurrent sessions, and completion of the ownership refactor.
+Recovered aliases include `snd_titlescreen -> s.win_flag`,
+`music_intro -> m.v1`, `snd_im_button -> s.select`, and
+`snd_start -> s.begin`. `snd_rollover` has no recovered named export.
+Its silent behavior is a historical Bevy deviation requiring source/native
+qualification; it is not an exact-parity waiver.
 
-## Current evidence
+## Current capability and dependency evidence
 
-The existing native implementation provides bounded Director presentation,
-timing, input, capture, and a process-isolated worker with a childhood-redux
-caller for a synthetic Director fixture. The menu dependency audit must pin
-and verify the capabilities reused by this spike; synthetic fixture support
-does not qualify Spybot or native Flash/audio.
+The worker advertises state inspection, virtual input, controlled time, and
+RGBA capture. Mutation, invocation, reset, and PCM are unsupported. Input
+currently qualifies only stage pointer coordinates and left-button-down
+dispatch. Native Flash and audio WIP must be proven by source, build, and
+runtime evidence; their presence alone is insufficient. The accepted
+external-cast route now has source-root alias/hash input, root confinement,
+shell qualification, and owner-bound startup orchestration evidence. It does
+not qualify the later `snd_netload_N.cct` payloads or level audio. The current
+ownership concern is the legacy `CastHandlers::cast_lib` resolver versus an
+explicit `RuntimeSession` context; the next proposed repair is an
+explicit-context cast handler using the existing owner/capability machinery.
 
-Current source inspection found:
+The dirplayer checkout was tested at HEAD
+`2116077c1a5c0d1de896c3863ba01feef0a4a88f`, with nested Ruffle adopted at
+`2dfcfedb612509e5d31e7b6e710194b8d3e5e208` on branch
+`feat/native-parity`. The childhood-redux checkout was tested at HEAD
+`0b2f7d71f0e9480e4fe9c4faee9f13532944e670`. Existing dirty native WIP and
+the repository `.DS_Store` entries were preserved and were not staged.
 
-- The worker advertises state inspection, virtual input, controlled time, and
-  RGBA capture. Mutation, invocation, reset, and PCM are unsupported; input is
-  limited to stage pointer coordinates and left-button-down dispatch.
-- The native load guard rejects embedded Flash, external casts, and JavaScript
-  Lingo. The actual menu dependency audit must determine which features are
-  required and when; a declared resource is not proof that it is needed at title.
-- Native Flash host code and related bindings exist as uncommitted work. Their
-  presence does not establish compilation, runtime behavior, or acceptance.
-  Preserve that work and establish its identity and ownership before reuse.
-- The browser title fixture invokes source initialization, enters the title,
-  seeks embedded Flash to frame 419, and verifies that playhead before and after
-  2.45 seconds of advancement. This direct entry does not prove normal startup.
-- Existing Bevy/browser comparisons report exact pixel and audio differences.
-  Native execution does not itself fix them.
+## Executed P0 probe
 
-The [Spybot menu plan](../../childhood-redux/docs/SPYBOT_MENU_PLAN.md) describes
-the existing Bevy menu scope. This sibling link assumes the existing
-side-by-side checkouts. This spike focuses on menu testing; broader gameplay
-and ownership work remain deferred as described above.
+On 2026-09-19, after a focused harness check and rustfmt check, exactly one
+normal source start was run:
 
-## Constraints and route
+```text
+PARITY_DIRPLAYER_RS_ROOT=/Users/clliaw/Projects/dirplayer-rs \
+PARITY_NATIVE_DIRPLAYER_WORKER=/Users/clliaw/Projects/dirplayer-rs/vm-rust/target/debug/native_dirplayer_parity_worker \
+mise exec -- cargo run -p parity --example native_dirplayer_spybot_p0 --locked --offline
+```
 
-Reuse the existing one-scenario-per-process worker and parity protocol,
-capture formats, comparison tools, and production Bevy test path. Preserve owner
-and generation checks at command boundaries. Broader ownership completion is
-not a prerequisite unless a concrete menu failure demonstrates otherwise.
+The harness used separate canonical validation for the dirplayer executable and
+source root and the childhood-redux resource/movie root. It sent Discover
+request id 1 and exactly one Start request id 2 with protocol version 1,
+operation `start`, and the exact DCR configuration recorded in the receipt.
+No fallback or direct-title request was sent. The typed first result was:
 
-General runtime semantics belong in dirplayer-rs. Spybot resource mappings,
-scenario setup, observations, and assertions belong in childhood-redux. Keep
-the implementations independent: do not feed reference state into Bevy or share
-game behavior in a way that defeats the comparison.
+```text
+status: blocked
+error code: unsupported
+native single-dcr worker does not support external casts:
+sound_level_1.cst, sound_level_2.cst, sound_level_3.cst,
+sound_level_4.cst, sound_level_5.cst
+```
 
-Retain the browser reference to cross-check native behavior against the original
-scripts and assets. Investigate browser/native discrepancies separately from
-Bevy/native discrepancies; matching two implementations alone does not validate
-the reference. No tolerance, resynchronization, normalization, or automatic
-baseline promotion may hide a difference.
+The full Windows source paths are retained in the receipt. The worker then
+received exactly one Shutdown request id 3 and acknowledged it. ProcessWorker
+termination reaped the process, storage was cleaned, the PID was not alive
+after drop, and stderr was empty. The typed transport does not expose raw
+response envelopes; the receipt records that protocol-version and request-id
+validation limitation.
 
-The recommended route is incremental native menu qualification followed by
-exact Bevy fidelity repair. Continuing browser-based testing is the strongest
-fallback if native integration proves substantially larger than expected; it
-remains useful evidence but does not satisfy the chosen native delivery goal.
+The reproducible receipt is
+[native-start-receipt.json](../../childhood-redux/docs/checkpoints/spybot-native-p0-20260919/native-start-receipt.json)
+and records both repo roots, HEADs, full porcelain status entries, nested
+Ruffle revision, dependency-closure hashes, harness hash, worker hash, DCR
+hash, toolchain, exact envelopes, typed results, and teardown evidence.
 
-## Next bounded item: menu dependency audit
+P0 is accepted as a structured blocker with clean teardown. It does not prove
+Flash completion, frame-419 RGBA, settled Director start, input behavior,
+audio, or menu completion.
 
-Produce a source-backed scenario contract and a concrete first-probe proposal.
-Use retained source and evidence first; do not expand this item into a new
-subsystem, gameplay reconstruction, or long runtime campaign.
+## Executed qualified-cast probe
 
-- [ ] Record checkout revisions, relevant dirty-file identities, nested Ruffle
-  identity, existing executable pins, and ownership of unfinished Flash work.
-- [ ] Trace normal startup, direct title, button feedback, cancellation, and
-  activation through original scripts, score, assets, and existing fixtures.
-- [ ] Define the comparison checkpoints, semantic state mappings, input sequence,
-  seed/time settings, dimensions, audio format, and activation cutoff.
-- [ ] Inventory required Flash operations, resource aliases/casts/fonts,
-  inspection/mutation/invocation, rendering, input, and Director/Flash audio.
-  Classify each as verified, reusable but unverified, missing, or unnecessary.
-- [ ] Separate required menu features from incidental initialization and later
-  destination/gameplay dependencies using evidence rather than assumptions.
-- [ ] Identify the smallest real-Spybot probe that tests the riskiest dependency.
-- [ ] Propose an initial effort allowance and reassessment point, accounting
-  separately for setup/build, execution, and analysis. No budget is set here;
-  estimate this menu scope independently of deferred gameplay work.
-- [ ] Deliver the capability matrix, evidence links, unknowns, revised remaining
-  effort, and a bounded implementation/probe item with explicit acceptance.
+On 2026-09-19, the latest native worker was built with the offline locked
+toolchain before running a separate qualified-cast probe. The probe supplied
+the five audited `sound_level_N.cct` aliases with root-confined relative paths
+and exact candidate hashes. It sent Discover request 1, one normal source
+Start request 2, and attempted Shutdown request 3. The existing P0 harness and
+receipt were not rerun or modified.
 
-## Proposed first runtime probe
+The qualified receipt is
+[native-qualified-casts-receipt.json](../../childhood-redux/docs/checkpoints/spybot-native-qualified-casts-20260919/native-qualified-casts-receipt.json),
+with the discovery note at
+[next-gate-analysis.md](../../childhood-redux/docs/checkpoints/spybot-native-qualified-casts-20260919/next-gate-analysis.md).
+The worker accepted the alias object far enough to enter ordinary DCR cast
+loading, but the receipt does not prove all five aliases were applied because
+the main DCR load aborted first. The first Start result was a transport error
+after a non-unwinding native abort in `wasm_bindgen::JsValue::from` from
+`try_parse_vector_shape` at `vm-rust/src/player/cast_member.rs:4451`.
+Shutdown returned `worker is terminated`; termination still reaped the worker,
+cleaned storage, and confirmed the PID was dead. This is not a structured Flash
+Unsupported result.
 
-**Question:** Can the existing native Director path and reusable Flash work run
-actual Spybot startup into the title with controlled execution and a completed,
-observable Flash render, without requiring the broad ownership refactor?
+## Next component contract
 
-**Workload:** the original local Spybot DCR and demonstrated required resources,
-one worker process, fixed seed and time, normal startup through title, followed
-by a separately identified direct-title diagnostic using the existing frame-419
-fixture. Setup shortcuts must be recorded and cannot stand in for normal startup.
+The latest elevated Metal-capable run cleared the renderer gate and localized
+the current menu blocker to a stack-localized `foreign or stale DatumRef` panic
+at `CastHandlers::cast_lib`. Metal construction progressed, but the production
+native Flash scaffold remains unqualified: it does not yet demonstrate frame
+advancement, the `introTitleReady` callback, or settled Director `start`.
 
-**Success observations:** source-backed title state; expected embedded Flash
-playhead; authored title pixels in a completed Director capture; bounded
-advancement; repeatable state/RGBA; clean teardown. Retain source/tool identities,
-commands, state, captures, and browser comparison evidence.
+The next proposed implementation item is an explicit-context cast handler
+repair: replace the legacy `CastHandlers::cast_lib` resolution with a typed
+`RuntimeSession`-bound path, preserving owner/capability isolation and the
+existing qualified shell behavior. No Flash, input, PCM, destination, fallback,
+guard-waiver, or broad GPU-discovery item is included.
 
-**Failure observations:** the first concrete unsupported capability, incorrect
-state/render, nondeterminism, resource failure, or lifecycle failure, with a
-minimal reproducer. Identifying that blocker is a valid spike result, not menu
-acceptance. Do not remove capability guards without implementing and checking
-the required behavior, or grow the probe into a reusable subsystem to make it pass.
+## Later qualification sequence
 
-**Reassessment:** at the agreed effort boundary or when a new major dependency
-appears, decide whether to implement the demonstrated gap, revise the native
-route, or retain browser testing while reconsidering the cost. The audit must
-set that allowance before execution. This first visual probe does not qualify
-audio or finish the milestone.
+After the parser gate is resolved and requalified, the anticipated next gate is
+native Flash: compare the source reveal at Flash frame 371, the transient
+frame-419 Flash `title`, and the settled Director `start` separately. Current
+`NativeFlashHost` semantics cover owner-bound offscreen Ruffle load, initial
+render/apply, resize, and unload; they do not yet demonstrate controlled frame
+advancement or the `introTitleReady` callback bridge, and load ignores the
+paused/asserted-frame inputs. This is a separate medium/high contract. Pointer
+and audio/PCM qualification remain later gates.
 
-## Delivery sequence after discovery
+## Parser-repair rerun
 
-1. Qualify actual native startup/title execution and deterministic Flash/Director
-   composition, including the required state and receiver operations.
-2. Qualify menu pointer movement, hover, press/release, cancellation, and START
-   activation from original behavior.
-3. Qualify deterministic menu audio: source timing, decoding, rate/gain/loop
-   semantics, required Flash audio, mixing, and PCM capture. Use isolated cue
-   comparisons to find the first divergence before testing the complete mix.
-4. Integrate native scenarios into childhood-redux and compare production Bevy
-   state, RGBA, and PCM. Correct demonstrated defects in the responsible runtime
-   or Bevy implementation, preserving independent reference evidence.
-5. Run the final menu campaign and record a durable cross-repository receipt.
+The approved repair replaced only the vector-shape success log with
+target-safe `debug!` logging and added focused native parser tests. The two
+focused tests passed, the locked offline native worker build passed, and the
+installed `wasm32-unknown-unknown` library check passed. The historical P0
+and qualified-cast harness and receipt hashes remained byte-identical.
 
-These are capability gates, not blanket authorization or detailed estimates.
-Keep each implementation item bounded by the next observable result.
+A separate rerun harness and receipt were then used with the same five exact
+aliases. It sent Discover request 1, one normal source Start request 2, and
+Shutdown request 3. The first Start result was now structured:
+`code=runtime`, `native Ruffle offscreen renderer failed: Ruffle does not
+support OpenGL on macOS/iOS.` Shutdown was acknowledged; termination reported
+`reaped`, storage was cleaned, stderr was empty, and the worker PID was dead.
+No fallback request was sent. The rerun receipt is retained at
+[native-qualified-casts-rerun-receipt.json](../../childhood-redux/docs/checkpoints/spybot-native-qualified-casts-rerun-20260919/native-qualified-casts-rerun-receipt.json).
 
-## Acceptance and parallel-work handoff
-
-- [ ] Normal startup and direct-title scenarios pass distinct source-backed
-  assertions; frame-419 direct entry is not substituted for startup coverage.
-- [ ] Declared menu semantic state agrees; exact decoded RGBA and PCM agree at
-  every in-scope checkpoint/interval, without hidden alignment or tolerances.
-- [ ] Original button feedback and valid/cancelled input sequences are covered;
-  Bevy emits one START request for valid activation and none for cancellation.
-- [ ] The activation cutoff and separately tested cue tail are explicit; the
-  destination remains excluded from any equality claim.
-- [ ] Native reference validation retains browser comparisons and script/asset
-  evidence, with material discrepancies resolved before declaring the reference
-  trustworthy for the chosen scenarios.
-- [ ] Five fresh serial and four concurrent runs per declared scenario establish
-  exact within-backend repeatability and successful cross-backend comparison.
-- [ ] Watchdog, error/cancellation cleanup, process/storage isolation, and
-  survivor behavior remain valid for the added native services.
-- [ ] Record cold/warm execution costs and retained performance requirements;
-  any proposed change to an existing gate is explicit, not a silent relaxation.
-- [ ] Runnable commands, pinned source/tool identities, captures, comparisons,
-  limitations, and final results are retained in a durable receipt.
-
-After acceptance, pin the qualified tester so Spybot work can continue against a
-stable reference while ownership changes are developed and checked separately.
-Both workstreams reuse this campaign as a regression gate. Their launch and
-detailed scope are later work; this document does not dispatch them.
-
-Revisit the route if a central assumption fails, a substantial rendering/audio
-subsystem becomes necessary, ownership changes prove essential to single-process
-correctness, remaining effort increases materially, or increments repeatedly
-produce neither the promised demonstration nor useful new evidence. Preserve
-completed work and exact acceptance criteria when replanning.
+The latest elevated run cleared the renderer gate and remains blocked by the
+stack-localized `foreign or stale DatumRef` panic at `CastHandlers::cast_lib`.
+The tracked GPU discovery establishes the Metal-capable execution route; it
+does not qualify Flash behavior. The native Flash scaffold and qualified
+external-cast route remain separately unqualified for production menu behavior.
