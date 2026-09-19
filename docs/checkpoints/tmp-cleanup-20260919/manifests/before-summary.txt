@@ -1,5 +1,0 @@
-matched_paths=217
-regular_files=167
-regular_file_bytes=43008089
-directories=49
-symlinks=1

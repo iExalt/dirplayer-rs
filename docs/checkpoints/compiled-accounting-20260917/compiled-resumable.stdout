@@ -1,8 +1,0 @@
-
-running 4 tests
-test player::compiled::tests::resumable_fast_path_reports_zero_backjumps ... ok
-test player::compiled::tests::resumable_backjump_reports_bounded_batch ... ok
-test player::compiled::tests::resumable_backjump_reports_input_poll_batch ... ok
-test player::compiled::tests::resumable_done_and_escape_report_prior_backjumps ... ok
-
-test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 590 filtered out; finished in 0.01s

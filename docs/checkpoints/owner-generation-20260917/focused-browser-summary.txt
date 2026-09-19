@@ -1,4 +1,0 @@
-test_flash_initial_access_before_reservation: passed
-test_flash_owned_evaluator_binding: passed
-2 passed, 0 failed
-exit: 0
