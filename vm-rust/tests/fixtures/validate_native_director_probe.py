@@ -62,8 +62,13 @@ def main() -> None:
     assert struct.unpack_from(">hhhh", cast, 14) == (0, 0, 32, 32)
 
     score = chunks[b"VWSC"]
-    assert u32(score, 8) == 1
-    assert len(score) >= 20 + 2 + 2 + 2 + 96 + 2
+    assert u32(score, 8) == 3
+    assert len(score) >= 20 + 102 * 3 + 2
+    stream_cursor = 20
+    for _ in range(3):
+        assert u16(score, stream_cursor) == 102
+        stream_cursor += 102
+    assert u16(score, stream_cursor) == 0
     # The score places member 2 (the shape) in an inset 24x24 rect. Member 1
     # is the movie script and is intentionally not rendered as a D5 placeholder.
     assert u16(score, 78) == 2
@@ -73,9 +78,10 @@ def main() -> None:
     assert u32(lctx, 8) == 1 and u16(lctx, 16) == 42 and u32(lctx, 32) == 7
     assert struct.unpack_from(">i", lctx, 46)[0] == 8
     lnam = chunks[b"Lnam"]
-    assert u16(lnam, 18) == 8
+    assert u16(lnam, 18) == 21
     lscr = chunks[b"Lscr"]
-    assert u16(lscr, 66) == 4 and u16(lscr, 72) == 4 and u16(lscr, 78) == 0
+    assert u16(lscr, 66) == 7 and u16(lscr, 72) == 7 and u16(lscr, 78) == 0
+    assert b"mouseDown" in lnam and b"mouseH" in lnam and b"mouseV" in lnam
     digest = hashlib.sha256(raw).hexdigest()
     print(f"valid {INPUT} bytes={len(raw)} sha256={digest}")
 

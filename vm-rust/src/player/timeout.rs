@@ -1,4 +1,7 @@
-use std::collections::HashMap;
+use std::{
+    cmp::Ordering,
+    collections::HashMap,
+};
 
 use crate::{
     director::lingo::datum::TimeoutRef,
@@ -10,6 +13,90 @@ use super::DatumRef;
 pub struct TimeoutManager {
     pub timeouts: HashMap<TimeoutRef, Timeout>,
     next_incarnation: u64,
+    next_registration_sequence: u64,
+}
+
+/// The exact logical time used by the native caller-driven pump.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct NativeTime {
+    numerator: u128,
+    denominator: u128,
+}
+
+pub(crate) const MAX_EXACT_NATIVE_MS: u64 = (1u64 << 53) - 1;
+
+impl NativeTime {
+    pub(crate) fn from_ms(milliseconds: u64) -> Result<Self, ScriptError> {
+        if milliseconds > MAX_EXACT_NATIVE_MS {
+            return Err(ScriptError::new(
+                "native simulation time exceeds exact supported range".to_owned(),
+            ));
+        }
+        Ok(Self { numerator: milliseconds as u128, denominator: 1 })
+    }
+
+    pub(crate) fn zero() -> Self {
+        Self { numerator: 0, denominator: 1 }
+    }
+
+    pub(crate) fn add_integer_ms(self, milliseconds: u32) -> Result<Self, ScriptError> {
+        self.add_fraction(milliseconds as u128, 1)
+    }
+
+    pub(crate) fn add_fraction(self, numerator: u128, denominator: u128) -> Result<Self, ScriptError> {
+        if denominator == 0 {
+            return Err(ScriptError::new("native time has a zero denominator".to_owned()));
+        }
+        let common_denominator = gcd(self.denominator, denominator);
+        let left_scale = denominator / common_denominator;
+        let right_scale = self.denominator / common_denominator;
+        let left = self
+            .numerator
+            .checked_mul(left_scale)
+            .ok_or_else(|| ScriptError::new("native time deadline overflow".to_owned()))?;
+        let right = numerator
+            .checked_mul(right_scale)
+            .ok_or_else(|| ScriptError::new("native time deadline overflow".to_owned()))?;
+        let denominator = self
+            .denominator
+            .checked_mul(left_scale)
+            .ok_or_else(|| ScriptError::new("native time deadline overflow".to_owned()))?;
+        let numerator = left
+            .checked_add(right)
+            .ok_or_else(|| ScriptError::new("native time deadline overflow".to_owned()))?;
+        let common = gcd(numerator, denominator);
+        Ok(Self { numerator: numerator / common, denominator: denominator / common })
+    }
+
+    pub(crate) fn cmp(self, other: Self) -> Result<Ordering, ScriptError> {
+        let left = self
+            .numerator
+            .checked_mul(other.denominator)
+            .ok_or_else(|| ScriptError::new("native time comparison overflow".to_owned()))?;
+        let right = other
+            .numerator
+            .checked_mul(self.denominator)
+            .ok_or_else(|| ScriptError::new("native time comparison overflow".to_owned()))?;
+        Ok(left.cmp(&right))
+    }
+
+    pub(crate) fn to_f64(self) -> Result<f64, ScriptError> {
+        let value = self.numerator as f64 / self.denominator as f64;
+        if value.is_finite() {
+            Ok(value)
+        } else {
+            Err(ScriptError::new("native time cannot be represented as f64".to_owned()))
+        }
+    }
+}
+
+fn gcd(mut left: u128, mut right: u128) -> u128 {
+    while right != 0 {
+        let remainder = left % right;
+        left = right;
+        right = remainder;
+    }
+    left.max(1)
 }
 
 /// Incarnations cross the wasm/JavaScript ABI as a Number, so keep them below
@@ -32,6 +119,9 @@ pub struct Timeout {
     pub incarnation: u64,
     /// Wall-clock timestamp (ms) when this timeout should next fire.
     pub next_fire_ms: f64,
+    /// Exact native deadline. Browser/legacy paths continue using next_fire_ms.
+    pub(crate) native_next_fire: Option<NativeTime>,
+    pub(crate) registration_sequence: u64,
 }
 
 impl TimeoutManager {
@@ -39,7 +129,16 @@ impl TimeoutManager {
         TimeoutManager {
             timeouts: HashMap::new(),
             next_incarnation: 1,
+            next_registration_sequence: 1,
         }
+    }
+
+    fn allocate_registration_sequence(&mut self) -> Result<u64, ScriptError> {
+        let sequence = self.next_registration_sequence;
+        self.next_registration_sequence = sequence
+            .checked_add(1)
+            .ok_or_else(|| ScriptError::new("timeout registration sequence exhausted".to_owned()))?;
+        Ok(sequence)
     }
 
     fn allocate_incarnation(&mut self) -> Result<u64, ScriptError> {
@@ -79,7 +178,25 @@ impl TimeoutManager {
         mut timeout: Timeout,
         now_ms: f64,
     ) -> Result<TimeoutReplacement, ScriptError> {
+        self.replace_timeout_inner(timeout, now_ms, None)
+    }
+
+    pub fn replace_timeout_at(
+        &mut self,
+        timeout: Timeout,
+        now: NativeTime,
+    ) -> Result<TimeoutReplacement, ScriptError> {
+        self.replace_timeout_inner(timeout, now.to_f64()?, Some(now))
+    }
+
+    fn replace_timeout_inner(
+        &mut self,
+        mut timeout: Timeout,
+        now_ms: f64,
+        native_now: Option<NativeTime>,
+    ) -> Result<TimeoutReplacement, ScriptError> {
         let incarnation = self.allocate_incarnation()?;
+        let registration_sequence = self.allocate_registration_sequence()?;
         // Creation/replacement is exact-keyed so `Timer` and `timer` remain
         // independent. Case-insensitive resolution is reserved for legacy
         // lookup/cancel paths below.
@@ -91,6 +208,8 @@ impl TimeoutManager {
         } else {
             0.0
         };
+        timeout.native_next_fire = if timeout.is_scheduled { native_now.map(|now| now.add_integer_ms(timeout.period)).transpose()? } else { None };
+        timeout.registration_sequence = registration_sequence;
 
         self.timeouts.insert(timeout.name.clone(), timeout.clone());
         Ok(TimeoutReplacement { old, new: timeout })
@@ -135,6 +254,25 @@ impl TimeoutManager {
         period: u32,
         now_ms: f64,
     ) -> Result<Option<TimeoutReplacement>, ScriptError> {
+        self.set_period_inner(timeout_name, period, now_ms, None)
+    }
+
+    pub fn set_period_at(
+        &mut self,
+        timeout_name: &str,
+        period: u32,
+        now: NativeTime,
+    ) -> Result<Option<TimeoutReplacement>, ScriptError> {
+        self.set_period_inner(timeout_name, period, now.to_f64()?, Some(now))
+    }
+
+    fn set_period_inner(
+        &mut self,
+        timeout_name: &str,
+        period: u32,
+        now_ms: f64,
+        native_now: Option<NativeTime>,
+    ) -> Result<Option<TimeoutReplacement>, ScriptError> {
         let Some(key) = self.resolve_key(timeout_name) else {
             return Ok(None);
         };
@@ -152,6 +290,7 @@ impl TimeoutManager {
         } else {
             0.0
         };
+        timeout.native_next_fire = if timeout.is_scheduled { native_now.map(|now| now.add_integer_ms(period)).transpose()? } else { None };
         Ok(Some(TimeoutReplacement {
             old: Some(old),
             new: timeout.clone(),
@@ -160,6 +299,36 @@ impl TimeoutManager {
 
     pub fn clear(&mut self) -> Vec<Timeout> {
         self.timeouts.drain().map(|(_, timeout)| timeout).collect()
+    }
+
+    pub(crate) fn next_native_deadline(&self) -> Result<Option<NativeTime>, ScriptError> {
+        let mut next = None;
+        for timeout in self.timeouts.values() {
+            let Some(deadline) = timeout.native_next_fire else { continue };
+            if !timeout.is_scheduled { continue }
+            if next.is_none() || deadline.cmp(next.unwrap())? == Ordering::Less {
+                next = Some(deadline);
+            }
+        }
+        Ok(next)
+    }
+
+    pub(crate) fn due_native_timeouts(&mut self, now: NativeTime) -> Result<Vec<Timeout>, ScriptError> {
+        let mut due = Vec::new();
+        for timeout in self.timeouts.values_mut() {
+            let Some(deadline) = timeout.native_next_fire else { continue };
+            if !timeout.is_scheduled || deadline.cmp(now)? == Ordering::Greater { continue }
+            timeout.native_next_fire = Some(deadline.add_integer_ms(timeout.period)?);
+            timeout.next_fire_ms = timeout.native_next_fire.unwrap().to_f64()?;
+            due.push((deadline, timeout.clone()));
+        }
+        due.sort_by(|(left_deadline, left), (right_deadline, right)| {
+            left_deadline
+                .cmp(*right_deadline)
+                .unwrap_or(Ordering::Equal)
+                .then(left.registration_sequence.cmp(&right.registration_sequence))
+        });
+        Ok(due.into_iter().map(|(_, timeout)| timeout).collect())
     }
 }
 
@@ -176,6 +345,8 @@ mod tests {
             is_scheduled: false,
             incarnation: 0,
             next_fire_ms: 0.0,
+            native_next_fire: None,
+            registration_sequence: 0,
         }
     }
 
@@ -243,5 +414,35 @@ mod tests {
         );
         assert!(!changed.new.is_scheduled);
         assert!(changed.new.incarnation > initial.new.incarnation);
+    }
+
+    #[test]
+    fn native_deadlines_are_exact_and_registration_order_is_stable() {
+        let zero = NativeTime::zero();
+        let first_frame = zero.add_fraction(1000, 30).unwrap();
+        let second_frame = first_frame.add_fraction(1000, 30).unwrap();
+        assert_eq!(first_frame.cmp(NativeTime::from_ms(33).unwrap()).unwrap(), Ordering::Greater);
+        assert_eq!(second_frame.cmp(NativeTime::from_ms(66).unwrap()).unwrap(), Ordering::Greater);
+
+        let mut manager = TimeoutManager::new();
+        manager.replace_timeout_at(timeout("first", 100), zero).unwrap();
+        manager.replace_timeout_at(timeout("second", 100), zero).unwrap();
+        let due = manager.due_native_timeouts(NativeTime::from_ms(100).unwrap()).unwrap();
+        assert_eq!(due.iter().map(|timeout| timeout.name.as_str()).collect::<Vec<_>>(), ["first", "second"]);
+    }
+
+    #[test]
+    fn native_recurring_deadline_advances_from_due_boundary_and_replacement_fences_old_incarnation() {
+        let mut manager = TimeoutManager::new();
+        let initial = manager.replace_timeout_at(timeout("repeat", 100), NativeTime::zero()).unwrap();
+        let due = manager.due_native_timeouts(NativeTime::from_ms(100).unwrap()).unwrap();
+        assert_eq!(due[0].incarnation, initial.new.incarnation);
+        assert_eq!(manager.next_native_deadline().unwrap(), Some(NativeTime::from_ms(200).unwrap()));
+
+        let replacement = manager.replace_timeout_at(timeout("repeat", 50), NativeTime::from_ms(100).unwrap()).unwrap();
+        assert!(replacement.new.incarnation > initial.new.incarnation);
+        assert_eq!(manager.next_native_deadline().unwrap(), Some(NativeTime::from_ms(150).unwrap()));
+        let due = manager.due_native_timeouts(NativeTime::from_ms(200).unwrap()).unwrap();
+        assert_eq!(due[0].incarnation, replacement.new.incarnation);
     }
 }

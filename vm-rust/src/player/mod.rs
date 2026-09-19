@@ -1096,6 +1096,8 @@ mod flash_binding_state_tests {
             is_scheduled: period > 0,
             incarnation: 0,
             next_fire_ms: 0.0,
+            native_next_fire: None,
+            registration_sequence: 0,
         }
     }
 
@@ -1109,6 +1111,29 @@ mod flash_binding_state_tests {
         assert!(state.is_current(7, replacement));
         assert!(state.invalidate(7, replacement));
         assert!(!state.is_current(7, replacement));
+    }
+
+    #[test]
+    fn native_timeout_retirement_does_not_publish_browser_clear() {
+        let session = RuntimeSession::new(SymbolOwner {
+            session: 955,
+            generation: 1,
+        })
+        .into_handle();
+        assert!(session.borrow_mut().add_player(1, channel::unbounded().0));
+        session
+            .borrow_mut()
+            .with_player(1, |context| {
+                context.player.native_logical_time =
+                    Some(crate::player::timeout::NativeTime::zero());
+                context
+                    .player
+                    .replace_timeout(timeout("native-retire", 10))
+                    .unwrap();
+                context.player.clear_timeouts();
+                assert!(context.player.take_timeout_host_actions().is_empty());
+            })
+            .unwrap();
     }
 
     #[test]
@@ -1788,7 +1813,7 @@ use self::{
     score::{get_sprite_at, Score},
     script::{Script, ScriptHandlerRef},
     sprite::{ColorRef, CursorRef},
-    timeout::{Timeout, TimeoutManager, TimeoutReplacement},
+    timeout::{NativeTime, Timeout, TimeoutManager, TimeoutReplacement},
 };
 
 use crate::player::handlers::datum_handlers::date::DateObject;
@@ -1949,6 +1974,9 @@ pub struct DirPlayer {
     pub cursor: CursorRef,
     pub start_time: chrono::DateTime<chrono::Local>,
     pub timeout_manager: TimeoutManager,
+    /// Set only by the owner-bound native caller-driven pump. Legacy/browser
+    /// callers retain their wall-clock timeout adapter when this is `None`.
+    pub(crate) native_logical_time: Option<NativeTime>,
     pub title: String,
     pub bg_color: ColorRef,
     pub stage_draw_rect: Option<[f64; 4]>,
@@ -2693,6 +2721,11 @@ impl DirPlayer {
     }
 
     pub(crate) fn queue_timeout_replacement(&mut self, replacement: TimeoutReplacement) {
+        if self.native_logical_time.is_some() {
+            // Native timers are consumed by NativeFramePump. Do not publish a
+            // browser host action or record an Unsupported receipt for them.
+            return;
+        }
         let fence = self.timeout_action_fence();
         if let Some(old) = replacement.old {
             if old.is_scheduled {
@@ -2714,9 +2747,12 @@ impl DirPlayer {
     }
 
     pub(crate) fn replace_timeout(&mut self, timeout: Timeout) -> Result<(), ScriptError> {
-        let replacement = self
-            .timeout_manager
-            .replace_timeout(timeout, crate::player::testing_shared::now_ms());
+        let replacement = if let Some(now) = self.native_logical_time {
+            self.timeout_manager.replace_timeout_at(timeout, now)
+        } else {
+            self.timeout_manager
+                .replace_timeout(timeout, crate::player::testing_shared::now_ms())
+        };
         let replacement = replacement?;
         self.queue_timeout_replacement(replacement);
         Ok(())
@@ -2727,11 +2763,15 @@ impl DirPlayer {
         timeout_name: &str,
         period: u32,
     ) -> Result<bool, ScriptError> {
-        let replacement = self.timeout_manager.set_period(
-            timeout_name,
-            period,
-            crate::player::testing_shared::now_ms(),
-        )?;
+        let replacement = if let Some(now) = self.native_logical_time {
+            self.timeout_manager.set_period_at(timeout_name, period, now)?
+        } else {
+            self.timeout_manager.set_period(
+                timeout_name,
+                period,
+                crate::player::testing_shared::now_ms(),
+            )?
+        };
         let Some(replacement) = replacement else {
             return Ok(false);
         };
@@ -2743,7 +2783,7 @@ impl DirPlayer {
         let Some(timeout) = self.timeout_manager.forget_timeout(timeout_name) else {
             return false;
         };
-        if timeout.is_scheduled {
+        if timeout.is_scheduled && self.native_logical_time.is_none() {
             self.timeout_host_actions.push(TimeoutHostAction::Clear {
                 fence: self.timeout_action_fence(),
                 name: timeout.name,
@@ -2756,7 +2796,7 @@ impl DirPlayer {
     pub(crate) fn clear_timeouts(&mut self) {
         let fence = self.timeout_action_fence();
         for timeout in self.timeout_manager.clear() {
-            if timeout.is_scheduled {
+            if timeout.is_scheduled && self.native_logical_time.is_none() {
                 self.timeout_host_actions.push(TimeoutHostAction::Clear {
                     fence: fence.clone(),
                     name: timeout.name,
@@ -3010,6 +3050,7 @@ impl DirPlayer {
             cursor: CursorRef::System(0),
             start_time: now, // supposed to be time at which computer started, but we don't have access from browser. this is sufficient for calculating elapsed time.
             timeout_manager: TimeoutManager::new(),
+            native_logical_time: None,
             title: "".to_string(),
             bg_color: ColorRef::Rgb(0, 0, 0),
             stage_draw_rect: None,
@@ -10803,6 +10844,25 @@ pub async fn run_single_frame_owned_at(
     owner: crate::player::ownership::OwnerToken,
     frame_now_ms: f64,
 ) -> Result<(bool, bool), ScriptError> {
+    run_single_frame_owned_at_inner(session, player_id, owner, frame_now_ms, true).await
+}
+
+pub(crate) async fn run_single_frame_owned_at_without_timeouts(
+    session: RuntimeSessionHandle,
+    player_id: u32,
+    owner: crate::player::ownership::OwnerToken,
+    frame_now_ms: f64,
+) -> Result<(bool, bool), ScriptError> {
+    run_single_frame_owned_at_inner(session, player_id, owner, frame_now_ms, false).await
+}
+
+async fn run_single_frame_owned_at_inner(
+    session: RuntimeSessionHandle,
+    player_id: u32,
+    owner: crate::player::ownership::OwnerToken,
+    frame_now_ms: f64,
+    fire_timeouts: bool,
+) -> Result<(bool, bool), ScriptError> {
     let (playing, paused, pending_init, stack_depth) = session
         .borrow_mut()
         .with_player(player_id, |context| {
@@ -10874,13 +10934,15 @@ pub async fn run_single_frame_owned_at(
     }
     // Global timeout and stream-status work happen once per frame, before
     // frame script dispatch, matching the recovered frame-loop ordering.
-    crate::player::fire_pending_timeouts_owned_at(
-        session.clone(),
-        player_id,
-        owner.clone(),
-        frame_now_ms,
-    )
-    .await?;
+    if fire_timeouts {
+        crate::player::fire_pending_timeouts_owned_at(
+            session.clone(),
+            player_id,
+            owner.clone(),
+            frame_now_ms,
+        )
+        .await?;
+    }
     crate::player::dispatch_pending_stream_status_owned(session.clone(), player_id, owner.clone())
         .await?;
     let unpuppet_changed = session
@@ -12496,7 +12558,7 @@ pub(crate) async fn fire_pending_timeouts_owned_at(
                 session.clone(),
                 player_id,
                 owner.clone(),
-                Symbol::builtin(BuiltInSymbol::Timeout),
+                handler_name,
                 args,
             )
             .await
@@ -12511,6 +12573,96 @@ pub(crate) async fn fire_pending_timeouts_owned_at(
         }
     }
     Ok(())
+}
+
+/// Fire exact native deadlines at one logical boundary. The ready list is
+/// detached before callbacks await, and every entry is revalidated against its
+/// owner and incarnation before dispatch.
+pub(crate) async fn fire_pending_timeouts_owned_at_exact(
+    session: RuntimeSessionHandle,
+    player_id: u32,
+    owner: OwnerToken,
+    now: NativeTime,
+) -> Result<u32, ScriptError> {
+    let pending = session
+        .borrow_mut()
+        .with_player(player_id, |mut context| {
+            if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                return Err(cancelled_scope_error());
+            }
+            let ready = context.player.timeout_manager.due_native_timeouts(now)?;
+            let ready = ready
+                .into_iter()
+                .map(|timeout| {
+                    let timeout_ref = context
+                        .player
+                        .alloc_datum(Datum::TimeoutRef(timeout.name.clone()));
+                    (
+                        timeout.target_ref,
+                        timeout.handler,
+                        timeout.name,
+                        timeout.incarnation,
+                        timeout_ref,
+                    )
+                })
+                .collect::<Vec<_>>();
+            Ok::<_, ScriptError>(ready)
+        })
+        .ok_or_else(cancelled_scope_error)??;
+
+    let mut fired = 0u32;
+    for (target_ref, handler_name, timeout_name, incarnation, timeout_ref) in pending {
+        let valid = session
+            .borrow_mut()
+            .with_player(player_id, |context| {
+                owner.same_identity(&context.player.owner)
+                    && owner.is_arena_live()
+                    && context
+                        .player
+                        .timeout_manager
+                        .get_timeout_exact(&timeout_name)
+                        .is_some_and(|timeout| {
+                            timeout.incarnation == incarnation
+                                && timeout.is_scheduled
+                                && timeout.native_next_fire.is_some()
+                        })
+            })
+            .unwrap_or(false);
+        if !valid {
+            continue;
+        }
+        fired = fired.saturating_add(1);
+        let args = vec![timeout_ref];
+        if target_ref != DatumRef::Void {
+            dispatch_timeout_target_owned(
+                session.clone(),
+                player_id,
+                owner.clone(),
+                target_ref,
+                handler_name,
+                args,
+                &timeout_name,
+            )
+            .await?;
+        } else {
+            match crate::player::events::player_invoke_global_event_owned(
+                session.clone(),
+                player_id,
+                owner.clone(),
+                handler_name,
+                args,
+            )
+            .await
+            {
+                Ok(_) | Err(ScriptError { code: ScriptErrorCode::HandlerNotFound, .. }) => {}
+                Err(error) => warn!(
+                    "Native timeout '{}' global handler error: {}",
+                    timeout_name, error.message
+                ),
+            }
+        }
+    }
+    Ok(fired)
 }
 
 /// Compatibility boundary for harness callers that have not yet supplied the
@@ -15121,6 +15273,8 @@ mod cursor_reset_tests {
                             is_scheduled: true,
                             incarnation: 0,
                             next_fire_ms: 0.0,
+                            native_next_fire: None,
+                            registration_sequence: 0,
                         })
                         .expect("lifecycle timeout replacement must succeed");
                     (

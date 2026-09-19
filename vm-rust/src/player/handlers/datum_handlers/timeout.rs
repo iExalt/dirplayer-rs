@@ -252,6 +252,8 @@ impl TimeoutDatumHandlers {
             is_scheduled: false,
             incarnation: 0,
             next_fire_ms: 0.0,
+            native_next_fire: None,
+            registration_sequence: 0,
         };
 
         player.replace_timeout(timeout)?;
@@ -556,6 +558,8 @@ mod tests {
                 is_scheduled: false,
                 incarnation: 0,
                 next_fire_ms: 0.0,
+                native_next_fire: None,
+                registration_sequence: 0,
             })
             .expect("test timeout replacement must succeed");
         let foreign_instance = foreign_player

@@ -6885,6 +6885,8 @@ mod owned_mouse_down_tests {
                         is_scheduled: true,
                         incarnation: 0,
                         next_fire_ms: 60_000.0,
+                        native_next_fire: None,
+                        registration_sequence: 0,
                     },
                     0.0,
                 )

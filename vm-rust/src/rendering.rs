@@ -461,6 +461,117 @@ pub fn render_stage_to_bitmap(
     );
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+/// Owner-bound native presentation policy backed by the canonical CPU bitmap
+/// compositor. The session retains only a weak binding; the native harness or
+/// worker owns this policy for its player lifetime.
+pub(crate) struct NativePresentationPolicy {
+    bitmap: RefCell<Option<(OwnerToken, Bitmap)>>,
+    disposed: Cell<bool>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl NativePresentationPolicy {
+    pub(crate) fn new() -> Self {
+        Self { bitmap: RefCell::new(None), disposed: Cell::new(false) }
+    }
+
+    fn present(&self, player: &mut DirPlayer, owner: &OwnerToken) -> Result<(), ScriptError> {
+        if self.disposed.get() {
+            return Err(ScriptError::new("native presentation policy is disposed".to_owned()));
+        }
+        let width = player.movie.rect.width().max(0) as u16;
+        let height = player.movie.rect.height().max(0) as u16;
+        let mut bitmap = Bitmap::new(
+            width,
+            height,
+            32,
+            32,
+            0,
+            PaletteRef::BuiltIn(get_system_default_palette()),
+        );
+        render_stage_to_bitmap(player, &mut bitmap, None);
+        *self.bitmap.borrow_mut() = Some((owner.clone(), bitmap));
+        Ok(())
+    }
+
+    fn snapshot(&self, owner: &OwnerToken) -> Option<Bitmap> {
+        self.bitmap
+            .borrow()
+            .as_ref()
+            .filter(|(cached_owner, _)| cached_owner.same_identity(owner))
+            .map(|(_, bitmap)| bitmap.clone())
+    }
+
+    pub(crate) fn dispose(&self) {
+        self.disposed.set(true);
+        self.bitmap.borrow_mut().take();
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod native_presentation_tests {
+    use super::{snapshot_native_for_owner, snapshot_native_fresh_for_owner, NativePresentationPolicy};
+    use crate::player::testing_shared::HarnessRuntime;
+    use std::rc::Rc;
+
+    #[test]
+    fn cached_snapshot_rejects_replaced_owner() {
+        let (command_tx, _command_rx) = async_std::channel::unbounded();
+        let mut runtime = HarnessRuntime::new(command_tx);
+        let policy = Rc::new(NativePresentationPolicy::new());
+        runtime
+            .session()
+            .borrow_mut()
+            .bind_native_presentation(runtime.player_id(), &policy);
+
+        let original_owner = runtime.owner().clone();
+        snapshot_native_for_owner(
+            &runtime.session(),
+            runtime.player_id(),
+            &original_owner,
+        )
+        .expect("initial owner should populate the native snapshot cache");
+        assert!(policy.snapshot(&original_owner).is_some());
+
+        let (replacement_tx, _replacement_rx) = async_std::channel::unbounded();
+        assert!(runtime.reset_player(replacement_tx));
+        runtime
+            .session()
+            .borrow_mut()
+            .bind_native_presentation(runtime.player_id(), &policy);
+        let replacement_owner = runtime.owner().clone();
+        assert!(policy.snapshot(&replacement_owner).is_none());
+
+        let error = match snapshot_native_for_owner(
+            &runtime.session(),
+            runtime.player_id(),
+            &original_owner,
+        ) {
+            Ok(_) => panic!("a cached snapshot must reject the retired owner"),
+            Err(error) => error,
+        };
+        assert!(error.message.contains("native presentation owner is stale"));
+
+        let fresh_error = match snapshot_native_fresh_for_owner(
+            &runtime.session(),
+            runtime.player_id(),
+            &original_owner,
+        ) {
+            Ok(_) => panic!("fresh presentation must reject the retired owner"),
+            Err(error) => error,
+        };
+        assert!(fresh_error.message.contains("native presentation owner is stale"));
+
+        snapshot_native_for_owner(
+            &runtime.session(),
+            runtime.player_id(),
+            &replacement_owner,
+        )
+        .expect("the replacement owner should retain the presentation binding");
+    }
+}
+
 /// Render a preview bitmap for a cast member. Returns `None` if the member type
 /// is not previewable or required data (fonts, bitmaps) is unavailable.
 pub fn render_preview_bitmap(
@@ -3898,9 +4009,106 @@ pub(crate) fn draw_frame_for_owner(
         .try_borrow()
         .map_err(|_| owned_error("runtime session is already borrowed"))?
         .renderer_state(player_id)
+        .and_then(|weak| weak.upgrade());
+    if let Some(state) = state {
+        return draw_frame_owned(&state, session, player_id, owner);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let policy = session
+            .try_borrow()
+            .map_err(|_| owned_error("runtime session is already borrowed"))?
+            .native_presentation(player_id)
+            .and_then(|weak| weak.upgrade())
+            .ok_or_else(|| owned_error("owned player has no presentation policy"))?;
+        return present_native_frame_owned(&policy, session, player_id, owner);
+    }
+    #[cfg(target_arch = "wasm32")]
+    Err(owned_error("owned player has no renderer"))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn present_native_frame_owned(
+    policy: &NativePresentationPolicy,
+    session: &RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: &OwnerToken,
+) -> Result<bool, ScriptError> {
+    if !owner.is_arena_live() {
+        return Ok(false);
+    }
+    let mut runtime = session
+        .try_borrow_mut()
+        .map_err(|_| owned_error("runtime session is already borrowed"))?;
+    let presented = runtime
+        .with_player(player_id, |context| {
+            if !context.player.owner.same_identity(owner) {
+                return Err(owned_error("native presentation owner is stale"));
+            }
+            policy.present(context.player, owner)?;
+            context.player.stage_dirty = false;
+            Ok(true)
+        })
+        .ok_or_else(|| owned_error("owned presentation player is not installed"))??;
+    Ok(presented)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn snapshot_native_for_owner(
+    session: &RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: &OwnerToken,
+) -> Result<Bitmap, ScriptError> {
+    let owner_valid = session
+        .try_borrow_mut()
+        .map_err(|_| owned_error("runtime session is already borrowed"))?
+        .with_player(player_id, |context| {
+            owner.is_arena_live() && context.player.owner.same_identity(owner)
+        })
+        .unwrap_or(false);
+    if !owner_valid {
+        return Err(owned_error("native presentation owner is stale"));
+    }
+    let policy = session
+        .try_borrow()
+        .map_err(|_| owned_error("runtime session is already borrowed"))?
+        .native_presentation(player_id)
         .and_then(|weak| weak.upgrade())
-        .ok_or_else(|| owned_error("owned player has no renderer"))?;
-    draw_frame_owned(&state, session, player_id, owner)
+        .ok_or_else(|| owned_error("owned player has no presentation policy"))?;
+    if policy.snapshot(owner).is_none() {
+        present_native_frame_owned(&policy, session, player_id, owner)?;
+    }
+    policy
+        .snapshot(owner)
+        .ok_or_else(|| owned_error("native presentation has no captured stage"))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn snapshot_native_fresh_for_owner(
+    session: &RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: &OwnerToken,
+) -> Result<Bitmap, ScriptError> {
+    let owner_valid = session
+        .try_borrow_mut()
+        .map_err(|_| owned_error("runtime session is already borrowed"))?
+        .with_player(player_id, |context| {
+            owner.is_arena_live() && context.player.owner.same_identity(owner)
+        })
+        .unwrap_or(false);
+    if !owner_valid {
+        return Err(owned_error("native presentation owner is stale"));
+    }
+    let policy = session
+        .try_borrow()
+        .map_err(|_| owned_error("runtime session is already borrowed"))?
+        .native_presentation(player_id)
+        .and_then(|weak| weak.upgrade())
+        .ok_or_else(|| owned_error("owned player has no presentation policy"))?;
+    present_native_frame_owned(&policy, session, player_id, owner)?;
+    policy
+        .snapshot(owner)
+        .ok_or_else(|| owned_error("native presentation has no captured stage"))
 }
 
 /// Draw the one unpaced frame Director emits after exitFrame settles.

@@ -1,18 +1,18 @@
-use std::path::Path;
+use std::{path::{Path, PathBuf}, rc::Rc, time::Duration};
 use std::sync::Mutex;
 
 use async_std::channel;
+use manual_future::ManualFuture;
 
 use crate::director::file::read_director_file_bytes;
 pub use crate::director::static_datum::StaticDatum;
 use crate::player::{
-    bitmap::bitmap::{get_system_default_palette, Bitmap, PaletteRef},
-    commands::run_command_loop,
+    commands::{run_command_loop, PlayerVMCommand},
+    session::{NativeAdvanceReport, NativeFramePump, NativeInputPump},
     PlayerVMExecutionItem,
 };
 pub use crate::player::testing_shared::{TestHarness, SnapshotOutput};
 use crate::player::testing_shared::HarnessRuntime;
-use crate::rendering::render_stage_to_bitmap;
 
 /// Global lock to ensure only one TestPlayer runs at a time.
 /// The player uses global mutable statics, so tests must be serialized.
@@ -23,6 +23,9 @@ pub struct TestPlayer {
     _tx: channel::Sender<PlayerVMExecutionItem>,
     _lock: std::sync::MutexGuard<'static, ()>,
     runtime: HarnessRuntime,
+    native_presentation: Rc<crate::rendering::NativePresentationPolicy>,
+    native_frame_pump: NativeFramePump,
+    native_input_pump: NativeInputPump,
 }
 
 impl TestPlayer {
@@ -32,14 +35,86 @@ impl TestPlayer {
         let (tx, rx) = channel::unbounded();
 
         let runtime = HarnessRuntime::new(tx.clone());
+        let native_presentation = Rc::new(crate::rendering::NativePresentationPolicy::new());
+        runtime
+            .session()
+            .borrow_mut()
+            .bind_native_presentation(runtime.player_id(), &native_presentation);
+        let native_frame_pump = NativeFramePump::new(
+            runtime.session(),
+            runtime.player_id(),
+            runtime.owner().clone(),
+        );
+        let native_input_pump = NativeInputPump::new(
+            runtime.session(),
+            runtime.player_id(),
+            runtime.owner().clone(),
+        );
         let command_session = runtime.session();
         let command_player_id = runtime.player_id();
         let command_owner = runtime.owner().clone();
         crate::player::spawn_player_local(async move {
             run_command_loop(rx, command_session, command_player_id, command_owner).await;
         });
-        TestPlayer { _tx: tx, _lock: lock, runtime }
+        TestPlayer {
+            _tx: tx,
+            _lock: lock,
+            runtime,
+            native_presentation,
+            native_frame_pump,
+            native_input_pump,
+        }
     }
+
+    /// Initialize this native player at an explicit caller-owned simulation time.
+    pub async fn init_movie_at(&mut self, now_ms: u64) {
+        self.native_frame_pump
+            .init_movie_at(now_ms)
+            .await
+            .unwrap_or_else(|error| panic!("native movie initialization failed: {}", error));
+    }
+
+    /// Advance this native player to an explicit, strictly later simulation time.
+    pub async fn advance_frame_to(&mut self, now_ms: u64) -> bool {
+        self.native_frame_pump
+            .advance_frame_to(now_ms)
+            .await
+            .unwrap_or_else(|error| panic!("native frame advancement failed: {}", error))
+            .0
+    }
+
+    /// Advance the native logical clock through all due timer/frame boundaries.
+    pub async fn advance_to(&mut self, now_ms: u64) -> crate::player::session::NativeAdvanceReport {
+        self.native_frame_pump
+            .advance_to(now_ms)
+            .await
+            .unwrap_or_else(|error| panic!("native logical advancement failed: {}", error))
+    }
+
+    /// Fallible native logical advancement for boundary and owner tests.
+    pub async fn try_advance_to(
+        &mut self,
+        now_ms: u64,
+    ) -> Result<crate::player::session::NativeAdvanceReport, crate::player::ScriptError> {
+        self.native_frame_pump.advance_to(now_ms).await
+    }
+
+    /// Consume native host-unsupported receipts; native logical timers should
+    /// leave this sink empty while legacy/browser paths retain their receipts.
+    pub fn take_native_timeout_host_unsupported(&mut self) -> Vec<crate::js_api::TimeoutHostDispatch> {
+        self.runtime
+            .session()
+            .borrow_mut()
+            .take_native_timeout_host_unsupported()
+    }
+
+    pub async fn native_mouse_down(&self, x: i32, y: i32) {
+        self.native_input_pump
+            .mouse_down(x, y)
+            .await
+            .unwrap_or_else(|error| panic!("native mouseDown failed: {}", error.message));
+    }
+
 }
 
 impl TestHarness for TestPlayer {
@@ -149,22 +224,27 @@ impl TestHarness for TestPlayer {
     }
 
     fn snapshot_stage(&self) -> SnapshotOutput {
-        self.runtime.with_context(|context| {
-            let w = context.player.movie.rect.width() as u16;
-            let h = context.player.movie.rect.height() as u16;
-            let mut bitmap = Bitmap::new(w, h, 32, 32, 0, PaletteRef::BuiltIn(get_system_default_palette()));
-            render_stage_to_bitmap(context.player, &mut bitmap, None);
-            SnapshotOutput::Rgba {
-                width: w as u32,
-                height: h as u32,
-                data: bitmap.data,
-            }
-        }).unwrap_or_else(|| panic!("harness player was replaced"))
+        let bitmap = crate::rendering::snapshot_native_fresh_for_owner(
+            &self.runtime.session(),
+            self.runtime.player_id(),
+            self.runtime.owner(),
+        )
+        .unwrap_or_else(|error| panic!("native stage snapshot failed: {}", error));
+        SnapshotOutput::Rgba {
+            width: bitmap.width as u32,
+            height: bitmap.height as u32,
+            data: bitmap.data,
+        }
     }
 }
 
 impl Drop for TestPlayer {
     fn drop(&mut self) {
+        self.runtime
+            .session()
+            .borrow_mut()
+            .unbind_native_presentation(self.runtime.player_id());
+        self.native_presentation.dispose();
         self.runtime.retire_current();
     }
 }
@@ -331,5 +411,268 @@ impl StageSnapshot {
             return Ok(Some(ratio));
         }
         Ok(None)
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod native_lifecycle_tests {
+    use super::*;
+    use crate::rendering::{snapshot_native_for_owner, snapshot_native_fresh_for_owner};
+
+    const PROBE_MOVIE: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/native_director_probe.dcr"
+    );
+
+    #[derive(Clone, Debug, PartialEq)]
+    struct LifecycleRecord {
+        initial_frame: u32,
+        initial_frame_state: StaticDatum,
+        initial_input_h: StaticDatum,
+        initial_input_v: StaticDatum,
+        input_frame: u32,
+        input_frame_state: StaticDatum,
+        input_h: StaticDatum,
+        input_v: StaticDatum,
+        at_100: NativeAdvanceReport,
+        at_100_frame: u32,
+        at_100_frame_state: StaticDatum,
+        at_300: NativeAdvanceReport,
+        at_300_frame: u32,
+        at_300_frame_state: StaticDatum,
+        before_rgba: Vec<u8>,
+        input_rgba: Vec<u8>,
+        final_rgba: Vec<u8>,
+    }
+
+    fn expected_probe_rgba(left: u32) -> Vec<u8> {
+        let mut data = Vec::with_capacity(32 * 32 * 4);
+        for y in 0..32 {
+            for x in 0..32 {
+                if (left..left + 24).contains(&x) && (4..28).contains(&y) {
+                    data.extend_from_slice(&[0, 0, 0, 255]);
+                } else {
+                    data.extend_from_slice(&[255, 255, 255, 255]);
+                }
+            }
+        }
+        data
+    }
+
+    fn snapshot_data(player: &TestPlayer) -> Vec<u8> {
+        let snapshot = StageSnapshot::from_output(player.snapshot_stage());
+        assert_eq!((snapshot.width, snapshot.height), (32, 32));
+        assert_eq!(snapshot.data.len(), 4096);
+        snapshot.data
+    }
+
+    fn write_iteration_artifacts(
+        evidence_dir: Option<&Path>,
+        iteration: usize,
+        record: &LifecycleRecord,
+    ) {
+        let Some(evidence_dir) = evidence_dir else {
+            return;
+        };
+        std::fs::create_dir_all(evidence_dir).unwrap();
+        let stem = format!("iteration-{iteration}");
+        std::fs::write(evidence_dir.join(format!("{stem}-before.rgba")), &record.before_rgba)
+            .unwrap();
+        std::fs::write(evidence_dir.join(format!("{stem}-input.rgba")), &record.input_rgba)
+            .unwrap();
+        std::fs::write(evidence_dir.join(format!("{stem}-final.rgba")), &record.final_rgba)
+            .unwrap();
+        let state = format!(
+            "schema=NATIVE_LIFECYCLE_V1\n\
+             initial_frame={}\n\
+             initial_frame_state={:?}\n\
+             initial_input_h={:?}\n\
+             initial_input_v={:?}\n\
+             input_frame={}\n\
+             input_frame_state={:?}\n\
+             input_h={:?}\n\
+             input_v={:?}\n\
+             at_100_frames={}\n\
+             at_100_timeouts={}\n\
+             at_100_frame={}\n\
+             at_100_frame_state={:?}\n\
+             at_300_frames={}\n\
+             at_300_timeouts={}\n\
+             at_300_frame={}\n\
+             at_300_frame_state={:?}\n\
+             before_rgba_bytes={}\n\
+             input_rgba_bytes={}\n\
+             final_rgba_bytes={}\n",
+            record.initial_frame,
+            record.initial_frame_state,
+            record.initial_input_h,
+            record.initial_input_v,
+            record.input_frame,
+            record.input_frame_state,
+            record.input_h,
+            record.input_v,
+            record.at_100.frames,
+            record.at_100.timeouts,
+            record.at_100_frame,
+            record.at_100_frame_state,
+            record.at_300.frames,
+            record.at_300.timeouts,
+            record.at_300_frame,
+            record.at_300_frame_state,
+            record.before_rgba.len(),
+            record.input_rgba.len(),
+            record.final_rgba.len(),
+        );
+        std::fs::write(evidence_dir.join(format!("{stem}-state.txt")), state).unwrap();
+        println!(
+            "NATIVE_LIFECYCLE_V1 iteration={iteration} initial_frame={} initial_frame_state={:?} initial_input_h={:?} initial_input_v={:?} input_frame={} input_frame_state={:?} input_h={:?} input_v={:?} at_100={:?} at_300={:?} final_frame={} final_frame_state={:?} rgba_bytes=4096/4096/4096",
+            record.initial_frame,
+            record.initial_frame_state,
+            record.initial_input_h,
+            record.initial_input_v,
+            record.input_frame,
+            record.input_frame_state,
+            record.input_h,
+            record.input_v,
+            record.at_100,
+            record.at_300,
+            record.at_300_frame,
+            record.at_300_frame_state,
+        );
+    }
+
+    async fn run_iteration(iteration: usize, evidence_dir: Option<&Path>) -> LifecycleRecord {
+        let mut player = TestPlayer::new();
+        player.load_movie(PROBE_MOVIE).await;
+        player.init_movie_at(0).await;
+        assert_eq!(player.try_advance_to(0).await.unwrap(), NativeAdvanceReport::default());
+
+        let initial_frame = player.current_frame();
+        let initial_frame_state = player.eval_datum("value(\"frameState\")").await.unwrap();
+        let initial_input_h = player.eval_datum("value(\"inputH\")").await.unwrap();
+        let initial_input_v = player.eval_datum("value(\"inputV\")").await.unwrap();
+        assert_eq!(initial_frame, 1);
+        assert_eq!(initial_frame_state, StaticDatum::Int(2));
+        assert_eq!(initial_input_h, StaticDatum::Void);
+        assert_eq!(initial_input_v, StaticDatum::Void);
+        let before_rgba = snapshot_data(&player);
+        assert_eq!(before_rgba, expected_probe_rgba(4));
+
+        player
+            .eval_datum("timeout().new(\"timerA\", 100, #timerA)")
+            .await
+            .unwrap();
+        player
+            .eval_datum("timeout().new(\"timerB\", 100, #timerB)")
+            .await
+            .unwrap();
+        assert_eq!(
+            player
+                .runtime
+                .with_context(|context| context.player.timeout_manager.timeouts.len()),
+            Some(2)
+        );
+        assert!(player.take_native_timeout_host_unsupported().is_empty());
+
+        player.native_mouse_down(8, 8).await;
+        let input_frame = player.current_frame();
+        let input_frame_state = player.eval_datum("value(\"frameState\")").await.unwrap();
+        let input_h = player.eval_datum("value(\"inputH\")").await.unwrap();
+        let input_v = player.eval_datum("value(\"inputV\")").await.unwrap();
+        assert_eq!(input_frame, initial_frame);
+        assert_eq!(input_frame_state, initial_frame_state);
+        assert_eq!(input_h, StaticDatum::Int(8));
+        assert_eq!(input_v, StaticDatum::Int(8));
+        let input_rgba = snapshot_data(&player);
+        assert_eq!(input_rgba, expected_probe_rgba(8));
+        assert!(player.take_native_timeout_host_unsupported().is_empty());
+
+        let at_100 = player.advance_to(100).await;
+        let at_100_frame = player.current_frame();
+        let at_100_frame_state = player.eval_datum("value(\"frameState\")").await.unwrap();
+        assert_eq!(at_100, NativeAdvanceReport { frames: 3, timeouts: 2 });
+        assert_eq!(at_100_frame, 1);
+        assert_eq!(at_100_frame_state, StaticDatum::Int(141));
+        assert!(player.take_native_timeout_host_unsupported().is_empty());
+
+        let at_300 = player.advance_to(300).await;
+        let at_300_frame = player.current_frame();
+        let at_300_frame_state = player.eval_datum("value(\"frameState\")").await.unwrap();
+        assert_eq!(at_300, NativeAdvanceReport { frames: 6, timeouts: 1 });
+        assert_eq!(at_300_frame, 1);
+        assert_eq!(at_300_frame_state, StaticDatum::Int(157));
+        assert!(player.take_native_timeout_host_unsupported().is_empty());
+        let final_rgba = snapshot_data(&player);
+        assert_eq!(final_rgba, expected_probe_rgba(4));
+
+        let session = player.runtime.session();
+        let player_id = player.runtime.player_id();
+        let owner = player.runtime.owner().clone();
+        let mut stale_frame_pump = NativeFramePump::new(session.clone(), player_id, owner.clone());
+        let stale_input_pump = NativeInputPump::new(session.clone(), player_id, owner.clone());
+        let weak_presentation = Rc::downgrade(&player.native_presentation);
+        let command_tx = player.runtime.command_tx();
+        let (command_future, completer) = ManualFuture::new();
+        command_tx
+            .send(PlayerVMExecutionItem {
+                command: PlayerVMCommand::MouseDown((0, 0)),
+                completer: Some(completer),
+            })
+            .await
+            .unwrap();
+
+        let record = LifecycleRecord {
+            initial_frame,
+            initial_frame_state,
+            initial_input_h,
+            initial_input_v,
+            input_frame,
+            input_frame_state,
+            input_h,
+            input_v,
+            at_100,
+            at_100_frame,
+            at_100_frame_state,
+            at_300,
+            at_300_frame,
+            at_300_frame_state,
+            before_rgba,
+            input_rgba,
+            final_rgba,
+        };
+        write_iteration_artifacts(evidence_dir, iteration, &record);
+
+        drop(player);
+        assert!(weak_presentation.upgrade().is_none());
+        assert!(session.borrow().native_presentation(player_id).is_none());
+        assert!(session.borrow_mut().with_player(player_id, |_| ()).is_none());
+        assert!(session.borrow_mut().take_timeout_host_actions().is_empty());
+        assert!(session.borrow_mut().take_native_timeout_host_unsupported().is_empty());
+        assert!(
+            async_std::future::timeout(Duration::from_secs(1), command_future)
+                .await
+                .is_ok(),
+            "retired command completer hung"
+        );
+        assert!(stale_frame_pump
+            .advance_to(301)
+            .await
+            .is_err());
+        assert!(stale_input_pump.mouse_down(0, 0).await.is_err());
+        assert!(snapshot_native_for_owner(&session, player_id, &owner).is_err());
+        assert!(snapshot_native_fresh_for_owner(&session, player_id, &owner).is_err());
+        record
+    }
+
+    #[test]
+    fn native_test_player_lifecycle() {
+        run_test(async {
+            let evidence_dir = std::env::var_os("NATIVE_LIFECYCLE_EVIDENCE_DIR").map(PathBuf::from);
+            let mut records = Vec::new();
+            for iteration in 0..3 {
+                records.push(run_iteration(iteration, evidence_dir.as_deref()).await);
+            }
+            assert!(records.windows(2).all(|pair| pair[0] == pair[1]));
+        });
     }
 }

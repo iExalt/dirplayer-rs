@@ -13,6 +13,7 @@ use std::{
 
 use async_std::channel::{self, Receiver, Sender};
 use log::warn;
+use manual_future::ManualFuture;
 
 use crate::director::file::DirectorFile;
 
@@ -22,6 +23,7 @@ use super::cast_lib::{
     PlayerNotification, PlayerNotificationKind,
 };
 use super::cast_manager::CastPreloadReason;
+use super::commands::PlayerVMCommand;
 use super::driver::{
     checked_internal_datum, ActionCompletion, ActionKind, ActionRegistry, ChildCompletion,
     CompletionTicket, DriverContinuation, DriverStart, DriverTurn, GlobalDispatch, PendingAction,
@@ -37,6 +39,7 @@ use super::host_events::{
 use super::js_lingo_loader::JsRuntimeRegistry;
 use super::nested::{NestedChildRecord, NestedPlayerRegistry};
 use super::ownership::{OwnerKey, OwnerToken};
+use super::timeout::{NativeTime, MAX_EXACT_NATIVE_MS};
 use super::symbols::{builtin::BuiltInSymbol, symbol::Symbol};
 use super::{datum_ref::DatumRef, script_ref::ScriptInstanceRef};
 use super::{DirPlayer, PlayerVMExecutionItem, ScriptError, ScriptErrorCode};
@@ -318,6 +321,9 @@ pub struct RuntimeSession {
     actions: ActionRegistry,
     js_lingo: JsRuntimeRegistry,
     renderer_bindings: HashMap<PlayerId, std::rc::Weak<crate::rendering::RendererState>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    native_presentation_bindings:
+        HashMap<PlayerId, std::rc::Weak<crate::rendering::NativePresentationPolicy>>,
     /// Host resources retired while this session is mutably borrowed. The
     /// owner boundary drains this queue only after releasing the RefMut.
     pending_host_teardowns: Vec<crate::player::xtra::manager::XtraTeardownRequest>,
@@ -371,6 +377,317 @@ pub struct RuntimeSession {
 /// Shared owner of a runtime session for host operations that may await.
 /// Callers borrow the session only for short preparation/application phases.
 pub(crate) type RuntimeSessionHandle = Rc<std::cell::RefCell<RuntimeSession>>;
+
+/// Caller-driven native frame pump for one owner-qualified player.
+///
+/// The pump owns the last accepted simulation timestamp and consumes the
+/// canonical frame-change handoff between caller-driven steps. It delegates
+/// execution to the canonical owner-bound movie phases and never samples a
+/// host clock or sleeps between calls.
+pub(crate) struct NativeFramePump {
+    session: RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: OwnerToken,
+    last_now_ms: Option<u64>,
+    next_frame_deadline: Option<NativeTime>,
+}
+
+/// Owner-qualified native input pump that reuses the canonical command path.
+/// It carries no clock and never mutates player input state before the command
+/// loop accepts the existing `MouseDown` command.
+pub(crate) struct NativeInputPump {
+    session: RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: OwnerToken,
+}
+
+impl NativeInputPump {
+    pub(crate) fn new(
+        session: RuntimeSessionHandle,
+        player_id: PlayerId,
+        owner: OwnerToken,
+    ) -> Self {
+        Self { session, player_id, owner }
+    }
+
+    pub(crate) async fn mouse_down(&self, x: i32, y: i32) -> Result<(), ScriptError> {
+        let queue_tx = self
+            .session
+            .borrow_mut()
+            .with_player(self.player_id, |context| {
+                if !self.owner.is_arena_live()
+                    || !self.owner.same_identity(&context.player.owner)
+                {
+                    return None;
+                }
+                Some(context.player.queue_tx.clone())
+            })
+            .flatten()
+            .ok_or_else(|| ScriptError::new("native input pump owner is stale".to_owned()))?;
+        let (future, completer) = ManualFuture::new();
+        queue_tx
+            .send(PlayerVMExecutionItem {
+                command: PlayerVMCommand::MouseDown((x, y)),
+                completer: Some(completer),
+            })
+            .await
+            .map_err(|_| ScriptError::new("native input command loop stopped".to_owned()))?;
+        future.await.map(|_| ())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct NativeAdvanceReport {
+    pub frames: u32,
+    pub timeouts: u32,
+}
+
+impl NativeFramePump {
+    pub(crate) fn new(
+        session: RuntimeSessionHandle,
+        player_id: PlayerId,
+        owner: OwnerToken,
+    ) -> Self {
+        Self { session, player_id, owner, last_now_ms: None, next_frame_deadline: None }
+    }
+
+    fn validate_owner(&self) -> Result<(), ScriptError> {
+        let valid = self
+            .session
+            .borrow_mut()
+            .with_player(self.player_id, |context| {
+                self.owner.is_arena_live()
+                    && self.owner.same_identity(&context.player.owner)
+            })
+            .unwrap_or(false);
+        if valid {
+            Ok(())
+        } else {
+            Err(ScriptError::new("native frame pump owner is stale".to_owned()))
+        }
+    }
+
+    fn accept_timestamp(&mut self, now_ms: u64) -> Result<(NativeTime, f64), ScriptError> {
+        if now_ms > MAX_EXACT_NATIVE_MS {
+            return Err(ScriptError::new(
+                "native simulation time exceeds exact supported range".to_owned(),
+            ));
+        }
+        if let Some(previous) = self.last_now_ms {
+            if now_ms <= previous {
+                return Err(ScriptError::new(format!(
+                    "native frame timestamp must increase: {now_ms} <= {previous}"
+                )));
+            }
+        }
+        self.last_now_ms = Some(now_ms);
+        let exact = NativeTime::from_ms(now_ms)?;
+        Ok((exact, exact.to_f64()?))
+    }
+
+    fn set_native_time(&self, now: NativeTime) -> Result<(), ScriptError> {
+        let set = self
+            .session
+            .borrow_mut()
+            .with_player(self.player_id, |context| {
+                if !self.owner.is_arena_live() || !self.owner.same_identity(&context.player.owner) {
+                    return false;
+                }
+                context.player.native_logical_time = Some(now);
+                true
+            })
+            .unwrap_or(false);
+        if set { Ok(()) } else { Err(crate::player::cancelled_scope_error()) }
+    }
+
+    fn frame_deadline_after(now: NativeTime, tempo: u32) -> Result<NativeTime, ScriptError> {
+        let tempo = if tempo == 0 { 30 } else { tempo };
+        now.add_fraction(1000, tempo as u128)
+    }
+
+    fn next_timeout_deadline(&self) -> Result<Option<NativeTime>, ScriptError> {
+        Ok(self.session
+            .borrow_mut()
+            .with_player(self.player_id, |context| {
+                if !self.owner.is_arena_live() || !self.owner.same_identity(&context.player.owner) {
+                    return Err(crate::player::cancelled_scope_error());
+                }
+                context.player.timeout_manager.next_native_deadline()
+            })
+            .ok_or_else(crate::player::cancelled_scope_error)??)
+    }
+
+    fn playback_state(&self) -> Result<(bool, bool, u32, u32), ScriptError> {
+        Ok(self.session
+            .borrow_mut()
+            .with_player(self.player_id, |context| {
+                if !self.owner.is_arena_live() || !self.owner.same_identity(&context.player.owner) {
+                    return Err(crate::player::cancelled_scope_error());
+                }
+                Ok((
+                    context.player.is_playing,
+                    context.player.is_script_paused,
+                    context.player.current_frame_tempo,
+                    context.player.playback_frame_count.min(u32::MAX as u64) as u32,
+                ))
+            })
+            .ok_or_else(crate::player::cancelled_scope_error)??)
+    }
+
+    fn clear_frame_change(&self) -> Result<(), ScriptError> {
+        // The owned frame executor leaves this handoff set after advancing the
+        // playhead; consume it so the next explicit step runs the arrived frame.
+        let cleared = self
+            .session
+            .borrow_mut()
+            .with_player(self.player_id, |context| {
+                if !self.owner.is_arena_live()
+                    || !self.owner.same_identity(&context.player.owner)
+                {
+                    return false;
+                }
+                context.player.has_player_frame_changed = false;
+                true
+            })
+            .unwrap_or(false);
+        if cleared {
+            Ok(())
+        } else {
+            Err(ScriptError::new("native frame pump owner is stale".to_owned()))
+        }
+    }
+
+    pub(crate) async fn init_movie_at(&mut self, now_ms: u64) -> Result<(), ScriptError> {
+        self.validate_owner()?;
+        let (exact_now, frame_now_ms) = self.accept_timestamp(now_ms)?;
+        self.set_native_time(exact_now)?;
+        crate::player::run_movie_init_owned_at(
+            self.session.clone(),
+            self.player_id,
+            self.owner.clone(),
+            frame_now_ms,
+        )
+        .await?;
+        self.clear_frame_change()?;
+        let (_, paused, tempo, _) = self.playback_state()?;
+        self.next_frame_deadline = if paused {
+            None
+        } else {
+            Some(Self::frame_deadline_after(exact_now, tempo)?)
+        };
+        Ok(())
+    }
+
+    pub(crate) async fn advance_frame_to(
+        &mut self,
+        now_ms: u64,
+    ) -> Result<(bool, bool), ScriptError> {
+        self.validate_owner()?;
+        let (exact_now, frame_now_ms) = self.accept_timestamp(now_ms)?;
+        self.set_native_time(exact_now)?;
+        self.clear_frame_change()?;
+        let result = crate::player::run_single_frame_owned_at(
+            self.session.clone(),
+            self.player_id,
+            self.owner.clone(),
+            frame_now_ms,
+        )
+        .await?;
+        self.clear_frame_change()?;
+        self.next_frame_deadline = None;
+        Ok(result)
+    }
+
+    /// Advance logical time through every due native timeout/frame boundary.
+    /// This is distinct from advance_frame_to, which is the retained low-level
+    /// one-frame adapter used by legacy callers.
+    pub(crate) async fn advance_to(
+        &mut self,
+        target_ms: u64,
+    ) -> Result<NativeAdvanceReport, ScriptError> {
+        self.validate_owner()?;
+        let target = NativeTime::from_ms(target_ms)?;
+        let Some(previous_ms) = self.last_now_ms else {
+            return Err(ScriptError::new("native frame pump is not initialized".to_owned()));
+        };
+        if target_ms < previous_ms {
+            return Err(ScriptError::new(format!(
+                "native simulation time reversed: {target_ms} < {previous_ms}"
+            )));
+        }
+        if target_ms == previous_ms {
+            self.set_native_time(target)?;
+            return Ok(NativeAdvanceReport::default());
+        }
+        if self.next_frame_deadline.is_none() {
+            let (_, paused, tempo, _) = self.playback_state()?;
+            if !paused {
+                let previous = NativeTime::from_ms(previous_ms)?;
+                self.next_frame_deadline = Some(Self::frame_deadline_after(previous, tempo)?);
+            }
+        }
+
+        let mut report = NativeAdvanceReport::default();
+        loop {
+            let next_timeout = self.next_timeout_deadline()?;
+            let boundary = match (self.next_frame_deadline, next_timeout) {
+                (None, None) => break,
+                (Some(frame), None) => frame,
+                (None, Some(timeout)) => timeout,
+                (Some(frame), Some(timeout)) => {
+                    if frame.cmp(timeout)? == std::cmp::Ordering::Less { frame } else { timeout }
+                }
+            };
+            if boundary.cmp(target)? == std::cmp::Ordering::Greater {
+                break;
+            }
+            let frame_due = self.next_frame_deadline == Some(boundary);
+            let timeout_due = next_timeout == Some(boundary);
+            self.set_native_time(boundary)?;
+
+            if timeout_due {
+                report.timeouts = report
+                    .timeouts
+                    .saturating_add(crate::player::fire_pending_timeouts_owned_at_exact(
+                        self.session.clone(),
+                        self.player_id,
+                        self.owner.clone(),
+                        boundary,
+                    )
+                    .await?);
+            }
+
+            if frame_due {
+                let (_, _, _, before_frames) = self.playback_state()?;
+                let frame_now_ms = boundary.to_f64()?;
+                let result = crate::player::run_single_frame_owned_at_without_timeouts(
+                    self.session.clone(),
+                    self.player_id,
+                    self.owner.clone(),
+                    frame_now_ms,
+                )
+                .await?;
+                self.clear_frame_change()?;
+                let (playing, paused, tempo, after_frames) = self.playback_state()?;
+                report.frames = report
+                    .frames
+                    .saturating_add(after_frames.saturating_sub(before_frames));
+                self.next_frame_deadline = if playing && !paused && result.0 {
+                    Some(Self::frame_deadline_after(boundary, tempo)?)
+                } else {
+                    None
+                };
+            } else if timeout_due {
+                // A timeout-only boundary must not rebase the already
+                // scheduled frame; preserving it keeps split and combined
+                // caller advances on the same rational cadence.
+            }
+        }
+        self.set_native_time(target)?;
+        self.last_now_ms = Some(target_ms);
+        Ok(report)
+    }
+}
 
 impl RuntimeSession {
     pub(crate) fn into_handle(self) -> RuntimeSessionHandle {
@@ -595,6 +912,8 @@ impl RuntimeSession {
             actions: ActionRegistry::new(),
             js_lingo: JsRuntimeRegistry::default(),
             renderer_bindings: HashMap::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            native_presentation_bindings: HashMap::new(),
             pending_host_teardowns: Vec::new(),
             nested_browser_owner_retirements: Vec::new(),
             pending_timeout_host_actions: Vec::new(),
@@ -2376,6 +2695,30 @@ impl RuntimeSession {
     pub(crate) fn unbind_renderer_state(&mut self, player_id: PlayerId) {
         self.renderer_bindings.remove(&player_id);
     }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn bind_native_presentation(
+        &mut self,
+        player_id: PlayerId,
+        policy: &std::rc::Rc<crate::rendering::NativePresentationPolicy>,
+    ) {
+        self.native_presentation_bindings
+            .insert(player_id, std::rc::Rc::downgrade(policy));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn native_presentation(
+        &self,
+        player_id: PlayerId,
+    ) -> Option<std::rc::Weak<crate::rendering::NativePresentationPolicy>> {
+        self.native_presentation_bindings.get(&player_id).cloned()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn unbind_native_presentation(&mut self, player_id: PlayerId) {
+        self.native_presentation_bindings.remove(&player_id);
+    }
+
     pub fn players(&self) -> &PlayerGraph {
         &self.players
     }
@@ -3217,6 +3560,9 @@ impl RuntimeSession {
     }
 
     pub fn remove_player(&mut self, id: PlayerId) -> Option<DirPlayer> {
+        self.renderer_bindings.remove(&id);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.native_presentation_bindings.remove(&id);
         self.active_input_scopes.remove(&id);
         self.input_flag_cleanups
             .borrow_mut()
@@ -6319,6 +6665,34 @@ mod tests {
         assert_eq!(allocate_session_id_from(&near_max).unwrap(), u64::MAX);
         assert!(allocate_session_id_from(&near_max).is_err());
         assert!(allocate_session_id_from(&near_max).is_err());
+    }
+
+    #[test]
+    fn native_frame_pump_rejects_replaced_owner() {
+        let session = session_with_casts(&[]).into_handle();
+        let owner = session
+            .borrow_mut()
+            .with_player(1, |context| context.player.owner.clone())
+            .unwrap();
+        let mut pump = NativeFramePump::new(session.clone(), 1, owner.clone());
+        session.borrow_mut().reset_player_owned(1, &owner).unwrap();
+        let error = async_std::task::block_on(pump.advance_to(1))
+            .expect_err("replaced owner unexpectedly advanced");
+        assert!(error.message.contains("stale"));
+    }
+
+    #[test]
+    fn native_input_pump_rejects_replaced_owner() {
+        let session = session_with_casts(&[]).into_handle();
+        let owner = session
+            .borrow_mut()
+            .with_player(1, |context| context.player.owner.clone())
+            .unwrap();
+        let pump = NativeInputPump::new(session.clone(), 1, owner.clone());
+        session.borrow_mut().reset_player_owned(1, &owner).unwrap();
+        let error = async_std::task::block_on(pump.mouse_down(8, 8))
+            .expect_err("replaced owner unexpectedly accepted native input");
+        assert!(error.message.contains("stale"));
     }
 
     fn session_with_casts(modes: &[u16]) -> RuntimeSession {
