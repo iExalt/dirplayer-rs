@@ -1,0 +1,13 @@
+repository_path=/private/tmp/dirplayer-semantic-apply
+repository_identity=origin	/private/tmp/dirplayer-native-readiness-worktree-20260918 (fetch)
+base_head=1aae34c5455e60079143d1d78852baa80a33ec23
+branch=(detached)
+status:
+## HEAD (no branch)
+M  vm-rust/src/player/timeout.rs
+
+patch=docs/checkpoints/tmp-cleanup-20260919/recovery/dirty-semantic-apply.review.txt.gz
+patch_bytes=5866
+patch_sha256=7699b409f79d98bd88c4bd9918998d95f9d7a6e40e7cee2b58e4b83c7cfc8957
+changed_paths:
+M	vm-rust/src/player/timeout.rs

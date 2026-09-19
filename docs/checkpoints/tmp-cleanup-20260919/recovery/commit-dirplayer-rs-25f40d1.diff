@@ -1,0 +1,10 @@
+--- a/.gitmodules
++++ b/.gitmodules
+@@ -1,6 +1,6 @@
+ [submodule "ruffle"]
+ 	path = ruffle
+-	url = https://github.com/chameleonxxl/ruffle.git
++	url = https://github.com/iExalt/ruffle.git
+ 	branch = dirplayer-integration
+ [submodule "vm-rust/tests/snapshots/reference"]
+ 	path = vm-rust/tests/snapshots/reference

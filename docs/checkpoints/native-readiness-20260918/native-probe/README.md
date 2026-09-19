@@ -1,5 +1,7 @@
 # Native Director readiness probe receipt
 
+> Cleanup (2026-09-19): temporary paths and commands below are historical provenance; the temporary worktrees and build outputs have been removed. Retained archives now use repository paths. See [cleanup index](../../tmp-cleanup-20260919/INDEX.md).
+
 This receipt records the probe-only native route in worktree
 `/private/tmp/dirplayer-native-readiness-cumulative-20260918`, branch
 `codex/native-dirplayer-readiness`. The accepted combined baseline source is
@@ -186,7 +188,7 @@ Retained logs and hashes:
 | `/private/tmp/native-probe-step-source-fix.log` | `37e10451130d24f126ec368366619ae399c4f40d03e5c3565b8715dd2014f8d7` |
 | `/private/tmp/native-probe-missing-source-fix.log` | `d5828fad0c3ef43d217566ae403f70bd107ef99f4897e56623b747b9267cc6e2` |
 | `docs/checkpoints/native-readiness-20260918/native-probe/native-probe-stage.png` | `0a1253f93d101cde9faeda623b5a9e3ea8c0dca8f8b89b7717caefee9365309d` |
-| `/private/tmp/dirplayer-native-probe-evidence-corrected-20260918.tar.gz` | `f032da61eb102ebc501808d00a74ae9e2d1216315ffcdcce07446db538c6d5de` |
+| `docs/checkpoints/native-readiness-20260918/native-probe/artifacts/dirplayer-native-probe-evidence-corrected-20260918.tar.gz` | `f032da61eb102ebc501808d00a74ae9e2d1216315ffcdcce07446db538c6d5de` |
 
 The successful contrast PNG is retained as the tracked canonical
 `native-probe-stage.png` with the SHA-256 above. The source fixture is retained

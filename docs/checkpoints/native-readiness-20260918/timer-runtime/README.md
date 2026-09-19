@@ -1,5 +1,7 @@
 # Timer runtime stabilization receipt
 
+> Cleanup (2026-09-19): temporary paths and commands below are historical provenance; the temporary worktrees and build outputs have been removed. Retained archives now use repository paths. See [cleanup index](../../tmp-cleanup-20260919/INDEX.md).
+
 ## Frozen source
 
 - Accepted cumulative base: `2812295899c5cd8e255f000a0df25f3dc78f1682`
@@ -45,7 +47,7 @@ The first cleanup-era WASM library check correctly failed with four `E0425` erro
 - Generated WASM JavaScript: `63a4220adfdfd4d5c0bca9926e54acbe038679fda4e583258db12b65834ce741`
 - Generated DirPlayer browser API: `8b7eee1e39953abb12487cf7fb2b876b9e6f9069d34408fcec16d8c618929526`
 - Generated frontend manager bundle: `a78296eb40646854d8708148d9fea8c79ddfdb8d946cc88cdcafb8e6f32390ad`
-- Complete runtime log archive: `/private/tmp/dirplayer-native-readiness-timer-runtime-logs-20260918.tar.gz`, SHA-256 `1fa550cf51bcbee5de218887292b903305a32b2dd549d719b58e5d90ace8cd66`
+- Complete runtime log archive: `docs/checkpoints/native-readiness-20260918/timer-runtime/artifacts/dirplayer-native-readiness-timer-runtime-logs-20260918.tar.gz`, SHA-256 `1fa550cf51bcbee5de218887292b903305a32b2dd549d719b58e5d90ace8cd66`
 - Expanded logs: `/private/tmp/dirplayer-native-readiness-timer-runtime-logs-expanded-20260918`
 - Frozen browser runner: `/private/tmp/dirplayer-native-readiness-browser-runner-fff7dcc3`
 - Shared native/WASM target and build workspace: `/private/tmp/dirplayer-native-readiness-native-stage2-fff7dcc3`

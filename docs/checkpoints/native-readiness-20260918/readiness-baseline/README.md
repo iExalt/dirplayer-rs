@@ -1,5 +1,7 @@
 # Combined readiness baseline receipt
 
+> Cleanup (2026-09-19): temporary paths and commands below are historical provenance; the temporary worktrees and build outputs have been removed. Retained archives now use repository paths. See [cleanup index](../../tmp-cleanup-20260919/INDEX.md).
+
 ## Outcome
 
 This checkpoint is the production-build and regression baseline for the next
@@ -136,7 +138,7 @@ original dirty checkout.
 Expanded evidence is under
 `/private/tmp/dirplayer-native-readiness-baseline-20260918`. The validation
 archive is
-`/private/tmp/dirplayer-native-readiness-baseline-evidence-20260918.tar.gz`,
+`docs/checkpoints/native-readiness-20260918/readiness-baseline/artifacts/dirplayer-native-readiness-baseline-evidence-20260918.tar.gz`,
 SHA-256 `cadc800d2b1653f3b851a96cca62bf6fa7e4e67d278cb55e53ae76a80d397706`.
 
 ## Explicitly open checks
