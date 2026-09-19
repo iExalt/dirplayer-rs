@@ -39,7 +39,7 @@ use super::host_events::{
 use super::js_lingo_loader::JsRuntimeRegistry;
 use super::nested::{NestedChildRecord, NestedPlayerRegistry};
 use super::ownership::{OwnerKey, OwnerToken};
-use super::timeout::{NativeTime, MAX_EXACT_NATIVE_MS};
+use super::timeout::{NativeTime, MAX_EXACT_NATIVE_US};
 use super::symbols::{builtin::BuiltInSymbol, symbol::Symbol};
 use super::{datum_ref::DatumRef, script_ref::ScriptInstanceRef};
 use super::{DirPlayer, PlayerVMExecutionItem, ScriptError, ScriptErrorCode};
@@ -388,7 +388,7 @@ pub(crate) struct NativeFramePump {
     session: RuntimeSessionHandle,
     player_id: PlayerId,
     owner: OwnerToken,
-    last_now_ms: Option<u64>,
+    last_now_us: Option<u64>,
     next_frame_deadline: Option<NativeTime>,
 }
 
@@ -448,7 +448,7 @@ impl NativeFramePump {
         player_id: PlayerId,
         owner: OwnerToken,
     ) -> Self {
-        Self { session, player_id, owner, last_now_ms: None, next_frame_deadline: None }
+        Self { session, player_id, owner, last_now_us: None, next_frame_deadline: None }
     }
 
     fn validate_owner(&self) -> Result<(), ScriptError> {
@@ -467,22 +467,23 @@ impl NativeFramePump {
         }
     }
 
-    fn accept_timestamp(&mut self, now_ms: u64) -> Result<(NativeTime, f64), ScriptError> {
-        if now_ms > MAX_EXACT_NATIVE_MS {
+    fn accept_timestamp_us(&mut self, now_us: u64) -> Result<(NativeTime, f64), ScriptError> {
+        if now_us > MAX_EXACT_NATIVE_US {
             return Err(ScriptError::new(
                 "native simulation time exceeds exact supported range".to_owned(),
             ));
         }
-        if let Some(previous) = self.last_now_ms {
-            if now_ms <= previous {
+        if let Some(previous) = self.last_now_us {
+            if now_us <= previous {
                 return Err(ScriptError::new(format!(
-                    "native frame timestamp must increase: {now_ms} <= {previous}"
+                    "native frame timestamp must increase: {now_us} <= {previous}"
                 )));
             }
         }
-        self.last_now_ms = Some(now_ms);
-        let exact = NativeTime::from_ms(now_ms)?;
-        Ok((exact, exact.to_f64()?))
+        self.last_now_us = Some(now_us);
+        let exact = NativeTime::from_micros(now_us)?;
+        let frame_now_ms = exact.to_f64()?;
+        Ok((exact, frame_now_ms))
     }
 
     fn set_native_time(&self, now: NativeTime) -> Result<(), ScriptError> {
@@ -558,8 +559,15 @@ impl NativeFramePump {
     }
 
     pub(crate) async fn init_movie_at(&mut self, now_ms: u64) -> Result<(), ScriptError> {
+        let now_us = now_ms
+            .checked_mul(1_000)
+            .ok_or_else(|| ScriptError::new("native simulation time overflow".to_owned()))?;
+        self.init_movie_at_us(now_us).await
+    }
+
+    pub(crate) async fn init_movie_at_us(&mut self, now_us: u64) -> Result<(), ScriptError> {
         self.validate_owner()?;
-        let (exact_now, frame_now_ms) = self.accept_timestamp(now_ms)?;
+        let (exact_now, frame_now_ms) = self.accept_timestamp_us(now_us)?;
         self.set_native_time(exact_now)?;
         crate::player::run_movie_init_owned_at(
             self.session.clone(),
@@ -582,8 +590,18 @@ impl NativeFramePump {
         &mut self,
         now_ms: u64,
     ) -> Result<(bool, bool), ScriptError> {
+        let now_us = now_ms
+            .checked_mul(1_000)
+            .ok_or_else(|| ScriptError::new("native simulation time overflow".to_owned()))?;
+        self.advance_frame_to_us(now_us).await
+    }
+
+    pub(crate) async fn advance_frame_to_us(
+        &mut self,
+        now_us: u64,
+    ) -> Result<(bool, bool), ScriptError> {
         self.validate_owner()?;
-        let (exact_now, frame_now_ms) = self.accept_timestamp(now_ms)?;
+        let (exact_now, frame_now_ms) = self.accept_timestamp_us(now_us)?;
         self.set_native_time(exact_now)?;
         self.clear_frame_change()?;
         let result = crate::player::run_single_frame_owned_at(
@@ -605,24 +623,37 @@ impl NativeFramePump {
         &mut self,
         target_ms: u64,
     ) -> Result<NativeAdvanceReport, ScriptError> {
+        let target_us = target_ms
+            .checked_mul(1_000)
+            .ok_or_else(|| ScriptError::new("native simulation time overflow".to_owned()))?;
+        self.advance_to_us(target_us).await
+    }
+
+    pub(crate) async fn advance_to_us(
+        &mut self,
+        target_us: u64,
+    ) -> Result<NativeAdvanceReport, ScriptError> {
         self.validate_owner()?;
-        let target = NativeTime::from_ms(target_ms)?;
-        let Some(previous_ms) = self.last_now_ms else {
-            return Err(ScriptError::new("native frame pump is not initialized".to_owned()));
+        let target = NativeTime::from_micros(target_us)?;
+        let Some(previous_us) = self.last_now_us else {
+            return Err(ScriptError::new(
+                "native frame pump is not initialized".to_owned(),
+            ));
         };
-        if target_ms < previous_ms {
+        let previous = NativeTime::from_micros(previous_us)?;
+        if target.cmp(previous)? == std::cmp::Ordering::Less {
             return Err(ScriptError::new(format!(
-                "native simulation time reversed: {target_ms} < {previous_ms}"
+                "native simulation time reversed: {target_us} < {}",
+                previous_us
             )));
         }
-        if target_ms == previous_ms {
+        if target.cmp(previous)? == std::cmp::Ordering::Equal {
             self.set_native_time(target)?;
             return Ok(NativeAdvanceReport::default());
         }
         if self.next_frame_deadline.is_none() {
             let (_, paused, tempo, _) = self.playback_state()?;
             if !paused {
-                let previous = NativeTime::from_ms(previous_ms)?;
                 self.next_frame_deadline = Some(Self::frame_deadline_after(previous, tempo)?);
             }
         }
@@ -684,7 +715,7 @@ impl NativeFramePump {
             }
         }
         self.set_native_time(target)?;
-        self.last_now_ms = Some(target_ms);
+        self.last_now_us = Some(target_us);
         Ok(report)
     }
 }

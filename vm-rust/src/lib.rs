@@ -2,6 +2,8 @@
 pub mod cursor;
 pub mod io;
 pub mod js_api;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod native_parity_worker;
 pub mod player;
 pub mod rendering;
 pub mod rendering_gpu;

@@ -2168,6 +2168,7 @@ dependencies = [
  "rgb565",
  "serde",
  "serde_json",
+ "sha2",
  "toml",
  "url",
  "wasm-bindgen",

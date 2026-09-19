@@ -11,36 +11,77 @@ and Stages 3–6 remain open. See the [publication checkpoint](checkpoints/nativ
 for the archived review inputs and the [live integration receipt](checkpoints/stage2-checkpoint-integration-20260917/README.md)
 for current source identity and verification.
 
-## Current native readiness handoff — 2026-09-18
+## Current native readiness handoff — 2026-09-19
 
-The isolated branch `codex/native-dirplayer-readiness` at
-`/private/tmp/dirplayer-native-readiness-cumulative-20260918` is the source of
-the bounded single-session readiness receipts. The combined source is `7cd3cc78`
-with evidence `731b0d0a`; timer stabilization is `fff7dcc3` with evidence
-`a4aa876d`; the final native probe source is `1a99d618` with evidence `3675f526`.
-The initial probe commits `42c21c82` and `7ec67bcc` are superseded history.
+N1 is accepted on direct `dev` at `0a1764173bd580bf72c2a6192b371f2c7cc990d0`.
+That acceptance covers the owned native presentation policy, deterministic
+caller-driven frame pump, input seam, and canonical RGBA lifecycle fixture; it
+does not claim audio, Flash, Bevy, browser retirement, or multi-session
+qualification.
 
-The combined baseline records native 636/0, browser 22/0, production WASM and
-frontend builds, plus same-source timer receipts of manager 18 and lifecycle 38.
-The final probe executes `prepareMovie`, `startMovie`, `enterFrame`, and
-`exitFrame`, and captures a 32x32 snapshot with a white corner, black center,
-and 576 opaque black pixels. The earlier all-white probe is not current evidence;
-its visible-pixel predicate counted the stage background.
+N2 is accepted from the tested direct `dev` working-tree bytes pinned by the
+checkpoint source manifest as a standalone JSON-lines v1 worker integrated
+through the childhood-redux `ProcessWorker` parent.
+The checked-in `native_director_probe.dcr` is the only behaviorally qualified
+fixture. The interface accepts other caller-supplied, hash-checked local single
+DCR inputs subject to its guards, but those inputs are not N2 fidelity evidence.
+The qualified scenario uses `loading_policy: "single-dcr"`, `epoch_us: 0`,
+caller-driven simulation, no ambient wall clock, and parent-provided writable
+`PARITY_SESSION_ROOT`/`TMPDIR`; timezone and date effects are unsupported or
+unqualified.
+Supported operations are discovery, load/init, exact microsecond advancement,
+runtime `current_frame`/`simulation_time_us`, validated root-global reads through
+`globals.<identifier>`, stage pointer plus left-button-down input, and exact RGBA
+capture. Missing globals are JSON `null`; malformed paths and unsupported datum
+types are structured errors. Supported symbols retain the parity shape
+`{"type":"symbol","value":"..."}` recursively through lists/property lists.
+Integer, finite float, string, void, finite point/rect, list, and property-list
+values retain their JSON forms; runtime references, Null, media, non-finite
+values, and other unrepresentable datum types are rejected as Unsupported.
+Global identifiers are ASCII and bounded to 128 bytes; inspection resolves
+existing symbols case-insensitively without interning. Global traversal is
+bounded to depth 32 and 4,096 datum nodes, with active-path cycles rejected as
+structured Unsupported results.
+PCM, JavaScript Lingo, Flash, external casts, reset, mutation, invocation, and
+unqualified input/targets remain explicit structured Unsupported results.
 
-The probe does not complete a post-init frame step: the native route reaches the
-missing renderer binding. Native timer host dispatch remains
-`TimeoutHostDispatch::Unsupported`. The 47 licensed/public paths are absent,
-and the wasm all-tests exploration remains unresolved with 14 test-only `E0599`
-errors. No audio, Flash, Bevy, native Ruffle, Spybot, or native product claim is
-made. Stage 2 ownership and Stage 3 independent-session/lifecycle/static proof
-remain final acceptance gates.
+The standalone N2 worker does not duplicate the parent supervisor or storage-root
+integration; childhood-redux owns that process supervision and storage isolation.
+The N2 worker does not add a childhood-redux runtime dependency,
+JS/Flash support, or timezone/date emulation. Multi-process process-isolated
+behavior is accepted through the parent integration; in-process multi-session
+ownership, game acceptance and later roadmap gates remain open. Focused worker
+compatibility evidence is retained under
+`.cache/native-bevy/native-n2-20260919/evidence`; game integration and the
+remaining roadmap gates stay open.
 
-The first bounded implementation item is an owned native presentation
-service/policy and caller-driven monotonic frame/timeout pump around the existing
-`RuntimeSession`/player/owner command loop and `load_movie`/`init_movie`/
-`step_frame` entry points. Replay bounded step/per-frame state first; add input
-and RGBA capture afterward. This may start from the isolated branch while final
-Stage 3 remains incomplete, but it does not waive any Stage 2/3 gate.
+The worker reuses `TestPlayer` and its existing `TEST_LOCK` only as the temporary
+single-process adapter used to qualify the N1 native seam. This item does not
+introduce a production ownership model or refactor that harness; the global
+inspection bridge reads its owned context without evaluating arbitrary Lingo or
+interning symbols during inspection.
+
+## Accepted N2 checkpoint — 2026-09-19
+
+The process-isolated native test worker is accepted for the checked-in synthetic
+Director reference. The compact receipt, per-file identities, command results,
+campaign observations, retained failed raw-input-shape attempt, and executable
+overwrite/restoration caveat are in
+[`checkpoints/native-n2-20260919/README.md`](checkpoints/native-n2-20260919/README.md),
+[`receipt.json`](checkpoints/native-n2-20260919/receipt.json), and
+[`campaign.json`](checkpoints/native-n2-20260919/campaign.json).
+
+- [x] JSON-lines v1 capabilities, state, input, timing, RGBA capture and explicit unsupported responses.
+- [x] Childhood parity caller and synthetic reference integration.
+- [x] Five fresh serial and four concurrent worker processes with matching state/RGBA.
+- [x] Parent-owned watchdog, cancellation, cleanup, independent storage, and victim/survivor checks.
+- [x] Wire malformed-input, request-ID, stderr separation, EOF and cleanup cases.
+
+N2 excludes PCM, Flash, JavaScript Lingo, external casts, reset, mutation,
+invocation, timezone/date qualification, multi-session ownership, game
+acceptance, browser retirement and N3 implementation. N3–N5 remain future work;
+their existing provisional Astra estimates total 40–122 active elapsed hours,
+remain unmeasured, and are not authorized by this receipt.
 
 ## Current Stage 1 checkpoint
 
@@ -748,7 +789,7 @@ Evidence and source hashes are in
 - [x] Validate 61 records and POSIX transport checks, including bounded writes/reads,
   line limits, UTF-8, malformed values, stderr drainage, and child-group cleanup.
 - [x] Add `mise run test:protocol-fixtures`; the integrated task passes.
-- [ ] Implement the production native worker and verify its real responses.
+- [x] Implement the accepted synthetic native worker and verify its real responses.
 
 The cleanup regression uses an exited parent and a descendant that ignores
 SIGTERM; bounded pipe EOF verifies termination after escalation. These are

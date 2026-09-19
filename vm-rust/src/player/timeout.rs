@@ -24,6 +24,7 @@ pub(crate) struct NativeTime {
 }
 
 pub(crate) const MAX_EXACT_NATIVE_MS: u64 = (1u64 << 53) - 1;
+pub(crate) const MAX_EXACT_NATIVE_US: u64 = MAX_EXACT_NATIVE_MS.saturating_mul(1_000);
 
 impl NativeTime {
     pub(crate) fn from_ms(milliseconds: u64) -> Result<Self, ScriptError> {
@@ -33,6 +34,15 @@ impl NativeTime {
             ));
         }
         Ok(Self { numerator: milliseconds as u128, denominator: 1 })
+    }
+
+    pub(crate) fn from_micros(microseconds: u64) -> Result<Self, ScriptError> {
+        if microseconds > MAX_EXACT_NATIVE_US {
+            return Err(ScriptError::new(
+                "native simulation time exceeds exact supported range".to_owned(),
+            ));
+        }
+        Ok(Self { numerator: microseconds as u128, denominator: 1_000 })
     }
 
     pub(crate) fn zero() -> Self {
@@ -429,6 +439,19 @@ mod tests {
         manager.replace_timeout_at(timeout("second", 100), zero).unwrap();
         let due = manager.due_native_timeouts(NativeTime::from_ms(100).unwrap()).unwrap();
         assert_eq!(due.iter().map(|timeout| timeout.name.as_str()).collect::<Vec<_>>(), ["first", "second"]);
+    }
+
+    #[test]
+    fn native_microsecond_boundary_preserves_rational_frame_deadline() {
+        let first_frame = NativeTime::zero().add_fraction(1000, 30).unwrap();
+        assert_eq!(
+            first_frame.cmp(NativeTime::from_micros(33_333).unwrap()).unwrap(),
+            Ordering::Greater
+        );
+        assert_eq!(
+            first_frame.cmp(NativeTime::from_micros(33_334).unwrap()).unwrap(),
+            Ordering::Less
+        );
     }
 
     #[test]

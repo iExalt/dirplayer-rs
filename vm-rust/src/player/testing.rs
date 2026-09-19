@@ -1,8 +1,10 @@
 use std::{path::{Path, PathBuf}, rc::Rc, time::Duration};
+use std::collections::HashSet;
 use std::sync::Mutex;
 
 use async_std::channel;
 use manual_future::ManualFuture;
+use rand::SeedableRng;
 
 use crate::director::file::read_director_file_bytes;
 pub use crate::director::static_datum::StaticDatum;
@@ -28,13 +30,60 @@ pub struct TestPlayer {
     native_input_pump: NativeInputPump,
 }
 
+#[derive(Debug)]
+pub(crate) enum NativeMovieLoadError {
+    Unsupported(String),
+    Runtime(crate::player::ScriptError),
+}
+
+/// Values exposed by the narrow native parity inspection bridge. This stays
+/// separate from `StaticDatum`, whose legacy conversion intentionally maps
+/// unsupported runtime values to Void for older tests.
+#[derive(Debug, PartialEq)]
+pub(crate) enum NativeGlobalValue {
+    Int(i32),
+    Float(f64),
+    String(String),
+    Symbol(String),
+    Void,
+    List(Vec<NativeGlobalValue>),
+    PropList(Vec<(NativeGlobalValue, NativeGlobalValue)>),
+    Point([f64; 2]),
+    Rect([f64; 4]),
+}
+
+#[derive(Debug)]
+pub(crate) enum NativeGlobalReadError {
+    Unsupported {
+        datum_type: &'static str,
+        reason: Option<&'static str>,
+    },
+    Runtime(crate::player::ScriptError),
+}
+
+const MAX_NATIVE_GLOBAL_DEPTH: usize = 32;
+const MAX_NATIVE_GLOBAL_NODES: usize = 4096;
+
+impl From<crate::player::ScriptError> for NativeMovieLoadError {
+    fn from(error: crate::player::ScriptError) -> Self {
+        Self::Runtime(error)
+    }
+}
+
 impl TestPlayer {
     pub fn new() -> Self {
-        let lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        Self::try_new().expect("native test player construction failed")
+    }
+
+    pub(crate) fn try_new() -> Result<Self, crate::player::ScriptError> {
+        let lock = match TEST_LOCK.lock() {
+            Ok(lock) => lock,
+            Err(poisoned) => poisoned.into_inner(),
+        };
 
         let (tx, rx) = channel::unbounded();
 
-        let runtime = HarnessRuntime::new(tx.clone());
+        let runtime = HarnessRuntime::try_new(tx.clone())?;
         let native_presentation = Rc::new(crate::rendering::NativePresentationPolicy::new());
         runtime
             .session()
@@ -56,14 +105,14 @@ impl TestPlayer {
         crate::player::spawn_player_local(async move {
             run_command_loop(rx, command_session, command_player_id, command_owner).await;
         });
-        TestPlayer {
+        Ok(TestPlayer {
             _tx: tx,
             _lock: lock,
             runtime,
             native_presentation,
             native_frame_pump,
             native_input_pump,
-        }
+        })
     }
 
     /// Initialize this native player at an explicit caller-owned simulation time.
@@ -72,6 +121,13 @@ impl TestPlayer {
             .init_movie_at(now_ms)
             .await
             .unwrap_or_else(|error| panic!("native movie initialization failed: {}", error));
+    }
+
+    pub(crate) async fn try_init_movie_at_us(
+        &mut self,
+        now_us: u64,
+    ) -> Result<(), crate::player::ScriptError> {
+        self.native_frame_pump.init_movie_at_us(now_us).await
     }
 
     /// Advance this native player to an explicit, strictly later simulation time.
@@ -89,6 +145,13 @@ impl TestPlayer {
             .advance_to(now_ms)
             .await
             .unwrap_or_else(|error| panic!("native logical advancement failed: {}", error))
+    }
+
+    pub(crate) async fn try_advance_to_us(
+        &mut self,
+        now_us: u64,
+    ) -> Result<crate::player::session::NativeAdvanceReport, crate::player::ScriptError> {
+        self.native_frame_pump.advance_to_us(now_us).await
     }
 
     /// Fallible native logical advancement for boundary and owner tests.
@@ -115,6 +178,310 @@ impl TestPlayer {
             .unwrap_or_else(|error| panic!("native mouseDown failed: {}", error.message));
     }
 
+    pub(crate) async fn try_native_mouse_down(
+        &self,
+        x: i32,
+        y: i32,
+    ) -> Result<(), crate::player::ScriptError> {
+        self.native_input_pump.mouse_down(x, y).await
+    }
+
+    pub(crate) fn set_deterministic_seed(
+        &self,
+        seed: u32,
+    ) -> Result<(), crate::player::ScriptError> {
+        self.runtime
+            .with_context(|context| {
+                context.player.rng = rand::rngs::SmallRng::seed_from_u64(u64::from(seed));
+                context.player.movie.random_seed = Some(seed as i32);
+            })
+            .ok_or_else(|| {
+                crate::player::ScriptError::new("harness player was replaced".to_owned())
+            })
+    }
+
+    pub(crate) async fn load_movie_quiet(
+        &mut self,
+        path: &str,
+        data_bytes: Vec<u8>,
+    ) -> Result<(), NativeMovieLoadError> {
+        let movie_path = Path::new(path);
+        let file_name = movie_path
+            .file_name()
+            .ok_or_else(|| {
+                NativeMovieLoadError::Runtime(crate::player::ScriptError::new(
+                    "movie path has no file name".to_owned(),
+                ))
+            })?
+            .to_string_lossy()
+            .to_string();
+        let dir = movie_path.parent().ok_or_else(|| {
+            NativeMovieLoadError::Runtime(crate::player::ScriptError::new(
+                "movie path has no parent".to_owned(),
+            ))
+        })?;
+        let base_url = url::Url::from_directory_path(dir)
+            .map_err(|_| {
+                NativeMovieLoadError::Runtime(crate::player::ScriptError::new(
+                    "movie parent is not a file URL path".to_owned(),
+                ))
+            })?
+            .to_string();
+        let dir_file = read_director_file_bytes(&data_bytes, &file_name, &base_url).map_err(
+            |error| NativeMovieLoadError::Runtime(crate::player::ScriptError::new(error)),
+        )?;
+        let external_casts: Vec<_> = dir_file
+            .cast_entries
+            .iter()
+            .filter(|entry| !entry.file_path.is_empty())
+            .map(|entry| entry.file_path.clone())
+            .collect();
+        let embedded_flash = dir_file
+            .casts
+            .iter()
+            .flat_map(|cast| cast.members.values())
+            .filter(|member| {
+                matches!(
+                    member.chunk.specific_data,
+                    crate::director::chunks::cast_member::CastMemberSpecificData::Flash(_)
+                )
+            })
+            .count();
+        let javascript_scripts = dir_file
+            .casts
+            .iter()
+            .flat_map(|cast| cast.lctx.iter())
+            .flat_map(|context| context.scripts.values())
+            .filter(|script| {
+                script.literals.iter().any(|literal| {
+                    matches!(literal, crate::director::lingo::datum::Datum::JavaScript(_))
+                })
+            })
+            .count();
+        validate_native_movie_features(&external_casts, embedded_flash, javascript_scripts)?;
+        self.runtime
+            .with_context(|context| {
+                context.player.is_playing = true;
+                context.player.is_script_paused = false;
+            })
+            .ok_or_else(|| {
+                NativeMovieLoadError::Runtime(crate::player::ScriptError::new(
+                    "harness player was replaced".to_owned(),
+                ))
+            })?;
+        crate::player::load_movie_from_dir_owned(
+            self.runtime.session(),
+            self.runtime.player_id(),
+            self.runtime.owner().clone(),
+            dir_file,
+        )
+        .await
+        .map_err(NativeMovieLoadError::Runtime)
+    }
+
+    pub(crate) async fn eval_datum_quiet(
+        &self,
+        command: &str,
+    ) -> Result<StaticDatum, crate::player::ScriptError> {
+        TestHarness::eval_datum(self, command).await
+    }
+
+    pub(crate) fn current_frame_quiet(&self) -> u32 {
+        TestHarness::current_frame(self)
+    }
+
+    pub(crate) fn native_global_value_quiet(
+        &self,
+        name: &str,
+    ) -> Result<Option<NativeGlobalValue>, NativeGlobalReadError> {
+        self.runtime
+            .with_context(|context| {
+                let lower_name = name.to_ascii_lowercase();
+                let Some(value_ref) = context
+                    .player
+                    .globals
+                    .iter()
+                    .find(|(symbol, _)| {
+                        context.symbols.lower(symbol).is_ok_and(|name| name == lower_name)
+                    })
+                    .map(|(_, value)| value)
+                else {
+                    return Ok(None);
+                };
+                let mut active = HashSet::new();
+                let mut nodes = 0;
+                strict_native_global_value(
+                    context.player,
+                    context.symbols,
+                    value_ref,
+                    0,
+                    &mut nodes,
+                    &mut active,
+                )
+                .map(Some)
+            })
+            .ok_or_else(|| {
+                NativeGlobalReadError::Runtime(crate::player::ScriptError::new(
+                    "harness player was replaced".to_owned(),
+                ))
+            })?
+    }
+
+    pub(crate) fn effective_tempo_quiet(&self) -> Result<u32, crate::player::ScriptError> {
+        self.runtime
+            .with_context(|context| context.player.movie.get_effective_tempo())
+            .ok_or_else(|| {
+                crate::player::ScriptError::new("harness player was replaced".to_owned())
+            })
+    }
+
+    pub(crate) fn snapshot_rgba_quiet(&self) -> Result<StageSnapshot, crate::player::ScriptError> {
+        let bitmap = crate::rendering::snapshot_native_fresh_for_owner(
+            &self.runtime.session(),
+            self.runtime.player_id(),
+            self.runtime.owner(),
+        )?;
+        Ok(StageSnapshot {
+            width: bitmap.width as u32,
+            height: bitmap.height as u32,
+            data: bitmap.data,
+        })
+    }
+
+}
+
+fn strict_native_global_value(
+    player: &crate::player::DirPlayer,
+    symbols: &crate::player::symbols::symbol_table::SymbolTable,
+    value_ref: &crate::player::DatumRef,
+    depth: usize,
+    nodes: &mut usize,
+    active: &mut HashSet<usize>,
+) -> Result<NativeGlobalValue, NativeGlobalReadError> {
+    if depth > MAX_NATIVE_GLOBAL_DEPTH {
+        return Err(NativeGlobalReadError::Unsupported {
+            datum_type: "container",
+            reason: Some("depth_limit"),
+        });
+    }
+    if matches!(value_ref, crate::player::DatumRef::Void) {
+        return Ok(NativeGlobalValue::Void);
+    }
+    *nodes += 1;
+    if *nodes > MAX_NATIVE_GLOBAL_NODES {
+        return Err(NativeGlobalReadError::Unsupported {
+            datum_type: "container",
+            reason: Some("node_limit"),
+        });
+    }
+    let id = value_ref.unwrap();
+    if !active.insert(id) {
+        return Err(NativeGlobalReadError::Unsupported {
+            datum_type: "container",
+            reason: Some("cycle"),
+        });
+    }
+    let datum = player
+        .allocator
+        .try_get_datum(value_ref)
+        .ok_or_else(|| {
+            NativeGlobalReadError::Runtime(crate::player::ScriptError::new(
+                "global contains a foreign or stale datum reference".to_owned(),
+            ))
+        })?;
+    let result = match datum {
+        crate::director::lingo::datum::Datum::Int(value) => Ok(NativeGlobalValue::Int(*value)),
+        crate::director::lingo::datum::Datum::Float(value) if value.is_finite() => {
+            Ok(NativeGlobalValue::Float(*value))
+        }
+        crate::director::lingo::datum::Datum::Float(_) => Err(
+            NativeGlobalReadError::Unsupported {
+                datum_type: "float",
+                reason: Some("non_finite"),
+            },
+        ),
+        crate::director::lingo::datum::Datum::String(value) => {
+            Ok(NativeGlobalValue::String(value.clone()))
+        }
+        crate::director::lingo::datum::Datum::Symbol(value) => symbols
+            .display(value)
+            .map(|display| NativeGlobalValue::Symbol(display.to_owned()))
+            .map_err(|_| {
+                NativeGlobalReadError::Runtime(crate::player::ScriptError::new(
+                    "global contains a foreign symbol".to_owned(),
+                ))
+            }),
+        crate::director::lingo::datum::Datum::Void => Ok(NativeGlobalValue::Void),
+        crate::director::lingo::datum::Datum::List(_, values, _) => values
+            .iter()
+            .map(|value| {
+                strict_native_global_value(player, symbols, value, depth + 1, nodes, active)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(NativeGlobalValue::List),
+        crate::director::lingo::datum::Datum::PropList(values, _) => values
+            .iter()
+            .map(|(key, value)| {
+                Ok((
+                    strict_native_global_value(player, symbols, key, depth + 1, nodes, active)?,
+                    strict_native_global_value(player, symbols, value, depth + 1, nodes, active)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, NativeGlobalReadError>>()
+            .map(NativeGlobalValue::PropList),
+        crate::director::lingo::datum::Datum::Point(values, _)
+            if values.iter().all(|value| value.is_finite()) =>
+        {
+            Ok(NativeGlobalValue::Point(*values))
+        }
+        crate::director::lingo::datum::Datum::Point(_, _) => {
+            Err(NativeGlobalReadError::Unsupported {
+                datum_type: "point",
+                reason: Some("non_finite"),
+            })
+        }
+        crate::director::lingo::datum::Datum::Rect(values, _)
+            if values.iter().all(|value| value.is_finite()) =>
+        {
+            Ok(NativeGlobalValue::Rect(*values))
+        }
+        crate::director::lingo::datum::Datum::Rect(_, _) => {
+            Err(NativeGlobalReadError::Unsupported {
+                datum_type: "rect",
+                reason: Some("non_finite"),
+            })
+        }
+        _ => Err(NativeGlobalReadError::Unsupported {
+            datum_type: datum.type_str(),
+            reason: None,
+        }),
+    };
+    active.remove(&id);
+    result
+}
+
+fn validate_native_movie_features(
+    external_casts: &[String],
+    embedded_flash: usize,
+    javascript_scripts: usize,
+) -> Result<(), NativeMovieLoadError> {
+    if !external_casts.is_empty() {
+        return Err(NativeMovieLoadError::Unsupported(format!(
+            "native single-dcr worker does not support external casts: {}",
+            external_casts.join(", ")
+        )));
+    }
+    if embedded_flash != 0 {
+        return Err(NativeMovieLoadError::Unsupported(format!(
+            "native Director worker does not support {embedded_flash} embedded Flash member(s)"
+        )));
+    }
+    if javascript_scripts != 0 {
+        return Err(NativeMovieLoadError::Unsupported(format!(
+            "native Director worker does not support {javascript_scripts} JavaScript Lingo script(s)"
+        )));
+    }
+    Ok(())
 }
 
 impl TestHarness for TestPlayer {
@@ -411,6 +778,77 @@ impl StageSnapshot {
             return Ok(Some(ratio));
         }
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod native_movie_validation_tests {
+    use super::{validate_native_movie_features, NativeMovieLoadError};
+
+    #[test]
+    fn rejects_external_casts_with_paths() {
+        let error = validate_native_movie_features(&["shared.cst".to_owned()], 0, 0).unwrap_err();
+        let NativeMovieLoadError::Unsupported(message) = error else {
+            panic!("external cast was not classified as unsupported");
+        };
+        assert!(message.contains("shared.cst"));
+    }
+
+    #[test]
+    fn rejects_embedded_flash() {
+        let error = validate_native_movie_features(&[], 1, 0).unwrap_err();
+        assert!(matches!(error, NativeMovieLoadError::Unsupported(message) if message.contains("Flash")));
+    }
+
+    #[test]
+    fn rejects_javascript_lingo_scripts() {
+        let error = validate_native_movie_features(&[], 0, 1).unwrap_err();
+        assert!(matches!(error, NativeMovieLoadError::Unsupported(message) if message.contains("JavaScript")));
+    }
+}
+
+#[cfg(test)]
+mod native_global_validation_tests {
+    use std::collections::{HashSet, VecDeque};
+
+    use super::{NativeGlobalReadError, TestPlayer, strict_native_global_value};
+    use crate::director::lingo::datum::{Datum, DatumType};
+    use crate::player::DatumRef;
+
+    #[test]
+    fn rejects_recursive_global_graphs_without_unbounded_walk() {
+        let player = TestPlayer::new();
+        let result = player
+            .runtime
+            .with_context(|context| {
+                let list = context.player.alloc_datum(Datum::List(
+                    DatumType::List,
+                    VecDeque::from([DatumRef::Void]),
+                    false,
+                ));
+                if let Datum::List(_, values, _) = context.player.get_datum_mut(&list) {
+                    values[0] = list.clone();
+                }
+                let mut active = HashSet::new();
+                let mut nodes = 0;
+                strict_native_global_value(
+                    context.player,
+                    context.symbols,
+                    &list,
+                    0,
+                    &mut nodes,
+                    &mut active,
+                )
+            })
+            .expect("test player must remain live")
+            .unwrap_err();
+        assert!(matches!(
+            result,
+            NativeGlobalReadError::Unsupported {
+                datum_type: "container",
+                reason: Some("cycle")
+            }
+        ));
     }
 }
 

@@ -1,0 +1,68 @@
+{
+  "schema": "native-dirplayer-n2-receipt-v1",
+  "date": "2026-09-19",
+  "bases": {
+    "worker": "0a1764173bd580bf72c2a6192b371f2c7cc990d0",
+    "caller": "3d221ba1e30399374652406642991d964312b813"
+  },
+  "identity": {
+    "algorithm": "sha256(concat(path bytes, NUL, file bytes, NUL) in listed order)",
+    "worker_source_digest": "f39ff8b081741972fc4580e2402d6ae48fc46785cb6765faceffc02fa9914aac",
+    "worker_source_files": {
+      "vm-rust/Cargo.lock": "5904aa7aea858d7fcfe35c9cdafa1dd304a9a6d78d148c7c952c8ebc37b353b0",
+      "vm-rust/Cargo.toml": "c995fd076dff490fcb3ba6af8ad049ffaba23bfc9eafd10d0f4f4c114671cc03",
+      "vm-rust/src/lib.rs": "ee7b53d4dcf83ea6330108504e77d3ca2680d2edc0296d625a5ef4a9035c67bb",
+      "vm-rust/src/player/session.rs": "f8900435de7b19e581368c6d7cc25ce8bcf69381459dd2f2286809c25b7c6763",
+      "vm-rust/src/player/testing.rs": "6491b3e851cc3e988a456270d058c11dd1b843f065b7051ca92307282578d6b9",
+      "vm-rust/src/player/testing_shared/mod.rs": "8b56c76ea53b601c44f018d89a42d18bb4df327e0e2b9a84d0a1ca2be03835e6",
+      "vm-rust/src/player/timeout.rs": "98cd1eef86b211d8ede5ba5e15c16089320ff32d2987840fe5d94fe2c762ec3a",
+      "vm-rust/src/native_parity_worker.rs": "dacf82c772491cdd85ebde012bd52b0d7daa3c73ac10b9949767f3b8fe40b221",
+      "vm-rust/src/native_dirplayer_parity_worker_main.rs": "dded20747fe9232c48e830ae46ad40ac8ea6b09c3b649ac683f16950d62d3522",
+      "vm-rust/tests/native_parity_worker_wire.rs": "b89faa43258fd970e72540e59a9be74021c61123850d7cf75301e357d588d834"
+    },
+    "caller_source_digest": "c43120cbd4ddb42b5dc2d7e358a6f448ba2a6bfd31256653efd8f092ef9f785a",
+    "caller_source_files": {
+      "workspace/parity/README.md": "16036e43a7f896b39220640655dc7a9a5f59527f56fefe71c57eb6c0887a864e",
+      "workspace/parity/examples/native_dirplayer_n2.rs": "c5cbeaca79d7c727b16d6f806fc36fb20cade8070c29087a5e8a0b3c3374404a",
+      "workspace/parity/examples/native_dirplayer_n2_campaign.rs": "5162c2e1b8e6294edbfe509e24c5e5c61976b81c73bfab485074bbbce19e413e",
+      "workspace/parity/src/lib.rs": "e2a13a376b0b00775560b49ea5f9564923f7a44f45ee557dad71d75fa3ab4277",
+      "workspace/parity/src/native_dirplayer.rs": "fcefec920338e9e34396393a35e0d71780fc7061846a2efa2d906d5c84eaa85c",
+      "workspace/parity/src/process.rs": "c866cae673144c70fda1c2cd2bcc34e478ff4c7094454f700cc89de0c9dc7bcf"
+    },
+    "executable": {
+      "path": ".cache/native-bevy/native-n1-20260918/target/debug/native_dirplayer_parity_worker",
+      "sha256": "eee624fc19d4a9a67a20f1de6e48d4d470c109c3095d2539f0d0e313ae7d1bb6",
+      "intermediate_overwrite_sha256": "a5302cd481e0c135812bd1c6e0650d8a2ccce02aea0fd41f55e6ce2ca91076ff",
+      "restoration_verified": true,
+      "restoration_detail": "cargo test overwrote the shared debug executable with a5302c; the final locked offline build restored eee624; campaign path matched eee624"
+    },
+    "fixture": {
+      "path": "vm-rust/tests/fixtures/native_director_probe.dcr",
+      "sha256": "88b08a92b01e66dddd18b75be665dfaf0bb3b1de6967987d42a8fd082b1b516d"
+    }
+  },
+  "toolchain": {"mise": "2026.4.6 macos-arm64 (1980-01-01)", "rustc": "rustc 1.98.1 (48a229cea 2026-09-01), LLVM 22.1.8, aarch64-apple-darwin", "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)", "platform": "Darwin 25.6.0 arm64"},
+  "commands": [
+    {"command": "TMPDIR=/Users/clliaw/Projects/childhood-redux/.cache/parity/native-dirplayer-n2-20260919/tmp CARGO_TARGET_DIR=/Users/clliaw/Projects/dirplayer-rs/.cache/native-bevy/native-n1-20260918/target env -u NATIVE_LIFECYCLE_EVIDENCE_DIR mise exec -- cargo build --manifest-path vm-rust/Cargo.toml --bin native_dirplayer_parity_worker --locked --offline", "result": "passed; restored the qualified executable hash"},
+    {"command": "TMPDIR=/Users/clliaw/Projects/childhood-redux/.cache/parity/native-dirplayer-n2-20260919/tmp CARGO_TARGET_DIR=/Users/clliaw/Projects/dirplayer-rs/.cache/native-bevy/native-n1-20260918/target env -u NATIVE_LIFECYCLE_EVIDENCE_DIR mise exec -- cargo test --manifest-path vm-rust/Cargo.toml --lib --locked --offline", "result": "650 passed"},
+    {"command": "TMPDIR=/Users/clliaw/Projects/childhood-redux/.cache/parity/native-dirplayer-n2-20260919/tmp CARGO_TARGET_DIR=/Users/clliaw/Projects/dirplayer-rs/.cache/native-bevy/native-n1-20260918/target env -u NATIVE_LIFECYCLE_EVIDENCE_DIR mise exec -- cargo test --manifest-path vm-rust/Cargo.toml --test mod --locked --offline e2e::dirplayer_test_movies::native_probe -- --nocapture", "result": "4 passed"},
+    {"command": "TMPDIR=/Users/clliaw/Projects/childhood-redux/.cache/parity/native-dirplayer-n2-20260919/tmp CARGO_TARGET_DIR=/Users/clliaw/Projects/dirplayer-rs/.cache/native-bevy/native-n1-20260918/target env -u NATIVE_LIFECYCLE_EVIDENCE_DIR mise exec -- cargo test --manifest-path vm-rust/Cargo.toml --test native_parity_worker_wire --locked --offline -- --nocapture", "result": "1 passed"},
+    {"command": "PARITY_DIRPLAYER_RS_ROOT=/Users/clliaw/Projects/dirplayer-rs PARITY_NATIVE_DIRPLAYER_WORKER=/Users/clliaw/Projects/dirplayer-rs/.cache/native-bevy/native-n1-20260918/target/debug/native_dirplayer_parity_worker PARITY_SESSION_ROOT=/Users/clliaw/Projects/childhood-redux/.cache/parity/native-dirplayer-n2-20260919/campaign-parent TMPDIR=/Users/clliaw/Projects/childhood-redux/.cache/parity/native-dirplayer-n2-20260919/tmp mise exec -- cargo run -p parity --example native_dirplayer_n2_campaign", "result": "passed: 5 serial, 4 concurrent"},
+    {"command": "TMPDIR=/Users/clliaw/Projects/childhood-redux/.cache/parity/native-dirplayer-n2-20260919/tmp mise exec -- cargo test -p parity --no-fail-fast", "result": "30 passed"},
+    {"command": "TMPDIR=/Users/clliaw/Projects/childhood-redux/.cache/parity/native-dirplayer-n2-20260919/tmp mise exec -- cargo fmt --package parity -- --check", "result": "passed"},
+    {"command": "git diff --check", "result": "passed"}
+  ],
+  "counts": {"worker_sessions": 9, "serial": 5, "concurrent": 4, "parity_tests": 30, "dirplayer_library_tests": 650, "native_probe_tests": 4, "wire_tests": 1},
+  "attempts": {
+    "raw_input_shape": {"result": "failed after the nine-session phase: flattened VirtualInput fields; tagged value payload required", "retained_path": "/Users/clliaw/Projects/childhood-redux/.cache/parity/native-dirplayer-n2-20260919/evidence/failed-attempt-raw-input-shape"},
+    "final": {"result": "passed", "retained_path": "/Users/clliaw/Projects/childhood-redux/.cache/parity/native-dirplayer-n2-20260919/evidence/campaign"}
+  },
+  "evidence": {
+    "dirplayer_gates": "/Users/clliaw/Projects/dirplayer-rs/.cache/native-bevy/native-n2-20260919/evidence/integrated-gates",
+    "caller_root": "/Users/clliaw/Projects/childhood-redux/.cache/parity/native-dirplayer-n2-20260919/evidence",
+    "local_final_receipt": "/Users/clliaw/Projects/childhood-redux/.cache/parity/native-dirplayer-n2-20260919/evidence/final-receipt.json",
+    "local_final_receipt_sha256": "9694edff2f5af69081d9adf868cdb72003bc42edb273689bd41d62555f2425b7"
+  },
+  "tested_working_tree": "All command results and hashes refer to the tested working-tree bytes pinned by the explicit manifests; the publication commit containing these manifests is the durable carrier and is not asserted here.",
+  "limits": ["only native_director_probe.dcr is behaviorally qualified", "no PCM, Flash, JavaScript Lingo, external casts, reset, mutation, invocation, timezone/date qualification", "multi-process process-isolated behavior is accepted through the parent ProcessWorker; no in-process multi-session ownership claim", "no Spybot/Battalion/game acceptance, browser retirement, or N3 authorization", "changed source/build path/toolchain requires explicit artifact-pin review", "no automatic baseline promotion"]
+}

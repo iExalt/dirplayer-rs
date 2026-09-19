@@ -61,6 +61,7 @@ image = "0.25.8"
 rand = { version = "0.9", features = ["small_rng"] }
 getrandom = { version = "0.3", features = ["wasm_js"] }
 base64 = "0.22"
+sha2 = "0.10"
 toml = "0.8"
 dotenvy = "0.15"
 binary_rw = "4.1.0"
@@ -160,6 +161,11 @@ default-features = false
 opt-level = 3
 lto = "fat"
 codegen-units = 1
+
+[[bin]]
+name = "native_dirplayer_parity_worker"
+path = "src/native_dirplayer_parity_worker_main.rs"
+required-features = []
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = ["-O4"]

@@ -155,18 +155,24 @@ pub struct HarnessRuntime {
 
 impl HarnessRuntime {
     pub(crate) fn new(command_tx: Sender<PlayerVMExecutionItem>) -> Self {
+        Self::try_new(command_tx).expect("native harness runtime construction failed")
+    }
+
+    pub(crate) fn try_new(command_tx: Sender<PlayerVMExecutionItem>) -> Result<Self, ScriptError> {
         let owner = SymbolOwner {
-            session: allocate_session_id().expect("shared session id namespace exhausted"),
+            session: allocate_session_id()?,
             generation: 1,
         };
         let session = RuntimeSession::new(owner).into_handle();
         let player_id = 1;
-        assert!(session.borrow_mut().add_player(player_id, command_tx.clone()));
+        if !session.borrow_mut().add_player(player_id, command_tx.clone()) {
+            return Err(ScriptError::new("native harness player id collision".to_owned()));
+        }
         let player_owner = session
             .borrow_mut()
             .with_player(player_id, |context| context.player.owner.clone())
-            .expect("new harness player must exist");
-        Self { session, player_id, owner: player_owner, command_tx }
+            .ok_or_else(|| ScriptError::new("native harness player was not installed".to_owned()))?;
+        Ok(Self { session, player_id, owner: player_owner, command_tx })
     }
 
     pub(crate) fn session(&self) -> RuntimeSessionHandle { self.session.clone() }
