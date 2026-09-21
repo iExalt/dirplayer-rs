@@ -11,16 +11,21 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(not(target_arch = "wasm32"))]
+use std::{cell::RefCell, rc::Rc};
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::director::file::{DirectorFile, read_director_file_bytes};
+use crate::native_bevy_host::{HostOperation, NativeBevyHost};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::player::session::NativeFlashCallbackObservation;
 use crate::player::testing::{
     NativeGlobalReadError, NativeGlobalValue, NativeInvokeArgument, NativeInvokeError, TestPlayer,
 };
-use crate::native_bevy_host::{HostOperation, NativeBevyHost};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::rendering::NativePresentationViewport;
 
@@ -372,6 +377,10 @@ pub(crate) struct Worker {
     pub(crate) pointer: Option<(i32, i32)>,
     pub(crate) session: SessionHandle,
     pub(crate) shutdown: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) callback_observer: Option<Rc<RefCell<Vec<NativeFlashCallbackObservation>>>>,
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) start_failure_witness: Option<crate::player::testing::NativeTeardownWitness>,
 }
 
 fn request(host: &mut NativeBevyHost, request: Request) -> Result<Response, StructuredError> {
@@ -426,7 +435,10 @@ fn request(host: &mut NativeBevyHost, request: Request) -> Result<Response, Stru
                 .enumerate()
                 .map(|(index, value)| native_invoke_argument(index, value))
                 .collect::<Result<Vec<_>, _>>()?;
-            host.submit(HostOperation::Invoke { function, arguments })
+            host.submit(HostOperation::Invoke {
+                function,
+                arguments,
+            })
         }
         Request::Inspect { target, path } => {
             require_started(host)?;
@@ -486,9 +498,7 @@ fn validate_input_form(event: &VirtualInput) -> Result<(), StructuredError> {
             button: MouseButton::Left,
             state: ButtonState::Down | ButtonState::Up,
         } => Ok(()),
-        VirtualInput::Button { .. } => {
-            Err(unsupported("only left button down/up is qualified"))
-        }
+        VirtualInput::Button { .. } => Err(unsupported("only left button down/up is qualified")),
         VirtualInput::Key { .. } => Err(unsupported("keyboard input is not qualified")),
         VirtualInput::Focus { .. } | VirtualInput::Leave | VirtualInput::Resize { .. } => {
             Err(unsupported("this virtual input form is not qualified"))
@@ -507,6 +517,10 @@ impl Worker {
                 generation: 1,
             },
             shutdown: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            callback_observer: None,
+            #[cfg(all(test, not(target_arch = "wasm32")))]
+            start_failure_witness: None,
         }
     }
 
@@ -609,6 +623,12 @@ impl Worker {
             .transpose()?;
 
         let mut player = TestPlayer::try_new().map_err(runtime_error)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(observer) = self.callback_observer.as_ref() {
+            player.install_native_flash_callback_observer(observer.clone());
+        }
+        #[cfg(all(test, not(target_arch = "wasm32")))]
+        let start_failure_witness = player.native_teardown_witness();
         player.set_deterministic_seed(seed).map_err(runtime_error)?;
         let movie_path_string = movie_path.to_str().ok_or_else(|| {
             error(
@@ -639,6 +659,10 @@ impl Worker {
         }
         let tempo = player.effective_tempo_quiet().map_err(runtime_error)?;
         if tempo != config.clock.frame_rate_num {
+            #[cfg(all(test, not(target_arch = "wasm32")))]
+            {
+                self.start_failure_witness = Some(start_failure_witness);
+            }
             return Err(error_with(
                 ErrorCode::InvalidRequest,
                 "configured frame rate does not match the loaded Director movie tempo",
@@ -701,7 +725,9 @@ impl Worker {
                 })
             }
             "flash_instances" => {
-                let snapshots = player.native_flash_snapshots_quiet().map_err(runtime_error)?;
+                let snapshots = player
+                    .native_flash_snapshots_quiet()
+                    .map_err(runtime_error)?;
                 json!({
                     "session": self.session,
                     "instances": snapshots
@@ -770,8 +796,9 @@ impl Worker {
         arguments: Vec<NativeInvokeArgument>,
     ) -> Result<Response, StructuredError> {
         let player = self.player.as_ref().ok_or_else(not_ready)?;
-        let value = async_std::task::block_on(player.native_invoke_global_quiet(&function, arguments))
-            .map_err(native_invoke_error)?;
+        let value =
+            async_std::task::block_on(player.native_invoke_global_quiet(&function, arguments))
+                .map_err(native_invoke_error)?;
         Ok(Response::Invoked(native_global_value_to_json(value)?))
     }
 
@@ -912,56 +939,78 @@ impl Worker {
     }
 }
 
+fn run_with_io(
+    input: &mut impl Read,
+    output: &mut impl Write,
+    host: &mut NativeBevyHost,
+) -> io::Result<()> {
+    let loop_result = (|| -> io::Result<()> {
+        loop {
+            let Some(line) = read_bounded_line(input)? else {
+                break;
+            };
+            if line.len() > MAX_LINE_BYTES {
+                write_response(
+                    output,
+                    0,
+                    Response::Error(error(
+                        ErrorCode::Protocol,
+                        format!("request exceeds {MAX_LINE_BYTES} byte limit"),
+                    )),
+                )?;
+                continue;
+            }
+            let envelope = match serde_json::from_slice::<RequestEnvelope>(&line) {
+                Ok(envelope) => envelope,
+                Err(parse_error) => {
+                    write_response(
+                        output,
+                        0,
+                        Response::Error(error(
+                            ErrorCode::Protocol,
+                            format!("invalid request JSON: {parse_error}"),
+                        )),
+                    )?;
+                    continue;
+                }
+            };
+            let response = if envelope.version != PROTOCOL_VERSION {
+                Response::Error(error(
+                    ErrorCode::Protocol,
+                    format!("unsupported protocol version {}", envelope.version),
+                ))
+            } else {
+                request(host, envelope.request).unwrap_or_else(Response::Error)
+            };
+            write_response(output, envelope.request_id, response)?;
+            if host.is_shutdown() {
+                break;
+            }
+        }
+        Ok(())
+    })();
+
+    let retire_result = if host.is_shutdown() {
+        Ok(())
+    } else {
+        host.submit(HostOperation::Shutdown)
+            .map(|_| ())
+            .map_err(|error| io::Error::other(error.message))
+    };
+
+    match loop_result {
+        Err(error) => Err(error),
+        Ok(()) => retire_result,
+    }
+}
+
 pub fn run() -> io::Result<()> {
     let stdin = io::stdin();
     let mut stdin = stdin.lock();
     let stdout = io::stdout();
     let mut stdout = io::BufWriter::new(stdout.lock());
     let mut host = NativeBevyHost::new();
-    loop {
-        let Some(line) = read_bounded_line(&mut stdin)? else {
-            break;
-        };
-        if line.len() > MAX_LINE_BYTES {
-            write_response(
-                &mut stdout,
-                0,
-                Response::Error(error(
-                    ErrorCode::Protocol,
-                    format!("request exceeds {MAX_LINE_BYTES} byte limit"),
-                )),
-            )?;
-            continue;
-        }
-        let envelope = match serde_json::from_slice::<RequestEnvelope>(&line) {
-            Ok(envelope) => envelope,
-            Err(parse_error) => {
-                write_response(
-                    &mut stdout,
-                    0,
-                    Response::Error(error(
-                        ErrorCode::Protocol,
-                        format!("invalid request JSON: {parse_error}"),
-                    )),
-                )?;
-                continue;
-            }
-        };
-        let response = if envelope.version != PROTOCOL_VERSION {
-            Response::Error(error(
-                ErrorCode::Protocol,
-                format!("unsupported protocol version {}", envelope.version),
-            ))
-        } else {
-            request(&mut host, envelope.request)
-                .unwrap_or_else(Response::Error)
-        };
-        write_response(&mut stdout, envelope.request_id, response)?;
-        if host.is_shutdown() {
-            break;
-        }
-    }
-    Ok(())
+    run_with_io(&mut stdin, &mut stdout, &mut host)
 }
 
 fn write_response(output: &mut impl Write, request_id: u64, response: Response) -> io::Result<()> {
@@ -1393,10 +1442,7 @@ fn native_global_read_error(error: NativeGlobalReadError) -> StructuredError {
     native_value_read_error("global", error)
 }
 
-fn native_value_read_error(
-    subject: &str,
-    error: NativeGlobalReadError,
-) -> StructuredError {
+fn native_value_read_error(subject: &str, error: NativeGlobalReadError) -> StructuredError {
     match error {
         NativeGlobalReadError::Runtime(error) => runtime_error(error),
         NativeGlobalReadError::Unsupported { datum_type, reason } => error_with(
@@ -1450,7 +1496,154 @@ fn error_with(
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    #[cfg(not(target_arch = "wasm32"))]
+    use std::io::{Cursor, ErrorKind};
 
+    #[cfg(not(target_arch = "wasm32"))]
+    const PROBE_MOVIE: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/native_director_probe.dcr"
+    );
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn initialized_probe_player() -> TestPlayer {
+        let mut player = TestPlayer::try_new().expect("probe player construction failed");
+        let bytes = std::fs::read(PROBE_MOVIE).expect("probe movie must be readable");
+        async_std::task::block_on(player.load_movie_quiet(PROBE_MOVIE, bytes))
+            .expect("probe movie must load");
+        async_std::task::block_on(player.try_init_movie_at_us(0))
+            .expect("probe movie must initialize");
+        player
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn spybot_start_config_from_env() -> Option<StartConfig> {
+        let resource_root = std::env::var("SPYBOT_RESOURCE_ROOT").ok()?;
+        let resource_root_path = PathBuf::from(&resource_root);
+        let movie = "spybot-nightfall-incident.dcr".to_owned();
+        let _movie_bytes = std::fs::read(resource_root_path.join(&movie))
+            .expect("SPYBOT_RESOURCE_ROOT must contain the Spybot DCR");
+        let cast_sha256 = "bd18e2325e2074a24b86db5a921b873e1f55bd38db7a7646a57eb0d929006035";
+        let casts = [
+            (
+                "sound_level_1.cct",
+                "spybot-nightfall-incident-sound-level-1.cct",
+            ),
+            (
+                "sound_level_2.cct",
+                "spybot-nightfall-incident-sound-level-2.cct",
+            ),
+            (
+                "sound_level_3.cct",
+                "spybot-nightfall-incident-sound-level-3.cct",
+            ),
+            (
+                "sound_level_4.cct",
+                "spybot-nightfall-incident-sound-level-4.cct",
+            ),
+            (
+                "sound_level_5.cct",
+                "spybot-nightfall-incident-sound-level-5.cct",
+            ),
+        ];
+        let resource_aliases = casts
+            .into_iter()
+            .map(|(key, path)| {
+                (
+                    key.to_owned(),
+                    ExternalCastAlias {
+                        path: path.to_owned(),
+                        sha256: cast_sha256.to_owned(),
+                    },
+                )
+            })
+            .collect();
+        Some(StartConfig {
+            adapter: AdapterConfig {
+                backend: "dirplayer-native".to_owned(),
+                resource_root,
+                movie,
+                source_dcr_sha256:
+                    "ddf24b667a8d014856d9db42e1658cbf9714847f1cadc2c2c14d21f8e5950c77".to_owned(),
+                loading_policy: "single-dcr".to_owned(),
+                resource_aliases: Some(resource_aliases),
+                presentation_viewport: Some(PresentationViewportConfig {
+                    x: 0,
+                    y: 0,
+                    width: 650,
+                    height: 420,
+                }),
+            },
+            seed: 0,
+            clock: ClockConfig {
+                epoch_us: 0,
+                frame_rate_num: 20,
+                frame_rate_den: 1,
+            },
+            loading: LoadingConfig {
+                fixture: "spybot-title".to_owned(),
+            },
+        })
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn assert_retired(witness: crate::player::testing::NativeTeardownWitness) {
+        assert!(!witness.owner.is_arena_live());
+        assert!(
+            witness
+                .session
+                .borrow_mut()
+                .with_player(witness.player_id, |_| ())
+                .is_none()
+        );
+        assert!(
+            witness
+                .session
+                .borrow()
+                .native_presentation(witness.player_id)
+                .is_none()
+        );
+        assert!(
+            witness
+                .session
+                .borrow()
+                .native_flash(witness.player_id)
+                .is_none()
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    struct ReadFailure;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl Read for ReadFailure {
+        fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::new(
+                ErrorKind::Interrupted,
+                "injected read failure",
+            ))
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    struct WriteFailure;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl Write for WriteFailure {
+        fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(
+                ErrorKind::BrokenPipe,
+                "injected write failure",
+            ))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::new(
+                ErrorKind::BrokenPipe,
+                "injected write failure",
+            ))
+        }
+    }
 
     #[test]
     fn global_symbol_uses_typed_wire_shape() {
@@ -1495,7 +1688,11 @@ mod tests {
                 reason: Some("wire_shape"),
             },
         ));
-        assert!(error.message.starts_with("returned datum type sound_channel"));
+        assert!(
+            error
+                .message
+                .starts_with("returned datum type sound_channel")
+        );
         assert_eq!(
             error.details,
             Some(json!({"datum_type": "sound_channel", "reason": "wire_shape"}))
@@ -1596,6 +1793,454 @@ mod tests {
     fn catches_signature_and_parser_failures_as_errors() {
         assert!(parse_director_file(b"not-a-cast", "bad.cct", "file:///tmp/").is_err());
         assert!(parse_director_file(b"XFIR malformed", "bad.cct", "file:///tmp/").is_err());
+    }
+
+    #[test]
+    fn pre_start_requests_do_not_submit_host_operations() {
+        let mut host = NativeBevyHost::new();
+        let requests = [
+            Request::Inspect {
+                target: Target::Root,
+                path: "current_frame".to_owned(),
+            },
+            Request::Invoke {
+                target: Target::Root,
+                function: "go".to_owned(),
+                arguments: vec![],
+            },
+            Request::Input {
+                event: VirtualInput::Pointer {
+                    space: PointerSpace::Stage,
+                    x: 1.0,
+                    y: 1.0,
+                },
+            },
+            Request::Advance { duration_us: 0 },
+            Request::Capture {
+                kind: CaptureKind::Rgba,
+            },
+        ];
+        for operation in requests {
+            assert!(matches!(
+                request(&mut host, operation),
+                Err(StructuredError {
+                    code: ErrorCode::NotReady,
+                    ..
+                })
+            ));
+        }
+        assert_eq!(host.test_elapsed_us(), 0);
+        assert!(!host.test_has_pending_operation());
+    }
+
+    #[test]
+    fn reset_and_modify_remain_explicitly_unsupported() {
+        let mut host = NativeBevyHost::new();
+        assert!(matches!(
+            request(&mut host, Request::Reset),
+            Err(StructuredError {
+                code: ErrorCode::Unsupported,
+                ..
+            })
+        ));
+        assert!(matches!(
+            request(
+                &mut host,
+                Request::Modify {
+                    target: Target::Root,
+                    path: "x".to_owned(),
+                    value: Value::Null,
+                }
+            ),
+            Err(StructuredError {
+                code: ErrorCode::Unsupported,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn unsupported_input_forms_are_rejected_before_submission() {
+        let unsupported = [
+            VirtualInput::Pointer {
+                space: PointerSpace::Window,
+                x: 1.0,
+                y: 1.0,
+            },
+            VirtualInput::Button {
+                button: MouseButton::Right,
+                state: ButtonState::Down,
+            },
+            VirtualInput::Key {
+                key: "A".to_owned(),
+                state: ButtonState::Down,
+            },
+            VirtualInput::Focus { focused: true },
+            VirtualInput::Leave,
+            VirtualInput::Resize {
+                width_physical: 1,
+                height_physical: 1,
+                scale: 1.0,
+            },
+        ];
+        for event in unsupported {
+            assert!(matches!(
+                validate_input_form(&event),
+                Err(StructuredError {
+                    code: ErrorCode::Unsupported,
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn request_boundary_rejects_invalid_forms_with_a_live_synthetic_player() {
+        let mut host = NativeBevyHost::new();
+        let witness = host.install_test_player(initialized_probe_player());
+        let object = Target::Object(ObjectHandle {
+            session_id: 1,
+            generation: 1,
+            object_id: 1,
+        });
+        assert!(matches!(
+            request(
+                &mut host,
+                Request::Inspect {
+                    target: object,
+                    path: "current_frame".to_owned(),
+                }
+            ),
+            Err(StructuredError {
+                code: ErrorCode::InvalidHandle,
+                ..
+            })
+        ));
+        assert!(matches!(
+            request(
+                &mut host,
+                Request::Invoke {
+                    target: Target::Object(ObjectHandle {
+                        session_id: 1,
+                        generation: 1,
+                        object_id: 1,
+                    }),
+                    function: "go".to_owned(),
+                    arguments: vec![],
+                }
+            ),
+            Err(StructuredError {
+                code: ErrorCode::InvalidHandle,
+                ..
+            })
+        ));
+        assert!(matches!(
+            request(
+                &mut host,
+                Request::Inspect {
+                    target: Target::Root,
+                    path: "unsupported_path".to_owned(),
+                }
+            ),
+            Err(StructuredError {
+                code: ErrorCode::Unsupported,
+                ..
+            })
+        ));
+        assert!(matches!(
+            request(
+                &mut host,
+                Request::Inspect {
+                    target: Target::Root,
+                    path: "globals.bad-name".to_owned(),
+                }
+            ),
+            Err(StructuredError {
+                code: ErrorCode::InvalidRequest,
+                ..
+            })
+        ));
+        assert!(matches!(
+            request(
+                &mut host,
+                Request::Invoke {
+                    target: Target::Root,
+                    function: "bad-name".to_owned(),
+                    arguments: vec![],
+                }
+            ),
+            Err(StructuredError {
+                code: ErrorCode::InvalidRequest,
+                ..
+            })
+        ));
+        assert!(matches!(
+            request(
+                &mut host,
+                Request::Invoke {
+                    target: Target::Root,
+                    function: "go".to_owned(),
+                    arguments: vec![json!([1, 2])],
+                }
+            ),
+            Err(StructuredError {
+                code: ErrorCode::InvalidRequest,
+                ..
+            })
+        ));
+        assert!(host.is_started());
+        assert!(matches!(
+            host.submit(HostOperation::Shutdown),
+            Ok(Response::Acknowledged)
+        ));
+        assert_retired(witness);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn repeated_start_is_rejected_without_replacing_the_existing_player() {
+        let mut host = NativeBevyHost::new();
+        let witness = host.install_test_player(initialized_probe_player());
+        let result = request(
+            &mut host,
+            Request::Start {
+                config: json!({"invalid": true}),
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(StructuredError {
+                code: ErrorCode::InvalidRequest,
+                ..
+            })
+        ));
+        assert!(host.is_started());
+        assert!(matches!(
+            host.submit(HostOperation::Shutdown),
+            Ok(Response::Acknowledged)
+        ));
+        assert_retired(witness);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn time_boundaries_preserve_elapsed_time_and_zero_uses_executor() {
+        let mut host = NativeBevyHost::new();
+        let witness = host.install_test_player(initialized_probe_player());
+        assert!(matches!(
+            request(&mut host, Request::Advance { duration_us: 0 }),
+            Ok(Response::Acknowledged)
+        ));
+        assert_eq!(host.test_elapsed_us(), 0);
+        assert!(!host.test_has_pending_operation());
+        assert!(host.validate_advance(MAX_ADVANCE_US).is_ok());
+        assert!(matches!(
+            request(
+                &mut host,
+                Request::Advance {
+                    duration_us: MAX_ADVANCE_US + 1,
+                }
+            ),
+            Err(StructuredError {
+                code: ErrorCode::InvalidRequest,
+                ..
+            })
+        ));
+        assert_eq!(host.test_elapsed_us(), 0);
+        assert!(!host.test_has_pending_operation());
+        host.test_set_elapsed_us(u64::MAX);
+        assert!(matches!(
+            request(&mut host, Request::Advance { duration_us: 1 }),
+            Err(StructuredError {
+                code: ErrorCode::InvalidRequest,
+                ..
+            })
+        ));
+        assert_eq!(host.test_elapsed_us(), u64::MAX);
+        assert!(!host.test_has_pending_operation());
+        assert!(matches!(
+            host.submit(HostOperation::Shutdown),
+            Ok(Response::Acknowledged)
+        ));
+        assert_retired(witness);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn runtime_error_leaves_time_unchanged_and_host_usable() {
+        let mut host = NativeBevyHost::new();
+        let witness = host.install_test_player(initialized_probe_player());
+        let error = host
+            .submit(HostOperation::Invoke {
+                function: "native_missing_handler".to_owned(),
+                arguments: vec![],
+            })
+            .expect_err("unknown handler must be a runtime error");
+        assert!(matches!(error.code, ErrorCode::Runtime));
+        assert_eq!(host.test_elapsed_us(), 0);
+        assert!(matches!(
+            host.submit(HostOperation::Advance(0)),
+            Ok(Response::Acknowledged)
+        ));
+        assert_eq!(host.test_elapsed_us(), 0);
+        assert!(host.is_started());
+        assert!(matches!(
+            host.submit(HostOperation::Shutdown),
+            Ok(Response::Acknowledged)
+        ));
+        assert_retired(witness);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "requires SPYBOT_RESOURCE_ROOT and the native rendering backend"]
+    fn spybot_production_host_observes_callback_and_retires_owner() {
+        let Some(config) = spybot_start_config_from_env() else {
+            eprintln!("SPYBOT_RESOURCE_ROOT is unset; skipping full-DCR host proof");
+            return;
+        };
+        let mut host = NativeBevyHost::new();
+        let callbacks = host.install_callback_observer();
+        assert!(matches!(
+            host.submit(HostOperation::Start(config)),
+            Ok(Response::Started { .. })
+        ));
+        for _ in 0..48 {
+            assert!(matches!(
+                host.submit(HostOperation::Advance(50_000)),
+                Ok(Response::Acknowledged)
+            ));
+        }
+        assert_eq!(host.test_elapsed_us(), 2_400_000);
+        let inspect = |host: &mut NativeBevyHost, path: &str| match host
+            .submit(HostOperation::Inspect(path.to_owned()))
+            .expect("production host inspection must succeed")
+        {
+            Response::Observation(value) => value,
+            response => panic!("expected observation for {path}, got {response:?}"),
+        };
+        assert_eq!(inspect(&mut host, "current_frame"), json!(5));
+        assert_eq!(inspect(&mut host, "current_label"), json!("title"));
+        let flash = inspect(&mut host, "flash_instances");
+        assert_eq!(flash["instances"].as_array().map(Vec::len), Some(1));
+        assert_eq!(flash["instances"][0]["sprite"], json!(1));
+        assert_eq!(flash["instances"][0]["generation"], json!(1));
+        assert_eq!(flash["instances"][0]["current_frame"], json!(419));
+        let init = inspect(&mut host, "init_state");
+        assert_eq!(init["pending_flash_actions"], json!([]));
+        assert_eq!(init["flash_bindings"][0]["asserted_frame"], json!(371));
+        assert_eq!(init["flash_bindings"][0]["cast_lib"], json!(2));
+        assert_eq!(init["flash_bindings"][0]["cast_member"], json!(3));
+        let witness = host
+            .test_live_teardown_witness()
+            .expect("started host must expose a teardown witness");
+        let callback_values = callbacks.borrow();
+        assert_eq!(callback_values.len(), 1);
+        let callback = &callback_values[0];
+        assert_eq!(callback.now_us, 2_400_000);
+        assert_eq!(callback.owner, witness.owner.key());
+        assert_eq!(callback.sprite, 1);
+        assert_eq!(callback.generation, 1);
+        assert_eq!(callback.cast_lib, 2);
+        assert_eq!(callback.cast_member, 3);
+        assert_eq!(callback.url, "lingo:introTitleReady()");
+        drop(callback_values);
+        assert!(matches!(
+            host.submit(HostOperation::Shutdown),
+            Ok(Response::Acknowledged)
+        ));
+        assert_retired(witness);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn failed_start_retains_no_player_and_retires_all_local_owner_bindings() {
+        let mut host = NativeBevyHost::new();
+        let movie = std::fs::read(PROBE_MOVIE).expect("probe movie must be readable");
+        let result = host.submit(HostOperation::Start(StartConfig {
+            adapter: AdapterConfig {
+                backend: "dirplayer-native".to_owned(),
+                resource_root: Path::new(PROBE_MOVIE)
+                    .parent()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_owned(),
+                movie: Path::new(PROBE_MOVIE)
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_owned(),
+                source_dcr_sha256: hex_sha256(&movie),
+                loading_policy: "single-dcr".to_owned(),
+                resource_aliases: None,
+                presentation_viewport: Some(PresentationViewportConfig {
+                    x: 0,
+                    y: 0,
+                    width: 1,
+                    height: 1,
+                }),
+            },
+            seed: 0,
+            clock: ClockConfig {
+                epoch_us: 0,
+                frame_rate_num: 61,
+                frame_rate_den: 1,
+            },
+            loading: LoadingConfig {
+                fixture: "probe".to_owned(),
+            },
+        }));
+        assert!(
+            matches!(
+                result,
+                Err(StructuredError {
+                    code: ErrorCode::InvalidRequest,
+                    ..
+                })
+            ),
+            "expected tempo validation failure, got {result:?}"
+        );
+        assert!(!host.is_started());
+        assert_eq!(host.test_elapsed_us(), 0);
+        assert!(host.test_pointer_is_none());
+        assert_retired(host.take_start_failure_witness().expect("start witness"));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn transport_eof_read_and_write_failures_retire_the_host() {
+        let cases: [(&str, Box<dyn Read>, Box<dyn Write>); 3] = [
+            (
+                "eof",
+                Box::new(Cursor::new(Vec::<u8>::new())),
+                Box::new(Vec::<u8>::new()),
+            ),
+            ("read", Box::new(ReadFailure), Box::new(Vec::<u8>::new())),
+            (
+                "write",
+                Box::new(Cursor::new(
+                    b"{\"version\":1,\"request_id\":1,\"op\":\"discover\"}\n".to_vec(),
+                )),
+                Box::new(WriteFailure),
+            ),
+        ];
+        for (name, mut input, mut output) in cases {
+            let mut host = NativeBevyHost::new();
+            let witness = host.install_test_player(
+                TestPlayer::try_new()
+                    .unwrap_or_else(|_| panic!("{name}: test player construction failed")),
+            );
+            let result = run_with_io(&mut input, &mut output, &mut host);
+            if name == "eof" {
+                assert!(result.is_ok());
+            } else {
+                assert!(result.is_err());
+            }
+            assert!(host.is_shutdown());
+            assert_retired(witness);
+        }
     }
 
     #[test]

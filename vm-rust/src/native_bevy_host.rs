@@ -6,11 +6,15 @@
 //! session, renderer, and command pumps are owner-local.
 
 use bevy::prelude::*;
-use bevy_state::app::StatesPlugin;
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::{cell::RefCell, rc::Rc};
 
 use crate::native_parity_worker::{
     CaptureKind, Response, StartConfig, StructuredError, VirtualInput, Worker,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use crate::player::session::NativeFlashCallbackObservation;
 
 #[derive(Debug)]
 pub(crate) enum HostOperation {
@@ -40,8 +44,6 @@ pub(crate) struct NativeBevyHost {
 impl NativeBevyHost {
     pub(crate) fn new() -> Self {
         let mut app = App::new();
-        app.add_plugins(StatesPlugin);
-        app.init_state::<HostLifecycle>();
         app.insert_non_send_resource(Worker::new());
         app.insert_non_send_resource(HostMailbox::default());
         app.add_systems(
@@ -94,12 +96,85 @@ impl NativeBevyHost {
     pub(crate) fn is_shutdown(&mut self) -> bool {
         self.app.world().non_send_resource::<Worker>().shutdown
     }
-}
 
-#[derive(States, Default, Debug, Clone, Copy, Eq, Hash, PartialEq)]
-enum HostLifecycle {
-    #[default]
-    Running,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn install_callback_observer(
+        &mut self,
+    ) -> Rc<RefCell<Vec<NativeFlashCallbackObservation>>> {
+        let observer = Rc::new(RefCell::new(Vec::new()));
+        self.app
+            .world_mut()
+            .non_send_resource_mut::<Worker>()
+            .callback_observer = Some(observer.clone());
+        observer
+    }
+
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn install_test_player(
+        &mut self,
+        player: crate::player::testing::TestPlayer,
+    ) -> crate::player::testing::NativeTeardownWitness {
+        let witness = player.native_teardown_witness();
+        self.app
+            .world_mut()
+            .non_send_resource_mut::<Worker>()
+            .player = Some(player);
+        witness
+    }
+
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn take_start_failure_witness(
+        &mut self,
+    ) -> Option<crate::player::testing::NativeTeardownWitness> {
+        self.app
+            .world_mut()
+            .non_send_resource_mut::<Worker>()
+            .start_failure_witness
+            .take()
+    }
+
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn test_live_teardown_witness(
+        &self,
+    ) -> Option<crate::player::testing::NativeTeardownWitness> {
+        self.app
+            .world()
+            .non_send_resource::<Worker>()
+            .player
+            .as_ref()
+            .map(crate::player::testing::TestPlayer::native_teardown_witness)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_elapsed_us(&mut self) -> u64 {
+        self.app.world().non_send_resource::<Worker>().elapsed_us
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_set_elapsed_us(&mut self, elapsed_us: u64) {
+        self.app
+            .world_mut()
+            .non_send_resource_mut::<Worker>()
+            .elapsed_us = elapsed_us;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_pointer_is_none(&mut self) -> bool {
+        self.app
+            .world()
+            .non_send_resource::<Worker>()
+            .pointer
+            .is_none()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_has_pending_operation(&mut self) -> bool {
+        self.app
+            .world()
+            .non_send_resource::<HostMailbox>()
+            .pending
+            .is_some()
+    }
 }
 
 fn take_operation(
