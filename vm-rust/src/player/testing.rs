@@ -21,9 +21,13 @@ use crate::player::{
     commands::{PlayerVMCommand, run_command_loop},
     host_events::{NativePlayerNotification, NativePlayerNotificationSink, NativePlayerNotificationSinkRef},
     ownership::OwnerKey,
-    session::{NativeAdvanceReport, NativeFramePump, NativeInputPump},
+    session::{
+        NativeAdvanceReport, NativeFramePump, NativeInputPump, RuntimeSessionHandle,
+    },
     NativeFlashActionSummary, NativeFlashBindingObservation,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use crate::player::session::NativeFlashCallbackObservation;
 
 /// Global lock to ensure only one TestPlayer runs at a time.
 /// The player uses global mutable statics, so tests must be serialized.
@@ -69,6 +73,13 @@ pub struct TestPlayer {
     native_notification_observer: Rc<NativeParityNotificationSink>,
     native_frame_pump: NativeFramePump,
     native_input_pump: NativeInputPump,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct NativeTeardownWitness {
+    pub(crate) session: RuntimeSessionHandle,
+    pub(crate) player_id: crate::player::session::PlayerId,
+    pub(crate) owner: crate::player::ownership::OwnerToken,
 }
 
 #[derive(Debug)]
@@ -339,6 +350,24 @@ impl TestPlayer {
             })?;
         self.native_presentation
             .set_viewport(viewport, stage_width, stage_height)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn install_native_flash_callback_observer(
+        &mut self,
+        observer: Rc<RefCell<Vec<NativeFlashCallbackObservation>>>,
+    ) {
+        self.native_frame_pump
+            .set_native_flash_callback_observer(Some(observer));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn native_teardown_witness(&self) -> NativeTeardownWitness {
+        NativeTeardownWitness {
+            session: self.runtime.session(),
+            player_id: self.runtime.player_id(),
+            owner: self.runtime.owner().clone(),
+        }
     }
 
     pub(crate) async fn load_movie_quiet(

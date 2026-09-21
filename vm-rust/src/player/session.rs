@@ -408,6 +408,20 @@ pub(crate) struct NativeFramePump {
     native_audio_remainder: u128,
     #[cfg(not(target_arch = "wasm32"))]
     native_pcm: Vec<[f32; 2]>,
+    #[cfg(not(target_arch = "wasm32"))]
+    native_flash_callback_observer: Option<Rc<RefCell<Vec<NativeFlashCallbackObservation>>>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct NativeFlashCallbackObservation {
+    pub(crate) now_us: u64,
+    pub(crate) owner: OwnerKey,
+    pub(crate) sprite: i16,
+    pub(crate) generation: u64,
+    pub(crate) cast_lib: i32,
+    pub(crate) cast_member: i32,
+    pub(crate) url: String,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -520,7 +534,37 @@ impl NativeFramePump {
             native_audio_remainder: 0,
             #[cfg(not(target_arch = "wasm32"))]
             native_pcm: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            native_flash_callback_observer: None,
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn set_native_flash_callback_observer(
+        &mut self,
+        observer: Option<Rc<RefCell<Vec<NativeFlashCallbackObservation>>>>,
+    ) {
+        self.native_flash_callback_observer = observer;
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn record_successful_native_flash_callback(
+        &self,
+        now_us: u64,
+        callback: &crate::native_flash::NativeFlashCallback,
+    ) {
+        let Some(observer) = self.native_flash_callback_observer.as_ref() else {
+            return;
+        };
+        observer.borrow_mut().push(NativeFlashCallbackObservation {
+            now_us,
+            owner: self.owner.key(),
+            sprite: callback.sprite,
+            generation: callback.generation,
+            cast_lib: callback.cast_lib,
+            cast_member: callback.cast_member,
+            url: callback.url.clone(),
+        });
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -851,6 +895,7 @@ impl NativeFramePump {
         for callback_buffer in advance.callback_buffers {
             let callbacks = crate::native_flash::NativeFlashHost::take_callbacks(&callback_buffer)?;
             for callback in callbacks {
+                let callback_identity = callback.clone();
                 if !self
                     .dispatch_native_flash_callback_if_current(callback, |callback| {
                         crate::player::commands::dispatch_native_flash_callback(
@@ -864,6 +909,8 @@ impl NativeFramePump {
                 {
                     continue;
                 }
+                #[cfg(not(target_arch = "wasm32"))]
+                self.record_successful_native_flash_callback(now_us, &callback_identity);
             }
         }
         let pending_owned_go_tempo = self
@@ -7748,6 +7795,77 @@ mod tests {
         .expect_err("a runtime callback error must not be hidden by replacement");
         assert_eq!(error.code, ScriptErrorCode::Generic);
         assert_eq!(error.message, "reentrant callback runtime failure");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_flash_callback_observer_reports_only_successful_current_owner_once() {
+        let mut session = session_with_casts(&[]);
+        let (owner, generation) = session
+            .with_player(1, |context| {
+                let generation = context
+                    .player
+                    .flash_binding_state
+                    .borrow_mut()
+                    .reserve_for_pair(1, 1, 1)
+                    .expect("native Flash generation");
+                (context.player.owner.clone(), generation)
+            })
+            .expect("native Flash observer fixture player");
+        let session = session.into_handle();
+        let observer = Rc::new(RefCell::new(Vec::new()));
+        let mut pump = NativeFramePump::new(session.clone(), 1, owner.clone());
+        pump.set_native_flash_callback_observer(Some(observer.clone()));
+        let successful = crate::native_flash::NativeFlashCallback {
+            sprite: 1,
+            generation,
+            cast_lib: 1,
+            cast_member: 1,
+            url: "lingo:successful()".to_owned(),
+        };
+        let successful_identity = successful.clone();
+        let dispatched = async_std::task::block_on(
+            pump.dispatch_native_flash_callback_if_current(successful, |_callback| async {
+                Ok(())
+            }),
+        )
+        .expect("successful callback dispatch must complete");
+        assert!(dispatched);
+        pump.record_successful_native_flash_callback(50_000, &successful_identity);
+
+        session
+            .borrow_mut()
+            .with_player(1, |context| {
+                assert!(context
+                    .player
+                    .flash_binding_state
+                    .borrow_mut()
+                    .invalidate(1, generation));
+                context
+                    .player
+                    .flash_binding_state
+                    .borrow_mut()
+                    .reserve_for_pair(1, 1, 1)
+                    .expect("same-owner replacement generation");
+            })
+            .expect("replacement must retain the owner");
+        let stale = crate::native_flash::NativeFlashCallback {
+            sprite: 1,
+            generation,
+            cast_lib: 1,
+            cast_member: 1,
+            url: "lingo:stale()".to_owned(),
+        };
+        let stale_result = async_std::task::block_on(
+            pump.dispatch_native_flash_callback_if_current(stale, |_callback| async {
+                Ok(())
+            }),
+        )
+        .expect("stale callback must be dropped without failing Advance");
+        assert!(!stale_result);
+        assert_eq!(observer.borrow().len(), 1);
+        assert_eq!(observer.borrow()[0].url, "lingo:successful()");
+        assert_eq!(observer.borrow()[0].now_us, 50_000);
     }
 
     #[test]

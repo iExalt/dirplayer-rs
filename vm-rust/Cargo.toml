@@ -10,6 +10,10 @@ edition = "2024"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[[bin]]
+name = "native_bevy_schedule_probe"
+path = "src/native_bevy_schedule_probe_main.rs"
+
 [features]
 default = ["console_error_panic_hook"]
 word_hard_break = []
@@ -76,6 +80,8 @@ async-channel = "=2.5.0"
 rodio = { version = "=0.22.2", default-features = false, features = ["mp3"] }
 ruffle_core = { path = "../ruffle/core", features = ["deterministic", "audio", "mp3"] }
 ruffle_render_wgpu = { path = "../ruffle/render/wgpu" }
+bevy = { version = "=0.19.0", default-features = false, features = ["bevy_state"] }
+bevy_state = { version = "=0.19.1", default-features = false }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.34"

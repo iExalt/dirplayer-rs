@@ -1,7 +1,13 @@
 # DirPlayer / Ruffle / childhood-redux Bevy alignment spike
 
-Status: plan updated; publication pending. The audit and exactly one bounded
-experimental Bevy adoption probe are authorized, but execution has not started.
+Status: plan updated; the audit and exactly one bounded experimental Bevy
+adoption probe were implemented and executed through the fresh-control gate.
+The dependency and focused owner-scoped callback checks passed. After the
+probe's nested executor was corrected and `StatesPlugin` was installed before
+`init_state`, the fresh normal-source control and Bevy-scheduled path both
+completed initialization, t=0 capture, 49 advances, endpoint capture, and
+teardown. Both paths matched their 650×420 RGBA captures byte-for-byte and
+passed the recorded source-behavior checks. No PCM/audio comparison was made.
 
 ## Decision and intended outcome
 
@@ -24,8 +30,9 @@ to accommodate childhood-redux's chosen framework. Any necessary change to the
 game's architecture must be explained and agreed separately.
 
 The first deliverable is a broad compatibility audit followed by one focused,
-executable alignment probe. The audit determines the best first boundary for
-direct Bevy adoption; the probe tests that boundary before a production migration.
+executable alignment probe. The audit determined scheduling as the first
+boundary for direct Bevy adoption; the probe tested that boundary through its
+fresh-control gate before a production migration.
 
 ## Evidence motivating the spike
 
@@ -111,9 +118,11 @@ not an exhaustive survey of every Director or Flash feature.
 
 ## Focused probe: test one direct integration boundary
 
-The audit selects one representative boundary. Rendering/compositing is an initial
-candidate, not a predetermined winner: the current Ruffle offscreen renderer and
-Bevy renderer remain distinct even though menu artwork now matches.
+The audit selected application/scheduling as the first representative boundary.
+The current Ruffle offscreen renderer and Bevy renderer remain distinct even
+though menu artwork now matches. The corrected full-DCR native control and
+Bevy-scheduled path completed their lifecycles and matched exact RGBA captures;
+the source runtime remains behind the explicit scheduling adapter.
 
 The decision-changing question is:
 
@@ -167,7 +176,12 @@ After the audit, adjust these allocations if the evidence requires it, but do no
 silently broaden the authorized scope. Before execution, record the selected
 boundary, affected files, workload, baseline, observable outputs, and stop
 conditions. At the audit handoff, estimate the remaining probe cost and reserve
-time to interpret its result.
+time to interpret its result. The dependency check completed in under a minute
+from cache, and the focused callback test passed as helper/witness evidence.
+After correcting the probe's nested executor and adding the minimal
+`StatesPlugin` setup, the authorized run completed the normal full-DCR control
+in 1.08 seconds and the Bevy lifecycle in approximately 1.06 seconds; both
+completed by 2.14 seconds total and passed the exact scheduling comparison.
 
 Reassess earlier if:
 
@@ -195,15 +209,18 @@ it for the user's intended direction.
 Return a compact decision record containing the compatibility map, what actually
 ran, exact results and failures, proposed Bevy ownership, necessary exceptions,
 remaining uncertainty, and the next component-sized production item with its
-acceptance check. Execute the authorized audit and probe using the existing
+acceptance check. The corrected full-DCR control and Bevy comparison are now
+qualified for this scheduling boundary. The next item remains a scheduling
+adapter retaining `RuntimeSession` and source-controlled clocks; do not bundle
+input migration. Execute the authorized audit and probe using the existing
 subagent-pair-program workflow; routine technical decisions remain within the
 agent team.
 
-Current authorization covers the audit and exactly one bounded experimental Bevy
-adoption probe after this plan is published. The next action is to carry out that
-audit and selected probe under the allocation above. It does not authorize
-production migration, gameplay implementation, or browser deletion. No further
-scope may be inferred from this document alone.
+The current authorization covered the audit and exactly one bounded experimental
+Bevy adoption probe after this plan was published; that work is now complete
+through the fresh-control gate. It does not authorize production migration,
+gameplay implementation, or browser deletion. No further scope may be inferred
+from this document alone.
 
 ## Checklist
 
@@ -213,7 +230,100 @@ scope may be inferred from this document alone.
 - [x] Record the authorized work block, checkpoint, adjustable allocation, and
   execution boundary; treat the checkpoint as non-binding and do not broaden scope
   silently when reallocating after the audit.
-- [ ] Audit the actual implementations and prioritize one Bevy adoption boundary.
-- [ ] Execute exactly one bounded experimental Bevy adoption probe and review its
-  source-behavior/output evidence.
-- [ ] Decide the migration route, exceptions, and next production increment.
+- [x] Audit the actual implementations and prioritize one Bevy adoption boundary.
+- [x] Execute exactly one bounded experimental Bevy adoption probe and review its
+  source-behavior/output evidence through the fresh-control gate.
+- [x] Decide the migration route, exceptions, and next production increment.
+
+## Execution decision record
+
+The accepted source hash and all five qualified cast hashes passed input
+validation. `mise exec -- cargo check --locked --offline --bin
+native_bevy_schedule_probe` passed with Bevy pinned to `=0.19.0`, default
+features disabled, and a locked offline dependency graph. The focused test
+`player::session::tests::native_flash_callback_observer_reports_only_successful_current_owner_once`
+passed with one test; it is helper/witness evidence only. It manually invokes
+the recording helper after a successful dispatch and rejects a replaced-
+generation callback without loading a renderer; it does not exercise the real
+`pump_native_flash_segment` observer placement.
+
+The probe adapter was corrected to match the native worker executor context.
+The worker uses synchronous `NativeParityWorker::start` and `advance` methods
+with one per-operation `block_on`; the probe's normal control is now
+synchronous with the same per-operation calls and no outer `block_on`. Bevy
+systems remain synchronous and use the same per-operation boundary.
+
+The one authorized rerun was configured with the original full DCR and 49
+controlled 50 ms increments in the Bevy-owned lifecycle. After the executor
+correction and the minimal `StatesPlugin` setup before `init_state`, the fresh
+normal-source control completed initialization, t=0 capture, all 49 advances,
+endpoint capture, and teardown in 1.08 seconds. The Bevy path completed the
+same lifecycle in approximately 1.06 seconds; both completed by 2.14 seconds
+total and passed the exact comparison.
+
+The escalated command was:
+
+```text
+env SPYBOT_RESOURCE_ROOT=/Users/clliaw/Projects/childhood-redux/resources/spybot \
+SPYBOT_MOVIE=spybot-nightfall-incident.dcr \
+SPYBOT_DCR_SHA256=ddf24b667a8d014856d9db42e1658cbf9714847f1cadc2c2c14d21f8e5950c77 \
+SPYBOT_PROBE_OUTPUT=/Users/clliaw/Projects/dirplayer-rs/vm-rust/.cache/native-bevy-schedule-probe-20260921 \
+perl -e 'alarm 120; exec @ARGV' -- mise exec -- cargo run --locked --offline --bin native_bevy_schedule_probe
+```
+
+It produced `Finished dev profile`, then `Running target/debug/native_bevy_schedule_probe`,
+the control and Bevy phase markers below, and exit 0:
+
+```text
+probe.begin                             0 ms
+control.input_verification.done          5 ms
+control.player_construction.done         7 ms
+control.movie_load.done                163 ms
+control.presentation_config.done        163 ms
+control.callback_observer_install.done  163 ms
+control.movie_init.begin               163 ms
+control.movie_init.done                470 ms
+control.capture_t0.done                479 ms
+control.advance.step_1                 497 ms
+control.advance.step_25                780 ms
+control.advance.step_49               1061 ms
+control.capture_endpoint.done         1070 ms
+control.teardown.done                 1080 ms
+control.complete                      1080 ms
+bevy.initialize.begin                 1081 ms
+bevy.initialize.movie_init.done       1519 ms
+bevy.capture_t0.done                  1528 ms
+bevy.advance.step_49                  2122 ms
+bevy.capture_endpoint.done            2133 ms
+bevy.teardown.done                    2141 ms
+native Bevy schedule probe passed
+```
+
+The earlier sandbox OpenGL error, escalated 4m40s/exit-130 attempt, and the
+intermediate exit-101 run with a missing `StateTransition` schedule remain
+historical diagnostics. The corrected executor and explicit `StatesPlugin`
+setup invalidated those pre-compare blocker conclusions; the final elevated
+run reached both full lifecycles and exited 0.
+
+The final receipt records identical 650×420 RGBA hashes at t=0
+(`d4c3ff5167d2c17df73779282ce5a88d8359f5ab309e382c24f40f6d7eaacf03`) and
+2.45 s (`78f7734afd3c304d2c96daeb1d6155c374bfc01974dafd080a2477f68ac805d3`),
+Director frame 6/label `start`, Flash frame 419, asserted frame 371, empty
+pending actions, one owner-scoped callback observation at 2.4 s, and successful
+owner retirement after teardown on both paths. No PCM or audio equivalence was
+claimed. The scheduling priority remains an inferred hypothesis about repeated
+parity-work reduction, not an accepted performance result.
+
+The implementation was kept within the approved files: the Bevy probe owns the
+player resource and ordered lifecycle states; `RuntimeSession` and
+`NativeFramePump` remain source executors; native callback observation is
+optional and behavior-neutral when absent; teardown checks owner retirement and
+native binding removal. The probe-local flushed phase logging is retained for
+the adapter setup correction and changes no production behavior. The next
+component-sized item remains scheduling-adapter-only; the full-DCR control and
+this scheduling comparison are qualified, while broader boundaries still need
+separate evidence. Do not bundle input migration.
+
+Bevy source-behavior and exact-output parity are accepted for this bounded
+scheduling probe. The acceptance does not claim audio equivalence or establish
+parity for the other six audit boundaries.

@@ -324,8 +324,7 @@ impl QualifiedExternalCasts {
             .map(|(key, entry)| (key.as_str(), entry.bytes.as_slice()))
     }
 
-    #[cfg(test)]
-    pub(crate) fn from_test_entries(
+    pub(crate) fn from_entries(
         entries: impl IntoIterator<Item = (String, String, Vec<u8>)>,
     ) -> Self {
         Self {
@@ -342,6 +341,13 @@ impl QualifiedExternalCasts {
                 })
                 .collect(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_test_entries(
+        entries: impl IntoIterator<Item = (String, String, Vec<u8>)>,
+    ) -> Self {
+        Self::from_entries(entries)
     }
 }
 
