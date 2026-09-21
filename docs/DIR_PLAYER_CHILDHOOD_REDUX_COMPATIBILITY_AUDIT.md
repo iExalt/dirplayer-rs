@@ -4,9 +4,10 @@
 
 Decision recorded 2026-09-21 using the agentic-workflow skill. The user selected
 **a production headless Bevy scheduling adapter, preserving existing menu RGBA,
-PCM, and source behavior**, as the first production deliverable. Planning is
-authorized; production implementation and further experiments have not started
-under this request. The completed audit/probe record below remains evidence for
+PCM, and source behavior**, as the first production deliverable. The subsequent
+user instruction authorized implementation with `subagent-pair-program` and
+commit/push after each accomplished milestone. Execution starts with S1 and
+assesses later boundaries at their stated evidence gates. The completed audit/probe record below remains evidence for
 the route, not acceptance of the production adapter.
 
 ### Outcome, constraints, and route
@@ -89,7 +90,7 @@ reference; its fixed 49-step script is not the production scheduling contract.
 
 Implementation checklist, in dependency order:
 
-- [ ] **S1.0 — Establish a reproducible starting point.** Inventory the existing
+- [x] **S1.0 — Establish a reproducible starting point.** Inventory the existing
   dirty probe/source changes, distinguish them from new adapter work, and retain
   their provenance. Record DirPlayer, childhood-redux, and embedded Ruffle
   revisions, dependency lock state, worker identity, and fixture hashes. Capture
@@ -186,7 +187,7 @@ a working comparison nor new discriminating evidence. If remaining work material
 exceeds this range, explain the revised cost and route choices. Do not silently
 expand S1 into audio/render migration or relax its acceptance criteria.
 
-### Later milestones: dependency-gated, not authorized by this plan
+### Later milestones: dependency-gated
 
 | Order | Useful outcome | Entry condition and exit evidence |
 | --- | --- | --- |
@@ -218,9 +219,24 @@ their own outcome and acceptance decisions; S1 is not a proxy for any of them.
 - **Next action:** S1.0, followed by one scheduling-adapter implementation item
   with an early full-menu comparison. No second exploratory subsystem probe is
   needed before starting this route.
-- **Authority:** this request produces the plan only. When implementation is
-  requested, hand S1 to `subagent-pair-program`; routine implementation, review,
-  and verification stay within that bounded item. Later milestones remain backlog.
+- **Authority:** the user subsequently authorized implementation using
+  `subagent-pair-program` and milestone commits/pushes. Assign component-level
+  items, retain the stated acceptance criteria, and assess later milestones at
+  their evidence gates. Material changes to outcome or fidelity still require a
+  user decision.
+
+### Execution checkpoint: S1.0 accepted
+
+Reviewed prerequisite source is committed as `75e051c9` (bounded scheduling
+probe; production scheduling unchanged). The fresh pre-migration campaign at
+that revision and childhood-redux `f041c1ef` passed five serial and four concurrent
+matched pairs: 11 exact RGBA checkpoints and three exact cumulative PCM windows
+per pair, source state/START observations, and shutdown/reaping. Eight runner
+processes were observed live. See the
+[baseline aggregate](../../childhood-redux/docs/checkpoints/spybot-native-menu-campaign-20260921/20260921-s1-0-premigration-01/campaign-aggregate.json).
+Native builds and the focused callback witness test passed; WASM compatibility
+remains unverified. This baseline qualifies the unchanged production worker as
+the control for S1.1–S1.3; it does not qualify production Bevy scheduling.
 
 ## Completed audit and probe record
 
