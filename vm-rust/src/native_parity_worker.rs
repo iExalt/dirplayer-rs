@@ -20,6 +20,7 @@ use crate::director::file::{DirectorFile, read_director_file_bytes};
 use crate::player::testing::{
     NativeGlobalReadError, NativeGlobalValue, NativeInvokeArgument, NativeInvokeError, TestPlayer,
 };
+use crate::native_bevy_host::{HostOperation, NativeBevyHost};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::rendering::NativePresentationViewport;
 
@@ -52,7 +53,7 @@ struct ResponseEnvelope {
     rename_all = "snake_case",
     deny_unknown_fields
 )]
-enum Request {
+pub(crate) enum Request {
     Discover,
     Start {
         config: Value,
@@ -86,7 +87,7 @@ enum Request {
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
-enum Response {
+pub(crate) enum Response {
     Capabilities(Capabilities),
     Started { session: SessionHandle },
     Observation(Value),
@@ -131,7 +132,7 @@ struct ObjectHandle {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum CaptureKind {
+pub(crate) enum CaptureKind {
     Rgba,
     Pcm,
 }
@@ -143,7 +144,7 @@ enum CaptureKind {
     rename_all = "snake_case",
     deny_unknown_fields
 )]
-enum VirtualInput {
+pub(crate) enum VirtualInput {
     Pointer {
         space: PointerSpace,
         x: f32,
@@ -191,13 +192,13 @@ enum ButtonState {
 }
 
 #[derive(Debug, Serialize)]
-struct SessionHandle {
+pub(crate) struct SessionHandle {
     id: u64,
     generation: u64,
 }
 
 #[derive(Debug, Serialize)]
-struct StructuredError {
+pub(crate) struct StructuredError {
     code: ErrorCode,
     message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -206,7 +207,7 @@ struct StructuredError {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum ErrorCode {
+pub(crate) enum ErrorCode {
     Unsupported,
     InvalidRequest,
     InvalidHandle,
@@ -252,33 +253,33 @@ fn pcm_sha256(samples: &[[f32; 2]]) -> String {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct StartConfig {
-    adapter: AdapterConfig,
-    seed: u64,
-    clock: ClockConfig,
-    loading: LoadingConfig,
+pub(crate) struct StartConfig {
+    pub(crate) adapter: AdapterConfig,
+    pub(crate) seed: u64,
+    pub(crate) clock: ClockConfig,
+    pub(crate) loading: LoadingConfig,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct AdapterConfig {
-    backend: String,
-    resource_root: String,
-    movie: String,
-    source_dcr_sha256: String,
-    loading_policy: String,
-    resource_aliases: Option<BTreeMap<String, ExternalCastAlias>>,
+pub(crate) struct AdapterConfig {
+    pub(crate) backend: String,
+    pub(crate) resource_root: String,
+    pub(crate) movie: String,
+    pub(crate) source_dcr_sha256: String,
+    pub(crate) loading_policy: String,
+    pub(crate) resource_aliases: Option<BTreeMap<String, ExternalCastAlias>>,
     #[serde(default)]
-    presentation_viewport: Option<PresentationViewportConfig>,
+    pub(crate) presentation_viewport: Option<PresentationViewportConfig>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PresentationViewportConfig {
-    x: i64,
-    y: i64,
-    width: i64,
-    height: i64,
+pub(crate) struct PresentationViewportConfig {
+    pub(crate) x: i64,
+    pub(crate) y: i64,
+    pub(crate) width: i64,
+    pub(crate) height: i64,
 }
 
 impl PresentationViewportConfig {
@@ -294,7 +295,7 @@ impl PresentationViewportConfig {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ExternalCastAlias {
+pub(crate) struct ExternalCastAlias {
     path: String,
     sha256: String,
 }
@@ -353,29 +354,150 @@ impl QualifiedExternalCasts {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ClockConfig {
-    epoch_us: i64,
-    frame_rate_num: u32,
-    frame_rate_den: u32,
+pub(crate) struct ClockConfig {
+    pub(crate) epoch_us: i64,
+    pub(crate) frame_rate_num: u32,
+    pub(crate) frame_rate_den: u32,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct LoadingConfig {
-    fixture: String,
+pub(crate) struct LoadingConfig {
+    pub(crate) fixture: String,
 }
 
-struct Worker {
-    player: Option<TestPlayer>,
-    elapsed_us: u64,
-    pointer: Option<(i32, i32)>,
-    session: SessionHandle,
-    runtime_version: String,
-    shutdown: bool,
+pub(crate) struct Worker {
+    pub(crate) player: Option<TestPlayer>,
+    pub(crate) elapsed_us: u64,
+    pub(crate) pointer: Option<(i32, i32)>,
+    pub(crate) session: SessionHandle,
+    pub(crate) shutdown: bool,
+}
+
+fn request(host: &mut NativeBevyHost, request: Request) -> Result<Response, StructuredError> {
+    match request {
+        Request::Discover => Ok(Response::Capabilities(Capabilities {
+            runtime: "dirplayer-native".to_owned(),
+            runtime_version: env!("CARGO_PKG_VERSION").to_owned(),
+            operations: vec![
+                Capability::StateInspection,
+                Capability::VirtualInput,
+                Capability::ControlledTime,
+                Capability::RgbaCapture,
+                Capability::PcmCapture,
+                Capability::Invocation,
+            ],
+        })),
+        Request::Start { config } => {
+            if host.is_started() {
+                return Err(error(
+                    ErrorCode::InvalidRequest,
+                    "one native worker process owns one scenario",
+                ));
+            }
+            validate_parent_storage()?;
+            let config: StartConfig = serde_json::from_value(config).map_err(|parse_error| {
+                error_with(
+                    ErrorCode::InvalidRequest,
+                    format!("invalid deterministic start configuration: {parse_error}"),
+                    None,
+                )
+            })?;
+            host.submit(HostOperation::Start(config))
+        }
+        Request::Reset | Request::Modify { .. } => Err(unsupported(
+            "native worker does not implement reset or mutation",
+        )),
+        Request::Invoke {
+            target,
+            function,
+            arguments,
+        } => {
+            require_started(host)?;
+            if !matches!(target, Target::Root) {
+                return Err(error(
+                    ErrorCode::InvalidHandle,
+                    "native invocation accepts only the current root owner",
+                ));
+            }
+            validate_global_identifier(&function)?;
+            let arguments = arguments
+                .into_iter()
+                .enumerate()
+                .map(|(index, value)| native_invoke_argument(index, value))
+                .collect::<Result<Vec<_>, _>>()?;
+            host.submit(HostOperation::Invoke { function, arguments })
+        }
+        Request::Inspect { target, path } => {
+            require_started(host)?;
+            if !matches!(target, Target::Root) {
+                return Err(error(
+                    ErrorCode::InvalidHandle,
+                    "native inspection accepts only the root target",
+                ));
+            }
+            if let Some(name) = path.strip_prefix("globals.") {
+                validate_global_identifier(name)?;
+            }
+            host.submit(HostOperation::Inspect(path))
+        }
+        Request::Input { event } => {
+            require_started(host)?;
+            validate_input_form(&event)?;
+            host.submit(HostOperation::Input(event))
+        }
+        Request::Advance { duration_us } => {
+            require_started(host)?;
+            host.validate_advance(duration_us)?;
+            host.submit(HostOperation::Advance(duration_us))
+        }
+        Request::Capture { kind } => {
+            require_started(host)?;
+            host.submit(HostOperation::Capture(kind))
+        }
+        Request::Shutdown => host.submit(HostOperation::Shutdown),
+    }
+}
+
+fn require_started(host: &mut NativeBevyHost) -> Result<(), StructuredError> {
+    if host.is_started() {
+        Ok(())
+    } else {
+        Err(not_ready())
+    }
+}
+
+fn validate_input_form(event: &VirtualInput) -> Result<(), StructuredError> {
+    match event {
+        VirtualInput::Pointer {
+            space: PointerSpace::Stage,
+            x,
+            y,
+        } => {
+            checked_coordinate(*x, "x")?;
+            checked_coordinate(*y, "y")?;
+            Ok(())
+        }
+        VirtualInput::Pointer {
+            space: PointerSpace::Window,
+            ..
+        } => Err(unsupported("window-space pointer input is not qualified")),
+        VirtualInput::Button {
+            button: MouseButton::Left,
+            state: ButtonState::Down | ButtonState::Up,
+        } => Ok(()),
+        VirtualInput::Button { .. } => {
+            Err(unsupported("only left button down/up is qualified"))
+        }
+        VirtualInput::Key { .. } => Err(unsupported("keyboard input is not qualified")),
+        VirtualInput::Focus { .. } | VirtualInput::Leave | VirtualInput::Resize { .. } => {
+            Err(unsupported("this virtual input form is not qualified"))
+        }
+    }
 }
 
 impl Worker {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             player: None,
             elapsed_us: 0,
@@ -384,88 +506,17 @@ impl Worker {
                 id: 1,
                 generation: 1,
             },
-            runtime_version: env!("CARGO_PKG_VERSION").to_owned(),
             shutdown: false,
         }
     }
 
-    fn request(&mut self, request: Request) -> Result<Response, StructuredError> {
-        match request {
-            Request::Discover => Ok(Response::Capabilities(Capabilities {
-                runtime: "dirplayer-native".to_owned(),
-                runtime_version: self.runtime_version.clone(),
-                operations: vec![
-                    Capability::StateInspection,
-                    Capability::VirtualInput,
-                    Capability::ControlledTime,
-                    Capability::RgbaCapture,
-                    Capability::PcmCapture,
-                    Capability::Invocation,
-                ],
-            })),
-            Request::Start { config } => self.start(config),
-            Request::Reset | Request::Modify { .. } => Err(unsupported(
-                "native worker does not implement reset or mutation",
-            )),
-            Request::Invoke {
-                target,
-                function,
-                arguments,
-            } => {
-                self.require_started()?;
-                self.invoke(target, &function, arguments)
-            }
-            Request::Inspect { target, path } => {
-                self.require_started()?;
-                if !matches!(target, Target::Root) {
-                    return Err(error(
-                        ErrorCode::InvalidHandle,
-                        "native inspection accepts only the root target",
-                    ));
-                }
-                self.inspect(&path)
-            }
-            Request::Input { event } => {
-                self.require_started()?;
-                self.input(event)
-            }
-            Request::Advance { duration_us } => {
-                self.require_started()?;
-                self.advance(duration_us)
-            }
-            Request::Capture { kind: CaptureKind::Pcm } => {
-                self.require_started()?;
-                self.pcm_capture()
-            }
-            Request::Capture {
-                kind: CaptureKind::Rgba,
-            } => {
-                self.require_started()?;
-                self.capture()
-            }
-            Request::Shutdown => {
-                self.player.take();
-                self.shutdown = true;
-                Ok(Response::Acknowledged)
-            }
-        }
-    }
-
-    fn start(&mut self, raw: Value) -> Result<Response, StructuredError> {
+    pub(crate) fn start(&mut self, config: StartConfig) -> Result<Response, StructuredError> {
         if self.player.is_some() {
             return Err(error(
                 ErrorCode::InvalidRequest,
                 "one native worker process owns one scenario",
             ));
         }
-        validate_parent_storage()?;
-        let config: StartConfig = serde_json::from_value(raw).map_err(|error| {
-            error_with(
-                ErrorCode::InvalidRequest,
-                format!("invalid deterministic start configuration: {error}"),
-                None,
-            )
-        })?;
         let seed = u32::try_from(config.seed).map_err(|_| {
             error(
                 ErrorCode::InvalidRequest,
@@ -606,18 +657,7 @@ impl Worker {
         })
     }
 
-    fn require_started(&self) -> Result<(), StructuredError> {
-        if self.player.is_some() {
-            Ok(())
-        } else {
-            Err(error(
-                ErrorCode::NotReady,
-                "native worker has not started a session",
-            ))
-        }
-    }
-
-    fn inspect(&self, path: &str) -> Result<Response, StructuredError> {
+    pub(crate) fn inspect(&self, path: &str) -> Result<Response, StructuredError> {
         let Some(player) = self.player.as_ref() else {
             return Err(not_ready());
         };
@@ -724,34 +764,18 @@ impl Worker {
         Ok(Response::Observation(value))
     }
 
-    fn invoke(
+    pub(crate) fn invoke(
         &self,
-        target: Target,
-        function: &str,
-        arguments: Vec<Value>,
+        function: String,
+        arguments: Vec<NativeInvokeArgument>,
     ) -> Result<Response, StructuredError> {
-        if !matches!(target, Target::Root) {
-            return Err(error(
-                ErrorCode::InvalidHandle,
-                "native invocation accepts only the current root owner",
-            ));
-        }
-        // Validate before TestPlayer interns the handler in the owner-local
-        // symbol table. This prevents malformed wire names from mutating the
-        // runtime's symbol arena.
-        validate_global_identifier(function)?;
-        let arguments = arguments
-            .into_iter()
-            .enumerate()
-            .map(|(index, value)| native_invoke_argument(index, value))
-            .collect::<Result<Vec<_>, _>>()?;
         let player = self.player.as_ref().ok_or_else(not_ready)?;
-        let value = async_std::task::block_on(player.native_invoke_global_quiet(function, arguments))
+        let value = async_std::task::block_on(player.native_invoke_global_quiet(&function, arguments))
             .map_err(native_invoke_error)?;
         Ok(Response::Invoked(native_global_value_to_json(value)?))
     }
 
-    fn input(&mut self, event: VirtualInput) -> Result<Response, StructuredError> {
+    pub(crate) fn input(&mut self, event: VirtualInput) -> Result<Response, StructuredError> {
         match event {
             VirtualInput::Pointer {
                 space: PointerSpace::Stage,
@@ -816,13 +840,23 @@ impl Worker {
         }
     }
 
-    fn advance(&mut self, duration_us: u64) -> Result<Response, StructuredError> {
+    pub(crate) fn validate_advance(&self, duration_us: u64) -> Result<(), StructuredError> {
         if duration_us > MAX_ADVANCE_US {
             return Err(error(
                 ErrorCode::InvalidRequest,
                 "advance exceeds the 60 second deterministic step budget",
             ));
         }
+        let target = self
+            .elapsed_us
+            .checked_add(duration_us)
+            .ok_or_else(|| error(ErrorCode::InvalidRequest, "simulation time overflow"))?;
+        let _ = target;
+        Ok(())
+    }
+
+    pub(crate) fn advance(&mut self, duration_us: u64) -> Result<Response, StructuredError> {
+        self.validate_advance(duration_us)?;
         let target = self
             .elapsed_us
             .checked_add(duration_us)
@@ -835,7 +869,7 @@ impl Worker {
         Ok(Response::Acknowledged)
     }
 
-    fn capture(&self) -> Result<Response, StructuredError> {
+    pub(crate) fn capture(&self) -> Result<Response, StructuredError> {
         let Some(player) = self.player.as_ref() else {
             return Err(not_ready());
         };
@@ -851,7 +885,7 @@ impl Worker {
         })))
     }
 
-    fn pcm_capture(&self) -> Result<Response, StructuredError> {
+    pub(crate) fn pcm_capture(&self) -> Result<Response, StructuredError> {
         let Some(player) = self.player.as_ref() else {
             return Err(not_ready());
         };
@@ -870,6 +904,12 @@ impl Worker {
             sha256,
         })))
     }
+
+    pub(crate) fn shutdown(&mut self) -> Result<Response, StructuredError> {
+        self.player.take();
+        self.shutdown = true;
+        Ok(Response::Acknowledged)
+    }
 }
 
 pub fn run() -> io::Result<()> {
@@ -877,7 +917,7 @@ pub fn run() -> io::Result<()> {
     let mut stdin = stdin.lock();
     let stdout = io::stdout();
     let mut stdout = io::BufWriter::new(stdout.lock());
-    let mut worker = Worker::new();
+    let mut host = NativeBevyHost::new();
     loop {
         let Some(line) = read_bounded_line(&mut stdin)? else {
             break;
@@ -913,12 +953,11 @@ pub fn run() -> io::Result<()> {
                 format!("unsupported protocol version {}", envelope.version),
             ))
         } else {
-            worker
-                .request(envelope.request)
+            request(&mut host, envelope.request)
                 .unwrap_or_else(Response::Error)
         };
         write_response(&mut stdout, envelope.request_id, response)?;
-        if worker.shutdown {
+        if host.is_shutdown() {
             break;
         }
     }

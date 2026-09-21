@@ -5,6 +5,8 @@ pub mod js_api;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native_bevy_schedule_probe;
 #[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod native_bevy_host;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod native_parity_worker;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native_flash;
