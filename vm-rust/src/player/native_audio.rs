@@ -226,12 +226,11 @@ impl Iterator for ChannelSource {
     type Item = f32;
 
     fn next(&mut self) -> Option<Self::Item> {
-        Some(
-            self.state
-                .lock()
-                .ok()
-                .map_or(0.0, |mut state| state.next_sample()),
-        )
+        let mut state = self.state.lock().ok()?;
+        if state.completed && state.current.is_none() {
+            return None;
+        }
+        Some(state.next_sample())
     }
 }
 
@@ -347,11 +346,6 @@ impl NativeAudioState {
         let channels: Vec<_> = (0..num_channels)
             .map(|_| Arc::new(Mutex::new(ChannelState::idle())))
             .collect();
-        for state in &channels {
-            mixer.add(ChannelSource {
-                state: state.clone(),
-            });
-        }
         Self {
             mixer,
             output,
@@ -395,13 +389,15 @@ impl NativeAudioState {
             )));
         }
         let segment = PreparedSegment::raw(bytes)?;
-        let mut state = self.channels[channel]
-            .lock()
-            .map_err(|_| ScriptError::new("native audio channel lock poisoned".to_owned()))?;
-        state.current = Some(segment);
-        state.queued.clear();
-        state.pending_error = None;
-        state.completed = false;
+        self.retire_channel_state(channel)?;
+        let state = Arc::new(Mutex::new(ChannelState {
+            current: Some(segment),
+            queued: VecDeque::new(),
+            pending_error: None,
+            completed: false,
+        }));
+        self.channels[channel] = state.clone();
+        self.mixer.add(ChannelSource { state });
         self.active[channel] = Some(NativeSoundInstance);
         self.queued[channel].clear();
         Ok(())
@@ -423,13 +419,15 @@ impl NativeAudioState {
             )));
         }
         let segment = self.prepare_segment(&member, loop_count, playback_rate, volume, pan)?;
-        let mut state = self.channels[channel]
-            .lock()
-            .map_err(|_| ScriptError::new("native audio channel lock poisoned".to_owned()))?;
-        state.current = Some(segment);
-        state.queued.clear();
-        state.pending_error = None;
-        state.completed = false;
+        self.retire_channel_state(channel)?;
+        let state = Arc::new(Mutex::new(ChannelState {
+            current: Some(segment),
+            queued: VecDeque::new(),
+            pending_error: None,
+            completed: false,
+        }));
+        self.channels[channel] = state.clone();
+        self.mixer.add(ChannelSource { state });
         self.active[channel] = Some(NativeSoundInstance);
         self.queued[channel].clear();
         Ok(())
@@ -456,15 +454,34 @@ impl NativeAudioState {
             prepared.push(self.prepare_segment(&member, loop_count, playback_rate, volume, pan)?);
         }
         let first = prepared.remove(0);
+        self.retire_channel_state(channel)?;
+        let queued_segments = prepared.into_iter().collect::<VecDeque<_>>();
+        let state = Arc::new(Mutex::new(ChannelState {
+            current: Some(first),
+            queued: queued_segments,
+            pending_error: None,
+            completed: false,
+        }));
+        let queued_len = state
+            .lock()
+            .map_err(|_| ScriptError::new("native audio channel lock poisoned".to_owned()))?
+            .queued
+            .len();
+        self.channels[channel] = state.clone();
+        self.mixer.add(ChannelSource { state });
+        self.active[channel] = Some(NativeSoundInstance);
+        self.queued[channel] = (0..queued_len).map(|_| ()).collect();
+        Ok(())
+    }
+
+    fn retire_channel_state(&mut self, channel: usize) -> Result<(), ScriptError> {
         let mut state = self.channels[channel]
             .lock()
             .map_err(|_| ScriptError::new("native audio channel lock poisoned".to_owned()))?;
-        state.current = Some(first);
-        state.queued = prepared.into_iter().collect();
+        state.current = None;
+        state.queued.clear();
         state.pending_error = None;
-        state.completed = false;
-        self.active[channel] = Some(NativeSoundInstance);
-        self.queued[channel] = (0..state.queued.len()).map(|_| ()).collect();
+        state.completed = true;
         Ok(())
     }
 
@@ -522,15 +539,15 @@ impl NativeAudioState {
     }
 
     pub(crate) fn is_busy(&self, channel: usize) -> Result<bool, ScriptError> {
-        let state = self.channels.get(channel).ok_or_else(|| {
-            ScriptError::new(format!("Invalid sound channel {}", channel + 1))
-        })?;
+        let state = self
+            .channels
+            .get(channel)
+            .ok_or_else(|| ScriptError::new(format!("Invalid sound channel {}", channel + 1)))?;
         let state = state
             .lock()
             .map_err(|_| ScriptError::new("native audio channel lock poisoned".to_owned()))?;
         Ok((state.current.is_some() && !state.completed) || !state.queued.is_empty())
     }
-
     pub(crate) fn stop_all(&mut self) {
         for index in 0..self.channels.len() {
             let _ = self.stop_channel(index);

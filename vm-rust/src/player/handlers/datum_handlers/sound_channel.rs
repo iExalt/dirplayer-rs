@@ -5639,6 +5639,163 @@ mod native_audio_tests {
         );
         samples
     }
+
+    fn first_active_frame(samples: &[f32]) -> Option<usize> {
+        samples
+            .chunks_exact(2)
+            .position(|frame| frame.iter().any(|sample| *sample != 0.0))
+    }
+
+    fn render_native_single(member: SoundMember, playback_rate: f32) -> Vec<f32> {
+        let mut state = NativeAudioState::new(1);
+        state
+            .play_member(0, member, 1, playback_rate, 255.0, 0.0)
+            .expect("cue should queue");
+        let mut output = vec![0.0; 48_000 * 2];
+        state.mix(&mut output).expect("cue should mix");
+        output
+    }
+
+    fn add_bevy_cue(mixer: &rodio::mixer::Mixer, bytes: &[u8], playback_rate: f32) {
+        let decoder = Decoder::builder()
+            .with_byte_len(bytes.len() as u64)
+            .with_data(std::io::Cursor::new(bytes.to_vec()))
+            .build()
+            .expect("DCR cue should decode");
+        let source = if playback_rate == 1.0 {
+            EitherSource::Plain(decoder)
+        } else {
+            EitherSource::Speed(decoder.speed(playback_rate))
+        };
+        mixer.add(UniformSourceIterator::new(
+            source,
+            ChannelCount::new(2).unwrap(),
+            SampleRate::new(48_000).unwrap(),
+        ));
+    }
+
+    enum EitherSource {
+        Plain(Decoder<std::io::Cursor<Vec<u8>>>),
+        Speed(rodio::source::Speed<Decoder<std::io::Cursor<Vec<u8>>>>),
+    }
+
+    impl Iterator for EitherSource {
+        type Item = f32;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            match self {
+                Self::Plain(source) => source.next(),
+                Self::Speed(source) => source.next(),
+            }
+        }
+    }
+
+    impl Source for EitherSource {
+        fn current_span_len(&self) -> Option<usize> {
+            match self {
+                Self::Plain(source) => source.current_span_len(),
+                Self::Speed(source) => source.current_span_len(),
+            }
+        }
+
+        fn channels(&self) -> ChannelCount {
+            match self {
+                Self::Plain(source) => source.channels(),
+                Self::Speed(source) => source.channels(),
+            }
+        }
+
+        fn sample_rate(&self) -> SampleRate {
+            match self {
+                Self::Plain(source) => source.sample_rate(),
+                Self::Speed(source) => source.sample_rate(),
+            }
+        }
+
+        fn total_duration(&self) -> Option<std::time::Duration> {
+            match self {
+                Self::Plain(source) => source.total_duration(),
+                Self::Speed(source) => source.total_duration(),
+            }
+        }
+    }
+
+    #[test]
+    fn integrated_native_four_stream_tail_matches_admission_order() {
+        const TITLE_FRAME: usize = 2_400;
+        const ACCEPTED_FRAME: usize = 165_600;
+        const TAIL_FRAMES: usize = 48_000;
+
+        let select_rate = 2.0_f32.powf(-2.0 / 12.0);
+        let select_first = first_active_frame(&render_native_single(
+            dcr_select_fixture_member(),
+            select_rate,
+        ))
+        .expect("select should contain active samples");
+        let begin_first = first_active_frame(&render_native_single(fixture_member(DCR_BEGIN), 1.0))
+            .expect("begin should contain active samples");
+        let title_first = first_active_frame(&render_native_single(dcr_fixture_member(), 1.0))
+            .expect("title should contain active samples");
+        let music_first =
+            first_active_frame(&render_native_single(dcr_music_fixture_member(), 1.0))
+                .expect("music should contain active samples");
+        println!(
+            "accepted-tail cue first-active offsets: title={title_first}, music={music_first}, select={select_first}, begin={begin_first}"
+        );
+
+        let mut native = NativeAudioState::new(7);
+        let mut native_pcm = vec![0.0; TITLE_FRAME * 2];
+        native.mix(&mut native_pcm).expect("initial native silence");
+        native
+            .play_member(0, dcr_fixture_member(), 1, 1.0, 255.0, 0.0)
+            .expect("title should admit on SFX channel 1");
+        native
+            .play_member(6, dcr_music_fixture_member(), 1, 1.0, 255.0, 0.0)
+            .expect("music should admit on music channel 7");
+        let mut opening = vec![0.0; (ACCEPTED_FRAME - TITLE_FRAME) * 2];
+        native.mix(&mut opening).expect("opening should mix");
+        native_pcm.extend(opening);
+        native
+            .play_member(0, dcr_select_fixture_member(), 1, select_rate, 255.0, 0.0)
+            .expect("second select should reuse SFX channel 1");
+        native
+            .play_member(1, fixture_member(DCR_BEGIN), 1, 1.0, 255.0, 0.0)
+            .expect("begin should use the next SFX channel");
+        let mut accepted = vec![0.0; TAIL_FRAMES * 2];
+        native.mix(&mut accepted).expect("accepted tail should mix");
+        native_pcm.extend(accepted);
+
+        // Render the exact schedule into one vector so the first mismatch can
+        // be reported in absolute and accepted-window coordinates.
+        let mut bevy_pcm = Vec::with_capacity(native_pcm.len());
+        let (mixer, mut output) = rodio::mixer::mixer(
+            ChannelCount::new(2).unwrap(),
+            SampleRate::new(48_000).unwrap(),
+        );
+        for _ in 0..TITLE_FRAME {
+            bevy_pcm.push(output.next().unwrap_or(0.0));
+            bevy_pcm.push(output.next().unwrap_or(0.0));
+        }
+        add_bevy_cue(&mixer, DCR_WIN_FLAG, 1.0);
+        add_bevy_cue(&mixer, DCR_MUSIC, 1.0);
+        for _ in TITLE_FRAME..ACCEPTED_FRAME {
+            bevy_pcm.push(output.next().unwrap_or(0.0));
+            bevy_pcm.push(output.next().unwrap_or(0.0));
+        }
+        add_bevy_cue(&mixer, DCR_SELECT, select_rate);
+        add_bevy_cue(&mixer, DCR_BEGIN, 1.0);
+        for _ in 0..TAIL_FRAMES {
+            bevy_pcm.push(output.next().unwrap_or(0.0));
+            bevy_pcm.push(output.next().unwrap_or(0.0));
+        }
+        assert_eq!(bevy_pcm.len(), native_pcm.len());
+        let first_diff = native_pcm
+            .chunks_exact(2)
+            .zip(bevy_pcm.chunks_exact(2))
+            .position(|(native, bevy)| native != bevy);
+        assert_eq!(first_diff, None);
+        assert_eq!(native_pcm, bevy_pcm);
+    }
     #[test]
     fn integrated_native_title_pair_matches_bevy_operands() {
         let mut native = NativeAudioState::new(2);
