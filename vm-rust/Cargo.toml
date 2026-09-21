@@ -73,6 +73,7 @@ lasso = "0.7.3"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 async-channel = "=2.5.0"
+rodio = { version = "=0.22.2", default-features = false, features = ["mp3"] }
 ruffle_core = { path = "../ruffle/core", features = ["deterministic", "audio", "mp3"] }
 ruffle_render_wgpu = { path = "../ruffle/render/wgpu" }
 

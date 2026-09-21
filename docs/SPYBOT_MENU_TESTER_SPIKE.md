@@ -4,10 +4,10 @@ Decision date: 2026-09-19.
 
 ## Current checkpoint (2026-09-21)
 
-The published baselines are dirplayer-rs `e82c6992` and childhood-redux
-`82c02c5`; the active nested Ruffle used by the current native visual recipe is
+The published baselines are dirplayer-rs `3e44c1c3` and childhood-redux
+`01212bff`; the active nested Ruffle used by the current native visual recipe is
 `fd5d8dda`. Native source rasterization is canonical for opening frames
-371–419, with Bevy scheduling, input, state, and audio remaining independent.
+371–419, with Bevy scheduling, input, and state remaining independent.
 The normal source path reaches Flash 371, advances through 419, dispatches the
 owned `introTitleReady` callback, and settles Director at `start`. The native
 worker now supports owned state inspection and invocation, deterministic time,
@@ -18,11 +18,15 @@ and cancellation. Available-DCR rollover silence is qualified by the recovered
 source and the browser handler comparison; no replacement cue is invented.
 
 The user-selected visual contract uses pinned native Ruffle source artwork for
-frames 371–419 while Bevy keeps independent scheduling, input, state, and
-audio. Representative native/Bevy pixels are exact at the accepted checkpoints.
-Native combined/split PCM is repeatable, and Bevy now admits title audio at the
-source 50 ms boundary, but exact native-versus-Bevy PCM still differs; the
-decoder/resampler policy is pending. The complete comparison campaign has not
+frames 371–419 while Bevy keeps independent scheduling, input, and state. The
+native Director audio path now uses the same device-free Rodio 0.22.2
+decode/resample/mix primitives as production Bevy while retaining independent
+source scheduling, Director channels, queueing, gain, pan, rateShift, ownership,
+and timestamps. In one normal-source 2.45-second run, native and Bevy produced
+the same 117,600-frame stereo capture, SHA-256
+`422c4f9dc76d58af3b11c8d360f735da8daa06d009209e766e626792273851d5`,
+with first active frame 2401. Representative native/Bevy pixels are also exact
+at the accepted checkpoints. The complete repeated comparison campaign has not
 run, so final fidelity remains open. All later checkpoint sections are
 historical evidence unless this section explicitly promotes their result; in
 particular, the experimental cast-property fast path was reverted.
@@ -32,7 +36,7 @@ particular, the experimental cast-property fast path was reverted.
 The user authorized implementation of the native DirPlayer reference and its
 bounded evidence probe. The chosen target remains exact comparison of the
 existing Bevy Spybot menu through START activation, including deterministic
-timing, RGBA, and later PCM qualification. A blocked native probe is accepted
+timing, RGBA, PCM, and input qualification. A blocked native probe is accepted
 as a dependency checkpoint; it is not menu completion.
 
 The boundary is START activation. Verify source behavior and the one mapped
@@ -83,24 +87,43 @@ handler comparison qualify no added rollover audio; no substitute cue is used.
 The current worker capabilities are the accepted set summarized above. Typed
 invocation runs through the existing owned command queue rather than string
 evaluation. Pointer move/down/up preserves capture, release cancellation,
-replacement, and owner retirement. PCM capture covers the demonstrated title,
-select, and begin paths, including source rateShift; it does not qualify later
-`snd_netload_N.cct` level audio. External-cast aliases remain hash-bound,
+replacement, and owner retirement. The four exact DCR cues (`s.win_flag`,
+`s.begin`, `s.select`, and `m.v1`) match the Bevy/Rodio 48 kHz stereo decode
+reference in isolation. The source `s.select` rateShift -2 path is deterministic
+across combined and split mixing, and native `soundBusy` reads the actual
+owner-scoped active/queued state instead of browser `AudioContext` fields. PCM
+capture does not qualify later `snd_netload_N.cct` level audio. External-cast aliases remain hash-bound,
 root-confined, and owner-qualified. The explicit-context cast repair is
 accepted; the former stale-DatumRef blocker and cast-property fast path are
 historical checkpoints, not current work.
 
-The next boundary is the user decision and implementation needed for exact
-native-versus-Bevy PCM decoding/resampling, followed by the full normal-source
-and direct diagnostic comparison campaign. Direct-title/frame requests remain
-diagnostic-only and cannot replace normal startup evidence.
+The isolated 1x Rodio references are exact: `s.win_flag` has 84,574 frames
+(`55db969870acca398973aece5d01625a6f5ed336c8ba6b2cfd6e99c250af44c7`),
+`s.begin` 53,506
+(`cd08af7c593c09b27741b55eedf8e061813751395045447b8acdc45da3690281`),
+`s.select` 34,520
+(`5d98564a7d0c9b228f3d0d8b0ee9aed3953b0781586fbbd4298cc52813045dce`),
+and `m.v1` 436,678
+(`f19e1df98f0754cbebe6eaa3b990f4ea44264b557961b7df7e6c56beabc0b626`).
+At source rateShift -2, the 48,000-frame `s.select` capture is byte-identical
+between native and the Bevy/Rodio path and between combined and 24,000+24,000
+mixes, SHA-256
+`b139015c8c3813e50503daa007f72eb15c91cc1dd3a48be5e87b966eed8ea4d`;
+the source reaches idle at frame 38,761 with last active frame 26,810.
 
-The dirplayer checkout was tested at HEAD
-`2116077c1a5c0d1de896c3863ba01feef0a4a88f`, with nested Ruffle adopted at
-`2dfcfedb612509e5d31e7b6e710194b8d3e5e208` on branch
-`feat/native-parity`. The childhood-redux checkout was tested at HEAD
-`0b2f7d71f0e9480e4fe9c4faee9f13532944e670`. Existing dirty native WIP and
-the repository `.DS_Store` entries were preserved and were not staged.
+The next boundary is the full normal-source comparison campaign through START:
+repeat exact visual/state/PCM checkpoints, qualify select and begin under real
+input, and preserve clean teardown. Direct-title/frame requests remain
+diagnostic-only and cannot replace normal startup evidence. Embedded Flash
+continues to use the pinned Ruffle path; this audio change does not replace it.
+
+The current audio qualification was run from dirplayer-rs HEAD
+`3e44c1c392c9274ef125a9b9b961f6b26415620f` plus the reviewed audio worktree,
+with nested Ruffle `fd5d8dda1cc7b8cf91de141a48574750fa8f86b2`.
+Childhood-redux was at `01212bffca2bcd4b6af9b9b14b4587a71276d82e`.
+The compact acceptance receipt is
+[native-audio-phase2-clean-final-receipt.json](../../childhood-redux/docs/checkpoints/spybot-native-audio-phase2-20260920/native-audio-phase2-clean-final-receipt.json).
+Existing cache and `.DS_Store` entries were preserved and were not staged.
 
 ## Executed P0 probe
 

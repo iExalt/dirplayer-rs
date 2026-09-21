@@ -57,6 +57,8 @@ pub mod stream_status;
 pub mod symbols;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod testing;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod native_audio;
 #[cfg(target_arch = "wasm32")]
 pub mod testing_browser;
 pub mod testing_shared;

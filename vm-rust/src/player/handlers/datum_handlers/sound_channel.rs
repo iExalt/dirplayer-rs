@@ -21,11 +21,6 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsValue;
 
 use crate::player::cast_member::SoundMember;
-#[cfg(not(target_arch = "wasm32"))]
-use ruffle_core::backend::audio::{
-    swf::{SoundEvent, SoundInfo},
-    AudioMixer, SoundHandle, SoundInstanceHandle, SoundTransform,
-};
 use binary_reader::BinaryReader;
 use binary_reader::Endian;
 
@@ -1243,241 +1238,9 @@ pub struct SoundManager {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-struct NativeAudioState {
-    mixer: AudioMixer,
-    active: Vec<Option<NativeSoundInstance>>,
-    queued: Vec<VecDeque<NativeQueuedSound>>,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-struct NativeSoundInstance {
-    _sound: SoundHandle,
-    instance: SoundInstanceHandle,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-struct NativeQueuedSound {
-    sound: SoundHandle,
-    loop_count: i32,
-    playback_rate: f32,
-    transform: SoundTransform,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn native_sound_transform(source_channels: u16, volume: f64, pan: f64) -> SoundTransform {
-    let gain = (volume / 255.0).clamp(0.0, 1.0) as f32;
-    let pan = (pan / 100.0).clamp(-1.0, 1.0);
-    let theta = (pan + 1.0) * std::f64::consts::FRAC_PI_4;
-    let left = theta.cos() as f32 * gain;
-    let right = theta.sin() as f32 * gain;
-
-    // Ruffle exposes every decoder as a stereo frame. For a mono Director
-    // member, model the browser's equal-power mono-to-stereo pan explicitly;
-    // for stereo members preserve channel separation while applying gain.
-    if source_channels <= 1 {
-        SoundTransform {
-            left_to_left: left,
-            left_to_right: right,
-            right_to_left: 0.0,
-            right_to_right: 0.0,
-        }
-    } else {
-        SoundTransform {
-            left_to_left: gain * ((1.0 - pan).max(0.0) as f32),
-            left_to_right: 0.0,
-            right_to_left: 0.0,
-            right_to_right: gain * ((1.0 + pan).max(0.0) as f32),
-        }
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn native_num_loops(loop_count: i32) -> Result<u16, ScriptError> {
-    if loop_count <= 0 {
-        return Err(ScriptError::new(
-            "native rate-0 audio requires a positive loop count".to_owned(),
-        ));
-    }
-    Ok(loop_count.saturating_sub(1) as u16)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn native_validate_playback_rate(playback_rate: f32) -> Result<(), ScriptError> {
-    if !playback_rate.is_finite() || playback_rate <= 0.0 {
-        return Err(ScriptError::new(format!(
-            "native playback rate must be finite and positive: {playback_rate}"
-        )));
-    }
-    Ok(())
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl NativeAudioState {
-    fn new(num_channels: usize) -> Self {
-        Self {
-            mixer: AudioMixer::new(2, 48_000),
-            active: (0..num_channels).map(|_| None).collect(),
-            queued: (0..num_channels).map(|_| VecDeque::new()).collect(),
-        }
-    }
-
-    fn register_member(
-        &mut self,
-        sound_member: &SoundMember,
-        loop_count: i32,
-        playback_rate: f32,
-        volume: f64,
-        pan: f64,
-    ) -> Result<NativeQueuedSound, ScriptError> {
-        native_num_loops(loop_count)?;
-        native_validate_playback_rate(playback_rate)?;
-        if !sound_member.sound.codec().eq_ignore_ascii_case("mp3") {
-            return Err(ScriptError::new(format!(
-                "native rate-0 audio does not support {} sound members",
-                sound_member.sound.codec()
-            )));
-        }
-        let sound = self
-            .mixer
-            .register_mp3(&sound_member.sound.data())
-            .map_err(|error| ScriptError::new(format!("Failed to decode MP3: {error}")))?;
-        Ok(NativeQueuedSound {
-            sound,
-            loop_count,
-            playback_rate,
-            transform: native_sound_transform(sound_member.info.channels, volume, pan),
-        })
-    }
-
-    fn start_mp3(&mut self, channel: usize, bytes: &[u8]) -> Result<(), ScriptError> {
-        if channel >= self.active.len() {
-            return Err(ScriptError::new(format!("Invalid sound channel {}", channel + 1)));
-        }
-        let sound = self
-            .mixer
-            .register_mp3(bytes)
-            .map_err(|error| ScriptError::new(format!("Failed to decode MP3: {error}")))?;
-        let next = self.start_registered(NativeQueuedSound {
-            sound,
-            loop_count: 1,
-            playback_rate: 1.0,
-            transform: SoundTransform::default(),
-        })?;
-        self.queued[channel].clear();
-        if let Some(previous) = self.active[channel].replace(next) {
-            self.mixer.stop_sound(previous.instance);
-        }
-        Ok(())
-    }
-
-    fn start_registered(
-        &mut self,
-        segment: NativeQueuedSound,
-    ) -> Result<NativeSoundInstance, ScriptError> {
-        native_validate_playback_rate(segment.playback_rate)?;
-        let settings = SoundInfo {
-            event: SoundEvent::Event,
-            in_sample: None,
-            out_sample: None,
-            num_loops: native_num_loops(segment.loop_count)?,
-            envelope: None,
-        };
-        let instance = self
-            .mixer
-            .start_sound_with_playback_rate(segment.sound, &settings, segment.playback_rate)
-            .map_err(|error| ScriptError::new(format!("Failed to start MP3: {error}")))?;
-        self.mixer.set_sound_transform(instance, segment.transform);
-        Ok(NativeSoundInstance {
-            _sound: segment.sound,
-            instance,
-        })
-    }
-
-    fn play_member(
-        &mut self,
-        channel: usize,
-        sound_member: SoundMember,
-        loop_count: i32,
-        playback_rate: f32,
-        volume: f64,
-        pan: f64,
-    ) -> Result<(), ScriptError> {
-        if channel >= self.active.len() {
-            return Err(ScriptError::new(format!("Invalid sound channel {}", channel + 1)));
-        }
-        let segment = self.register_member(&sound_member, loop_count, playback_rate, volume, pan)?;
-        let next = self.start_registered(segment)?;
-        self.queued[channel].clear();
-        if let Some(previous) = self.active[channel].replace(next) {
-            self.mixer.stop_sound(previous.instance);
-        }
-        Ok(())
-    }
-
-    fn play_queue(
-        &mut self,
-        channel: usize,
-        segments: Vec<(SoundMember, i32, f32)>,
-        volume: f64,
-        pan: f64,
-    ) -> Result<(), ScriptError> {
-        if channel >= self.active.len() {
-            return Err(ScriptError::new(format!("Invalid sound channel {}", channel + 1)));
-        }
-        if segments.is_empty() {
-            return Err(ScriptError::new("native audio queue is empty".to_owned()));
-        }
-        let mut registered = Vec::with_capacity(segments.len());
-        for (member, loop_count, playback_rate) in segments {
-            registered.push(self.register_member(&member, loop_count, playback_rate, volume, pan)?);
-        }
-        let first = registered.remove(0);
-        let next = self.start_registered(first)?;
-        self.queued[channel] = registered.into_iter().collect();
-        if let Some(previous) = self.active[channel].replace(next) {
-            self.mixer.stop_sound(previous.instance);
-        }
-        Ok(())
-    }
-
-    fn stop_channel(&mut self, channel: usize) -> Result<(), ScriptError> {
-        let Some(active) = self.active.get_mut(channel) else {
-            return Err(ScriptError::new(format!("Invalid sound channel {}", channel + 1)));
-        };
-        if let Some(previous) = active.take() {
-            self.mixer.stop_sound(previous.instance);
-        }
-        self.queued[channel].clear();
-        Ok(())
-    }
-
-    fn mix(&mut self, output: &mut [f32]) -> Result<(), ScriptError> {
-        self.mixer.mix(output);
-        for channel in 0..self.active.len() {
-            let finished = self.active[channel]
-                .as_ref()
-                .is_some_and(|active| self.mixer.get_sound_position(active.instance).is_none());
-            if finished {
-                self.active[channel] = None;
-                if let Some(next) = self.queued[channel].pop_front() {
-                    self.active[channel] = Some(self.start_registered(next)?);
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn stop_all(&mut self) {
-        self.mixer.stop_all_sounds();
-        for active in &mut self.active {
-            *active = None;
-        }
-        for queued in &mut self.queued {
-            queued.clear();
-        }
-    }
-
-}
+pub(crate) use crate::player::native_audio::{
+    NativeAudioState, native_num_loops, native_sound_transform,
+};
 
 impl SoundManager {
     /// Empty replacement used while an owner-bound frame tick temporarily
@@ -1587,8 +1350,14 @@ impl SoundManager {
         volume: f64,
         pan: f64,
     ) -> Result<(), ScriptError> {
-        self.native_audio
-            .play_member(channel, sound_member, loop_count, playback_rate, volume, pan)
+        self.native_audio.play_member(
+            channel,
+            sound_member,
+            loop_count,
+            playback_rate,
+            volume,
+            pan,
+        )
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1608,8 +1377,27 @@ impl SoundManager {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn native_sound_busy(&self, channel: usize) -> Result<bool, ScriptError> {
+        self.native_audio.is_busy(channel)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn native_mix(&mut self, output: &mut [f32]) -> Result<(), ScriptError> {
-        self.native_audio.mix(output)
+        self.native_audio.mix(output)?;
+        for (channel, (active, queued)) in self
+            .channels
+            .iter()
+            .zip(self.native_audio.activity_snapshot()?)
+        {
+            let mut channel = channel.borrow_mut();
+            if active {
+                channel.status = SoundStatus::Playing;
+            } else if queued == 0 {
+                channel.status = SoundStatus::Idle;
+                channel.current_segment_index = None;
+            }
+        }
+        Ok(())
     }
 
     pub fn audio_context(&self) -> Option<Arc<AudioContext>> {
@@ -5336,6 +5124,7 @@ mod rate_shift_tests {
         assert_eq!(channel.source_position_ms(2.0), 1250.0);
         assert_eq!(channel.source_position_ms(-1.0), 250.0);
     }
+
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -5355,6 +5144,8 @@ mod native_audio_tests {
     use crate::player::symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable};
     use crate::player::DirPlayer;
     use async_std::channel;
+    use rodio::source::UniformSourceIterator;
+    use rodio::{ChannelCount, Decoder, SampleRate, Source};
     use sha2::{Digest, Sha256};
 
     // This is the 3397-byte s.win_flag member extracted from the recovered DCR
@@ -5373,6 +5164,36 @@ mod native_audio_tests {
         include_bytes!("../../../../tests/fixtures/spybot_s_select_dcr_media.bin");
     const DCR_SELECT_MEDIA_SHA256: &str =
         "833077dc5f504e1177f5627f92ef94a6284a56575b14c7e5c30071867e698d72";
+    const DCR_BEGIN: &[u8] =
+        include_bytes!("../../../../tests/fixtures/spybot_s_begin_dcr_trimmed.mp3");
+    const DCR_SELECT: &[u8] =
+        include_bytes!("../../../../tests/fixtures/spybot_s_select_dcr_trimmed.mp3");
+    const DCR_MUSIC: &[u8] =
+        include_bytes!("../../../../tests/fixtures/spybot_m_v1_dcr_trimmed.mp3");
+    const DCR_WIN_FLAG: &[u8] =
+        include_bytes!("../../../../tests/fixtures/spybot_s_win_flag_dcr_trimmed.mp3");
+
+    fn decode_bevy_rodio(bytes: &[u8]) -> Vec<f32> {
+        let decoder = Decoder::builder()
+            .with_byte_len(bytes.len() as u64)
+            .with_data(std::io::Cursor::new(bytes.to_vec()))
+            .build()
+            .expect("DCR MP3 fixture should decode");
+        UniformSourceIterator::new(
+            decoder,
+            ChannelCount::new(2).unwrap(),
+            SampleRate::new(48_000).unwrap(),
+        )
+        .collect()
+    }
+
+    fn pcm_sha256(samples: &[f32]) -> String {
+        let mut hasher = Sha256::new();
+        for sample in samples {
+            hasher.update(sample.to_le_bytes());
+        }
+        format!("{:x}", hasher.finalize())
+    }
 
     fn fixture_member(bytes: &[u8]) -> SoundMember {
         let media = MediaChunk {
@@ -5444,6 +5265,10 @@ mod native_audio_tests {
             cue_point_times: Vec::new(),
             cue_point_names: Vec::new(),
         }
+    }
+
+    fn dcr_music_fixture_member() -> SoundMember {
+        fixture_member(DCR_MUSIC)
     }
 
     fn call_fixture_player() -> (
@@ -5545,6 +5370,40 @@ mod native_audio_tests {
         let mut stopped = vec![0.0; 8_192];
         player.sound_manager.native_mix(&mut stopped).unwrap();
         assert!(stopped.iter().all(|sample| *sample == 0.0));
+    }
+
+    #[test]
+    fn native_mix_updates_sound_busy_when_the_queue_reaches_idle() {
+        let (mut player, mut symbols, channel, member) = call_fixture_player();
+        SoundChannelDatumHandlers::call(
+            &mut player,
+            &symbols,
+            &channel,
+            Symbol::builtin(BuiltInSymbol::Queue),
+            &vec![member],
+        )
+        .unwrap();
+        SoundChannelDatumHandlers::call(
+            &mut player,
+            &symbols,
+            &channel,
+            Symbol::builtin(BuiltInSymbol::Play),
+            &vec![],
+        )
+        .unwrap();
+        assert_eq!(
+            player.sound_manager.get_channel(0).unwrap().borrow().status,
+            SoundStatus::Playing
+        );
+
+        for _ in 0..64 {
+            let mut output = vec![0.0; 4096 * 2];
+            player.sound_manager.native_mix(&mut output).unwrap();
+            if player.sound_manager.get_channel(0).unwrap().borrow().status == SoundStatus::Idle {
+                return;
+            }
+        }
+        panic!("native soundBusy state did not return to idle");
     }
 
     #[test]
@@ -5664,16 +5523,17 @@ mod native_audio_tests {
     }
 
     #[test]
-    fn native_transform_matches_mono_equal_power_and_director_units() {
+    fn native_transform_matches_mono_default_and_director_units() {
         let center = native_sound_transform(1, 255.0, 0.0);
-        let center_gain = 2.0_f32.sqrt().recip();
-        assert!((center.left_to_left - center_gain).abs() < 1e-6);
-        assert!((center.left_to_right - center_gain).abs() < 1e-6);
+        assert_eq!(center.left_to_left, 1.0);
+        assert_eq!(center.left_to_right, 0.0);
         assert_eq!(center.right_to_left, 0.0);
-        assert_eq!(center.right_to_right, 0.0);
+        assert_eq!(center.right_to_right, 1.0);
 
         let quiet = native_sound_transform(1, 128.0, 0.0);
-        assert!((quiet.left_to_left - center_gain * (128.0 / 255.0)).abs() < 1e-6);
+        assert!((quiet.left_to_left - (128.0 / 255.0)).abs() < 1e-6);
+        assert_eq!(quiet.left_to_right, 0.0);
+        assert_eq!(quiet.right_to_right, 128.0 / 255.0);
         let left = native_sound_transform(1, 255.0, -100.0);
         let right = native_sound_transform(1, 255.0, 100.0);
         assert!((left.left_to_left - 1.0).abs() < 1e-6);
@@ -5740,6 +5600,77 @@ mod native_audio_tests {
         output
     }
 
+    fn render_bevy_title_pair(total_frames: usize) -> Vec<f32> {
+        let (mixer, mut output) = rodio::mixer::mixer(
+            ChannelCount::new(2).unwrap(),
+            SampleRate::new(48_000).unwrap(),
+        );
+        let title = Decoder::builder()
+            .with_byte_len(DCR_WIN_FLAG.len() as u64)
+            .with_data(std::io::Cursor::new(DCR_WIN_FLAG.to_vec()))
+            .build()
+            .expect("DCR title should decode");
+        let music = Decoder::builder()
+            .with_byte_len(DCR_MUSIC.len() as u64)
+            .with_data(std::io::Cursor::new(DCR_MUSIC.to_vec()))
+            .build()
+            .expect("DCR music should decode");
+        // The source admits both entities at the exact 50 ms boundary. The
+        // mixer starts with no sources, so the preceding interval is silence.
+        for _ in 0..2_400 {
+            assert_eq!(output.next().unwrap_or(0.0), 0.0);
+            assert_eq!(output.next().unwrap_or(0.0), 0.0);
+        }
+        mixer.add(UniformSourceIterator::new(
+            title,
+            ChannelCount::new(2).unwrap(),
+            SampleRate::new(48_000).unwrap(),
+        ));
+        mixer.add(UniformSourceIterator::new(
+            music,
+            ChannelCount::new(2).unwrap(),
+            SampleRate::new(48_000).unwrap(),
+        ));
+        let mut samples = vec![0.0; 2_400 * 2];
+        samples.extend(
+            (0..(total_frames - 2_400) * 2)
+                .map(|_| output.next().unwrap_or(0.0))
+                .collect::<Vec<_>>(),
+        );
+        samples
+    }
+    #[test]
+    fn integrated_native_title_pair_matches_bevy_operands() {
+        let mut native = NativeAudioState::new(2);
+        let mut prefix = vec![0.0; 2_400 * 2];
+        native.mix(&mut prefix).expect("initial native silence");
+        native
+            .play_queue(0, vec![(dcr_fixture_member(), 1, 1.0)], 255.0, 0.0)
+            .expect("title should queue");
+        native
+            .play_queue(1, vec![(dcr_music_fixture_member(), 1, 1.0)], 255.0, 0.0)
+            .expect("music should queue");
+        let mut native_pcm = prefix;
+        let mut tail = vec![0.0; (117_600 - 2_400) * 2];
+        native.mix(&mut tail).expect("native pair should mix");
+        native_pcm.extend(tail);
+        let bevy_pcm = render_bevy_title_pair(117_600);
+        let first_diff = native_pcm
+            .iter()
+            .zip(&bevy_pcm)
+            .position(|(native, bevy)| native.to_bits() != bevy.to_bits());
+        if let Some(sample) = first_diff {
+            panic!(
+                "first integrated mismatch at frame {} channel {}: native={:?} bevy={:?}",
+                sample / 2,
+                sample % 2,
+                native_pcm[sample],
+                bevy_pcm[sample]
+            );
+        }
+        assert_eq!(native_pcm, bevy_pcm);
+    }
+
     #[test]
     fn actual_dcr_cue_decodes_to_deterministic_stereo_output() {
         let digest = Sha256::digest(WIN_FLAG);
@@ -5751,8 +5682,55 @@ mod native_audio_tests {
         let first_nonzero = output
             .chunks_exact(2)
             .position(|frame| frame[0] != 0.0 || frame[1] != 0.0);
-        assert_eq!(first_nonzero, Some(2_706));
+        assert_eq!(first_nonzero, Some(1));
         assert_eq!(output, render(&[48_000]));
+    }
+
+    #[test]
+    fn exact_dcr_cues_match_the_bevy_rodio_48khz_reference() {
+        let cases = [
+            (
+                "s.win_flag",
+                DCR_WIN_FLAG,
+                84_574,
+                72_779,
+                "55db969870acca398973aece5d01625a6f5ed336c8ba6b2cfd6e99c250af44c7",
+            ),
+            (
+                "s.begin",
+                DCR_BEGIN,
+                53_506,
+                44_589,
+                "cd08af7c593c09b27741b55eedf8e061813751395045447b8acdc45da3690281",
+            ),
+            (
+                "s.select",
+                DCR_SELECT,
+                34_520,
+                23_877,
+                "5d98564a7d0c9b228f3d0d8b0ee9aed3953b0781586fbbd4298cc52813045dce",
+            ),
+            (
+                "m.v1",
+                DCR_MUSIC,
+                436_678,
+                427_761,
+                "f19e1df98f0754cbebe6eaa3b990f4ea44264b557961b7df7e6c56beabc0b626",
+            ),
+        ];
+        for (name, bytes, expected_frames, expected_last_active, expected_sha) in cases {
+            let pcm = decode_bevy_rodio(bytes);
+            assert_eq!(pcm.len(), expected_frames * 2, "{name} frame count");
+            assert_eq!(pcm_sha256(&pcm), expected_sha, "{name} PCM hash");
+            let last_active = pcm
+                .chunks_exact(2)
+                .rposition(|frame| frame.iter().any(|sample| *sample != 0.0))
+                .expect("cue should contain nonzero samples");
+            assert_eq!(
+                last_active, expected_last_active,
+                "{name} last active frame"
+            );
+        }
     }
 
     #[test]
@@ -5768,12 +5746,14 @@ mod native_audio_tests {
             .play_queue(0, vec![(member, 1, 1.0)], 255.0, 0.0)
             .expect("prefixed DCR MP3 should queue and play");
         let mut output = vec![0.0; 48_000 * 2];
-        state.mix(&mut output).expect("native mixer should decode DCR MP3");
+        state
+            .mix(&mut output)
+            .expect("native mixer should decode DCR MP3");
         assert!(output.iter().any(|sample| *sample != 0.0));
         let first_nonzero = output
             .chunks_exact(2)
             .position(|frame| frame[0] != 0.0 || frame[1] != 0.0);
-        assert!(first_nonzero.is_some_and(|frame| frame >= 2_706));
+        assert_eq!(first_nonzero, Some(1));
     }
 
     fn render_dcr_select(parts: &[usize], playback_rate: f32) -> Vec<f32> {
@@ -5836,6 +5816,37 @@ mod native_audio_tests {
         let split = render_dcr_select(&[24_000, 24_000], playback_rate);
         assert_eq!(combined, split);
         assert!(combined.iter().any(|sample| *sample != 0.0));
+
+        let decoder = Decoder::builder()
+            .with_byte_len(DCR_SELECT.len() as u64)
+            .with_data(std::io::Cursor::new(DCR_SELECT.to_vec()))
+            .build()
+            .expect("DCR s.select should decode");
+        let mut bevy = UniformSourceIterator::new(
+            decoder.amplify(1.0).speed(playback_rate),
+            ChannelCount::new(2).unwrap(),
+            SampleRate::new(48_000).unwrap(),
+        )
+        .take(48_000 * 2)
+        .collect::<Vec<f32>>();
+        bevy.resize(48_000 * 2, 0.0);
+        assert_eq!(combined.len(), 48_000 * 2);
+        assert_eq!(bevy.len(), combined.len());
+        if let Some(sample) = combined
+            .iter()
+            .zip(&bevy)
+            .position(|(native, bevy)| native.to_bits() != bevy.to_bits())
+        {
+            panic!(
+                "s.select rate -2 first Bevy mismatch at frame {} channel {}: native={:?} bevy={:?}",
+                sample / 2,
+                sample % 2,
+                combined[sample],
+                bevy[sample]
+            );
+        }
+        assert_eq!(combined, bevy);
+        println!("s.select rate -2 fixed-48000 pcm sha256={}", pcm_sha256(&combined));
     }
 
     #[test]
@@ -5845,15 +5856,15 @@ mod native_audio_tests {
             render_dcr_select_until_idle(1.0);
         let (slow_output, slow_frames, slow_last_nonzero) =
             render_dcr_select_until_idle(playback_rate);
-        assert_eq!(rate_one_frames, 34_561);
-        assert_eq!(rate_one_last_nonzero, 22_903);
-        assert_eq!(slow_frames, 38_793);
-        assert_eq!(slow_last_nonzero, 25_707);
+        assert_eq!(rate_one_frames, 34_521);
+        assert_eq!(rate_one_last_nonzero, 23_877);
+        assert_eq!(slow_frames, 38_761);
+        assert_eq!(slow_last_nonzero, 26_810);
         assert_eq!(rate_one_output.len(), rate_one_frames * 2);
         assert_eq!(slow_output.len(), slow_frames * 2);
         assert!(slow_frames > rate_one_frames);
         assert!(slow_last_nonzero > rate_one_last_nonzero);
-        assert!(rate_one_last_nonzero >= 2_706);
+        assert!(rate_one_last_nonzero > 0);
         assert!(slow_last_nonzero >= rate_one_last_nonzero);
 
         let mut state = NativeAudioState::new(1);
@@ -5867,7 +5878,9 @@ mod native_audio_tests {
             .expect("DCR s.select should queue and play");
         state.stop_all();
         let mut output = [0.0; 2];
-        state.mix(&mut output).expect("stopped mixer should remain usable");
+        state
+            .mix(&mut output)
+            .expect("stopped mixer should remain usable");
         assert_eq!(output, [0.0; 2]);
         assert!(state.active[0].is_none());
         assert!(state.queued[0].is_empty());

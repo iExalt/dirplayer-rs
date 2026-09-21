@@ -2564,6 +2564,15 @@ impl TypeHandlers {
             
             // Convert to 0-based index
             let channel_idx = (channel_num - 1) as usize;
+
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let is_busy = player.sound_manager.native_sound_busy(channel_idx)?;
+                return Ok(player.alloc_datum(Datum::Int(if is_busy { 1 } else { 0 })));
+            }
+
+            #[cfg(target_arch = "wasm32")]
+            {
             
             // Get the channel directly from sound manager
             let channel_rc = player.sound_manager.get_channel(channel_idx)
@@ -2648,6 +2657,7 @@ impl TypeHandlers {
             }
 
             Ok(player.alloc_datum(Datum::Int(if is_busy { 1 } else { 0 })))
+            }
         })
     }
 }

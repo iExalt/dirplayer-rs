@@ -3405,6 +3405,77 @@ mod ownership_tests {
     }
 
     #[test]
+    fn native_sound_busy_uses_owner_audio_state_through_handler() {
+        let _serial = async_std::task::block_on(crate::player::player_semaphone().lock());
+        let _ambient = AmbientPlayerStateGuard::install(None, 0);
+        let mut session = two_player_session();
+        let fixture = include_bytes!("../../../tests/fixtures/spybot_s_win_flag_dcr_trimmed.mp3");
+
+        let busy_owner_one = session
+            .with_player(1, |mut context| -> Result<crate::player::DatumRef, crate::player::ScriptError> {
+                context.player.sound_manager.native_start_mp3(0, fixture)?;
+                let channel = context.player.alloc_datum(Datum::Int(1));
+                BuiltInHandlerManager::call_handler(
+                    &mut context,
+                    Symbol::builtin(BuiltInSymbol::SoundBusy),
+                    &vec![channel],
+                )
+            })
+            .unwrap()
+            .unwrap();
+        let owner_one_busy = session
+            .with_player(1, |context| context.player.get_datum(&busy_owner_one).int_value())
+            .unwrap()
+            .unwrap();
+        assert_eq!(owner_one_busy, 1);
+
+        let busy_owner_two = session
+            .with_player(2, |mut context| -> Result<crate::player::DatumRef, crate::player::ScriptError> {
+                let channel = context.player.alloc_datum(Datum::Int(1));
+                BuiltInHandlerManager::call_handler(
+                    &mut context,
+                    Symbol::builtin(BuiltInSymbol::SoundBusy),
+                    &vec![channel],
+                )
+            })
+            .unwrap()
+            .unwrap();
+        let owner_two_busy = session
+            .with_player(2, |context| context.player.get_datum(&busy_owner_two).int_value())
+            .unwrap()
+            .unwrap();
+        assert_eq!(owner_two_busy, 0);
+
+        session
+            .with_player(1, |context| -> Result<(), crate::player::ScriptError> {
+                for _ in 0..128 {
+                    let mut output = vec![0.0; 4096 * 2];
+                    context.player.sound_manager.native_mix(&mut output)?;
+                }
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+
+        let idle_owner_one = session
+            .with_player(1, |mut context| -> Result<crate::player::DatumRef, crate::player::ScriptError> {
+                let channel = context.player.alloc_datum(Datum::Int(1));
+                BuiltInHandlerManager::call_handler(
+                    &mut context,
+                    Symbol::builtin(BuiltInSymbol::SoundBusy),
+                    &vec![channel],
+                )
+            })
+            .unwrap()
+            .unwrap();
+        let owner_one_idle = session
+            .with_player(1, |context| context.player.get_datum(&idle_owner_one).int_value())
+            .unwrap()
+            .unwrap();
+        assert_eq!(owner_one_idle, 0);
+    }
+
+    #[test]
     fn explicit_context_routes_sprite_box_transition_and_preload_to_selected_player() {
         let mut session = two_player_session();
         let ignored_foreign = session

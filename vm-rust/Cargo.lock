@@ -3119,6 +3119,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6d43e85498d0bb728f77a88b4313eaf4ed21673f3f8a05c36e835cf6c9c0d066"
 
 [[package]]
+name = "rodio"
+version = "0.22.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d0a536bb79db59098ef71a4dd4246c02eb87b316deceb1b68e0cde7167ec01eb"
+dependencies = [
+ "dasp_sample",
+ "num-rational",
+ "symphonia",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "ruffle_common"
 version = "0.1.0"
 dependencies = [
@@ -3992,6 +4004,7 @@ dependencies = [
  "pest_derive",
  "rand",
  "rgb565",
+ "rodio",
  "ruffle_core",
  "ruffle_render_wgpu",
  "serde",
