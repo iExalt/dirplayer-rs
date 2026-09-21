@@ -100,31 +100,31 @@ Implementation checklist, in dependency order:
   checkpoint before its acceptance runs. Do not disable that guard, stage all
   WIP, discard changes, or silently create a worktree to pass it. If unresolved
   work prevents that checkpoint, report the specific blocked acceptance step.
-- [ ] **S1.1 — Extract explicit lifecycle ownership.** Give the Bevy app a
+- [x] **S1.1 — Extract explicit lifecycle ownership.** Give the Bevy app a
   session-owned non-send player resource and ordered initialization, advancement,
   observation/capture, and teardown systems. Keep synchronous systems with the
   existing per-operation `block_on` boundary; install required state support
   before state initialization. Preserve source executors and generation checks.
   Bevy must not merely call the old worker loop from one opaque system.
-- [ ] **S1.2 — Connect the normal worker protocol.** Keep transport and wire
+- [x] **S1.2 — Connect the normal worker protocol.** Keep transport and wire
   validation at the boundary; route accepted operations to the host in request
   order. Preserve inspection, invocation, existing stage-space pointer input,
   RGBA/PCM capture, and shutdown behavior. Honor arbitrary currently accepted
   advance durations, including zero, the 60-second limit, and overflow rejection.
   App bookkeeping, inspection, input, and capture must not introduce extra source
   ticks. Preserve the existing policy for errors during advancement.
-- [ ] **S1.3 — Run the early fidelity check.** Compare a fresh normal-source menu
+- [x] **S1.3 — Run the early fidelity check.** Compare a fresh normal-source menu
   run against the pre-change control and unchanged childhood-redux worker. Require
   the 11 exact RGBA checkpoints, three exact cumulative PCM comparisons, and
   independent source observations. Record the earliest differing operation if it
   fails. Investigate that boundary before adding more migration work.
-- [ ] **S1.4 — Qualify lifecycle and protocol edges.** Check pre-start requests,
+- [x] **S1.4 — Qualify lifecycle and protocol edges.** Check pre-start requests,
   repeated start, invalid duration, unsupported operations, failed initialization,
   runtime errors, normal shutdown, and EOF/transport-error cleanup. Check exact-once
   callback delivery, stale-generation rejection, and owner/presentation/Flash
   retirement. Add focused tests for real ordering and cleanup risks, using existing
   fixtures; do not create an unrelated runtime/session redesign.
-- [ ] **S1.5 — Accept and integrate.** Make the Bevy host the normal worker path,
+- [x] **S1.5 — Accept and integrate.** Make the Bevy host the normal worker path,
   remove migration-only duplicated lifecycle policy, and run the final campaign
   against that exact candidate. Record what Bevy owns, retained backends, command
   recipes, exit statuses, revisions, outputs, and remaining limitations. A build,
@@ -213,12 +213,11 @@ their own outcome and acceptance decisions; S1 is not a proxy for any of them.
 
 - **Chosen:** production headless Bevy scheduling first; exact menu RGBA, PCM, and
   original source behavior remain mandatory.
-- **Proven:** bounded Bevy scheduling feasibility recorded by the completed probe.
-- **Unproven:** production protocol/lifecycle integration and PCM preservation
-  under that integration; all later migration milestones.
-- **Next action:** S1.0, followed by one scheduling-adapter implementation item
-  with an early full-menu comparison. No second exploratory subsystem probe is
-  needed before starting this route.
+- **Proven:** S1 production scheduling integration, protocol/lifecycle edges,
+  source callbacks/retirement, and exact menu RGBA/PCM under the final campaign.
+- **Unproven:** later migration milestones and the explicit out-of-S1 capabilities.
+- **Next action:** bound S2 input/coordinate adoption using the existing stage-space
+  oracle before implementing a window/input adapter.
 - **Authority:** the user subsequently authorized implementation using
   `subagent-pair-program` and milestone commits/pushes. Assign component-level
   items, retain the stated acceptance criteria, and assess later milestones at
@@ -237,6 +236,36 @@ processes were observed live. See the
 Native builds and the focused callback witness test passed; WASM compatibility
 remains unverified. This baseline qualifies the unchanged production worker as
 the control for S1.1–S1.3; it does not qualify production Bevy scheduling.
+
+### Execution checkpoint: S1 accepted
+
+Production integration is committed as `474991bd`, with lifecycle cleanup and
+edge qualification in `3308f301`. The normal worker constructs one Bevy host;
+separate systems execute initialization, input/invocation, controlled advancement,
+inspection/capture, and retirement. There is no alternate legacy worker route.
+Director/Ruffle execution, rendering, and audio remain source-owned.
+
+The early comparison matched the pre-migration control and childhood-redux for
+all 11 RGBA and three PCM captures. Focused qualification passed four host tests,
+20 worker tests, three stale-generation witnesses, and the explicitly run ignored
+full-DCR production-host test. That test observed one current-owner title callback
+at 2.4 s and owner/presentation/Flash retirement. Native and WASM library builds
+passed. EOF and read/write errors explicitly retire the host while retaining the
+primary transport error.
+
+The final unchanged candidate `3308f301` passed five fresh serial pairs and four
+concurrent pairs, each with 11 exact RGBA and three exact cumulative PCM windows,
+source/input state checks, and complete shutdown/reaping/storage cleanup. Eight
+runner processes were observed live before waiting. Source correctness evidence
+and the existing destination exclusions remain explicit.
+
+- [Early three-way comparison](../../childhood-redux/docs/checkpoints/spybot-native-menu-campaign-20260921/20260921-s1-3-early-candidate-01/serial-0/comparison-summary.json).
+- [Lifecycle, error, and callback evidence](../../childhood-redux/docs/checkpoints/spybot-native-menu-campaign-20260921/20260921-s1-4-edge-proof-01/summary.json).
+- [Final campaign summary and reproduction command](../../childhood-redux/docs/checkpoints/spybot-native-menu-campaign-20260921/20260921-s1-5-final-01/summary.json).
+
+In-process multi-session behavior, simultaneous readiness, physical-display/Retina
+fidelity, and destination gameplay remain unqualified. S1 does not establish
+rendering, audio-backend, font, or asset migration.
 
 ## Completed audit and probe record
 
