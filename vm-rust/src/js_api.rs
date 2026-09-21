@@ -5021,6 +5021,19 @@ impl JsApi {
                 owner: notification.owner.clone(),
                 kind,
             };
+            // A native adapter may be bound before the command loop starts.
+            // Deliver outside the session borrow so the adapter can observe
+            // synchronously without creating a session/ sink borrow cycle.
+            // Unbound or stale adapters fall back to the existing bounded
+            // mailbox and retain its overflow/cancellation contract.
+            let sink = {
+                let runtime = session.borrow();
+                runtime.native_player_notification_sink(player_id, &native.owner)
+            };
+            if let Some(sink) = sink {
+                sink.accept(&native);
+                continue;
+            }
             if let Err(error) = session.borrow_mut().push_native_player_notification(native) {
                 push_error = Some(error);
                 retry_notifications.push(notification);

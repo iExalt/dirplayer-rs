@@ -220,6 +220,16 @@ pub struct NativePlayerNotification {
     pub kind: NativePlayerNotificationKind,
 }
 
+/// Synchronous native adapter for already-owned notification DTOs.  A bound
+/// sink acknowledges delivery by consuming the DTO at the adapter boundary;
+/// an absent or stale weak binding leaves the bounded mailbox as the fallback.
+pub trait NativePlayerNotificationSink {
+    fn accept(&self, notification: &NativePlayerNotification);
+}
+
+pub type NativePlayerNotificationSinkRef = Rc<dyn NativePlayerNotificationSink>;
+pub type NativePlayerNotificationSinkWeak = Weak<dyn NativePlayerNotificationSink>;
+
 /// One bounded native conversion failure retained for inspection.  The
 /// failing notification is consumed; the detached tail remains retryable.
 #[derive(Clone, Debug)]

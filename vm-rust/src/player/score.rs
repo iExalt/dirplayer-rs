@@ -102,6 +102,7 @@ extern "C" {
     /// keep playing — required by mello's Fire/Marshmello which play
     /// looping animations under each label) use `dirplayer_ruffleGoToFrame`.
     #[wasm_bindgen(js_name = "dirplayer_ruffleGoToFrameAndStop")]
+    #[cfg(target_arch = "wasm32")]
     fn ruffle_goto_frame_and_stop(sprite_num: i32, frame_or_label: &str);
     /// Classify what's under a sprite-local point in the SWF, mirroring
     /// Director's Flash `sprite.hitTest()`: 0 = #background, 1 = #normal,
@@ -4943,21 +4944,27 @@ pub fn sprite_set_prop(
                 return Ok(());
             }
             let frame_or_label = value.string_value(&*symbols)?;
-            let has_member = player
+            let member_ref = player
                 .movie
                 .score
                 .get_sprite(sprite_id)
-                .and_then(|s| s.member.as_ref().map(|_| ()))
-                .is_some();
-            if has_member {
+                .and_then(|sprite| sprite.member.clone());
+            if member_ref.is_some() {
                 // Record the asserted numeric frame on the SPRITE so it survives
                 // a member swap and re-projects onto a freshly-created Ruffle
                 // instance (StoryScramble poster tiles / bogeyman pre-swap
                 // frame). Non-numeric (label) targets don't set it.
                 if let Ok(n) = frame_or_label.parse::<i32>() {
                     player.movie.score.get_sprite_mut(sprite_id).flash_asserted_frame = Some(n);
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if player.flash_host_route == crate::player::FlashHostRoute::LocalOwned {
+                        player.queue_flash_seek(sprite_id, n);
+                    }
                 }
-                ruffle_goto_frame_and_stop(sprite_id as i32, &frame_or_label);
+                #[cfg(target_arch = "wasm32")]
+                if player.flash_host_route == crate::player::FlashHostRoute::LegacySynthetic {
+                    ruffle_goto_frame_and_stop(sprite_id as i32, &frame_or_label);
+                }
             }
             Ok(())
         }

@@ -441,8 +441,14 @@ impl MovieHandlers {
 
     pub fn get_pref(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         let pref_name = Self::checked_datum(runtime, &args[0])?.string_value(runtime.symbols)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(value) = runtime.player.native_preference(&pref_name).map(str::to_owned) {
+            return Ok(runtime.player.alloc_datum(Datum::String(value)));
+        }
+        #[cfg(target_arch = "wasm32")]
         let storage = web_sys::window()
             .and_then(|w| w.local_storage().ok().flatten());
+        #[cfg(target_arch = "wasm32")]
         if let Some(storage) = storage {
             let key = format!("dirplayer_pref_{}", pref_name);
             if let Ok(Some(value)) = storage.get_item(&key) {
@@ -455,8 +461,17 @@ impl MovieHandlers {
     pub fn set_pref(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         let pref_name = Self::checked_datum(runtime, &args[0])?.string_value(runtime.symbols)?;
         let pref_value = Self::checked_datum(runtime, &args[1])?.string_value(runtime.symbols)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            runtime
+                .player
+                .set_native_preference(pref_name, pref_value);
+            return Ok(DatumRef::Void);
+        }
+        #[cfg(target_arch = "wasm32")]
         let storage = web_sys::window()
             .and_then(|w| w.local_storage().ok().flatten());
+        #[cfg(target_arch = "wasm32")]
         if let Some(storage) = storage {
             let key = format!("dirplayer_pref_{}", pref_name);
             let _ = storage.set_item(&key, &pref_value);
@@ -926,6 +941,10 @@ async fn execute_go_owned(
         if frame == current {
             context.player.go_same_frame = true;
         } else {
+            // A later different-frame Go supersedes a retained same-frame
+            // marker from an earlier callback; do not let the canonical
+            // boundary consume the stale marker and discard this target.
+            context.player.go_same_frame = false;
             context.player.next_frame = Some(frame);
             context.player.has_frame_changed_in_go = true;
             context.player.go_direction = if frame > current { 2 } else { 1 };

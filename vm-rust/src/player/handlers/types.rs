@@ -2550,8 +2550,11 @@ impl TypeHandlers {
         })
     }
 
-    pub fn sound_busy(args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {       
-        reserve_player_mut(|player| {
+    pub fn sound_busy(
+        runtime: &mut ExecutionContext<'_>,
+        args: &Vec<DatumRef>,
+    ) -> Result<DatumRef, ScriptError> {
+        runtime.with_player(|player| {
             if args.is_empty() {
                 return Err(ScriptError::new("soundBusy requires a channel number".to_string()));
             }

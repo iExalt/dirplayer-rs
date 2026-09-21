@@ -1034,8 +1034,8 @@ impl BuiltInHandlerManager {
             .display(&name)
             .map_err(|_| crate::player::symbols::symbol::SymbolError::Foreign)?;
         match name.into_builtin() {
-            Some(BuiltInSymbol::CastLib) => CastHandlers::cast_lib(args),
-            Some(BuiltInSymbol::FindEmpty) => CastHandlers::find_empty(args),
+            Some(BuiltInSymbol::CastLib) => CastHandlers::cast_lib(runtime, args),
+            Some(BuiltInSymbol::FindEmpty) => CastHandlers::find_empty(runtime, args),
             Some(BuiltInSymbol::PreloadNetThing) => NetHandlers::preload_net_thing(runtime.player, runtime.symbols, args),
             Some(BuiltInSymbol::NetDone) => NetHandlers::net_done(runtime.player, runtime.symbols, args),
             Some(BuiltInSymbol::NetAbort) => NetHandlers::net_abort(runtime.player, runtime.symbols, args),
@@ -1694,7 +1694,7 @@ impl BuiltInHandlerManager {
             Some(BuiltInSymbol::Label) => Self::label(runtime, args),
             Some(BuiltInSymbol::Alert) => Self::alert(runtime, args),
             Some(BuiltInSymbol::Objectp) => Self::object_p(runtime, args),
-            Some(BuiltInSymbol::SoundBusy) => TypeHandlers::sound_busy(args),
+            Some(BuiltInSymbol::SoundBusy) => TypeHandlers::sound_busy(runtime, args),
             // `stopSound` (Director 11.5 Scripting Dictionary p.872) —
             // legacy command that stops the sound currently playing on
             // sound channel 1 (the implicit puppetSound channel). Fugue
@@ -3117,12 +3117,24 @@ fn wraps_in_line_up_to(
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod ownership_tests {
     use super::BuiltInHandlerManager;
+    use crate::director::chunks::ChunkContainer;
+    use crate::director::chunks::config::ConfigChunk;
+    use crate::director::file::DirectorFile;
     use crate::director::chunks::score::FrameLabel;
     use crate::director::lingo::datum::Datum;
+    use crate::player::cast_lib::{CastLib, CastMemberRef};
+    use crate::player::handlers::datum_handlers::player::PlayerDatumHandlers;
+    use crate::player::handlers::datum_handlers::sound_channel::SoundStatus;
     use crate::player::session::RuntimeSession;
     use crate::player::symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolOwner};
     use crate::player::ScriptErrorCode;
     use async_std::channel;
+    use binary_reader::Endian;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::rc::Rc;
+    use url::Url;
 
     fn two_player_session() -> RuntimeSession {
         let mut session = RuntimeSession::new(SymbolOwner {
@@ -3134,6 +3146,262 @@ mod ownership_tests {
         let (tx, _rx) = channel::unbounded();
         assert!(session.add_player(2, tx));
         session
+    }
+
+    struct AmbientPlayerStateGuard {
+        previous_handle: Option<Rc<RefCell<RuntimeSession>>>,
+        previous_active_player_id: usize,
+    }
+
+    impl AmbientPlayerStateGuard {
+        fn install(
+            handle: Option<Rc<RefCell<RuntimeSession>>>,
+            active_player_id: usize,
+        ) -> Self {
+            let previous_handle = crate::player::PLAYER_SESSION_HANDLE.with(|slot| {
+                slot.replace(handle)
+            });
+            let previous_active_player_id = unsafe {
+                let previous = crate::player::ACTIVE_PLAYER_ID;
+                crate::player::ACTIVE_PLAYER_ID = active_player_id;
+                previous
+            };
+            Self {
+                previous_handle,
+                previous_active_player_id,
+            }
+        }
+    }
+
+    impl Drop for AmbientPlayerStateGuard {
+        fn drop(&mut self) {
+            crate::player::PLAYER_SESSION_HANDLE.with(|slot| {
+                slot.replace(self.previous_handle.take());
+            });
+            unsafe {
+                crate::player::ACTIVE_PLAYER_ID = self.previous_active_player_id;
+            }
+        }
+    }
+
+    fn minimal_movie_file(min_member: u16, max_member: u16) -> DirectorFile {
+        DirectorFile {
+            base_path: Url::parse("file:///tmp/").unwrap(),
+            file_name: "explicit-context-test.dcr".to_owned(),
+            endian: Endian::Big,
+            after_burned: false,
+            version: 500,
+            cast_entries: Vec::new(),
+            casts: Vec::new(),
+            config: ConfigChunk {
+                len: 0,
+                file_version: 0,
+                movie_top: 0,
+                movie_left: 0,
+                movie_bottom: 0,
+                movie_right: 0,
+                min_member,
+                max_member,
+                field9: 0,
+                field10: 0,
+                pre_d77field11: 0,
+                d7_stage_color_g: 0,
+                d7_stage_color_b: 0,
+                comment_font: 0,
+                comment_size: 0,
+                comment_style: 0,
+                pre_d7_stage_color: 0,
+                d7_stage_color_is_rgb: 0,
+                d7_stage_color_r: 0,
+                bit_depth: 0,
+                field17: 0,
+                field18: 0,
+                field19: 0,
+                director_version: 0,
+                field21: 0,
+                field22: 0,
+                field23: 0,
+                field24: 0,
+                field25: 0,
+                field26: 0,
+                frame_rate: 0,
+                platform: 0,
+                protection: 0,
+                field29: 0,
+                checksum: 0,
+                remnants: Vec::new(),
+            },
+            score: None,
+            tile_list: None,
+            frame_labels: None,
+            score_order: None,
+            media: None,
+            xmedia: None,
+            cast_info: None,
+            effect: None,
+            thum: None,
+            xtra_list: None,
+            key_table: None,
+            chunk_container: ChunkContainer {
+                deserialized_chunks: HashMap::new(),
+                chunk_info: HashMap::new(),
+                cached_chunk_views: HashMap::new(),
+            },
+            font_table: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn explicit_context_routes_cast_handlers_to_selected_owner() {
+        let mut session = two_player_session();
+        session
+            .with_player(1, |context| {
+                context
+                    .player
+                    .movie
+                    .cast_manager
+                    .casts
+                    .push(CastLib::test_external(1, 0));
+            })
+            .unwrap();
+
+        session
+            .with_player(2, |mut context| -> Result<(), crate::player::ScriptError> {
+                context
+                    .player
+                    .movie
+                    .cast_manager
+                    .casts
+                    .push(CastLib::test_external(1, 0));
+                context
+                    .player
+                    .movie
+                    .cast_manager
+                    .casts
+                    .push(CastLib::test_external(2, 0));
+                context.player.movie.file = Some(minimal_movie_file(1, 2));
+
+                let cast_number = context.player.alloc_datum(Datum::Int(2));
+                let cast_lib = BuiltInHandlerManager::call_handler(
+                    &mut context,
+                    Symbol::builtin(BuiltInSymbol::CastLib),
+                    &vec![cast_number],
+                )?;
+                assert!(cast_lib
+                    .owner()
+                    .is_some_and(|owner| owner.same_identity(&context.player.owner)));
+                assert!(matches!(context.player.get_datum(&cast_lib), Datum::CastLib(2)));
+
+                let member = context.player.alloc_datum(Datum::CastMember(CastMemberRef {
+                    cast_lib: 2,
+                    cast_member: 1,
+                }));
+                let empty = BuiltInHandlerManager::call_handler(
+                    &mut context,
+                    Symbol::builtin(BuiltInSymbol::FindEmpty),
+                    &vec![member],
+                )?;
+                assert!(empty
+                    .owner()
+                    .is_some_and(|owner| owner.same_identity(&context.player.owner)));
+                assert!(matches!(context.player.get_datum(&empty), Datum::Int(1)));
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+    }
+
+    #[test]
+    fn explicit_context_routes_sound_busy_without_ambient_player() {
+        let _serial = async_std::task::block_on(crate::player::player_semaphone().lock());
+        let _ambient = AmbientPlayerStateGuard::install(None, 0);
+        let mut session = two_player_session();
+
+        session
+            .with_player(2, |mut context| -> Result<(), crate::player::ScriptError> {
+                let channel = context.player.alloc_datum(Datum::Int(1));
+                let result = BuiltInHandlerManager::call_handler(
+                    &mut context,
+                    Symbol::builtin(BuiltInSymbol::SoundBusy),
+                    &vec![channel],
+                )?;
+                assert!(result
+                    .owner()
+                    .is_some_and(|owner| owner.same_identity(&context.player.owner)));
+                assert!(matches!(context.player.get_datum(&result), Datum::Int(0)));
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+    }
+
+    #[test]
+    fn explicit_context_sound_busy_rejects_foreign_ambient_result_and_argument() {
+        let _serial = async_std::task::block_on(crate::player::player_semaphone().lock());
+        let handle = two_player_session().into_handle();
+        let _ambient = AmbientPlayerStateGuard::install(Some(handle.clone()), 1);
+
+        handle
+            .borrow_mut()
+            .with_player(1, |context| {
+                context
+                    .player
+                    .sound_manager
+                    .get_channel(0)
+                    .expect("test player has channel 1")
+                    .borrow_mut()
+                    .status = SoundStatus::Loading;
+            })
+            .unwrap();
+
+        let result = handle
+            .borrow_mut()
+            .with_player(2, |mut context| -> Result<crate::player::DatumRef, crate::player::ScriptError> {
+                let channel = context.player.alloc_datum(Datum::Int(1));
+                BuiltInHandlerManager::call_handler(
+                    &mut context,
+                    Symbol::builtin(BuiltInSymbol::SoundBusy),
+                    &vec![channel],
+                )
+            })
+            .unwrap()
+            .unwrap();
+
+        let (owner, value) = handle
+            .borrow_mut()
+            .with_player(2, |context| {
+                (
+                    context.player.owner.clone(),
+                    matches!(context.player.get_datum(&result), Datum::Int(0)),
+                )
+            })
+            .unwrap();
+        assert!(result
+            .owner()
+            .is_some_and(|result_owner| result_owner.same_identity(&owner)));
+        assert!(value);
+
+        let ambient_status = handle
+            .borrow_mut()
+            .with_player(1, |context| {
+                context
+                    .player
+                    .sound_manager
+                    .get_channel(0)
+                    .expect("test player has channel 1")
+                    .borrow()
+                    .status
+                    .clone()
+            })
+            .unwrap();
+        assert_eq!(ambient_status, SoundStatus::Loading);
+
+        let rejected_by_ambient_allocator = catch_unwind(AssertUnwindSafe(|| {
+            let _ = handle.borrow_mut().with_player(1, |context| {
+                let _ = context.player.get_datum(&result);
+            });
+        }));
+        assert!(rejected_by_ambient_allocator.is_err());
     }
 
     #[test]
@@ -3357,5 +3625,115 @@ mod ownership_tests {
             })
             .unwrap()
             .unwrap();
+    }
+
+    #[test]
+    fn native_preferences_are_shared_between_forms_and_owner_scoped() {
+        let mut session = two_player_session();
+        let key = "spybot.preference";
+
+        let missing = session
+            .with_player(1, |mut context| -> Result<Datum, crate::player::ScriptError> {
+                let key_ref = context.player.alloc_datum(Datum::String(key.to_owned()));
+                let result = BuiltInHandlerManager::call_handler(
+                    &mut context,
+                    Symbol::builtin(BuiltInSymbol::GetPref),
+                    &vec![key_ref],
+                )?;
+                Ok(context.player.get_datum(&result).clone())
+            })
+            .unwrap()
+            .unwrap();
+        assert!(matches!(missing, Datum::Void));
+
+        session
+            .with_player(1, |mut context| -> Result<_, crate::player::ScriptError> {
+                let key_ref = context.player.alloc_datum(Datum::String(key.to_owned()));
+                let value_ref = context
+                    .player
+                    .alloc_datum(Datum::String("global-value".to_owned()));
+                BuiltInHandlerManager::call_handler(
+                    &mut context,
+                    Symbol::builtin(BuiltInSymbol::SetPref),
+                    &vec![key_ref, value_ref],
+                )
+            })
+            .unwrap()
+            .unwrap();
+
+        let player_value = session
+            .with_player(1, |mut context| -> Result<Datum, crate::player::ScriptError> {
+                let key_ref = context.player.alloc_datum(Datum::String(key.to_owned()));
+                let result = PlayerDatumHandlers::call(
+                    &mut context,
+                    Symbol::builtin(BuiltInSymbol::GetPref),
+                    &vec![key_ref],
+                )?;
+                Ok(context.player.get_datum(&result).clone())
+            })
+            .unwrap()
+            .unwrap();
+        assert!(matches!(player_value, Datum::String(value) if value == "global-value"));
+
+        session
+            .with_player(1, |mut context| -> Result<_, crate::player::ScriptError> {
+                let key_ref = context.player.alloc_datum(Datum::String(key.to_owned()));
+                let value_ref = context
+                    .player
+                    .alloc_datum(Datum::String("player-value".to_owned()));
+                PlayerDatumHandlers::call(
+                    &mut context,
+                    Symbol::builtin(BuiltInSymbol::SetPref),
+                    &vec![key_ref, value_ref],
+                )
+            })
+            .unwrap()
+            .unwrap();
+
+        let global_value = session
+            .with_player(1, |mut context| -> Result<Datum, crate::player::ScriptError> {
+                let key_ref = context.player.alloc_datum(Datum::String(key.to_owned()));
+                let result = BuiltInHandlerManager::call_handler(
+                    &mut context,
+                    Symbol::builtin(BuiltInSymbol::GetPref),
+                    &vec![key_ref],
+                )?;
+                Ok(context.player.get_datum(&result).clone())
+            })
+            .unwrap()
+            .unwrap();
+        assert!(matches!(global_value, Datum::String(value) if value == "player-value"));
+
+        let other_owner_value = session
+            .with_player(2, |mut context| -> Result<Datum, crate::player::ScriptError> {
+                let key_ref = context.player.alloc_datum(Datum::String(key.to_owned()));
+                let result = PlayerDatumHandlers::call(
+                    &mut context,
+                    Symbol::builtin(BuiltInSymbol::GetPref),
+                    &vec![key_ref],
+                )?;
+                Ok(context.player.get_datum(&result).clone())
+            })
+            .unwrap()
+            .unwrap();
+        assert!(matches!(other_owner_value, Datum::Void));
+
+        let old_owner = session
+            .with_player(1, |context| context.player.owner.clone())
+            .unwrap();
+        session.reset_player_owned(1, &old_owner).unwrap();
+        let reset_value = session
+            .with_player(1, |mut context| -> Result<Datum, crate::player::ScriptError> {
+                let key_ref = context.player.alloc_datum(Datum::String(key.to_owned()));
+                let result = BuiltInHandlerManager::call_handler(
+                    &mut context,
+                    Symbol::builtin(BuiltInSymbol::GetPref),
+                    &vec![key_ref],
+                )?;
+                Ok(context.player.get_datum(&result).clone())
+            })
+            .unwrap()
+            .unwrap();
+        assert!(matches!(reset_value, Datum::Void));
     }
 }

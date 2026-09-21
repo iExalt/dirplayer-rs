@@ -108,10 +108,29 @@ fn native_worker_wire_preserves_global_runtime_and_capture_contracts() {
     assert_eq!(current_frame["request_id"], 3);
     assert_eq!(current_frame["value"], 1);
 
-    let simulation_time = send_request(
+    let current_label = send_request(
         &mut stdin,
         &mut stdout,
         4,
+        json!({"op": "inspect", "args": {"target": "root", "path": "current_label"}}),
+    );
+    assert_eq!(current_label["request_id"], 4);
+    assert!(current_label["value"].is_string() || current_label["value"].is_null());
+
+    let flash_instances = send_request(
+        &mut stdin,
+        &mut stdout,
+        5,
+        json!({"op": "inspect", "args": {"target": "root", "path": "flash_instances"}}),
+    );
+    assert_eq!(flash_instances["request_id"], 5);
+    assert_eq!(flash_instances["value"]["session"], json!({"id": 1, "generation": 1}));
+    assert_eq!(flash_instances["value"]["instances"], json!([]));
+
+    let simulation_time = send_request(
+        &mut stdin,
+        &mut stdout,
+        6,
         json!({"op": "inspect", "args": {"target": "root", "path": "simulation_time_us"}}),
     );
     assert_eq!(simulation_time["value"], 0);
@@ -119,29 +138,29 @@ fn native_worker_wire_preserves_global_runtime_and_capture_contracts() {
     let global = send_request(
         &mut stdin,
         &mut stdout,
-        5,
+        7,
         json!({"op": "inspect", "args": {"target": "root", "path": "globals.frameState"}}),
     );
-    assert_eq!(global["request_id"], 5);
+    assert_eq!(global["request_id"], 7);
     assert_eq!(global["value"], 2);
 
     let malformed = send_request(
         &mut stdin,
         &mut stdout,
-        6,
+        8,
         json!({"op": "inspect", "args": {"target": "root", "path": "globals.bad-name"}}),
     );
-    assert_eq!(malformed["request_id"], 6);
+    assert_eq!(malformed["request_id"], 8);
     assert_eq!(malformed["kind"], "error");
     assert_eq!(malformed["value"]["code"], "invalid_request");
 
     let capture = send_request(
         &mut stdin,
         &mut stdout,
-        7,
+        9,
         json!({"op": "capture", "args": {"kind": "rgba"}}),
     );
-    assert_eq!(capture["request_id"], 7);
+    assert_eq!(capture["request_id"], 9);
     assert_eq!(capture["kind"], "captured");
     assert_eq!(capture["value"]["kind"], "rgba");
     assert_eq!(
@@ -160,8 +179,77 @@ fn native_worker_wire_preserves_global_runtime_and_capture_contracts() {
     assert_eq!(capture["value"]["value"]["width"], 32);
     assert_eq!(capture["value"]["value"]["height"], 32);
 
-    let shutdown = send_request(&mut stdin, &mut stdout, 8, json!({"op": "shutdown"}));
-    assert_eq!(shutdown["request_id"], 8);
+    let init_state = send_request(
+        &mut stdin,
+        &mut stdout,
+        10,
+        json!({"op": "inspect", "args": {"target": "root", "path": "init_state"}}),
+    );
+    assert_eq!(init_state["request_id"], 10);
+    assert_eq!(init_state["value"]["session"], json!({"id": 1, "generation": 1}));
+    assert!(init_state["value"]["next_frame"].is_null());
+    assert_eq!(init_state["value"]["flash_bindings"], json!([]));
+    assert_eq!(init_state["value"]["pending_flash_actions"], json!([]));
+
+    let input_state = send_request(
+        &mut stdin,
+        &mut stdout,
+        11,
+        json!({"op": "inspect", "args": {"target": "root", "path": "input_state"}}),
+    );
+    assert_eq!(input_state["request_id"], 11);
+    assert_eq!(input_state["value"]["session"], json!({"id": 1, "generation": 1}));
+    assert_eq!(input_state["value"]["pointer"], json!({"x": 0, "y": 0}));
+    assert_eq!(input_state["value"]["mouse_down"], false);
+    assert!(input_state["value"]["captured_sprite"].is_null());
+    assert!(input_state["value"]["hovered_sprites"].is_array());
+
+    let pointer = send_request(
+        &mut stdin,
+        &mut stdout,
+        12,
+        json!({
+            "op": "input",
+            "args": {"event": {"kind": "pointer", "value": {"space": "stage", "x": 8.0, "y": 8.0}}}
+        }),
+    );
+    assert_eq!(pointer["request_id"], 12);
+    assert_eq!(pointer["kind"], "acknowledged");
+
+    let moved_state = send_request(
+        &mut stdin,
+        &mut stdout,
+        13,
+        json!({"op": "inspect", "args": {"target": "root", "path": "input_state"}}),
+    );
+    assert_eq!(moved_state["value"]["pointer"], json!({"x": 8, "y": 8}));
+
+    let mouse_down = send_request(
+        &mut stdin,
+        &mut stdout,
+        14,
+        json!({
+            "op": "input",
+            "args": {"event": {"kind": "button", "value": {"button": "left", "state": "down"}}}
+        }),
+    );
+    assert_eq!(mouse_down["request_id"], 14);
+    assert_eq!(mouse_down["kind"], "acknowledged");
+
+    let mouse_up = send_request(
+        &mut stdin,
+        &mut stdout,
+        15,
+        json!({
+            "op": "input",
+            "args": {"event": {"kind": "button", "value": {"button": "left", "state": "up"}}}
+        }),
+    );
+    assert_eq!(mouse_up["request_id"], 15);
+    assert_eq!(mouse_up["kind"], "acknowledged");
+
+    let shutdown = send_request(&mut stdin, &mut stdout, 16, json!({"op": "shutdown"}));
+    assert_eq!(shutdown["request_id"], 16);
     assert_eq!(shutdown["kind"], "acknowledged");
     drop(stdin);
     let mut stderr = String::new();

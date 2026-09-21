@@ -6,6 +6,7 @@ use crate::{
         owner_key_string, DatumRef, DirPlayer, ScriptError,
         handlers::datum_handlers::date::DateObject,
         ownership::OwnerToken,
+        session::{PlayerId, RuntimeSessionHandle},
         symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable}
     }
 };
@@ -81,7 +82,9 @@ extern "C" {
 }
 
 pub(crate) fn ruffle_dispatch_mouse_event_owned(
-    owner_key: &OwnerToken,
+    session: &RuntimeSessionHandle,
+    player_id: PlayerId,
+    owner: &OwnerToken,
     sprite_num: i32,
     generation: u64,
     event_type: &str,
@@ -90,9 +93,9 @@ pub(crate) fn ruffle_dispatch_mouse_event_owned(
     sprite_w: i32,
     sprite_h: i32,
 ) -> Result<(), ScriptError> {
-    let owner_key = owner_key_string(owner_key);
     #[cfg(target_arch = "wasm32")]
     {
+        let owner_key = owner_key_string(owner);
         if generation == 0 || generation > 9_007_199_254_740_991 {
             return Err(ScriptError::new_code(
                 crate::player::ScriptErrorCode::InvalidReference,
@@ -117,8 +120,23 @@ pub(crate) fn ruffle_dispatch_mouse_event_owned(
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let _ = (owner_key, sprite_num, generation, event_type, local_x, local_y, sprite_w, sprite_h);
-        Err(ScriptError::new("Flash mouse dispatch is unavailable on native".to_owned()))
+        let host = session
+            .borrow()
+            .native_flash(player_id)
+            .and_then(|binding| binding.upgrade())
+            .ok_or_else(|| ScriptError::new("native Flash mouse host is unavailable".to_owned()))?;
+        host.borrow_mut().dispatch_mouse(
+            session,
+            player_id,
+            owner,
+            sprite_num as i16,
+            generation,
+            event_type,
+            local_x,
+            local_y,
+            sprite_w,
+            sprite_h,
+        )
     }
 }
 

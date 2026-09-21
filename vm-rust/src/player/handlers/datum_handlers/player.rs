@@ -85,7 +85,13 @@ impl PlayerDatumHandlers {
     fn get_pref(runtime: &mut ExecutionContext<'_>, args: &Vec<DatumRef>) -> Result<DatumRef, ScriptError> {
         runtime.with_player_and_symbols(|player, symbols| {
             let pref_name = player.get_datum(&args[0]).string_value(symbols)?;
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(value) = player.native_preference(&pref_name).map(str::to_owned) {
+                return Ok(player.alloc_datum(Datum::String(value)));
+            }
+            #[cfg(target_arch = "wasm32")]
             let storage = web_sys::window().and_then(|window| window.local_storage().ok().flatten());
+            #[cfg(target_arch = "wasm32")]
             if let Some(storage) = storage {
                 let key = format!("dirplayer_pref_{pref_name}");
                 if let Ok(Some(value)) = storage.get_item(&key) {
@@ -100,7 +106,14 @@ impl PlayerDatumHandlers {
         runtime.with_player_and_symbols(|player, symbols| {
             let pref_name = player.get_datum(&args[0]).string_value(symbols)?;
             let pref_value = player.get_datum(&args[1]).string_value(symbols)?;
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                player.set_native_preference(pref_name, pref_value);
+                return Ok(DatumRef::Void);
+            }
+            #[cfg(target_arch = "wasm32")]
             let storage = web_sys::window().and_then(|window| window.local_storage().ok().flatten());
+            #[cfg(target_arch = "wasm32")]
             if let Some(storage) = storage {
                 let key = format!("dirplayer_pref_{pref_name}");
                 let _ = storage.set_item(&key, &pref_value);

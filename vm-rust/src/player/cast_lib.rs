@@ -876,16 +876,6 @@ impl CastLib {
             self.pending_notifications
             .push(CastNotification::CastMemberListChanged(self.number));
         }
-        unsafe {
-            let player_mut = &mut crate::player::player_mut();
-
-            player_mut.movie.cast_manager.clear_movie_script_cache();
-            player_mut.movie.cast_manager.invalidate_member_name_cache();
-            player_mut
-                .movie
-                .cast_manager
-                .load_fonts_into_manager(&mut player_mut.font_manager);
-        };
     }
 
     pub fn insert_member(&mut self, number: u32, member: CastMember, symbols: &mut SymbolTable) {

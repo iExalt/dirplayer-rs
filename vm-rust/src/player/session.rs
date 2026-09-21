@@ -8,7 +8,9 @@ use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, HashSet, VecDeque},
     rc::Rc,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use async_std::channel::{self, Receiver, Sender};
@@ -35,6 +37,7 @@ use super::handlers::manager::BuiltInHandlerManager;
 use super::host_events::{BrowserHostSinkRef, BrowserHostSinkWeak, HostEventDelivery};
 use super::host_events::{
     NativeHostEventMailbox, NativeNotificationError, NativePlayerNotificationMailbox,
+    NativePlayerNotificationSinkRef, NativePlayerNotificationSinkWeak,
 };
 use super::js_lingo_loader::JsRuntimeRegistry;
 use super::nested::{NestedChildRecord, NestedPlayerRegistry};
@@ -349,6 +352,10 @@ pub struct RuntimeSession {
     /// Session-owned weak bindings for the direct browser host sink. The
     /// strong capability remains on BrowserPlayerHandle.
     host_sinks: HashMap<PlayerId, (OwnerToken, BrowserHostSinkWeak)>,
+    /// Session-owned weak bindings for the synchronous native notification
+    /// adapter. The strong sink remains on its native owner.
+    native_player_notification_sinks:
+        HashMap<PlayerId, (OwnerToken, NativePlayerNotificationSinkWeak)>,
     /// Owner-generation fence for notification drains. Reentrant drains for
     /// the same generation return immediately; a reset may replace the
     /// entry with its new owner without clearing an older outer drain.
@@ -393,6 +400,42 @@ pub(crate) struct NativeFramePump {
     owner: OwnerToken,
     last_now_us: Option<u64>,
     next_frame_deadline: Option<NativeTime>,
+    #[cfg(not(target_arch = "wasm32"))]
+    last_native_flash_us: Option<u64>,
+    #[cfg(not(target_arch = "wasm32"))]
+    native_audio_cursor_us: Option<u64>,
+    #[cfg(not(target_arch = "wasm32"))]
+    native_audio_remainder: u128,
+    #[cfg(not(target_arch = "wasm32"))]
+    native_pcm: Vec<[f32; 2]>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn native_audio_sample_count(elapsed_us: u64, remainder: u128) -> Result<(usize, u128), ScriptError> {
+    let total = u128::from(elapsed_us)
+        .checked_mul(48_000)
+        .and_then(|value| value.checked_add(remainder))
+        .ok_or_else(|| ScriptError::new("native PCM sample count overflow".to_owned()))?;
+    let frames = usize::try_from(total / 1_000_000).map_err(|_| {
+        ScriptError::new("native PCM sample count exceeds addressable memory".to_owned())
+    })?;
+    Ok((frames, total % 1_000_000))
+}
+
+fn earliest_native_deadline(
+    deadlines: impl IntoIterator<Item = Option<NativeTime>>,
+) -> Result<Option<NativeTime>, ScriptError> {
+    let mut earliest = None;
+    for deadline in deadlines.into_iter().flatten() {
+        earliest = Some(match earliest {
+            None => deadline,
+            Some(current) => match deadline.cmp(current)? {
+                std::cmp::Ordering::Less => deadline,
+                _ => current,
+            },
+        });
+    }
+    Ok(earliest)
 }
 
 /// Owner-qualified native input pump that reuses the canonical command path.
@@ -413,7 +456,7 @@ impl NativeInputPump {
         Self { session, player_id, owner }
     }
 
-    pub(crate) async fn mouse_down(&self, x: i32, y: i32) -> Result<(), ScriptError> {
+    async fn dispatch(&self, command: PlayerVMCommand) -> Result<(), ScriptError> {
         let queue_tx = self
             .session
             .borrow_mut()
@@ -430,12 +473,24 @@ impl NativeInputPump {
         let (future, completer) = ManualFuture::new();
         queue_tx
             .send(PlayerVMExecutionItem {
-                command: PlayerVMCommand::MouseDown((x, y)),
+                command,
                 completer: Some(completer),
             })
             .await
             .map_err(|_| ScriptError::new("native input command loop stopped".to_owned()))?;
         future.await.map(|_| ())
+    }
+
+    pub(crate) async fn mouse_down(&self, x: i32, y: i32) -> Result<(), ScriptError> {
+        self.dispatch(PlayerVMCommand::MouseDown((x, y))).await
+    }
+
+    pub(crate) async fn mouse_move(&self, x: i32, y: i32) -> Result<(), ScriptError> {
+        self.dispatch(PlayerVMCommand::MouseMove((x, y))).await
+    }
+
+    pub(crate) async fn mouse_up(&self, x: i32, y: i32) -> Result<(), ScriptError> {
+        self.dispatch(PlayerVMCommand::MouseUp((x, y))).await
     }
 }
 
@@ -451,7 +506,72 @@ impl NativeFramePump {
         player_id: PlayerId,
         owner: OwnerToken,
     ) -> Self {
-        Self { session, player_id, owner, last_now_us: None, next_frame_deadline: None }
+        Self {
+            session,
+            player_id,
+            owner,
+            last_now_us: None,
+            next_frame_deadline: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            last_native_flash_us: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            native_audio_cursor_us: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            native_audio_remainder: 0,
+            #[cfg(not(target_arch = "wasm32"))]
+            native_pcm: Vec::new(),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn mix_native_audio_to(&mut self, now_us: u64) -> Result<(), ScriptError> {
+        let previous_us = self.native_audio_cursor_us.unwrap_or(now_us);
+        let elapsed_us = now_us
+            .checked_sub(previous_us)
+            .ok_or_else(|| ScriptError::new("native audio time reversed".to_owned()))?;
+        self.native_audio_cursor_us = Some(now_us);
+        if elapsed_us == 0 {
+            return Ok(());
+        }
+        let (frames, remainder) =
+            native_audio_sample_count(elapsed_us, self.native_audio_remainder)?;
+        self.native_audio_remainder = remainder;
+        if frames == 0 {
+            return Ok(());
+        }
+        let mut interleaved = vec![0.0_f32; frames * 2];
+        let mixed = self
+            .session
+            .borrow_mut()
+            .with_player(self.player_id, |context| {
+                if !self.owner.is_arena_live()
+                    || !self.owner.same_identity(&context.player.owner)
+                {
+                    return Err(crate::player::cancelled_scope_error());
+                }
+                context
+                    .player
+                    .sound_manager
+                    .native_mix(&mut interleaved)
+            })
+            .ok_or_else(crate::player::cancelled_scope_error)?;
+        mixed?;
+        self.native_pcm.extend(
+            interleaved
+                .chunks_exact(2)
+                .map(|frame| [frame[0], frame[1]]),
+        );
+        Ok(())
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn mix_native_audio_to(&mut self, _now_us: u64) -> Result<(), ScriptError> {
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn native_pcm_snapshot(&self) -> Vec<[f32; 2]> {
+        self.native_pcm.clone()
     }
 
     fn validate_owner(&self) -> Result<(), ScriptError> {
@@ -561,6 +681,238 @@ impl NativeFramePump {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    fn set_native_flash_time(&self, now_us: u64) -> Result<(), ScriptError> {
+        let host = self
+            .session
+            .borrow()
+            .native_flash(self.player_id)
+            .and_then(|binding| binding.upgrade());
+        if let Some(host) = host {
+            host.borrow_mut().set_time_us(now_us)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn next_native_flash_deadline(
+        &self,
+        now_us: u64,
+    ) -> Result<Option<NativeTime>, ScriptError> {
+        let host = self
+            .session
+            .borrow()
+            .native_flash(self.player_id)
+            .and_then(|binding| binding.upgrade());
+        let Some(host) = host else {
+            return Ok(None);
+        };
+        let wake_us = host.borrow().time_til_next_frame_us()?;
+        wake_us
+            .map(|wake_us| {
+                NativeTime::from_micros(now_us)?.add_fraction(wake_us as u128, 1_000)
+            })
+            .transpose()
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn next_native_flash_deadline(&self, _now_us: u64) -> Result<Option<NativeTime>, ScriptError> {
+        Ok(None)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn set_native_flash_time(&self, _now_us: u64) -> Result<(), ScriptError> {
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn validate_native_flash_callback(
+        &self,
+        callback: &crate::native_flash::NativeFlashCallback,
+    ) -> bool {
+        self.session
+            .borrow_mut()
+            .with_player(self.player_id, |context| {
+                self.owner.is_arena_live()
+                    && self.owner.same_identity(&context.player.owner)
+                    && context
+                        .player
+                        .native_flash_bindings()
+                        .into_iter()
+                        .any(|binding| {
+                            binding.sprite == callback.sprite
+                                && binding.generation == callback.generation
+                                && binding.cast_lib == callback.cast_lib
+                                && binding.cast_member == callback.cast_member
+                        })
+            })
+            .unwrap_or(false)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn dispatch_native_flash_callback_if_current<F, Fut>(
+        &self,
+        callback: crate::native_flash::NativeFlashCallback,
+        dispatch: F,
+    ) -> Result<bool, ScriptError>
+    where
+        F: FnOnce(crate::native_flash::NativeFlashCallback) -> Fut,
+        Fut: std::future::Future<Output = Result<(), ScriptError>>,
+    {
+        if !self.validate_native_flash_callback(&callback) {
+            return Ok(false);
+        }
+        let callback_identity = callback.clone();
+        match dispatch(callback).await {
+            Ok(()) => {
+                self.validate_owner()?;
+                Ok(self.validate_native_flash_callback(&callback_identity))
+            }
+            Err(error) => {
+                // Replacing/unloading a binding can cancel the callback's
+                // owned scope while it is suspended. Drop that control-flow
+                // cancellation only after proving the old binding is stale;
+                // runtime/script errors must remain observable even when the
+                // callback caused a reentrant replacement.
+                self.validate_owner()?;
+                if error.code == ScriptErrorCode::Abort
+                    && !self.validate_native_flash_callback(&callback_identity)
+                {
+                    Ok(false)
+                } else {
+                    Err(error)
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn apply_native_flash_frame_or_drop(
+        &self,
+        frame: crate::native_flash::NativeFlashFrame,
+    ) -> Result<bool, ScriptError> {
+        match crate::native_flash::NativeFlashHost::apply_frame(
+            &self.session,
+            self.player_id,
+            &self.owner,
+            frame.sprite,
+            frame.generation,
+            frame.width,
+            frame.height,
+            &frame.rgba,
+        ) {
+            Ok(()) => Ok(true),
+            Err(error) => {
+                let replaced_or_unloaded = self
+                    .session
+                    .borrow_mut()
+                    .with_player(self.player_id, |context| {
+                        self.owner.is_arena_live()
+                            && self.owner.same_identity(&context.player.owner)
+                            && context.player.flash_instance_generation(frame.sprite)
+                                != Some(frame.generation)
+                    })
+                    .unwrap_or(false);
+                if replaced_or_unloaded {
+                    Ok(false)
+                } else {
+                    Err(error)
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn pump_native_flash_segment(
+        &mut self,
+        now_us: u64,
+        elapsed_us: u64,
+    ) -> Result<(), ScriptError> {
+        self.set_native_flash_time(now_us)?;
+        crate::player::drain_flash_host_actions_owned(
+            self.session.clone(),
+            self.player_id,
+            self.owner.clone(),
+        )?;
+        let host = self
+            .session
+            .borrow()
+            .native_flash(self.player_id)
+            .and_then(|binding| binding.upgrade());
+        let Some(host) = host else {
+            self.validate_owner()?;
+            return Ok(());
+        };
+        let advance = host.borrow_mut().advance_frames(elapsed_us)?;
+        drop(host);
+        for frame in advance.frames {
+            let _ = self.apply_native_flash_frame_or_drop(frame)?;
+        }
+        for callback_buffer in advance.callback_buffers {
+            let callbacks = crate::native_flash::NativeFlashHost::take_callbacks(&callback_buffer)?;
+            for callback in callbacks {
+                if !self
+                    .dispatch_native_flash_callback_if_current(callback, |callback| {
+                        crate::player::commands::dispatch_native_flash_callback(
+                            self.session.clone(),
+                            self.player_id,
+                            self.owner.clone(),
+                            callback,
+                        )
+                    })
+                    .await?
+                {
+                    continue;
+                }
+            }
+        }
+        let pending_owned_go_tempo = self
+            .session
+            .borrow_mut()
+            .with_player(self.player_id, |context| {
+                if !self.owner.same_identity(&context.player.owner) || !self.owner.is_arena_live() {
+                    return Err(crate::player::cancelled_scope_error());
+                }
+                Ok((context.player.has_frame_changed_in_go
+                    && context.player.next_frame.is_some()
+                    && context.player.next_frame != Some(context.player.movie.current_frame))
+                    .then_some(context.player.current_frame_tempo))
+            })
+            .ok_or_else(crate::player::cancelled_scope_error)??;
+        if let Some(tempo) = pending_owned_go_tempo {
+            self.next_frame_deadline = Some(Self::frame_deadline_after(
+                NativeTime::from_micros(now_us)?,
+                tempo,
+            )?);
+        }
+        self.validate_owner()
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    async fn pump_native_flash_segment(
+        &mut self,
+        _now_us: u64,
+        _elapsed_us: u64,
+    ) -> Result<(), ScriptError> {
+        Ok(())
+    }
+
+    async fn advance_native_flash_to(&mut self, now_us: u64) -> Result<(), ScriptError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        let previous_us = self.last_native_flash_us.unwrap_or(now_us);
+        #[cfg(target_arch = "wasm32")]
+        let previous_us = now_us;
+        let elapsed_us = now_us
+            .checked_sub(previous_us)
+            .ok_or_else(|| ScriptError::new("native Flash time reversed".to_owned()))?;
+        self.pump_native_flash_segment(now_us, elapsed_us).await?;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.last_native_flash_us = Some(now_us);
+        }
+        Ok(())
+    }
+
     pub(crate) async fn init_movie_at(&mut self, now_ms: u64) -> Result<(), ScriptError> {
         let now_us = now_ms
             .checked_mul(1_000)
@@ -572,6 +924,7 @@ impl NativeFramePump {
         self.validate_owner()?;
         let (exact_now, frame_now_ms) = self.accept_timestamp_us(now_us)?;
         self.set_native_time(exact_now)?;
+        self.set_native_flash_time(now_us)?;
         crate::player::run_movie_init_owned_at(
             self.session.clone(),
             self.player_id,
@@ -579,7 +932,15 @@ impl NativeFramePump {
             frame_now_ms,
         )
         .await?;
+        self.validate_owner()?;
         self.clear_frame_change()?;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.last_native_flash_us = Some(now_us);
+            self.native_audio_cursor_us = Some(now_us);
+            self.native_audio_remainder = 0;
+            self.native_pcm.clear();
+        }
         let (_, paused, tempo, _) = self.playback_state()?;
         self.next_frame_deadline = if paused {
             None
@@ -606,6 +967,7 @@ impl NativeFramePump {
         self.validate_owner()?;
         let (exact_now, frame_now_ms) = self.accept_timestamp_us(now_us)?;
         self.set_native_time(exact_now)?;
+        self.mix_native_audio_to(now_us)?;
         self.clear_frame_change()?;
         let result = crate::player::run_single_frame_owned_at(
             self.session.clone(),
@@ -615,6 +977,7 @@ impl NativeFramePump {
         )
         .await?;
         self.clear_frame_change()?;
+        self.advance_native_flash_to(now_us).await?;
         self.next_frame_deadline = None;
         Ok(result)
     }
@@ -633,6 +996,13 @@ impl NativeFramePump {
     }
 
     pub(crate) async fn advance_to_us(
+        &mut self,
+        target_us: u64,
+    ) -> Result<NativeAdvanceReport, ScriptError> {
+        self.advance_to_us_inner(target_us).await
+    }
+
+    async fn advance_to_us_inner(
         &mut self,
         target_us: u64,
     ) -> Result<NativeAdvanceReport, ScriptError> {
@@ -664,20 +1034,36 @@ impl NativeFramePump {
         let mut report = NativeAdvanceReport::default();
         loop {
             let next_timeout = self.next_timeout_deadline()?;
-            let boundary = match (self.next_frame_deadline, next_timeout) {
-                (None, None) => break,
-                (Some(frame), None) => frame,
-                (None, Some(timeout)) => timeout,
-                (Some(frame), Some(timeout)) => {
-                    if frame.cmp(timeout)? == std::cmp::Ordering::Less { frame } else { timeout }
-                }
+            #[cfg(not(target_arch = "wasm32"))]
+            let native_flash_now_us = self.last_native_flash_us.unwrap_or(previous_us);
+            #[cfg(target_arch = "wasm32")]
+            let native_flash_now_us = previous_us;
+            // Ruffle callbacks can become due between Director frame and
+            // timeout deadlines. Treat the earliest active Flash wake as a
+            // regular controlled boundary so callbacks are dispatched at
+            // their source timestamp before later Director work.
+            let next_flash = self.next_native_flash_deadline(native_flash_now_us)?;
+            let boundary = earliest_native_deadline([
+                self.next_frame_deadline,
+                next_timeout,
+                next_flash,
+            ])?;
+            let Some(boundary) = boundary else {
+                break;
             };
             if boundary.cmp(target)? == std::cmp::Ordering::Greater {
                 break;
             }
-            let frame_due = self.next_frame_deadline == Some(boundary);
-            let timeout_due = next_timeout == Some(boundary);
+            let frame_due = match self.next_frame_deadline {
+                Some(deadline) => deadline.cmp(boundary)? == std::cmp::Ordering::Equal,
+                None => false,
+            };
+            let timeout_due = match next_timeout {
+                Some(deadline) => deadline.cmp(boundary)? == std::cmp::Ordering::Equal,
+                None => false,
+            };
             self.set_native_time(boundary)?;
+            self.mix_native_audio_to(boundary.to_micros()?)?;
 
             if timeout_due {
                 report.timeouts = report
@@ -716,8 +1102,11 @@ impl NativeFramePump {
                 // scheduled frame; preserving it keeps split and combined
                 // caller advances on the same rational cadence.
             }
+            self.advance_native_flash_to(boundary.to_micros()?).await?;
         }
         self.set_native_time(target)?;
+        self.mix_native_audio_to(target_us)?;
+        self.advance_native_flash_to(target_us).await?;
         self.last_now_us = Some(target_us);
         Ok(report)
     }
@@ -958,6 +1347,7 @@ impl RuntimeSession {
             native_notification_errors: HashMap::new(),
             native_timeout_host_unsupported: Vec::new(),
             host_sinks: HashMap::new(),
+            native_player_notification_sinks: HashMap::new(),
             notification_drains: HashMap::new(),
             scheduled_notification_drains: HashMap::new(),
             host_event_deliveries: HashMap::new(),
@@ -3552,9 +3942,6 @@ impl RuntimeSession {
         self.actions.cancel_owner(&current_owner);
         self.js_lingo.clear_player(player_id, &current_owner);
         self.cancel_player_cast_loads(player_id);
-        // Native snapshots belong to the retired generation.  Drop them
-        // before reset installs the replacement owner; lifecycle teardown is
-        // carried by the separate host-event queue.
         self.native_player_notifications.remove(&player_id);
         self.native_notification_errors.remove(&player_id);
         #[cfg(not(target_arch = "wasm32"))]
@@ -3617,6 +4004,14 @@ impl RuntimeSession {
         self.with_player(player_id, |context| {
             context.player.net_manager.reset_owner(new_owner.key());
         });
+        if let Some((bound_owner, _)) = self
+            .native_player_notification_sinks
+            .get_mut(&player_id)
+        {
+            if bound_owner.same_identity(&current_owner) {
+                *bound_owner = new_owner.clone();
+            }
+        }
         self.collect_player_host_teardowns(player_id);
         self.w3d_clocks
             .insert(player_id, W3dClock::new(new_owner.clone()));
@@ -3647,6 +4042,7 @@ impl RuntimeSession {
         self.native_player_notifications.remove(&id);
         self.native_notification_errors.remove(&id);
         self.host_sinks.remove(&id);
+        self.native_player_notification_sinks.remove(&id);
         let owner = self
             .players
             .players
@@ -4106,6 +4502,46 @@ impl RuntimeSession {
         owner: &OwnerToken,
     ) -> Option<BrowserHostSinkRef> {
         let (bound_owner, sink) = self.host_sinks.get(&player_id)?;
+        if !bound_owner.same_identity(owner) || !owner.is_arena_live() {
+            return None;
+        }
+        sink.upgrade()
+    }
+
+    pub(crate) fn bind_native_player_notification_sink(
+        &mut self,
+        player_id: PlayerId,
+        owner: &OwnerToken,
+        sink: &NativePlayerNotificationSinkRef,
+    ) -> Result<(), ScriptError> {
+        if !self.player_owner_matches(player_id, owner) {
+            return Err(super::cancelled_scope_error());
+        }
+        self.native_player_notification_sinks
+            .insert(player_id, (owner.clone(), Rc::downgrade(sink)));
+        Ok(())
+    }
+
+    pub(crate) fn unbind_native_player_notification_sink(
+        &mut self,
+        player_id: PlayerId,
+        owner: &OwnerToken,
+    ) {
+        if self
+            .native_player_notification_sinks
+            .get(&player_id)
+            .is_some_and(|(bound, _)| bound.same_identity(owner))
+        {
+            self.native_player_notification_sinks.remove(&player_id);
+        }
+    }
+
+    pub(crate) fn native_player_notification_sink(
+        &self,
+        player_id: PlayerId,
+        owner: &OwnerToken,
+    ) -> Option<NativePlayerNotificationSinkRef> {
+        let (bound_owner, sink) = self.native_player_notification_sinks.get(&player_id)?;
         if !bound_owner.same_identity(owner) || !owner.is_arena_live() {
             return None;
         }
@@ -6504,6 +6940,7 @@ impl RuntimeSession {
                 }
             };
             if applied {
+                player.refresh_after_cast_apply();
                 match pending.purpose {
                     PendingCastPurpose::Preload => {
                         player.movie.cast_manager.complete_preload(
@@ -6715,13 +7152,240 @@ impl RuntimeSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::director::chunks::{config::ConfigChunk, ChunkContainer};
+    use crate::director::cast::CastDef;
+    use crate::director::chunks::{
+        cast_member::{CastMemberChunk, CastMemberDef, CastMemberSpecificData},
+        config::ConfigChunk,
+        media::MediaChunk,
+        sound::SoundChunk,
+        Chunk, ChunkContainer,
+    };
+    use crate::director::enums::SoundInfo as DirectorSoundInfo;
+    use crate::director::enums::MemberType;
     use crate::director::file::DirectorFile;
+    use crate::director::lingo::datum::{Datum, StringChunkExpr, StringChunkSource, StringChunkType};
+    use crate::player::cast_lib::{CastLib, CastMemberRef};
+    use crate::player::cast_member::{CastMember, CastMemberType, SoundMember};
+    use crate::director::chunks::cast_member_info::CastMemberInfoChunk;
     use crate::player::cast_lib::CastLibState;
     use crate::player::cast_manager::CastPreloadState;
+    use crate::player::handlers::datum_handlers::sound_channel::SoundChannelDatumHandlers;
+    use crate::player::handlers::datum_handlers::sound_channel::SoundStatus;
+    use crate::player::symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable};
     use async_std::channel;
-    use binary_reader::Endian;
+    use binary_reader::{BinaryReader, Endian};
     use url::Url;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_audio_sample_clock_is_rational_and_split_stable() {
+        let (whole, remainder) = native_audio_sample_count(2_450_000, 0).unwrap();
+        assert_eq!(whole, 117_600);
+        assert_eq!(remainder, 0);
+
+        let (first, remainder) = native_audio_sample_count(1, 0).unwrap();
+        let (second, remainder) = native_audio_sample_count(2_449_999, remainder).unwrap();
+        assert_eq!(first + second, whole);
+        assert_eq!(remainder, 0);
+    }
+
+    #[test]
+    fn native_deadline_selection_is_ordered_and_skips_absent_wakes() {
+        let earliest = earliest_native_deadline([
+            Some(NativeTime::from_ms(100).unwrap()),
+            None,
+            Some(NativeTime::from_ms(50).unwrap()),
+        ])
+        .unwrap();
+        assert_eq!(earliest, Some(NativeTime::from_ms(50).unwrap()));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_frame_pump_mixes_owned_audio_at_boundaries_and_rejects_stale_owner() {
+        const WIN_FLAG: &[u8] = include_bytes!("../../tests/fixtures/s.win_flag.mp3");
+
+        fn run_schedule(schedule: &[u64]) -> (Vec<[f32; 2]>, RuntimeSessionHandle, OwnerToken) {
+            let session = session_with_casts(&[]).into_handle();
+            let owner = session
+                .borrow_mut()
+                .with_player(1, |context| {
+                    context
+                        .player
+                        .sound_manager
+                        .native_start_mp3(0, WIN_FLAG)
+                        .expect("fixture must start through the owner player");
+                    context.player.owner.clone()
+                })
+                .expect("audio fixture player");
+            let mut pump = NativeFramePump::new(session.clone(), 1, owner.clone());
+            pump.last_now_us = Some(0);
+            pump.native_audio_cursor_us = Some(0);
+            pump.mix_native_audio_to(0).expect("zero delta is a no-op");
+            for target in schedule {
+                pump.mix_native_audio_to(*target)
+                    .expect("owned audio interval must mix");
+            }
+            (pump.native_pcm_snapshot(), session, owner)
+        }
+
+        let (short, short_session, short_owner) = run_schedule(&[1_000]);
+        assert_eq!(short.len(), 48);
+        assert!(short.iter().all(|frame| frame == &[0.0, 0.0]));
+        let (whole, _whole_session, _whole_owner) = run_schedule(&[2_450_000]);
+        assert_eq!(whole.len(), 117_600);
+        assert!(whole.iter().any(|frame| frame[0] != 0.0 || frame[1] != 0.0));
+        assert_eq!(
+            whole.iter().position(|frame| frame[0] != 0.0 || frame[1] != 0.0),
+            Some(2_706)
+        );
+        let (split, _split_session, _split_owner) =
+            run_schedule(&[1_225_000, 2_450_000]);
+        assert_eq!(whole, split, "split and combined owner schedules must mix identically");
+
+        let mut stale_pump = NativeFramePump::new(short_session.clone(), 1, short_owner.clone());
+        stale_pump.last_now_us = Some(0);
+        stale_pump.native_audio_cursor_us = Some(0);
+        short_session
+            .borrow_mut()
+            .reset_player_owned(1, &short_owner)
+            .expect("owner reset");
+        let error = stale_pump
+            .mix_native_audio_to(50_000)
+            .expect_err("stale owner must reject audio mutation");
+        assert!(error.message.contains("cancelled") || error.message.contains("stale"));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_frame_pump_uses_owner_handler_queue_play_stop_route() {
+        const WIN_FLAG: &[u8] = include_bytes!("../../tests/fixtures/s.win_flag.mp3");
+
+        let mut session = session_with_casts(&[]);
+        let (owner, channel, member, channel_rc) = session
+            .with_player(1, |context| {
+                let mut symbols = SymbolTable::new();
+                let media = MediaChunk {
+                    sample_rate: 48_000,
+                    data_size_field: WIN_FLAG.len() as u32,
+                    guid: None,
+                    audio_data: WIN_FLAG.to_vec(),
+                    is_compressed: true,
+                };
+                let sound_member = SoundMember {
+                    info: DirectorSoundInfo {
+                        sample_rate: 48_000,
+                        sample_size: 0,
+                        channels: 1,
+                        sample_count: 0,
+                        duration: 0,
+                        loop_enabled: false,
+                    },
+                    sound: SoundChunk::from_media(&media),
+                    cue_point_times: Vec::new(),
+                    cue_point_names: Vec::new(),
+                };
+                let mut cast = CastLib::test_external(1, 0);
+                cast.insert_member(
+                    1,
+                    CastMember::new(1, CastMemberType::Sound(sound_member)),
+                    &mut symbols,
+                );
+                context.player.movie.cast_manager.casts.push(cast);
+                let channel = context.player.alloc_datum(Datum::SoundChannel(1));
+                let member = context.player.alloc_datum(Datum::CastMember(CastMemberRef {
+                    cast_lib: 1,
+                    cast_member: 1,
+                }));
+                let channel_rc = context.player.sound_manager.get_channel(0).unwrap();
+                let owner = context.player.owner.clone();
+                SoundChannelDatumHandlers::call(
+                    context.player,
+                    &symbols,
+                    &channel,
+                    Symbol::builtin(BuiltInSymbol::Queue),
+                    &vec![member.clone()],
+                )?;
+                SoundChannelDatumHandlers::call(
+                    context.player,
+                    &symbols,
+                    &channel,
+                    Symbol::builtin(BuiltInSymbol::Play),
+                    &vec![],
+                )?;
+                Ok::<_, ScriptError>((owner, channel, member, channel_rc))
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            channel_rc.borrow().status,
+            SoundStatus::Playing,
+            "Queue -> Play must admit the native channel before the first pump interval"
+        );
+        let session = session.into_handle();
+        let mut pump = NativeFramePump::new(session.clone(), 1, owner.clone());
+        pump.last_now_us = Some(0);
+        pump.native_audio_cursor_us = Some(0);
+        pump.mix_native_audio_to(2_450_000)
+            .expect("owner-bound handler audio must mix through the frame pump");
+        let pcm = pump.native_pcm_snapshot();
+        assert_eq!(pcm.len(), 117_600);
+        assert!(pcm.iter().any(|frame| frame[0] != 0.0 || frame[1] != 0.0));
+        assert_eq!(channel_rc.borrow().status, SoundStatus::Playing);
+
+        session
+            .borrow_mut()
+            .with_player(1, |context| {
+                SoundChannelDatumHandlers::call(
+                    context.player,
+                    context.symbols,
+                    &channel,
+                    Symbol::builtin(BuiltInSymbol::Stop),
+                    &vec![],
+                )
+            })
+            .unwrap()
+            .unwrap();
+        let manager_channel = session
+            .borrow_mut()
+            .with_player(1, |context| context.player.sound_manager.get_channel(0).unwrap())
+            .unwrap();
+        assert!(Rc::ptr_eq(&channel_rc, &manager_channel));
+        let before_stop = pump.native_pcm_snapshot().len();
+        pump.mix_native_audio_to(2_500_000)
+            .expect("owner-bound stop must leave the pump usable");
+        assert_eq!(pump.native_pcm_snapshot().len(), before_stop + 2_400);
+        assert!(pump.native_pcm_snapshot()[before_stop..]
+            .iter()
+            .all(|frame| frame[0] == 0.0 && frame[1] == 0.0));
+        assert_eq!(channel_rc.borrow().status, SoundStatus::Idle);
+        assert!(owner.same_identity(
+            &session
+                .borrow_mut()
+                .with_player(1, |context| context.player.owner.clone())
+                .unwrap()
+        ));
+        let _ = member;
+    }
+
+    struct ReentrantNativeNotificationSink {
+        session: RuntimeSessionHandle,
+        callbacks: Rc<Cell<u32>>,
+    }
+
+    impl super::super::host_events::NativePlayerNotificationSink
+        for ReentrantNativeNotificationSink
+    {
+        fn accept(&self, notification: &super::super::host_events::NativePlayerNotification) {
+            self.session
+                .borrow_mut()
+                .with_player(notification.player_id, |context| {
+                    context.player.host_event_backpressure = None;
+                })
+                .expect("reentrant sink should see the current player");
+            self.callbacks.set(self.callbacks.get() + 1);
+        }
+    }
 
     #[test]
     fn session_id_allocator_is_unique_and_checked_at_exhaustion() {
@@ -6750,6 +7414,342 @@ mod tests {
         assert!(error.message.contains("stale"));
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    fn native_flash_pump_fixture() -> (
+        RuntimeSessionHandle,
+        Rc<RefCell<crate::native_flash::NativeFlashHost>>,
+        OwnerToken,
+        u64,
+    ) {
+        let mut session = RuntimeSession::new(SymbolOwner {
+            session: 78,
+            generation: 1,
+        });
+        let (tx, _rx) = channel::unbounded();
+        assert!(session.add_player(1, tx));
+        let swf = include_bytes!(
+            "../../../../childhood-redux/resources/battalion-ghosts/battalion-ghosts.swf"
+        )
+        .to_vec();
+        let (owner, generation) = session
+            .with_player(1, |context| {
+                let mut cast = super::super::cast_lib::CastLib::test_external(1, 0);
+                cast.members.insert(
+                    1,
+                    super::super::cast_member::CastMember::new(
+                        1,
+                        super::super::cast_member::CastMemberType::Flash(
+                            super::super::cast_member::FlashMember {
+                                data: swf.clone(),
+                                reg_point: (0, 0),
+                                flash_info: None,
+                            },
+                        ),
+                    ),
+                );
+                context.player.movie.cast_manager.casts.push(cast);
+                context.player.movie.score.channels = vec![
+                    super::super::score::SpriteChannel::new(0),
+                    super::super::score::SpriteChannel::new(1),
+                ];
+                context.player.movie.score.channels[1].sprite.member =
+                    Some(super::super::cast_lib::CastMemberRef {
+                        cast_lib: 1,
+                        cast_member: 1,
+                    });
+                let generation = context
+                    .player
+                    .flash_binding_state
+                    .borrow_mut()
+                    .reserve_for_pair(1, 1, 1)
+                    .expect("native Flash generation");
+                (context.player.owner.clone(), generation)
+            })
+            .expect("native Flash fixture player");
+        let session = session.into_handle();
+        let host = Rc::new(RefCell::new(crate::native_flash::NativeFlashHost::new()));
+        session.borrow_mut().bind_native_flash(1, &host);
+        host.borrow_mut()
+            .load(
+                &session,
+                1,
+                &owner,
+                1,
+                generation,
+                1,
+                1,
+                &swf,
+                2,
+                2,
+                false,
+                -1,
+            )
+            .expect("native Flash fixture load");
+        (session, host, owner, generation)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_flash_dispatches_move_down_up_through_owned_player() {
+        let (session, host, owner, generation) = native_flash_pump_fixture();
+        for event_type in ["move", "down", "up"] {
+            crate::player::handlers::datum_handlers::flash_object::ruffle_dispatch_mouse_event_owned(
+                    &session, 1, &owner, 1, generation, event_type, 1, 1, 4, 4,
+                )
+                .expect("native Flash input must reach the owned Ruffle player");
+        }
+        assert_eq!(
+            host.borrow()
+                .snapshots()
+                .expect("native Flash snapshot after input")[0]
+                .generation,
+            generation
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_flash_input_rejects_retired_owner_and_replaced_generation() {
+        let (session, _host, owner, generation) = native_flash_pump_fixture();
+        session
+            .borrow_mut()
+            .with_player(1, |context| {
+                assert!(context
+                    .player
+                    .flash_binding_state
+                    .borrow_mut()
+                    .invalidate(1, generation));
+                context
+                    .player
+                    .flash_binding_state
+                    .borrow_mut()
+                    .reserve_for_pair(1, 1, 1)
+                    .expect("replacement native Flash generation");
+            })
+            .expect("replace native Flash generation");
+        let error = crate::player::handlers::datum_handlers::flash_object::ruffle_dispatch_mouse_event_owned(
+                &session, 1, &owner, 1, generation, "up", 1, 1, 2, 2,
+            )
+            .expect_err("stale native Flash generation must not receive input");
+        assert!(error.message.contains("generation"));
+
+        session
+            .borrow_mut()
+            .reset_player_owned(1, &owner)
+            .expect("owner reset");
+        let error = crate::player::handlers::datum_handlers::flash_object::ruffle_dispatch_mouse_event_owned(
+                &session, 1, &owner, 1, generation, "move", 1, 1, 2, 2,
+            )
+            .expect_err("retired native Flash owner must not receive input");
+        assert!(error.message.contains("owner"));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_flash_pump_drops_frame_after_same_owner_flash_unload() {
+        let (session, host, owner, generation) = native_flash_pump_fixture();
+        let frame = host
+            .borrow_mut()
+            .advance_frames(0)
+            .expect("native Flash frame capture")
+            .frames
+            .into_iter()
+            .next()
+            .expect("fixture frame");
+        session
+            .borrow_mut()
+            .with_player(1, |context| {
+                assert!(context
+                    .player
+                    .flash_binding_state
+                    .borrow_mut()
+                    .invalidate(1, generation));
+            })
+            .expect("same-owner Flash unload");
+        let pump = NativeFramePump::new(session, 1, owner);
+        assert!(
+            !pump
+                .apply_native_flash_frame_or_drop(frame)
+                .expect("same-owner unload must drop the old frame"),
+            "an unloaded generation must not fail its enclosing Advance"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_frame_pump_drains_seek_once_before_tick_and_rejects_replaced_generation() {
+        let (session, host, owner, generation) = native_flash_pump_fixture();
+        session
+            .borrow_mut()
+            .with_player(1, |context| context.player.queue_flash_seek(1, 1))
+            .expect("queue native Flash seek");
+        assert_eq!(
+            session
+                .borrow_mut()
+                .with_player(1, |context| context.player.pending_flash_action_summaries())
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let mut pump = NativeFramePump::new(session.clone(), 1, owner.clone());
+        async_std::task::block_on(pump.pump_native_flash_segment(50_000, 50_000))
+            .expect("seek must drain before native Flash tick");
+        assert!(session
+            .borrow_mut()
+            .with_player(1, |context| context.player.pending_flash_action_summaries())
+            .unwrap()
+            .is_empty());
+        let after_seek_and_tick = host
+            .borrow()
+            .snapshots()
+            .expect("native Flash snapshot after pump");
+        assert!(
+            after_seek_and_tick[0].current_frame > 1,
+            "seek must be applied before tick, got frame {}",
+            after_seek_and_tick[0].current_frame
+        );
+
+        async_std::task::block_on(pump.pump_native_flash_segment(50_000, 0))
+            .expect("empty second drain must be a no-op");
+        assert_eq!(
+            host.borrow()
+                .snapshots()
+                .expect("native Flash snapshot after empty drain"),
+            after_seek_and_tick
+        );
+
+        let late_callback = crate::native_flash::NativeFlashCallback {
+            sprite: 1,
+            generation,
+            cast_lib: 1,
+            cast_member: 1,
+            url: "lingo:late()".to_owned(),
+        };
+        assert!(pump.validate_native_flash_callback(&late_callback));
+        session
+            .borrow_mut()
+            .with_player(1, |context| {
+                assert!(context
+                    .player
+                    .flash_binding_state
+                    .borrow_mut()
+                    .invalidate(1, generation));
+                context
+                    .player
+                    .flash_binding_state
+                    .borrow_mut()
+                    .reserve_for_pair(1, 1, 1)
+                    .expect("replacement native Flash generation")
+            })
+            .unwrap();
+        assert!(
+            !pump.validate_native_flash_callback(&late_callback),
+            "same-owner replacement must drop a late callback"
+        );
+        async_std::task::block_on(pump.pump_native_flash_segment(51_000, 1_000))
+            .expect("replaced generation must drop stale captured frame");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_flash_callback_replacement_drops_remaining_old_fifo() {
+        let (session, _host, owner, generation) = native_flash_pump_fixture();
+        let pump = NativeFramePump::new(session.clone(), 1, owner.clone());
+        let delivered = Rc::new(RefCell::new(Vec::new()));
+        let first = crate::native_flash::NativeFlashCallback {
+            sprite: 1,
+            generation,
+            cast_lib: 1,
+            cast_member: 1,
+            url: "lingo:first()".to_owned(),
+        };
+        let second = crate::native_flash::NativeFlashCallback {
+            url: "lingo:late-old-generation()".to_owned(),
+            ..first.clone()
+        };
+        let delivered_first = delivered.clone();
+        let replacement_session = session.clone();
+        let first_result = async_std::task::block_on(
+            pump.dispatch_native_flash_callback_if_current(first, move |callback| async move {
+                delivered_first.borrow_mut().push(callback.url);
+                replacement_session
+                    .borrow_mut()
+                    .with_player(1, |context| {
+                        assert!(context
+                            .player
+                            .flash_binding_state
+                            .borrow_mut()
+                            .invalidate(1, generation));
+                        context
+                            .player
+                            .flash_binding_state
+                            .borrow_mut()
+                            .reserve_for_pair(1, 1, 1)
+                            .expect("same-owner replacement generation");
+                    })
+                    .expect("replacement must retain the owner");
+                Ok(())
+            }),
+        )
+        .expect("first callback dispatch must complete");
+        assert!(!first_result, "replacement must stale the completed callback");
+
+        let delivered_second = delivered.clone();
+        let second_result = async_std::task::block_on(
+            pump.dispatch_native_flash_callback_if_current(second, move |callback| async move {
+                delivered_second.borrow_mut().push(callback.url);
+                Ok(())
+            }),
+        )
+        .expect("stale FIFO callback must be dropped without failing Advance");
+        assert!(!second_result);
+        assert_eq!(
+            delivered.borrow().as_slice(),
+            ["lingo:first()"],
+            "remaining callbacks from the replaced generation must not dispatch"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_flash_callback_runtime_error_survives_reentrant_replacement() {
+        let (session, _host, owner, generation) = native_flash_pump_fixture();
+        let pump = NativeFramePump::new(session.clone(), 1, owner);
+        let callback = crate::native_flash::NativeFlashCallback {
+            sprite: 1,
+            generation,
+            cast_lib: 1,
+            cast_member: 1,
+            url: "lingo:replacement_then_fail()".to_owned(),
+        };
+        let replacement_session = session.clone();
+        let error = async_std::task::block_on(
+            pump.dispatch_native_flash_callback_if_current(callback, move |_callback| async move {
+                replacement_session
+                    .borrow_mut()
+                    .with_player(1, |context| {
+                        assert!(context
+                            .player
+                            .flash_binding_state
+                            .borrow_mut()
+                            .invalidate(1, generation));
+                        context
+                            .player
+                            .flash_binding_state
+                            .borrow_mut()
+                            .reserve_for_pair(1, 1, 1)
+                            .expect("same-owner replacement generation");
+                    })
+                    .expect("replacement must retain the owner");
+                Err(ScriptError::new("reentrant callback runtime failure".to_owned()))
+            }),
+        )
+        .expect_err("a runtime callback error must not be hidden by replacement");
+        assert_eq!(error.code, ScriptErrorCode::Generic);
+        assert_eq!(error.message, "reentrant callback runtime failure");
+    }
+
     #[test]
     fn native_input_pump_rejects_replaced_owner() {
         let session = session_with_casts(&[]).into_handle();
@@ -6758,9 +7758,35 @@ mod tests {
             .with_player(1, |context| context.player.owner.clone())
             .unwrap();
         let pump = NativeInputPump::new(session.clone(), 1, owner.clone());
+        session
+            .borrow_mut()
+            .with_player(1, |context| {
+                context.player.mouse_loc = (12, 34);
+                context.player.movie.mouse_down = true;
+                context.player.mouse_down_sprite = 7;
+                context.player.click_on_sprite = 8;
+                context.player.hovered_sprites = vec![7, 8];
+            })
+            .unwrap();
         session.borrow_mut().reset_player_owned(1, &owner).unwrap();
+        session
+            .borrow_mut()
+            .with_player(1, |context| {
+                assert_eq!(context.player.mouse_loc, (0, 0));
+                assert!(!context.player.movie.mouse_down);
+                assert_eq!(context.player.mouse_down_sprite, 0);
+                assert_eq!(context.player.click_on_sprite, 0);
+                assert!(context.player.hovered_sprites.is_empty());
+            })
+            .unwrap();
         let error = async_std::task::block_on(pump.mouse_down(8, 8))
             .expect_err("replaced owner unexpectedly accepted native input");
+        assert!(error.message.contains("stale"));
+        let error = async_std::task::block_on(pump.mouse_move(8, 8))
+            .expect_err("replaced owner unexpectedly accepted native pointer move");
+        assert!(error.message.contains("stale"));
+        let error = async_std::task::block_on(pump.mouse_up(8, 8))
+            .expect_err("replaced owner unexpectedly accepted native pointer release");
         assert!(error.message.contains("stale"));
     }
 
@@ -6862,6 +7888,276 @@ mod tests {
             },
             font_table: HashMap::new(),
         })
+    }
+
+    fn named_sound_member_info(name: &str) -> CastMemberInfoChunk {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&20u32.to_be_bytes());
+        bytes.extend_from_slice(&[0u8; 16]);
+        let item_count = 21u16;
+        bytes.extend_from_slice(&item_count.to_be_bytes());
+        let mut items = vec![Vec::new(); item_count as usize];
+        items[1] = std::iter::once(name.len() as u8)
+            .chain(name.as_bytes().iter().copied())
+            .collect();
+        let mut offset = 0u32;
+        for item in &items {
+            bytes.extend_from_slice(&offset.to_be_bytes());
+            offset += item.len() as u32;
+        }
+        bytes.extend_from_slice(&offset.to_be_bytes());
+        for item in items {
+            bytes.extend_from_slice(&item);
+        }
+        let mut reader = BinaryReader::from_vec(&bytes);
+        reader.set_endian(Endian::Big);
+        CastMemberInfoChunk::read(&mut reader, 500).expect("test member info must parse")
+    }
+
+    fn cached_named_sound_cast_file() -> Rc<DirectorFile> {
+        let mut file = empty_cached_file("cast5.cct");
+        let member = CastMemberDef {
+            chunk: CastMemberChunk {
+                member_type: MemberType::Sound,
+                specific_data: CastMemberSpecificData::None,
+                specific_data_raw: Vec::new(),
+                member_info: Some(named_sound_member_info("s.win_flag")),
+            },
+            children: vec![Some(Chunk::Sound(SoundChunk::new(Vec::new())))],
+        };
+        let mut members = std::collections::HashMap::new();
+        members.insert(72, member);
+        Rc::get_mut(&mut file)
+            .expect("test file must be uniquely owned")
+            .casts
+            .push(CastDef {
+                id: 5,
+                name: "cast5".to_owned(),
+                members,
+                lctx: None,
+                capital_x: false,
+                dir_version: 500,
+                section_to_member: std::collections::HashMap::new(),
+                lctx_section_id: None,
+                lctx_child_section_ids: Vec::new(),
+                palette_id_offset: 0,
+            });
+        file
+    }
+
+    #[test]
+    fn external_cast_apply_refreshes_only_the_session_owner_lookup_caches() {
+        let mut session = RuntimeSession::new(SymbolOwner {
+            session: 190,
+            generation: 1,
+        });
+        let (tx, _rx) = channel::unbounded();
+        assert!(session.add_player(1, tx));
+        let (tx, _rx) = channel::unbounded();
+        assert!(session.add_player(2, tx));
+        add_external_casts(&mut session, 1, &[0, 0, 0, 0, 0]);
+        add_external_casts(&mut session, 2, &[0, 0, 0, 0, 0]);
+
+        let owner_misses = session
+            .with_player(1, |context| {
+                (
+                    context
+                        .player
+                        .movie
+                        .cast_manager
+                        .find_member_ref_by_name("s.win_flag"),
+                    context
+                        .player
+                        .movie
+                        .cast_manager
+                        .find_member_ref_by_number(72),
+                )
+            })
+            .unwrap();
+        let foreign_misses = session
+            .with_player(2, |context| {
+                (
+                    context
+                        .player
+                        .movie
+                        .cast_manager
+                        .find_member_ref_by_name("s.win_flag"),
+                    context
+                        .player
+                        .movie
+                        .cast_manager
+                        .find_member_ref_by_number(72),
+                )
+            })
+            .unwrap();
+        assert_eq!(owner_misses, (None, None));
+        assert_eq!(foreign_misses, (None, None));
+
+        let requests = session.prepare_cast_loads(1, CastPreloadReason::MovieLoaded);
+        assert_eq!(requests.len(), 5);
+        let named_file = cached_named_sound_cast_file();
+        for (index, pending) in session.pending_casts.iter_mut().enumerate() {
+            pending.state = PendingCastState::ReadyCached(if index == 4 {
+                named_file.clone()
+            } else {
+                empty_cached_file(&format!("cast{}.cct", index + 1))
+            });
+        }
+        let mut generated = CastNotificationOutbox::default();
+        assert!(session.drain_ready_casts(1, &mut generated));
+
+        let owner_refs = session
+            .with_player(1, |context| {
+                (
+                    context
+                        .player
+                        .movie
+                        .cast_manager
+                        .find_member_ref_by_name("s.win_flag"),
+                    context
+                        .player
+                        .movie
+                        .cast_manager
+                        .find_member_ref_by_number(72),
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            owner_refs,
+            (
+                Some(CastMemberRef {
+                    cast_lib: 5,
+                    cast_member: 72,
+                }),
+                Some(CastMemberRef {
+                    cast_lib: 5,
+                    cast_member: 72,
+                })
+            )
+        );
+        let foreign_refs = session
+            .with_player(2, |context| {
+                (
+                    context
+                        .player
+                        .movie
+                        .cast_manager
+                        .find_member_ref_by_name("s.win_flag"),
+                    context
+                        .player
+                        .movie
+                        .cast_manager
+                        .find_member_ref_by_number(72),
+                )
+            })
+            .unwrap();
+        assert_eq!(foreign_refs, (None, None));
+    }
+
+    #[test]
+    fn movie_member_resolves_string_chunk_after_external_cast_apply_without_cross_owner_lookup() {
+        let mut session = RuntimeSession::new(SymbolOwner {
+            session: 191,
+            generation: 1,
+        });
+        let (tx, _rx) = channel::unbounded();
+        assert!(session.add_player(1, tx));
+        let (tx, _rx) = channel::unbounded();
+        assert!(session.add_player(2, tx));
+        add_external_casts(&mut session, 1, &[0, 0, 0, 0, 0]);
+        add_external_casts(&mut session, 2, &[0, 0, 0, 0, 0]);
+
+        // Prewarm both owners with misses so the regression covers the loaded
+        // cast lookup path and cannot pass through a cold-cache scan.
+        for player_id in [1, 2] {
+            session
+                .with_player(player_id, |context| {
+                    assert_eq!(
+                        context
+                            .player
+                            .movie
+                            .cast_manager
+                            .find_member_ref_by_name("s.win_flag"),
+                        None
+                    );
+                })
+                .unwrap();
+        }
+
+        let requests = session.prepare_cast_loads(1, CastPreloadReason::MovieLoaded);
+        assert_eq!(requests.len(), 5);
+        let named_file = cached_named_sound_cast_file();
+        for (index, pending) in session.pending_casts.iter_mut().enumerate() {
+            pending.state = PendingCastState::ReadyCached(if index == 4 {
+                named_file.clone()
+            } else {
+                empty_cached_file(&format!("cast{}.cct", index + 1))
+            });
+        }
+        let mut generated = CastNotificationOutbox::default();
+        assert!(session.drain_ready_casts(1, &mut generated));
+
+        let owner_result = session
+            .with_player(1, |mut runtime| {
+                let source = runtime
+                    .player
+                    .alloc_datum(Datum::String("s.win_flag".to_owned()));
+                let chunk = runtime.player.alloc_datum(Datum::StringChunk(
+                    StringChunkSource::Datum(source),
+                    StringChunkExpr {
+                        chunk_type: StringChunkType::Word,
+                        start: 1,
+                        end: 1,
+                        item_delimiter: runtime.player.movie.item_delimiter,
+                    },
+                    "s.win_flag".to_owned(),
+                ));
+                let result = crate::player::handlers::movie::MovieHandlers::member(
+                    &mut runtime,
+                    &vec![chunk],
+                )?;
+                Ok::<_, ScriptError>(runtime.player.get_datum(&result).clone())
+            })
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            owner_result,
+            Datum::CastMember(CastMemberRef {
+                cast_lib: 5,
+                cast_member: 72,
+            })
+        ));
+
+        let foreign_result = session
+            .with_player(2, |mut runtime| {
+                let source = runtime
+                    .player
+                    .alloc_datum(Datum::String("s.win_flag".to_owned()));
+                let chunk = runtime.player.alloc_datum(Datum::StringChunk(
+                    StringChunkSource::Datum(source),
+                    StringChunkExpr {
+                        chunk_type: StringChunkType::Word,
+                        start: 1,
+                        end: 1,
+                        item_delimiter: runtime.player.movie.item_delimiter,
+                    },
+                    "s.win_flag".to_owned(),
+                ));
+                let result = crate::player::handlers::movie::MovieHandlers::member(
+                    &mut runtime,
+                    &vec![chunk],
+                )?;
+                Ok::<_, ScriptError>(runtime.player.get_datum(&result).clone())
+            })
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            foreign_result,
+            Datum::CastMember(CastMemberRef {
+                cast_lib: -1,
+                cast_member: -1,
+            })
+        ));
     }
 
     #[test]
@@ -7637,6 +8933,45 @@ mod tests {
     }
 
     #[test]
+    fn native_notification_sink_can_reenter_session_mutably() {
+        let mut session = RuntimeSession::new(SymbolOwner {
+            session: 803,
+            generation: 1,
+        });
+        let (tx, _rx) = channel::unbounded();
+        assert!(session.add_player(1, tx));
+        let handle = session.into_handle();
+        let owner = handle
+            .borrow_mut()
+            .with_player(1, |context| context.player.owner.clone())
+            .unwrap();
+        let callbacks = Rc::new(Cell::new(0));
+        let sink: NativePlayerNotificationSinkRef = Rc::new(ReentrantNativeNotificationSink {
+            session: handle.clone(),
+            callbacks: callbacks.clone(),
+        });
+        handle
+            .borrow_mut()
+            .bind_native_player_notification_sink(1, &owner, &sink)
+            .unwrap();
+        handle.borrow_mut().with_player(1, |context| {
+            context
+                .player
+                .queue_player_notification(PlayerNotificationKind::Host(
+                    super::super::host_events::HostEvent::FrameChanged { frame: 1 },
+                ));
+        });
+
+        crate::js_api::JsApi::dispatch_player_notifications(handle.clone(), 1).unwrap();
+
+        assert_eq!(callbacks.get(), 1);
+        assert!(handle
+            .borrow_mut()
+            .take_native_player_notifications(1)
+            .is_empty());
+    }
+
+    #[test]
     fn native_notification_drain_preserves_all_owned_kinds_for_two_players() {
         let mut session = RuntimeSession::new(SymbolOwner {
             session: 804,
@@ -7815,6 +9150,95 @@ mod tests {
             session.take_native_player_notifications(1).len(),
             super::super::host_events::MAX_HOST_EVENTS
         );
+    }
+
+    #[test]
+    fn unbound_native_notification_dispatch_fails_closed_at_capacity() {
+        let mut session = RuntimeSession::new(SymbolOwner {
+            session: 807,
+            generation: 1,
+        });
+        let (first_tx, _first_rx) = channel::unbounded();
+        let (second_tx, _second_rx) = channel::unbounded();
+        assert!(session.add_player(1, first_tx));
+        assert!(session.add_player(2, second_tx));
+        let handle = session.into_handle();
+        let first_owner = handle
+            .borrow_mut()
+            .with_player(1, |context| context.player.owner.clone())
+            .unwrap();
+        let second_owner = handle
+            .borrow_mut()
+            .with_player(2, |context| context.player.owner.clone())
+            .unwrap();
+
+        handle.borrow_mut().with_player(1, |context| {
+            for frame in 0..=(super::super::host_events::MAX_HOST_EVENTS as u32) {
+                context.player.queue_player_notification(
+                    PlayerNotificationKind::Host(
+                        super::super::host_events::HostEvent::FrameChanged { frame },
+                    ),
+                );
+            }
+        });
+
+        assert!(crate::js_api::JsApi::dispatch_player_notifications(handle.clone(), 1).is_err());
+        let (backpressure, owner_still_current) = handle
+            .borrow_mut()
+            .with_player(1, |context| {
+                (
+                    context.player.host_event_backpressure,
+                    context.player.owner.same_identity(&first_owner),
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            backpressure,
+            Some(super::super::host_events::HostEventOverflow {
+                capacity: super::super::host_events::MAX_HOST_EVENTS,
+            })
+        );
+        assert!(owner_still_current);
+
+        let native_events = handle
+            .borrow_mut()
+            .take_native_player_notifications(1);
+        assert_eq!(
+            native_events.len(),
+            super::super::host_events::MAX_HOST_EVENTS
+        );
+        for (frame, event) in native_events.iter().enumerate() {
+            assert!(event.owner.same_identity(&first_owner));
+            assert!(matches!(
+                event.kind,
+                super::super::host_events::NativePlayerNotificationKind::Host(
+                    super::super::host_events::HostEvent::FrameChanged { frame: actual }
+                ) if actual == frame as u32
+            ));
+        }
+        let pending_tail = handle
+            .borrow_mut()
+            .with_player(1, |context| context.player.pending_player_notifications.clone())
+            .unwrap();
+        assert_eq!(pending_tail.len(), 1);
+        assert!(matches!(
+            pending_tail[0].kind,
+            PlayerNotificationKind::Host(
+                super::super::host_events::HostEvent::FrameChanged { frame: 256 }
+            )
+        ));
+
+        handle.borrow_mut().with_player(2, |context| {
+            context.player.queue_player_notification(PlayerNotificationKind::Host(
+                super::super::host_events::HostEvent::FrameChanged { frame: 7 },
+            ));
+        });
+        assert!(crate::js_api::JsApi::dispatch_player_notifications(handle.clone(), 2).is_ok());
+        assert!(handle.borrow_mut().with_player(2, |context| {
+            context.player.host_event_backpressure.is_none()
+                && context.player.owner.same_identity(&second_owner)
+        }).unwrap());
+        assert_eq!(handle.borrow_mut().take_native_player_notifications(2).len(), 1);
     }
 
     #[test]

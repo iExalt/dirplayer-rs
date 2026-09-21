@@ -3938,6 +3938,7 @@ impl WebGL2Renderer {
                             color: fg_color.clone(),
                             bg_color: bg_color.clone(),
                         }),
+                        None,
                     );
 
                     let texture = match self.context.create_texture() {

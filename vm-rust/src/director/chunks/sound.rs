@@ -241,74 +241,6 @@ impl Default for SoundChunk {
 }
 
 impl SoundChunk {
-    /// Length in bytes of the MPEG audio frame whose 4-byte header starts at `h`,
-    /// or None if `h` is not a valid MPEG-1/2/2.5 Layer I-III header.
-    fn mp3_frame_len(h: &[u8]) -> Option<usize> {
-        if h.len() < 4 || h[0] != 0xFF || (h[1] & 0xE0) != 0xE0 {
-            return None;
-        }
-        let version_id = (h[1] >> 3) & 0x03; // 01 is reserved
-        let layer = (h[1] >> 1) & 0x03; // 00 is reserved
-        let bitrate_idx = (h[2] >> 4) & 0x0F; // 0 = free, 15 = bad
-        let rate_idx = (h[2] >> 2) & 0x03; // 3 is reserved
-        if version_id == 1 || layer == 0 || bitrate_idx == 0 || bitrate_idx == 15 || rate_idx == 3 {
-            return None;
-        }
-        let mpeg1 = version_id == 3;
-        // kbps tables, indexed by bitrate_idx
-        const V1L1: [u32; 16] = [0,32,64,96,128,160,192,224,256,288,320,352,384,416,448,0];
-        const V1L2: [u32; 16] = [0,32,48,56,64,80,96,112,128,160,192,224,256,320,384,0];
-        const V1L3: [u32; 16] = [0,32,40,48,56,64,80,96,112,128,160,192,224,256,320,0];
-        const V2L1: [u32; 16] = [0,32,48,56,64,80,96,112,128,144,160,176,192,224,256,0];
-        const V2L23: [u32; 16] = [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160,0];
-        let bitrate = match (mpeg1, layer) {
-            (true, 3) => V1L1[bitrate_idx as usize],
-            (true, 2) => V1L2[bitrate_idx as usize],
-            (true, 1) => V1L3[bitrate_idx as usize],
-            (false, 3) => V2L1[bitrate_idx as usize],
-            (false, _) => V2L23[bitrate_idx as usize],
-            _ => 0,
-        } * 1000;
-        if bitrate == 0 {
-            return None;
-        }
-        let base_rate = [44100u32, 48000, 32000][rate_idx as usize];
-        let sample_rate = match version_id {
-            3 => base_rate,      // MPEG 1
-            2 => base_rate / 2,  // MPEG 2
-            _ => base_rate / 4,  // MPEG 2.5
-        };
-        let padding = ((h[2] >> 1) & 0x01) as u32;
-        let len = if layer == 3 {
-            // Layer I frames are measured in 4-byte slots
-            (12 * bitrate / sample_rate + padding) * 4
-        } else {
-            let coeff = if mpeg1 { 144 } else { 72 };
-            coeff * bitrate / sample_rate + padding
-        };
-        if len < 4 { None } else { Some(len as usize) }
-    }
-
-    /// Offset of the first MP3 frame in `data`, requiring a second valid frame at the
-    /// distance the first one declares. Only a short prefix is scanned — a Shockwave
-    /// Audio payload begins within the first few bytes, and scanning further would
-    /// risk matching noise deep inside genuine PCM.
-    fn find_mp3_start(data: &[u8]) -> Option<usize> {
-        let limit = data.len().min(2048);
-        for off in 0..limit {
-            if let Some(len) = Self::mp3_frame_len(&data[off..]) {
-                match data.get(off + len..) {
-                    // Second frame must follow immediately.
-                    Some(next) if Self::mp3_frame_len(next).is_some() => return Some(off),
-                    // A single frame at the very start is still an MP3 (short SFX).
-                    None if off + len >= data.len() => return Some(off),
-                    _ => {}
-                }
-            }
-        }
-        None
-    }
-
     pub fn from_snd_chunk(reader: &mut BinaryReader, version: u16) -> Result<SoundChunk, String> {
         let original_endian = reader.endian;
         reader.endian = Endian::Big;
@@ -538,7 +470,7 @@ impl SoundChunk {
         // `find_mp3_start` scans a short prefix and requires TWO consecutive valid
         // frame headers, so a chance 0xFF 0xEx byte pair inside real PCM does not
         // trigger it.
-        let mp3_offset = Self::find_mp3_start(&audio_data);
+        let mp3_offset = MediaChunk::find_mp3_start(&audio_data);
         let audio_data = match mp3_offset {
             Some(0) | None => audio_data,
             Some(off) => {
@@ -613,6 +545,12 @@ impl SoundChunk {
 
     pub fn from_media(media: &MediaChunk) -> SoundChunk {
         let codec = media.get_codec_name();
+        let mp3_offset = if codec == "mp3" {
+            media.mp3_start().unwrap_or(0)
+        } else {
+            0
+        };
+        let audio_data = media.audio_data[mp3_offset..].to_vec();
 
         // For IMA ADPCM, the data_size_field contains the uncompressed size
         // Calculate sample_count from uncompressed size, not compressed data
@@ -622,8 +560,8 @@ impl SoundChunk {
             let uncompressed_samples = media.data_size_field;
             (uncompressed_samples, 16)
         } else if codec == "mp3" {
-            // For MP3, we can't easily calculate sample count without decoding
-            // Use compressed size as estimate
+            // MP3 frame/sample metadata is owned by the decoder; the Director
+            // media size field is not a sample count for this representation.
             (0, 0)
         } else {
             // Raw PCM - data is in bytes, 16-bit = 2 bytes per sample
@@ -634,7 +572,7 @@ impl SoundChunk {
             "from_media: codec={}, data_size_field={}, audio_data.len()={}, sample_count={}",
             codec,
             media.data_size_field,
-            media.audio_data.len(),
+            audio_data.len(),
             sample_count
         );
 
@@ -644,7 +582,7 @@ impl SoundChunk {
             bits_per_sample,
             sample_count,
             codec: codec.to_string(),
-            data: media.audio_data.clone(),
+            data: audio_data,
             version: 0,
             big_endian_data: true, // Director media chunks are big-endian
         }

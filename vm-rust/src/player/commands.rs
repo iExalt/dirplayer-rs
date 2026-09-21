@@ -5,7 +5,6 @@ use std::{
     pin::Pin,
     rc::{Rc, Weak},
 };
-
 use indexmap::IndexMap;
 
 use async_std::channel::{Receiver, Sender};
@@ -36,16 +35,19 @@ use super::{
     allocator::ScriptInstanceAllocatorTrait,
     cast_lib::CastMemberRef,
     cast_member::CastMemberType,
-    datum_ref::DatumRef,
-    events::{
-        player_dispatch_callback_event, player_dispatch_event_to_sprite,
-        player_dispatch_event_to_sprite_targeted, player_dispatch_movie_callback,
-        player_invoke_frame_and_movie_scripts, player_wait_available,
-    },
+        datum_ref::DatumRef,
+        events::{
+            player_dispatch_callback_event, player_dispatch_event_to_sprite,
+            player_dispatch_event_to_sprite_targeted,
+            player_dispatch_event_to_sprite_targeted_owned,
+            player_dispatch_movie_callback, player_invoke_frame_and_movie_scripts,
+            player_invoke_static_event_owned, player_wait_available,
+        },
     font::player_load_system_font_owned,
     keyboard_events::{player_key_down, player_key_up},
     player_call_script_handler,
     player_call_script_handler_turn_in_session_sync,
+    player_call_global_handler_turn_in_session, GlobalHandlerTurn,
     player_is_playing, reserve_player_mut, reserve_player_ref,
     score::{
         concrete_sprite_hit_test, get_concrete_sprite_rect, get_sprite_at, get_sprites_at,
@@ -114,6 +116,12 @@ pub enum PlayerVMCommand {
     KeyDown(String, u16),
     KeyUp(String, u16),
     TriggerAlertHook,
+    /// Typed owner-bound global invocation. The existing command loop owns
+    /// any InternalVmRequest continuation produced by the handler.
+    InvokeGlobal {
+        handler: Symbol,
+        args: Vec<DatumRef>,
+    },
     // Flash-to-Lingo callback mechanism
     TriggerFlashCallback {
         sprite_num: i32,
@@ -248,6 +256,9 @@ pub fn _format_player_cmd(command: &PlayerVMCommand) -> String {
         PlayerVMCommand::KeyDown(key, ..) => format!("KeyDown({})", key),
         PlayerVMCommand::KeyUp(key, ..) => format!("KeyUp({})", key),
         PlayerVMCommand::TriggerAlertHook => "TriggerAlertHook".to_string(),
+        PlayerVMCommand::InvokeGlobal { handler, .. } => {
+            format!("InvokeGlobal({handler:?})")
+        }
         PlayerVMCommand::TriggerFlashCallback {
             sprite_num,
             handler_name,
@@ -551,13 +562,15 @@ pub async fn run_command_loop(
         let item = if !blocked {
             match deferred_items.pop_front().or_else(|| rx.try_recv().ok()) {
                 Some(item) => item,
-                None => match rx.recv().await {
+                None => {
+                    match rx.recv().await {
                     Ok(item) => item,
                     Err(_) => {
                         retire_stale_nested_owner(&session_handle, player_id, &owner);
                         break;
                     } // Channel closed (sender dropped)
-                },
+                    }
+                }
             }
         } else {
             match rx.recv().await {
@@ -653,6 +666,8 @@ async fn run_command_with_pending_pump(
     futures::pin_mut!(command_done);
     let mut caller_completer = completer;
     let mut drive_pending = false;
+    let mut cooperative_batch = CooperativeTurnBatch::default();
+    let mut ready_service_batch = ReadyServiceBatch::default();
     let mut work: FuturesUnordered<Pin<Box<dyn Future<Output = OwnerSchedulerEvent>>>> =
         FuturesUnordered::new();
     loop {
@@ -666,6 +681,10 @@ async fn run_command_with_pending_pump(
         // script action may issue an evaluator child while this command is
         // still suspended.
         let resumed = pump_pending_commands(&session_handle, player_id);
+        if !resumed.is_empty() {
+            cooperative_batch.reset();
+            ready_service_batch.reset();
+        }
         for turn in resumed {
             drive_pending |= matches!(&turn, CommandTurn::Waiting(_) | CommandTurn::Pending(_));
             finish_command_turn_no_wake(turn, &session_handle, player_id, &owner).await;
@@ -695,11 +714,30 @@ async fn run_command_with_pending_pump(
             drive_pending = false;
             match admit_pending_command(&session_handle, player_id, &owner) {
                 Some(PendingAdmission::Turn(turn)) => {
+                    let cooperative_waiting = is_runnable_cooperative_waiting(&turn);
+                    let reached_batch_bound = cooperative_batch.observe(&turn);
                     drive_pending |=
                         matches!(&turn, CommandTurn::Waiting(_) | CommandTurn::Pending(_));
                     finish_command_turn_no_wake(turn, &session_handle, player_id, &owner).await;
+                    if cooperative_waiting && work.is_empty() {
+                        let more_ready = drive_pending
+                            || session_handle.borrow().has_ready_pending_commands(player_id);
+                        if cooperative_batch.should_yield(more_ready) {
+                            cooperative_batch.reset();
+                            async_std::task::yield_now().await;
+                        }
+                        if more_ready {
+                            continue;
+                        }
+                    }
+                    if reached_batch_bound {
+                        // A real action future is already selected below; its
+                        // completion or the select timer supplies the yield.
+                        cooperative_batch.reset();
+                    }
                 }
                 Some(PendingAdmission::Action { action, ticket }) => {
+                    cooperative_batch.reset();
                     let action_work = async {
                         let result = execute_admitted_pending_command(
                             &session_handle,
@@ -713,8 +751,24 @@ async fn run_command_with_pending_pump(
                     };
                     work.push(Box::pin(action_work));
                 }
-                None => {}
+                None => cooperative_batch.reset(),
             }
+        } else {
+            cooperative_batch.reset();
+        }
+
+        let ready_work = drive_pending
+            || session_handle
+                .borrow()
+                .has_ready_pending_commands(player_id);
+        match command_pump_route(&mut ready_service_batch, work.is_empty(), ready_work) {
+            CommandPumpRoute::ActiveNoTimer => {}
+            CommandPumpRoute::ContinueNoTimer => continue,
+            CommandPumpRoute::YieldNoTimer => {
+                async_std::task::yield_now().await;
+                continue;
+            }
+            CommandPumpRoute::ParkWithTimer => {}
         }
 
         // Do not hold a RefCell borrow across the select. A producer may add
@@ -731,14 +785,26 @@ async fn run_command_with_pending_pump(
         } else {
             let next = work.next().fuse();
             futures::pin_mut!(next);
+            let tick = sleep(std::time::Duration::from_millis(1)).fuse();
+            futures::pin_mut!(tick);
             select! {
                 result = command_done => {
                     return attach_caller_completer(result, caller_completer.take());
                 }
                 event = next => {
                     match event {
-                        Some(OwnerSchedulerEvent::Eval(advanced)) => drive_pending |= advanced,
+                        Some(OwnerSchedulerEvent::Eval(advanced)) => {
+                            cooperative_batch.reset();
+                            if !advanced {
+                                ready_service_batch.reset();
+                            }
+                            drive_pending |= advanced;
+                        }
                         Some(OwnerSchedulerEvent::Actions(turns, again)) => {
+                            cooperative_batch.reset();
+                            if !again {
+                                ready_service_batch.reset();
+                            }
                             drive_pending = again;
                             for turn in turns {
                                 finish_command_turn_no_wake(turn, &session_handle, player_id, &owner).await;
@@ -747,7 +813,7 @@ async fn run_command_with_pending_pump(
                         None => {}
                     }
                 }
-                _ = sleep(std::time::Duration::from_millis(1)).fuse() => {}
+                _ = tick => {}
             }
         }
     }
@@ -763,6 +829,8 @@ pub(crate) async fn drive_pending_owner(
     owner: &super::ownership::OwnerToken,
 ) {
     let mut action_ready = false;
+    let mut cooperative_batch = CooperativeTurnBatch::default();
+    let mut ready_service_batch = ReadyServiceBatch::default();
     let mut work: FuturesUnordered<Pin<Box<dyn Future<Output = OwnerSchedulerEvent>>>> =
         FuturesUnordered::new();
     loop {
@@ -771,6 +839,9 @@ pub(crate) async fn drive_pending_owner(
             return;
         }
         let resumed = pump_pending_commands(session, player_id);
+        if !resumed.is_empty() {
+            cooperative_batch.reset();
+        }
         for turn in resumed {
             action_ready |= matches!(&turn, CommandTurn::Waiting(_) | CommandTurn::Pending(_));
             finish_command_turn_no_wake(turn, session, player_id, owner).await;
@@ -789,11 +860,30 @@ pub(crate) async fn drive_pending_owner(
             action_ready = false;
             match admit_pending_command(session, player_id, owner) {
                 Some(PendingAdmission::Turn(turn)) => {
+                    let cooperative_waiting = is_runnable_cooperative_waiting(&turn);
+                    let reached_batch_bound = cooperative_batch.observe(&turn);
                     action_ready |=
                         matches!(&turn, CommandTurn::Waiting(_) | CommandTurn::Pending(_));
                     finish_command_turn_no_wake(turn, session, player_id, owner).await;
+                    if cooperative_waiting && work.is_empty() {
+                        let more_ready =
+                            action_ready || session.borrow().has_ready_pending_commands(player_id);
+                        if cooperative_batch.should_yield(more_ready) {
+                            cooperative_batch.reset();
+                            async_std::task::yield_now().await;
+                        }
+                        if more_ready {
+                            continue;
+                        }
+                    }
+                    if reached_batch_bound {
+                        // The existing action future/select below supplies
+                        // the yield when external work is already active.
+                        cooperative_batch.reset();
+                    }
                 }
                 Some(PendingAdmission::Action { action, ticket }) => {
+                    cooperative_batch.reset();
                     let action_work = async {
                         let result = execute_admitted_pending_command(
                             session, player_id, owner, action, ticket,
@@ -803,19 +893,24 @@ pub(crate) async fn drive_pending_owner(
                     };
                     work.push(Box::pin(action_work));
                 }
-                None => {}
+                None => {
+                    cooperative_batch.reset();
+                }
             }
+        } else {
+            cooperative_batch.reset();
         }
-        if work.is_empty() {
-            if action_ready || session.borrow().has_ready_pending_commands(player_id) {
-                // A completed internal action may leave its child driver at
-                // one cooperative Waiting turn before it reaches its
-                // terminal result. Keep the owner pump alive for that ready
-                // command, while started external waits remain parked.
-                sleep(std::time::Duration::from_millis(1)).await;
+        let ready_work = action_ready || session.borrow().has_ready_pending_commands(player_id);
+        match ready_service_batch.step(work.is_empty(), ready_work) {
+            ReadyServiceStep::Active => {}
+            ReadyServiceStep::Continue => continue,
+            ReadyServiceStep::Yield => {
+                async_std::task::yield_now().await;
                 continue;
             }
-            return;
+            ReadyServiceStep::Park => {
+                return;
+            }
         }
         let next = work.next().fuse();
         futures::pin_mut!(next);
@@ -823,8 +918,12 @@ pub(crate) async fn drive_pending_owner(
         futures::pin_mut!(tick);
         select! {
             event = next => match event {
-                Some(OwnerSchedulerEvent::Eval(advanced)) => action_ready |= advanced,
+                Some(OwnerSchedulerEvent::Eval(advanced)) => {
+                    cooperative_batch.reset();
+                    action_ready |= advanced;
+                }
                 Some(OwnerSchedulerEvent::Actions(turns, again)) => {
+                    cooperative_batch.reset();
                     action_ready = again;
                     for turn in turns {
                         finish_command_turn_no_wake(turn, session, player_id, owner).await;
@@ -832,7 +931,9 @@ pub(crate) async fn drive_pending_owner(
                 }
                 None => {}
             },
-            _ = tick => {}
+            _ = tick => {
+                ready_service_batch.reset();
+            }
         }
     }
 }
@@ -929,7 +1030,7 @@ fn with_owned_player<R>(
         .ok_or_else(super::cancelled_scope_error)??)
 }
 
-struct MouseDownInputFlags {
+struct InputCommandFlags {
     session: Weak<RefCell<RuntimeSession>>,
     mailbox: Weak<RefCell<VecDeque<DeferredInputFlagCleanup>>>,
     queue_tx: Sender<PlayerVMExecutionItem>,
@@ -940,7 +1041,7 @@ struct MouseDownInputFlags {
     active: bool,
 }
 
-impl MouseDownInputFlags {
+impl InputCommandFlags {
     fn enter(
         session: &Rc<RefCell<RuntimeSession>>,
         player_id: u32,
@@ -998,7 +1099,7 @@ impl MouseDownInputFlags {
     }
 }
 
-impl Drop for MouseDownInputFlags {
+impl Drop for InputCommandFlags {
     fn drop(&mut self) {
         self.restore();
     }
@@ -2293,6 +2394,97 @@ enum PendingAdmission {
         action: crate::player::driver::PendingAction,
         ticket: crate::player::driver::CompletionTicket,
     },
+}
+
+const COOPERATIVE_TURN_BATCH_LIMIT: usize = 32;
+const READY_SERVICE_BATCH_LIMIT: usize = 32;
+
+#[derive(Default)]
+struct CooperativeTurnBatch {
+    drained: usize,
+}
+
+impl CooperativeTurnBatch {
+    fn reset(&mut self) {
+        self.drained = 0;
+    }
+
+    fn observe(&mut self, turn: &CommandTurn) -> bool {
+        if !is_runnable_cooperative_waiting(turn) {
+            self.reset();
+            return false;
+        }
+        self.drained += 1;
+        self.drained == COOPERATIVE_TURN_BATCH_LIMIT
+    }
+
+    fn should_yield(&self, more_ready: bool) -> bool {
+        more_ready && self.drained >= COOPERATIVE_TURN_BATCH_LIMIT
+    }
+}
+
+fn is_runnable_cooperative_waiting(turn: &CommandTurn) -> bool {
+    matches!(
+        turn,
+        CommandTurn::Waiting(pending) if pending.action.is_none() && !pending.started
+    )
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ReadyServiceStep {
+    Active,
+    Continue,
+    Yield,
+    Park,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum CommandPumpRoute {
+    ActiveNoTimer,
+    ContinueNoTimer,
+    YieldNoTimer,
+    ParkWithTimer,
+}
+
+#[derive(Default)]
+struct ReadyServiceBatch {
+    serviced: usize,
+}
+
+impl ReadyServiceBatch {
+    fn reset(&mut self) {
+        self.serviced = 0;
+    }
+
+    fn step(&mut self, work_is_empty: bool, ready_work: bool) -> ReadyServiceStep {
+        if !work_is_empty {
+            return ReadyServiceStep::Active;
+        }
+        if !ready_work {
+            self.reset();
+            return ReadyServiceStep::Park;
+        }
+        self.serviced += 1;
+        if self.serviced == READY_SERVICE_BATCH_LIMIT {
+            self.reset();
+            ReadyServiceStep::Yield
+        } else {
+            ReadyServiceStep::Continue
+        }
+    }
+}
+
+fn command_pump_route(
+    batch: &mut ReadyServiceBatch,
+    work_is_empty: bool,
+    ready_work: bool,
+) -> CommandPumpRoute {
+    match batch.step(work_is_empty, ready_work) {
+        ReadyServiceStep::Active => CommandPumpRoute::ActiveNoTimer,
+        ReadyServiceStep::Continue => CommandPumpRoute::ContinueNoTimer,
+        ReadyServiceStep::Yield => CommandPumpRoute::YieldNoTimer,
+        ReadyServiceStep::Park => CommandPumpRoute::ParkWithTimer,
+    }
 }
 
 /// Remove exactly one ready command before its executor future is created.
@@ -3665,6 +3857,9 @@ pub(crate) async fn run_player_command(
     owner: super::ownership::OwnerToken,
 ) -> CommandTurn {
     match command {
+        command @ PlayerVMCommand::InvokeGlobal { .. } => {
+            run_global_invoke_command(command, completer, session_handle, player_id, owner).await
+        }
         command @ (PlayerVMCommand::TriggerAlertHook
         | PlayerVMCommand::TriggerFlashCallback { .. }
         | PlayerVMCommand::TriggerLingoCallbackOnScript { .. }
@@ -3679,6 +3874,75 @@ pub(crate) async fn run_player_command(
             run_player_command_result(command, session_handle, player_id, owner).await,
             completer,
         ),
+    }
+}
+
+/// Start a typed global invocation inside the normal owner command loop.
+///
+/// A global may execute a synchronous datum handler or yield an internal
+/// object action. Returning the latter as a PendingCommand lets the existing
+/// loop admit, execute, and resume the exact owner/ticket continuation.
+async fn run_global_invoke_command(
+    command: PlayerVMCommand,
+    completer: Option<ManualFutureCompleter<Result<DatumRef, ScriptError>>>,
+    session_handle: Rc<RefCell<RuntimeSession>>,
+    player_id: u32,
+    owner: super::ownership::OwnerToken,
+) -> CommandTurn {
+    let PlayerVMCommand::InvokeGlobal { handler, args } = command else {
+        unreachable!("non-global command routed to global invocation")
+    };
+    if !owner_is_current(&session_handle, player_id, &owner) {
+        return CommandTurn::Complete(Err(super::cancelled_scope_error()), completer);
+    }
+    let turn = {
+        let mut session = session_handle.borrow_mut();
+        player_call_global_handler_turn_in_session(&mut session, player_id, handler, &args)
+    };
+    match turn {
+        GlobalHandlerTurn::Complete(result) => CommandTurn::Complete(result, completer),
+        GlobalHandlerTurn::Waiting => CommandTurn::Complete(
+            Err(ScriptError::new(
+                "global invocation returned an uncompleted cooperative turn".to_owned(),
+            )),
+            completer,
+        ),
+        GlobalHandlerTurn::PendingRequest { request, .. } => {
+            // Re-enter the existing evaluator/owner pump for typed requests.
+            // This preserves the request's consumed arguments and lets the
+            // sole owner queue retain/resume the exact terminal result.
+            let result = match request {
+                crate::player::driver::InternalVmRequest::MovieAsync(request) => {
+                    super::handlers::movie::execute_movie_async(session_handle, request).await
+                }
+                request => {
+                    crate::player::eval::invoke_request_owned(
+                        session_handle,
+                        player_id,
+                        owner,
+                        request,
+                    )
+                    .await
+                }
+            };
+            CommandTurn::Complete(result, completer)
+        }
+        GlobalHandlerTurn::PendingAction(action) => {
+            let ticket = action.ticket().clone();
+            CommandTurn::Pending(crate::player::driver::PendingCommand {
+                player_id,
+                owner,
+                action: Some(action),
+                started: false,
+                ticket: Some(ticket),
+                completer,
+                event_sender: None,
+                score_continuation: None,
+                child_completion: None,
+                eval_child: None,
+                eval_sender: None,
+            })
+        }
     }
 }
 
@@ -4561,6 +4825,53 @@ async fn run_callback_command(
     }
 }
 
+/// Dispatch a callback produced by the owner-qualified native Flash host.
+/// This keeps the native bridge on the same Lingo/event paths as browser
+/// callbacks without enqueueing work behind the Advance that is awaiting it.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) async fn dispatch_native_flash_callback(
+    session_handle: Rc<RefCell<RuntimeSession>>,
+    player_id: u32,
+    owner: super::ownership::OwnerToken,
+    callback: crate::native_flash::NativeFlashCallback,
+) -> Result<(), ScriptError> {
+    let url = callback.url;
+    if let Some(source) = url.strip_prefix("lingo:") {
+        crate::player::eval_lingo_command_owned(
+            session_handle,
+            player_id,
+            owner,
+            source.to_owned(),
+        )
+        .await
+        .map(|_| ())
+    } else if let Some(body) = url.strip_prefix("event:") {
+        let turn = run_command_with_pending_pump(
+            PlayerVMCommand::DispatchFlashEventRaw {
+                cast_lib: callback.cast_lib,
+                cast_member: callback.cast_member,
+                body: body.to_owned(),
+            },
+            None,
+            session_handle,
+            player_id,
+            owner,
+        )
+        .await;
+        match turn {
+            CommandTurn::Complete(result, _) => result.map(|_| ()),
+            CommandTurn::Continue => Ok(()),
+            CommandTurn::Waiting(_) | CommandTurn::Pending(_) => Err(ScriptError::new(
+                "native Flash event callback unexpectedly suspended".to_owned(),
+            )),
+        }
+    } else {
+        Err(ScriptError::new(
+            "unsupported native Flash callback URL".to_owned(),
+        ))
+    }
+}
+
 async fn run_player_command_result(
     command: PlayerVMCommand,
     session_handle: Rc<RefCell<RuntimeSession>>,
@@ -5179,13 +5490,13 @@ async fn run_player_command_result(
                     return Err(super::cancelled_scope_error());
                 }
                 super::handlers::datum_handlers::flash_object::ruffle_dispatch_mouse_event_owned(
-                    &owner_key, sn, generation, "move", lx, ly, sw, sh,
+                    &session_handle, player_id, &owner_key, sn, generation, "move", lx, ly, sw, sh,
                 )?;
                 if !flash_generation_current() {
                     return Err(super::cancelled_scope_error());
                 }
                 super::handlers::datum_handlers::flash_object::ruffle_dispatch_mouse_event_owned(
-                    &owner_key, sn, generation, "down", lx, ly, sw, sh,
+                    &session_handle, player_id, &owner_key, sn, generation, "down", lx, ly, sw, sh,
                 )?;
                 if !flash_generation_current() {
                     return Err(super::cancelled_scope_error());
@@ -5200,7 +5511,7 @@ async fn run_player_command_result(
             // Set in_mouse_command so the frame loop skips frame updates/advancement
             // and updateStage renders without sleeping (preventing re-entrant event
             // dispatch and timing issues with mouseUp processing).
-            let mut input_flags = MouseDownInputFlags::enter(&session_handle, player_id, &owner)?;
+            let mut input_flags = InputCommandFlags::enter(&session_handle, player_id, &owner)?;
 
             // Dispatch to sprite behaviors if the sprite has any, otherwise
             // fall through to frame/movie scripts per Director's propagation chain.
@@ -5349,11 +5660,17 @@ async fn run_player_command_result(
             return Ok(DatumRef::Void);
         }
         PlayerVMCommand::MouseUp((x, y)) => {
-            crate::player::wait_for_handler_gap().await;
-            crate::player::hold_draw_for_input_handler();
-            if !player_is_playing().await {
-                return Ok(DatumRef::Void);
-            }
+            crate::player::wait_for_handler_gap_owned(
+                session_handle.clone(),
+                player_id,
+                owner.clone(),
+            )
+            .await?;
+            with_owned_player(&session_handle, player_id, &owner, |player| {
+                if player.draw_hold_since_ms.is_none() {
+                    player.draw_hold_since_ms = Some(chrono::Utc::now().timestamp_millis());
+                }
+            })?;
             // `the mouseUpScript` (if set) is dispatched at the END of the
             // mouseUp pipeline (post-sprite/cast/frame), via the existing
             // player_dispatch_movie_callback call further below. We
@@ -5368,20 +5685,20 @@ async fn run_player_command_result(
             // A lift drag ends on release and swallows the mouseUp, matching the
             // mouseDown that started it (the scrollbar is player chrome, not
             // something the movie's scripts see).
-            let was_scroll_drag = reserve_player_mut(|player| {
+            let was_scroll_drag = with_owned_player(&session_handle, player_id, &owner, |player| {
                 if player.field_scroll_drag.take().is_some() {
                     player.movie.mouse_down = false;
                     true
                 } else {
                     false
                 }
-            });
+            })?;
             if was_scroll_drag {
                 return Ok(DatumRef::Void);
             }
 
             // Update mouse state and determine which sprite to notify
-            let result = reserve_player_mut(|player| {
+            let result = with_owned_player(&session_handle, player_id, &owner, |player| {
                 player.mouse_loc = (x, y);
                 player.movie.mouse_down = false;
                 let sprite_num_to_notify = player.mouse_down_sprite;
@@ -5423,7 +5740,7 @@ async fn run_player_command_result(
                 } else {
                     None
                 }
-            });
+            })?;
             let is_inside = result.as_ref().map(|x| x.1).unwrap_or(true);
             let event_name = if is_inside {
                 "mouseUp"
@@ -5437,23 +5754,7 @@ async fn run_player_command_result(
             // the mouseUp command is processed at a frame loop .await point.
             // Set in_mouse_command to prevent re-entrant frame updates and
             // make updateStage synchronous (render-only, no sleep).
-            let saved_yield_flags = reserve_player_mut(|player| {
-                let saved = (
-                    player.is_in_frame_update,
-                    player.in_frame_script,
-                    player.in_enter_frame,
-                    player.in_prepare_frame,
-                    player.in_event_dispatch,
-                    player.in_mouse_command,
-                );
-                player.is_in_frame_update = false;
-                player.in_frame_script = false;
-                player.in_enter_frame = false;
-                player.in_prepare_frame = false;
-                player.in_event_dispatch = false;
-                player.in_mouse_command = true;
-                saved
-            });
+            let mut input_flags = InputCommandFlags::enter(&session_handle, player_id, &owner)?;
 
             // Mirror the mouseDown forwarding: if the cursor is currently
             // over a Flash sprite, hand the release into Ruffle so the SWF's
@@ -5463,7 +5764,7 @@ async fn run_player_command_result(
             // position handles the common click-and-release-in-place case.
             // (releaseOutside semantics for drag-off-the-button can be added
             // later by tracking the press sprite separately.)
-            let flash_forward_up = reserve_player_ref(|player| {
+            let flash_forward_up = with_owned_player(&session_handle, player_id, &owner, |player| {
                 let any_sprite = get_sprite_at(player, x, y, false)?;
                 let sprite = player.movie.score.get_sprite(any_sprite as i16)?;
                 let member_ref = sprite.member.as_ref()?;
@@ -5478,16 +5779,17 @@ async fn run_player_command_result(
                     y - rect.top,
                     rect.right - rect.left,
                     rect.bottom - rect.top,
+                    player.flash_instance_generation(any_sprite as i16)?,
                 ))
-            });
-            if let Some((sn, lx, ly, sw, sh)) = flash_forward_up {
+            })?;
+            if let Some((sn, lx, ly, sw, sh, generation)) = flash_forward_up {
                 // Same MouseMove-before-MouseUp seeding as the down handler.
-                let _ = super::handlers::datum_handlers::flash_object::ruffle_dispatch_mouse_event_global(
-                    sn, "move", lx, ly, sw, sh,
-                );
-                let _ = super::handlers::datum_handlers::flash_object::ruffle_dispatch_mouse_event_global(
-                    sn, "up", lx, ly, sw, sh,
-                );
+                super::handlers::datum_handlers::flash_object::ruffle_dispatch_mouse_event_owned(
+                    &session_handle, player_id, &owner, sn, generation, "move", lx, ly, sw, sh,
+                )?;
+                super::handlers::datum_handlers::flash_object::ruffle_dispatch_mouse_event_owned(
+                    &session_handle, player_id, &owner, sn, generation, "up", lx, ly, sw, sh,
+                )?;
             }
 
             // Dispatch to the sprite that originally received mouseDown,
@@ -5499,16 +5801,19 @@ async fn run_player_command_result(
                     sprite_num, event_name
                 );
                 if *sprite_num > 0 {
-                    event_stopped = player_dispatch_event_to_sprite_targeted(
+                    event_stopped = player_dispatch_event_to_sprite_targeted_owned(
+                        session_handle.clone(),
+                        player_id,
+                        owner.clone(),
                         Symbol::builtin(if is_inside {
                             BuiltInSymbol::MouseUp
                         } else {
                             BuiltInSymbol::MouseUpOutSide
                         }),
-                        &vec![],
+                        vec![],
                         *sprite_num as u16,
                     )
-                    .await;
+                    .await?;
                     true
                 } else {
                     false
@@ -5519,19 +5824,24 @@ async fn run_player_command_result(
             };
 
             if !dispatched_to_sprite {
-                player_invoke_frame_and_movie_scripts(
+                player_invoke_static_event_owned(
+                    &session_handle,
+                    player_id,
+                    &owner,
                     Symbol::builtin(BuiltInSymbol::MouseUp),
                     &vec![],
                 )
-                .await;
+                .await?;
             }
 
             // Execute cast member script using the ORIGINAL sprite that had mouseDown,
             // consistent with Director behavior
-            let cast_member_script_call = retained_session_handle()
-                .and_then(|handle| {
-                    let mut session = handle.borrow_mut();
-                    session.with_player(active_player_id() as u32, |context| {
+            let cast_member_script_call = {
+                let mut session = session_handle.borrow_mut();
+                session.with_player(player_id, |context| {
+                    if !owner.is_arena_live() || !owner.same_identity(&context.player.owner) {
+                        return None;
+                    }
                         let player = context.player;
                         let symbols = context.symbols;
                         let sprite_num_to_notify = result.as_ref().map(|r| r.2).unwrap_or(-1);
@@ -5594,17 +5904,23 @@ async fn run_player_command_result(
                         debug!("✓ Handler '{}' found!", handler_name);
 
                         Some((None, handler.unwrap(), vec![]))
-                    })
-                })
-                .flatten();
+                }).flatten()
+            };
 
             let mut handler_err: Option<ScriptError> = None;
             if let Some((receiver, handler, args)) = cast_member_script_call {
-                match player_call_script_handler(receiver, handler, &args).await {
-                    ScriptHandlerTurn::Complete(Err(e)) => handler_err = Some(e),
-                    ScriptHandlerTurn::Complete(Ok(_))
-                    | ScriptHandlerTurn::Waiting
-                    | ScriptHandlerTurn::Pending(_) => {}
+                if let Err(e) = crate::player::eval::invoke_script_callback_owned(
+                    session_handle.clone(),
+                    player_id,
+                    owner.clone(),
+                    receiver,
+                    handler,
+                    args,
+                    false,
+                )
+                .await
+                {
+                    handler_err = Some(e);
                 }
             }
 
@@ -5621,17 +5937,10 @@ async fn run_player_command_result(
                 }
             }
 
-            // Restore all is_yield_safe() flags and command_handler_yielding
-            // MUST happen even on error to prevent skip_frame getting stuck
-            reserve_player_mut(|player| {
-                player.is_in_frame_update = saved_yield_flags.0;
-                player.in_frame_script = saved_yield_flags.1;
-                player.in_enter_frame = saved_yield_flags.2;
-                player.in_prepare_frame = saved_yield_flags.3;
-                player.in_event_dispatch = saved_yield_flags.4;
-                player.in_mouse_command = saved_yield_flags.5;
+            input_flags.restore();
+            with_owned_player(&session_handle, player_id, &owner, |player| {
                 player.is_double_click = false;
-            });
+            })?;
 
             if let Some(e) = handler_err {
                 return Err(e);
@@ -5639,10 +5948,7 @@ async fn run_player_command_result(
             return Ok(DatumRef::Void);
         }
         PlayerVMCommand::MouseMove((x, y)) => {
-            if !player_is_playing().await {
-                return Ok(DatumRef::Void);
-            }
-            reserve_player_mut(|player| {
+            with_owned_player(&session_handle, player_id, &owner, |player| {
                 player.mouse_loc = (x, y);
 
                 // Continue a field lift drag before anything else — it owns the
@@ -5697,11 +6003,41 @@ async fn run_player_command_result(
                         sprite.loc_v = new_v;
                     }
                 }
-            });
+            })?;
             // The pointer moved, so re-evaluate which sprites it is inside.
             // (The same pass also runs once per frame — mouseWithin is sent
             // every frame the pointer stays inside, not only when it moves.)
-            crate::player::events::dispatch_rollover_events();
+            crate::player::events::dispatch_rollover_events_owned(
+                session_handle.clone(),
+                player_id,
+                owner.clone(),
+            )
+            .await?;
+
+            let flash_forward_move = with_owned_player(&session_handle, player_id, &owner, |player| {
+                let any_sprite = get_sprite_at(player, x, y, false)?;
+                let sprite = player.movie.score.get_sprite(any_sprite as i16)?;
+                let member_ref = sprite.member.as_ref()?;
+                let member = player.movie.cast_manager.find_member_by_ref(member_ref)?;
+                if !matches!(member.member_type, CastMemberType::Flash(_)) {
+                    return None;
+                }
+                let generation = player.flash_instance_generation(any_sprite as i16)?;
+                let rect = super::score::get_concrete_sprite_rect(player, sprite);
+                Some((
+                    any_sprite as i32,
+                    x - rect.left,
+                    y - rect.top,
+                    rect.right - rect.left,
+                    rect.bottom - rect.top,
+                    generation,
+                ))
+            })?;
+            if let Some((sn, lx, ly, sw, sh, generation)) = flash_forward_move {
+                super::handlers::datum_handlers::flash_object::ruffle_dispatch_mouse_event_owned(
+                    &session_handle, player_id, &owner, sn, generation, "move", lx, ly, sw, sh,
+                )?;
+            }
         }
         PlayerVMCommand::RightMouseDown((x, y)) => {
             if !player_is_playing().await {
@@ -5714,7 +6050,9 @@ async fn run_player_command_result(
             // handler in frame/movie scripts. We don't toggle button
             // hilite or set mouse_down_sprite — those are left-button
             // concerns.
-            let scripted_sprite = reserve_player_ref(|player| get_sprite_at(player, x, y, true));
+            let scripted_sprite = with_owned_player(&session_handle, player_id, &owner, |player| {
+                get_sprite_at(player, x, y, true)
+            })?;
             if let Some(sprite_number) = scripted_sprite {
                 player_dispatch_event_to_sprite_targeted(
                     Symbol::builtin(BuiltInSymbol::RightMouseDown),
@@ -5873,6 +6211,9 @@ async fn run_player_command_result(
         | PlayerVMCommand::DispatchFlashEventRaw { .. } => {
             unreachable!("callback commands are dispatched through run_callback_command")
         }
+        PlayerVMCommand::InvokeGlobal { .. } => {
+            unreachable!("global invocation is dispatched through run_global_invoke_command")
+        }
         PlayerVMCommand::PumpPending => {}
     }
     Ok(DatumRef::Void)
@@ -5882,15 +6223,24 @@ async fn run_player_command_result(
 mod raw_flash_tests {
     use super::{
         raw_flash_args, raw_flash_args_from_values, raw_flash_values, ruffle_flash_values,
-        run_callback_command, CommandTurn, Datum, FlashCallbackArgs, PlayerVMCommand,
+        dispatch_native_flash_callback, run_callback_command, CommandTurn, Datum, FlashCallbackArgs,
+        PlayerVMCommand,
         RawFlashBinding,
     };
+    use crate::native_flash::NativeFlashCallback;
+    use crate::director::{
+        chunks::{handler::{Bytecode, HandlerDef}, script::ScriptChunk},
+        enums::ScriptType,
+        lingo::opcode::OpCode,
+    };
     use crate::player::datum_ref::DatumRef;
+    use crate::player::cast_lib::{CastLib, CastMemberRef};
+    use crate::player::script::Script;
     use crate::player::session::RuntimeSession;
     use crate::player::symbols::symbol_table::SymbolOwner;
     use crate::player::{owner_key_string, DirPlayer};
     use async_std::channel;
-    use std::{cell::RefCell, rc::Rc};
+    use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
     fn assert_bound_markers(
         player: &DirPlayer,
@@ -6120,6 +6470,108 @@ mod raw_flash_tests {
             "stale callback allocated VM data"
         );
     }
+
+    #[test]
+    fn native_flash_callbacks_use_the_owner_bound_lingo_and_event_paths() {
+        let mut session = RuntimeSession::new(SymbolOwner {
+            session: 9905,
+            generation: 1,
+        });
+        assert!(session.add_player(1, channel::unbounded().0));
+        let session = Rc::new(RefCell::new(session));
+        let owner = session
+            .borrow_mut()
+            .with_player(1, |context| context.player.owner.clone())
+            .expect("callback test player exists");
+        let (event_handler, event_marker) = session
+            .borrow_mut()
+            .with_player(1, |context| {
+                (
+                    context.symbols.intern("callbackProbe"),
+                    context.symbols.intern("nativeEventMarker"),
+                )
+            })
+            .expect("callback test symbols exist");
+        session
+            .borrow_mut()
+            .with_player(1, |context| {
+                let member_ref = CastMemberRef { cast_lib: 1, cast_member: 77 };
+                let handler = Rc::new(HandlerDef {
+                    name_id: 0,
+                    bytecode_array: vec![
+                        Bytecode::new(OpCode::PushInt8, 7, 0),
+                        Bytecode::new(OpCode::SetGlobal, 1, 1),
+                        Bytecode::new(OpCode::Ret, 0, 2),
+                    ],
+                    bytecode_index_map: fxhash::FxHashMap::default(),
+                    argument_name_ids: vec![],
+                    local_name_ids: vec![],
+                    global_name_ids: vec![1],
+                    compiled_ir: RefCell::new(None),
+                });
+                let script = Rc::new(Script {
+                    member_ref,
+                    name: "native-event-movie".to_owned(),
+                    chunk: ScriptChunk {
+                        script_number: 1,
+                        literals: vec![],
+                        handlers: vec![],
+                        property_name_ids: vec![],
+                        property_defaults: HashMap::new(),
+                    },
+                    script_type: ScriptType::Movie,
+                    handlers: fxhash::FxHashMap::from_iter([(event_handler.clone(), handler)]),
+                    handler_names_raw: vec!["callbackProbe".to_owned()],
+                    handler_names: vec![event_handler.clone()],
+                    properties: RefCell::new(fxhash::FxHashMap::default()),
+                });
+                let mut cast = CastLib::test_external(1, 0);
+                cast.name_symbols = Rc::from(vec![event_handler, event_marker.clone()]);
+                cast.scripts.insert(77, script);
+                context.player.movie.cast_manager.casts.push(cast);
+            })
+            .expect("callback test movie script exists");
+        let lingo = NativeFlashCallback {
+            sprite: 1,
+            generation: 1,
+            cast_lib: 1,
+            cast_member: 1,
+            url: "lingo:1 + 1".to_owned(),
+        };
+        async_std::task::block_on(dispatch_native_flash_callback(
+            session.clone(),
+            1,
+            owner.clone(),
+            lingo,
+        ))
+        .expect("owner-bound Lingo callback must complete");
+        let event = NativeFlashCallback {
+            sprite: 1,
+            generation: 1,
+            cast_lib: 1,
+            cast_member: 1,
+            url: "event:callbackProbe 7".to_owned(),
+        };
+        async_std::task::block_on(dispatch_native_flash_callback(
+            session.clone(),
+            1,
+            owner,
+            event,
+        ))
+        .expect("owner-bound event callback must complete");
+        assert_eq!(
+            session
+                .borrow_mut()
+                .with_player(1, |context| {
+                    context
+                        .player
+                        .globals
+                        .get(&event_marker)
+                        .map(|value| context.player.get_datum(value).int_value().unwrap_or_default())
+                }),
+            Some(Some(7))
+        );
+    }
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -6127,7 +6579,6 @@ mod multiuser_socket_command_tests {
     use super::{run_player_command_result, PlayerVMCommand};
     use async_std::channel;
     use std::{cell::RefCell, rc::Rc};
-
     use crate::player::{
         ownership::{OwnerKey, OwnerToken},
         session::RuntimeSession,
@@ -6271,22 +6722,497 @@ mod multiuser_socket_command_tests {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod scheduler_admission_tests {
     use super::{
-        admit_pending_command, execute_admitted_pending_command, pump_admitted_eval_request,
-        pump_pending_commands, CommandTurn, PendingAdmission,
+        admit_pending_command, execute_admitted_pending_command, finish_command_turn_no_wake,
+        pump_admitted_eval_request, pump_pending_commands, CommandTurn,
+        command_pump_route, CommandPumpRoute, CooperativeTurnBatch, PendingAdmission,
+        ReadyServiceBatch, ReadyServiceStep,
+        COOPERATIVE_TURN_BATCH_LIMIT, READY_SERVICE_BATCH_LIMIT,
     };
     use async_std::channel;
-    use std::{cell::RefCell, rc::Rc};
+    use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
+    use crate::director::{
+        chunks::{handler::{Bytecode, HandlerDef}, script::ScriptChunk},
+        enums::ScriptType,
+        lingo::opcode::OpCode,
+    };
     use crate::player::{
         driver::{
-            ActionCompletion, InternalVmRequest, PendingAction, PendingCommand, TraceRequest,
+            ActionCompletion, CompletionTicket, DriverContinuation, DriverStart, DriverTurn,
+            HostRequest, InternalVmRequest, PendingAction, PendingCommand, TraceRequest,
         },
+        cast_lib::{CastLib, CastMemberRef},
         eval::EvalTurn,
-        ownership::OwnerToken,
+        ownership::{OwnerKey, OwnerToken},
+        script::Script,
         session::RuntimeSession,
         symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolOwner},
         DatumRef,
     };
+
+    fn update_stage_driver_fixture() ->
+        (Rc<RefCell<RuntimeSession>>, OwnerToken, CompletionTicket)
+    {
+        let mut session = RuntimeSession::new(SymbolOwner {
+            session: 9955,
+            generation: 1,
+        });
+        assert!(session.add_player(1, channel::unbounded().0));
+        let member_ref = CastMemberRef {
+            cast_lib: 1,
+            cast_member: 1,
+        };
+        let (handler_name, update_stage) = session
+            .with_player(1, |context| {
+                (
+                    context.symbols.intern("runUpdateStage"),
+                    Symbol::builtin(BuiltInSymbol::UpdateStage),
+                )
+            })
+            .expect("scheduler test player exists");
+        let handler = Rc::new(HandlerDef {
+            name_id: 0,
+            bytecode_array: vec![
+                Bytecode::new(OpCode::PushArgListNoRet, 0, 0),
+                Bytecode::new(OpCode::ExtCall, 1, 1),
+                Bytecode::new(OpCode::Ret, 0, 2),
+            ],
+            bytecode_index_map: fxhash::FxHashMap::default(),
+            argument_name_ids: vec![],
+            local_name_ids: vec![],
+            global_name_ids: vec![],
+            compiled_ir: RefCell::new(None),
+        });
+        let script = Rc::new(Script {
+            member_ref: member_ref.clone(),
+            name: "scheduler-update-stage".to_owned(),
+            chunk: ScriptChunk {
+                script_number: 1,
+                literals: vec![],
+                handlers: vec![],
+                property_name_ids: vec![],
+                property_defaults: HashMap::new(),
+            },
+            script_type: ScriptType::Movie,
+            handlers: fxhash::FxHashMap::from_iter([(handler_name.clone(), handler)]),
+            handler_names_raw: vec!["runUpdateStage".to_owned()],
+            handler_names: vec![handler_name.clone()],
+            properties: RefCell::new(fxhash::FxHashMap::default()),
+        });
+        session
+            .with_player(1, |context| {
+                let mut cast = CastLib::test_external(1, 0);
+                cast.name_symbols = Rc::from(vec![handler_name.clone(), update_stage]);
+                cast.scripts.insert(1, script);
+                context.player.movie.cast_manager.casts.push(cast);
+            })
+            .expect("scheduler test player exists");
+        let owner = session
+            .with_player(1, |context| context.player.owner.clone())
+            .expect("scheduler test owner exists");
+        let driver = match DriverContinuation::start(
+            &mut session,
+            1,
+            None,
+            (member_ref, handler_name),
+            &[],
+            false,
+        )
+        .expect("UpdateStage driver should start")
+        {
+            DriverStart::Running(driver) => driver,
+            DriverStart::Early(_) => panic!("UpdateStage fixture completed during setup"),
+        };
+        session.insert_driver_for_test(driver);
+        let action = (0..64)
+            .find_map(|_| match session.turn_handler(1) {
+                Some(DriverTurn::Pending(action)) => Some(action),
+                Some(DriverTurn::Waiting) => None,
+                Some(DriverTurn::Complete(_)) => {
+                    panic!("UpdateStage fixture completed before producing an action")
+                }
+                Some(DriverTurn::Error(_)) => {
+                    panic!("UpdateStage fixture failed before producing an action")
+                }
+                None => panic!("UpdateStage fixture lost its driver"),
+            })
+            .expect("UpdateStage fixture did not produce an action");
+        assert!(matches!(
+            &action,
+            PendingAction::Internal(request)
+                if matches!(
+                    &request.request,
+                    InternalVmRequest::MovieAsync(movie)
+                        if matches!(
+                            &movie.kind,
+                            crate::player::handlers::movie::MovieAsyncKind::UpdateStage { .. }
+                        )
+                )
+        ));
+        let ticket = action.ticket().clone();
+        let session = Rc::new(RefCell::new(session));
+        session.borrow_mut().retain_pending_command(PendingCommand {
+            player_id: 1,
+            owner: owner.clone(),
+            action: Some(action),
+            started: false,
+            ticket: Some(ticket.clone()),
+            completer: None,
+            event_sender: None,
+            score_continuation: None,
+            child_completion: None,
+            eval_child: None,
+            eval_sender: None,
+        });
+        (session, owner, ticket)
+    }
+
+    fn cooperative_waiting(
+        owner: &OwnerToken,
+        ticket: Option<CompletionTicket>,
+    ) -> CommandTurn {
+        CommandTurn::Waiting(PendingCommand {
+            player_id: 1,
+            owner: owner.clone(),
+            action: None,
+            started: false,
+            ticket,
+            completer: None,
+            event_sender: None,
+            score_continuation: None,
+            child_completion: None,
+            eval_child: None,
+            eval_sender: None,
+        })
+    }
+
+    #[test]
+    fn cooperative_turn_batch_is_bounded_and_requires_more_ready_work() {
+        let owner = OwnerToken::new(OwnerKey {
+            session: 9950,
+            player: 1,
+            generation: 1,
+        });
+        let mut batch = CooperativeTurnBatch::default();
+
+        for _ in 0..31 {
+            assert!(!batch.observe(&cooperative_waiting(&owner, None)));
+        }
+        assert_eq!(batch.drained, 31);
+        assert!(!batch.should_yield(true));
+
+        assert!(batch.observe(&cooperative_waiting(&owner, None)));
+        assert_eq!(batch.drained, 32);
+        assert!(batch.should_yield(true));
+        assert!(!batch.should_yield(false));
+
+        // A non-runnable Pending turn resets the cooperative budget. This
+        // keeps a real action-producing turn out of the cooperative batch.
+        let pending = CommandTurn::Pending(PendingCommand {
+            player_id: 1,
+            owner,
+            action: None,
+            started: false,
+            ticket: None,
+            completer: None,
+            event_sender: None,
+            score_continuation: None,
+            child_completion: None,
+            eval_child: None,
+            eval_sender: None,
+        });
+        assert!(!batch.observe(&pending));
+        assert_eq!(batch.drained, 0);
+    }
+
+    #[test]
+    fn cooperative_turn_requeue_preserves_same_owner_fifo() {
+        let mut session = RuntimeSession::new(SymbolOwner {
+            session: 9953,
+            generation: 1,
+        });
+        assert!(session.add_player(1, channel::unbounded().0));
+        let owner = session
+            .with_player(1, |context| context.player.owner.clone())
+            .expect("scheduler test player exists");
+        let first_ticket = session.test_scheduler_ticket(&owner);
+        let second_ticket = session.test_scheduler_ticket(&owner);
+        let session = Rc::new(RefCell::new(session));
+
+        let first = cooperative_waiting(&owner, Some(first_ticket.clone()));
+        let second = cooperative_waiting(&owner, Some(second_ticket.clone()));
+        let first = match first {
+            CommandTurn::Waiting(pending) => pending,
+            _ => unreachable!(),
+        };
+        let second = match second {
+            CommandTurn::Waiting(pending) => pending,
+            _ => unreachable!(),
+        };
+        session.borrow_mut().retain_pending_command(second);
+
+        async_std::task::block_on(finish_command_turn_no_wake(
+            CommandTurn::Waiting(first),
+            &session,
+            1,
+            &owner,
+        ));
+
+        let selected = session
+            .borrow_mut()
+            .take_ready_pending_command_for(1)
+            .expect("second ready command should remain selectable");
+        assert!(selected
+            .ticket
+            .as_ref()
+            .is_some_and(|ticket| ticket.same_identity(&second_ticket)));
+        let requeued = session
+            .borrow_mut()
+            .take_ready_pending_command_for(1)
+            .expect("cooperative command should be requeued at the tail");
+        assert!(requeued
+            .ticket
+            .as_ref()
+            .is_some_and(|ticket| ticket.same_identity(&first_ticket)));
+    }
+
+    #[test]
+    fn ready_service_batch_preserves_progress_after_action_completion() {
+        let mut batch = ReadyServiceBatch::default();
+
+        for _ in 0..(READY_SERVICE_BATCH_LIMIT - 1) {
+            assert_eq!(batch.step(false, false), ReadyServiceStep::Active);
+            assert_eq!(batch.step(true, true), ReadyServiceStep::Continue);
+        }
+        assert_eq!(batch.serviced, READY_SERVICE_BATCH_LIMIT - 1);
+
+        assert_eq!(batch.step(false, false), ReadyServiceStep::Active);
+        assert_eq!(batch.step(true, true), ReadyServiceStep::Yield);
+        assert_eq!(batch.serviced, 0);
+    }
+
+    #[test]
+    fn ready_service_batch_yields_competing_local_probe_at_boundary() {
+        let serviced = std::rc::Rc::new(std::cell::Cell::new(false));
+        async_std::task::block_on({
+            let boundary_serviced = serviced.clone();
+            async move {
+                let probe_serviced = boundary_serviced.clone();
+                let probe = async_std::task::spawn_local(async move {
+                    probe_serviced.set(true);
+                });
+                let mut batch = ReadyServiceBatch::default();
+                for _ in 0..READY_SERVICE_BATCH_LIMIT {
+                    assert_eq!(batch.step(false, false), ReadyServiceStep::Active);
+                    let step = batch.step(true, true);
+                    if step == ReadyServiceStep::Yield {
+                        async_std::task::yield_now().await;
+                    } else {
+                        assert_eq!(step, ReadyServiceStep::Continue);
+                    }
+                }
+                assert!(
+                    serviced.get(),
+                    "ready-service batch boundary must service a competing probe"
+                );
+                probe.await;
+            }
+        });
+    }
+
+    #[test]
+    fn command_owned_ready_route_skips_timer_and_parks_external_work() {
+        let mut batch = ReadyServiceBatch::default();
+        for _ in 0..(READY_SERVICE_BATCH_LIMIT - 1) {
+            assert_eq!(
+                command_pump_route(&mut batch, true, true),
+                CommandPumpRoute::ContinueNoTimer
+            );
+        }
+        assert_eq!(
+            command_pump_route(&mut batch, true, true),
+            CommandPumpRoute::YieldNoTimer
+        );
+        assert_eq!(
+            command_pump_route(&mut batch, false, false),
+            CommandPumpRoute::ActiveNoTimer
+        );
+        assert_eq!(
+            command_pump_route(&mut batch, true, false),
+            CommandPumpRoute::ParkWithTimer
+        );
+    }
+
+    #[test]
+    fn cooperative_turn_bound_yields_to_competing_local_probe() {
+        let serviced = std::rc::Rc::new(std::cell::Cell::new(false));
+        async_std::task::block_on({
+            let boundary_serviced = serviced.clone();
+            async move {
+                let probe_serviced = boundary_serviced.clone();
+                let probe = async_std::task::spawn_local(async move {
+                    probe_serviced.set(true);
+                });
+                let owner = OwnerToken::new(OwnerKey {
+                    session: 9954,
+                    player: 1,
+                    generation: 1,
+                });
+                let mut batch = CooperativeTurnBatch::default();
+                for _ in 0..COOPERATIVE_TURN_BATCH_LIMIT {
+                    assert!(
+                        batch.observe(&cooperative_waiting(&owner, None))
+                            || batch.drained < COOPERATIVE_TURN_BATCH_LIMIT
+                    );
+                }
+                assert!(batch.should_yield(true));
+                batch.reset();
+                async_std::task::yield_now().await;
+                assert!(
+                    boundary_serviced.get(),
+                    "yield boundary must service a ready probe"
+                );
+                probe.await;
+            }
+        });
+    }
+
+    #[test]
+    fn started_external_action_is_admitted_once_and_resumes_once() {
+        let mut session = RuntimeSession::new(SymbolOwner {
+            session: 9952,
+            generation: 1,
+        });
+        assert!(session.add_player(1, channel::unbounded().0));
+        let owner = session
+            .with_player(1, |context| context.player.owner.clone())
+            .expect("scheduler test player exists");
+        let ticket = session.test_scheduler_ticket(&owner);
+        let session = Rc::new(RefCell::new(session));
+        session.borrow_mut().retain_pending_command(PendingCommand {
+            player_id: 1,
+            owner: owner.clone(),
+            action: Some(PendingAction::Host(HostRequest::Debugger {
+                ticket: ticket.clone(),
+                message: "scheduler external wait".to_owned(),
+            })),
+            started: false,
+            ticket: Some(ticket.clone()),
+            completer: None,
+            event_sender: None,
+            score_continuation: None,
+            child_completion: None,
+            eval_child: None,
+            eval_sender: None,
+        });
+
+        let (action, admitted_ticket) = match admit_pending_command(&session, 1, &owner)
+            .expect("external action should admit")
+        {
+            PendingAdmission::Action { action, ticket } => (action, ticket),
+            PendingAdmission::Turn(_) => panic!("external action was admitted as a turn"),
+        };
+        let (turns, drive_again) = async_std::task::block_on(execute_admitted_pending_command(
+            &session,
+            1,
+            &owner,
+            action,
+            admitted_ticket,
+        ));
+        assert!(matches!(turns.as_slice(), [CommandTurn::Continue]));
+        assert!(!drive_again, "unresolved host work must remain parked");
+        assert!(!session.borrow().has_ready_pending_commands(1));
+        assert!(admit_pending_command(&session, 1, &owner).is_none());
+        assert!(pump_pending_commands(&session, 1).is_empty());
+
+        session.borrow_mut().submit_pending_command_completion(
+            1,
+            ticket.clone(),
+            ActionCompletion::InternalResult(crate::player::DatumRef::Void),
+        );
+        let resumed = pump_pending_commands(&session, 1);
+        assert_eq!(resumed.len(), 1, "exact completion should resume once");
+        assert!(!session.borrow().has_pending_commands(1));
+
+        // The action registry retires the ticket on the first completion;
+        // duplicate host delivery is ignored and cannot create a second turn.
+        session.borrow_mut().submit_pending_command_completion(
+            1,
+            ticket,
+            ActionCompletion::InternalResult(crate::player::DatumRef::Void),
+        );
+        assert!(pump_pending_commands(&session, 1).is_empty());
+    }
+
+    #[test]
+    fn real_update_stage_action_completes_through_owner_pump_once() {
+        let (session, owner, ticket) = update_stage_driver_fixture();
+        let (action, admitted_ticket) = match admit_pending_command(&session, 1, &owner)
+            .expect("UpdateStage action should admit")
+        {
+            PendingAdmission::Action { action, ticket } => (action, ticket),
+            PendingAdmission::Turn(_) => panic!("UpdateStage action became a cooperative turn"),
+        };
+        assert!(admitted_ticket.same_identity(&ticket));
+        let (turns, drive_again) = async_std::task::block_on(
+            execute_admitted_pending_command(&session, 1, &owner, action, admitted_ticket),
+        );
+        assert!(drive_again, "synchronous UpdateStage must wake its owner pump");
+        assert!(matches!(turns.as_slice(), [CommandTurn::Continue]));
+
+        let resumed = pump_pending_commands(&session, 1);
+        assert_eq!(resumed.len(), 1, "the exact completion must resume once");
+        assert!(matches!(resumed[0], CommandTurn::Complete(Err(_), _)));
+        assert!(!session.borrow().has_pending_commands(1));
+        assert!(session.borrow().action_details(&ticket).is_none());
+
+        session.borrow_mut().submit_pending_command_completion(
+            1,
+            ticket,
+            ActionCompletion::InternalError(crate::player::ScriptError::new(
+                "late UpdateStage completion".to_owned(),
+            )),
+        );
+        assert!(pump_pending_commands(&session, 1).is_empty());
+    }
+
+    #[test]
+    fn real_update_stage_completion_is_dropped_on_owner_replacement() {
+        let (session, owner, ticket) = update_stage_driver_fixture();
+        let (action, admitted_ticket) = match admit_pending_command(&session, 1, &owner)
+            .expect("UpdateStage action should admit")
+        {
+            PendingAdmission::Action { action, ticket } => (action, ticket),
+            PendingAdmission::Turn(_) => panic!("UpdateStage action became a cooperative turn"),
+        };
+        let (turns, drive_again) = async_std::task::block_on(
+            execute_admitted_pending_command(&session, 1, &owner, action, admitted_ticket),
+        );
+        assert!(drive_again);
+        assert!(matches!(turns.as_slice(), [CommandTurn::Continue]));
+
+        session.borrow_mut().remove_player(1).expect("old player should retire");
+        assert!(session.borrow_mut().add_player(1, channel::unbounded().0));
+        let replacement_owner = session
+            .borrow_mut()
+            .with_player(1, |context| context.player.owner.clone())
+            .expect("replacement player should exist");
+        assert!(!owner.same_identity(&replacement_owner));
+        assert!(session.borrow().action_details(&ticket).is_none());
+        assert!(pump_pending_commands(&session, 1).is_empty());
+        session.borrow_mut().submit_pending_command_completion(
+            1,
+            ticket,
+            ActionCompletion::InternalError(crate::player::ScriptError::new(
+                "late replaced-owner completion".to_owned(),
+            )),
+        );
+        assert!(pump_pending_commands(&session, 1).is_empty());
+        assert!(session
+            .borrow_mut()
+            .with_player(1, |context| context.player.owner.same_identity(&replacement_owner))
+            .unwrap());
+    }
 
     #[test]
     fn scheduler_admits_each_eval_and_action_identity_once_before_poll() {
@@ -6490,7 +7416,7 @@ mod scheduler_admission_tests {
 mod owned_mouse_down_tests {
     use super::{
         execute_pending_commands, pump_pending_commands, pump_pending_eval_requests,
-        run_player_command_result, CommandTurn, MouseDownInputFlags, PlayerVMCommand,
+        run_player_command_result, CommandTurn, InputCommandFlags, PlayerVMCommand,
     };
     use async_std::channel;
     use futures::future::{select, Either, FutureExt};
@@ -6560,6 +7486,7 @@ mod owned_mouse_down_tests {
             })
             .expect("test player exists");
         let nothing = Symbol::builtin(BuiltInSymbol::Nothing);
+        let mouse_up = Symbol::builtin(BuiltInSymbol::MouseUp);
         let member_ref = CastMemberRef {
             cast_lib: 1,
             cast_member: 1,
@@ -6590,9 +7517,12 @@ mod owned_mouse_down_tests {
                 property_defaults: HashMap::new(),
             },
             script_type: ScriptType::Score,
-            handlers: fxhash::FxHashMap::from_iter([(mouse_down.clone(), handler)]),
-            handler_names_raw: vec!["mouseDown".to_owned(), "nothing".to_owned()],
-            handler_names: vec![mouse_down.clone()],
+            handlers: fxhash::FxHashMap::from_iter([
+                (mouse_down.clone(), handler.clone()),
+                (mouse_up, handler),
+            ]),
+            handler_names_raw: vec!["mouseDown".to_owned(), "mouseUp".to_owned(), "nothing".to_owned()],
+            handler_names: vec![mouse_down.clone(), Symbol::builtin(BuiltInSymbol::MouseUp)],
             properties: RefCell::new(fxhash::FxHashMap::default()),
         });
         session
@@ -7111,6 +8041,114 @@ mod owned_mouse_down_tests {
     }
 
     #[test]
+    fn owned_mouse_move_and_up_clear_capture_after_outside_release() {
+        let (session, owner, _marker) = session_with_suspended_mouse_behavior(9_105);
+        async_std::task::block_on(async {
+            drive_command(
+                PlayerVMCommand::MouseMove((10, 10)),
+                session.clone(),
+                1,
+                owner.clone(),
+            )
+            .await
+            .expect("owned MouseMove should complete");
+            assert_eq!(
+                session
+                    .borrow_mut()
+                    .with_player(1, |context| context.player.hovered_sprites.clone())
+                    .unwrap(),
+                vec![1]
+            );
+            drive_mouse_down(session.clone(), owner.clone())
+                .await
+                .expect("owned MouseDown should complete");
+            assert!(session
+                .borrow_mut()
+                .with_player(1, |context| context.player.movie.mouse_down
+                    && context.player.mouse_down_sprite > 0)
+                .unwrap());
+
+            drive_command(
+                PlayerVMCommand::MouseMove((200, 200)),
+                session.clone(),
+                1,
+                owner.clone(),
+            )
+            .await
+            .expect("outside MouseMove should complete");
+            assert!(session
+                .borrow_mut()
+                .with_player(1, |context| context.player.hovered_sprites.is_empty())
+                .unwrap());
+            drive_command(
+                PlayerVMCommand::MouseUp((200, 200)),
+                session.clone(),
+                1,
+                owner.clone(),
+            )
+            .await
+            .expect("outside MouseUp should complete");
+        });
+        let state = session
+            .borrow_mut()
+            .with_player(1, |context| {
+                (
+                    context.player.movie.mouse_down,
+                    context.player.mouse_down_sprite,
+                    context.player.mouse_loc,
+                )
+            })
+            .unwrap();
+        assert_eq!(state, (false, -1, (200, 200)));
+    }
+
+    #[test]
+    fn suspended_mouse_up_cleanup_is_discarded_on_owner_retirement() {
+        let (session, owner, _marker) = session_with_suspended_mouse_behavior(9_106);
+        session
+            .borrow_mut()
+            .with_player(1, |context| {
+                context.player.movie.mouse_down = true;
+                context.player.mouse_down_sprite = 1;
+                context.player.click_on_sprite = 1;
+                context.player.mouse_loc = (10, 10);
+                context.player.command_handler_yielding = true;
+            })
+            .unwrap();
+
+        let mut operation = Box::pin(run_player_command_result(
+            PlayerVMCommand::MouseUp((10, 10)),
+            session.clone(),
+            1,
+            owner.clone(),
+        ));
+        let waker = futures::task::noop_waker();
+        let mut poll_context = Context::from_waker(&waker);
+        assert!(matches!(
+            operation.as_mut().poll(&mut poll_context),
+            Poll::Pending
+        ));
+        assert_eq!(session.borrow().active_event_scope_count_for_test(1), 1);
+
+        let replacement = session.borrow_mut().reset_player_owned(1, &owner).unwrap();
+        drop(operation);
+        session.borrow_mut().drain_input_flag_cleanups();
+        session.borrow_mut().drain_event_cleanups();
+        assert_eq!(session.borrow().pending_owned_work_count_for_test(1), 0);
+        assert_eq!(session.borrow().active_event_scope_count_for_test(1), 0);
+        session
+            .borrow_mut()
+            .with_player(1, |context| {
+                assert!(context.player.owner.same_identity(&replacement));
+                assert!(!context.player.in_mouse_command);
+                assert!(!context.player.in_event_dispatch);
+                assert!(!context.player.movie.mouse_down);
+                assert_eq!(context.player.mouse_down_sprite, 0);
+            })
+            .unwrap();
+    }
+
+    #[test]
     fn dropped_suspended_mouse_down_cleanup_is_discarded_on_reset_replacement() {
         let (session, owner, _marker) = session_with_suspended_mouse_behavior(9_103);
         let mut operation = Box::pin(run_player_command_result(
@@ -7225,8 +8263,8 @@ mod owned_mouse_down_tests {
         session.borrow_mut().with_player(1, |context| {
             context.player.in_frame_script = true;
         });
-        let first = MouseDownInputFlags::enter(&session, 1, &owner).unwrap();
-        let second = MouseDownInputFlags::enter(&session, 1, &owner).unwrap();
+        let first = InputCommandFlags::enter(&session, 1, &owner).unwrap();
+        let second = InputCommandFlags::enter(&session, 1, &owner).unwrap();
         drop(first);
         assert!(
             session
@@ -7255,8 +8293,8 @@ mod owned_mouse_down_tests {
         session.borrow_mut().with_player(1, |context| {
             context.player.in_frame_script = true;
         });
-        let first = MouseDownInputFlags::enter(&session, 1, &owner).unwrap();
-        let second = MouseDownInputFlags::enter(&session, 1, &owner).unwrap();
+        let first = InputCommandFlags::enter(&session, 1, &owner).unwrap();
+        let second = InputCommandFlags::enter(&session, 1, &owner).unwrap();
         drop(second);
         assert!(
             session
@@ -7285,7 +8323,7 @@ mod owned_mouse_down_tests {
         session.borrow_mut().with_player(1, |context| {
             context.player.in_event_dispatch = true;
         });
-        let guard = MouseDownInputFlags::enter(&session, 1, &owner).unwrap();
+        let guard = InputCommandFlags::enter(&session, 1, &owner).unwrap();
         let borrowed = session.borrow_mut();
         drop(guard);
         drop(borrowed);
@@ -7313,7 +8351,7 @@ mod owned_mouse_down_tests {
         session
             .borrow_mut()
             .set_next_input_scope_id_for_test(u64::MAX);
-        let result = MouseDownInputFlags::enter(&session, 1, &owner);
+        let result = InputCommandFlags::enter(&session, 1, &owner);
         assert!(result.is_err());
         assert!(
             session
@@ -7330,7 +8368,7 @@ mod owned_mouse_down_tests {
     #[test]
     fn reset_discards_old_input_cleanup_without_touching_replacement() {
         let (session, owner) = session_with_player(1);
-        let guard = MouseDownInputFlags::enter(&session, 1, &owner).unwrap();
+        let guard = InputCommandFlags::enter(&session, 1, &owner).unwrap();
         let replacement = session.borrow_mut().reset_player_owned(1, &owner).unwrap();
         drop(guard);
         assert!(

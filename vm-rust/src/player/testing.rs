@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::sync::Mutex;
+use std::{cell::{Cell, RefCell}, sync::Mutex};
 use std::{
     path::{Path, PathBuf},
     rc::Rc,
@@ -11,6 +11,7 @@ use manual_future::ManualFuture;
 use rand::SeedableRng;
 
 use crate::director::file::read_director_file_bytes;
+use crate::director::lingo::datum::Datum;
 pub use crate::director::static_datum::StaticDatum;
 use crate::native_parity_worker::QualifiedExternalCasts;
 use crate::player::testing_shared::HarnessRuntime;
@@ -18,12 +19,45 @@ pub use crate::player::testing_shared::{SnapshotOutput, TestHarness};
 use crate::player::{
     PlayerVMExecutionItem,
     commands::{PlayerVMCommand, run_command_loop},
+    host_events::{NativePlayerNotification, NativePlayerNotificationSink, NativePlayerNotificationSinkRef},
+    ownership::OwnerKey,
     session::{NativeAdvanceReport, NativeFramePump, NativeInputPump},
+    NativeFlashActionSummary, NativeFlashBindingObservation,
 };
 
 /// Global lock to ensure only one TestPlayer runs at a time.
 /// The player uses global mutable statics, so tests must be serialized.
 static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+/// Bounded native parity adapter. The production sink acknowledges each DTO
+/// synchronously and retains only delivery metadata; tests add a recording
+/// side channel to verify FIFO delivery without changing production memory.
+struct NativeParityNotificationSink {
+    delivered: Cell<u64>,
+    last_owner: Cell<Option<OwnerKey>>,
+    #[cfg(test)]
+    recorded: RefCell<Vec<NativePlayerNotification>>,
+}
+
+impl NativeParityNotificationSink {
+    fn new() -> Self {
+        Self {
+            delivered: Cell::new(0),
+            last_owner: Cell::new(None),
+            #[cfg(test)]
+            recorded: RefCell::new(Vec::new()),
+        }
+    }
+}
+
+impl NativePlayerNotificationSink for NativeParityNotificationSink {
+    fn accept(&self, notification: &NativePlayerNotification) {
+        self.delivered.set(self.delivered.get().saturating_add(1));
+        self.last_owner.set(Some(notification.owner.key()));
+        #[cfg(test)]
+        self.recorded.borrow_mut().push(notification.clone());
+    }
+}
 
 /// Native test harness. Wraps the global DirPlayer for in-memory testing.
 pub struct TestPlayer {
@@ -32,6 +66,7 @@ pub struct TestPlayer {
     runtime: HarnessRuntime,
     native_presentation: Rc<crate::rendering::NativePresentationPolicy>,
     native_flash: Rc<std::cell::RefCell<crate::native_flash::NativeFlashHost>>,
+    native_notification_observer: Rc<NativeParityNotificationSink>,
     native_frame_pump: NativeFramePump,
     native_input_pump: NativeInputPump,
 }
@@ -58,6 +93,42 @@ pub(crate) enum NativeGlobalValue {
     Rect([f64; 4]),
 }
 
+/// Typed values accepted by the native worker's owner-bound Invoke bridge.
+/// The conversion to Datum happens only while the owning player and symbol
+/// table are borrowed together.
+#[derive(Debug)]
+pub(crate) enum NativeInvokeArgument {
+    Int(i32),
+    Float(f64),
+    String(String),
+    Symbol(String),
+    Void,
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) struct NativeInitObservation {
+    pub(crate) next_frame: Option<u32>,
+    pub(crate) flash_bindings: Vec<NativeFlashBindingObservation>,
+    pub(crate) pending_flash_actions: Vec<NativeFlashActionSummary>,
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) struct NativeInputSpriteObservation {
+    pub(crate) sprite: i16,
+    pub(crate) member_ref: Option<(u32, u32)>,
+    pub(crate) member_name: Option<String>,
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) struct NativeInputObservation {
+    pub(crate) owner: OwnerKey,
+    pub(crate) pointer: Option<(i32, i32)>,
+    pub(crate) mouse_down: bool,
+    pub(crate) captured_sprite: Option<NativeInputSpriteObservation>,
+    pub(crate) click_on_sprite: Option<NativeInputSpriteObservation>,
+    pub(crate) hovered_sprites: Vec<NativeInputSpriteObservation>,
+}
+
 #[derive(Debug)]
 pub(crate) enum NativeGlobalReadError {
     Unsupported {
@@ -65,6 +136,13 @@ pub(crate) enum NativeGlobalReadError {
         reason: Option<&'static str>,
     },
     Runtime(crate::player::ScriptError),
+}
+
+#[derive(Debug)]
+pub(crate) enum NativeInvokeError {
+    Runtime(crate::player::ScriptError),
+    Returned(NativeGlobalReadError),
+    UnsupportedContinuation(&'static str),
 }
 
 const MAX_NATIVE_GLOBAL_DEPTH: usize = 32;
@@ -102,6 +180,17 @@ impl TestPlayer {
             .session()
             .borrow_mut()
             .bind_native_flash(runtime.player_id(), &native_flash);
+        let native_notification_observer = Rc::new(NativeParityNotificationSink::new());
+        let native_notification_sink: NativePlayerNotificationSinkRef =
+            native_notification_observer.clone();
+        runtime
+            .session()
+            .borrow_mut()
+            .bind_native_player_notification_sink(
+                runtime.player_id(),
+                runtime.owner(),
+                &native_notification_sink,
+            )?;
         let native_frame_pump = NativeFramePump::new(
             runtime.session(),
             runtime.player_id(),
@@ -124,6 +213,7 @@ impl TestPlayer {
             runtime,
             native_presentation,
             native_flash,
+            native_notification_observer,
             native_frame_pump,
             native_input_pump,
         })
@@ -168,6 +258,11 @@ impl TestPlayer {
         self.native_frame_pump.advance_to_us(now_us).await
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn native_pcm_snapshot_quiet(&self) -> Vec<[f32; 2]> {
+        self.native_frame_pump.native_pcm_snapshot()
+    }
+
     /// Fallible native logical advancement for boundary and owner tests.
     pub async fn try_advance_to(
         &mut self,
@@ -202,6 +297,22 @@ impl TestPlayer {
         self.native_input_pump.mouse_down(x, y).await
     }
 
+    pub(crate) async fn try_native_mouse_move(
+        &self,
+        x: i32,
+        y: i32,
+    ) -> Result<(), crate::player::ScriptError> {
+        self.native_input_pump.mouse_move(x, y).await
+    }
+
+    pub(crate) async fn try_native_mouse_up(
+        &self,
+        x: i32,
+        y: i32,
+    ) -> Result<(), crate::player::ScriptError> {
+        self.native_input_pump.mouse_up(x, y).await
+    }
+
     pub(crate) fn set_deterministic_seed(
         &self,
         seed: u32,
@@ -214,6 +325,20 @@ impl TestPlayer {
             .ok_or_else(|| {
                 crate::player::ScriptError::new("harness player was replaced".to_owned())
             })
+    }
+
+    pub(crate) fn configure_native_presentation(
+        &self,
+        viewport: Option<crate::rendering::NativePresentationViewport>,
+    ) -> Result<(), crate::player::ScriptError> {
+        let (stage_width, stage_height) = self
+            .runtime
+            .with_context(|context| (context.player.movie.rect.width(), context.player.movie.rect.height()))
+            .ok_or_else(|| {
+                crate::player::ScriptError::new("harness player was replaced".to_owned())
+            })?;
+        self.native_presentation
+            .set_viewport(viewport, stage_width, stage_height)
     }
 
     pub(crate) async fn load_movie_quiet(
@@ -415,6 +540,136 @@ impl TestPlayer {
         TestHarness::current_frame(self)
     }
 
+    pub(crate) fn current_label_quiet(&self) -> Option<String> {
+        self.runtime
+            .with_context(|context| {
+                context
+                    .player
+                    .movie
+                    .score
+                    .frame_labels
+                    .iter()
+                    .filter(|label| label.frame_num <= context.player.movie.current_frame as i32)
+                    .max_by_key(|label| label.frame_num)
+                    .map(|label| label.label.clone())
+            })
+            .flatten()
+    }
+
+    pub(crate) fn native_init_state_quiet(
+        &self,
+    ) -> Result<NativeInitObservation, crate::player::ScriptError> {
+        if !self.runtime.owner_valid() {
+            return Err(crate::player::ScriptError::new(
+                "native init inspection owner is stale".to_owned(),
+            ));
+        }
+        let observation = self
+            .runtime
+            .with_context(|context| NativeInitObservation {
+                next_frame: context.player.next_frame,
+                flash_bindings: context.player.native_flash_bindings(),
+                pending_flash_actions: context.player.pending_flash_action_summaries(),
+            })
+            .ok_or_else(|| crate::player::ScriptError::new("native init inspection owner changed".to_owned()))?;
+        if !self.runtime.owner_valid() {
+            return Err(crate::player::ScriptError::new(
+                "native init inspection owner changed".to_owned(),
+            ));
+        }
+        Ok(observation)
+    }
+
+    pub(crate) fn native_input_state_quiet(
+        &self,
+    ) -> Result<NativeInputObservation, crate::player::ScriptError> {
+        if !self.runtime.owner_valid() {
+            return Err(crate::player::ScriptError::new(
+                "native input inspection owner is stale".to_owned(),
+            ));
+        }
+        let observation = self
+            .runtime
+            .with_context(|context| {
+                let player = context.player;
+                let sprite_observation = |sprite: i16| {
+                    let member_ref = player
+                        .movie
+                        .score
+                        .get_sprite(sprite)
+                        .and_then(|sprite| sprite.member.clone());
+                    let member_name = member_ref.as_ref().and_then(|member_ref| {
+                        player
+                            .movie
+                            .cast_manager
+                            .find_member_by_ref(member_ref)
+                            .map(|member| member.name.clone())
+                    });
+                    NativeInputSpriteObservation {
+                        sprite,
+                        member_ref: member_ref
+                            .map(|member_ref| (member_ref.cast_lib as u32, member_ref.cast_member as u32)),
+                        member_name,
+                    }
+                };
+                NativeInputObservation {
+                    owner: player.owner.key(),
+                    pointer: Some(player.mouse_loc),
+                    mouse_down: player.movie.mouse_down,
+                    captured_sprite: (player.mouse_down_sprite > 0)
+                        .then(|| sprite_observation(player.mouse_down_sprite)),
+                    click_on_sprite: (player.click_on_sprite > 0)
+                        .then(|| sprite_observation(player.click_on_sprite)),
+                    hovered_sprites: player
+                        .hovered_sprites
+                        .iter()
+                        .copied()
+                        .map(sprite_observation)
+                        .collect(),
+                }
+            })
+            .ok_or_else(|| {
+                crate::player::ScriptError::new("native input inspection owner changed".to_owned())
+            })?;
+        if !self.runtime.owner_valid() {
+            return Err(crate::player::ScriptError::new(
+                "native input inspection owner changed".to_owned(),
+            ));
+        }
+        Ok(observation)
+    }
+
+    pub(crate) fn native_flash_snapshots_quiet(
+        &self,
+    ) -> Result<Vec<crate::native_flash::NativeFlashSnapshot>, crate::player::ScriptError> {
+        if !self.runtime.owner_valid() {
+            return Err(crate::player::ScriptError::new(
+                "native Flash inspection owner is stale".to_owned(),
+            ));
+        }
+        let weak_host = {
+            let session = self.runtime.session();
+            let session = session.borrow();
+            session
+                .native_flash(self.runtime.player_id())
+                .ok_or_else(|| {
+                    crate::player::ScriptError::new(
+                        "native Flash inspection host is unavailable".to_owned(),
+                    )
+                })?
+        };
+        let host = weak_host.upgrade().ok_or_else(|| {
+            crate::player::ScriptError::new("native Flash inspection host is stale".to_owned())
+        })?;
+        let snapshots = host.borrow().snapshots()?;
+        if !self.runtime.owner_valid() {
+            return Err(crate::player::ScriptError::new(
+                "native Flash inspection owner changed".to_owned(),
+            ));
+        }
+        Ok(snapshots)
+    }
+
     pub(crate) fn native_global_value_quiet(
         &self,
         name: &str,
@@ -453,6 +708,84 @@ impl TestPlayer {
                     "harness player was replaced".to_owned(),
                 ))
             })?
+    }
+
+    /// Invoke a validated global through the owning player's command queue.
+    /// The normal command loop adopts and resumes any owner-bound internal
+    /// continuation before the wire operation receives its terminal result.
+    pub(crate) async fn native_invoke_global_quiet(
+        &self,
+        function: &str,
+        arguments: Vec<NativeInvokeArgument>,
+    ) -> Result<NativeGlobalValue, NativeInvokeError> {
+        if !self.runtime.owner_valid() {
+            return Err(NativeInvokeError::Runtime(crate::player::ScriptError::new(
+                "native invocation owner is stale".to_owned(),
+            )));
+        }
+        let Some((handler, args)) = self.runtime.with_context(|context| {
+            let handler = context.symbols.intern(function);
+            let args = arguments
+                .into_iter()
+                .map(|argument| {
+                    let datum = match argument {
+                        NativeInvokeArgument::Int(value) => Datum::Int(value),
+                        NativeInvokeArgument::Float(value) => Datum::Float(value),
+                        NativeInvokeArgument::String(value) => Datum::String(value),
+                        NativeInvokeArgument::Symbol(value) => {
+                            Datum::Symbol(context.symbols.intern(&value))
+                        }
+                        NativeInvokeArgument::Void => Datum::Void,
+                    };
+                    context.player.alloc_datum(datum)
+                })
+                .collect::<Vec<_>>();
+            (handler, args)
+        }) else {
+            return Err(NativeInvokeError::Runtime(crate::player::ScriptError::new(
+                "native invocation owner was replaced while preparing arguments".to_owned(),
+            )));
+        };
+        let command_tx = self.runtime.command_tx();
+        let (future, completer) = ManualFuture::new();
+        command_tx
+            .send(PlayerVMExecutionItem {
+                command: PlayerVMCommand::InvokeGlobal { handler, args },
+                completer: Some(completer),
+            })
+            .await
+            .map_err(|_| {
+                NativeInvokeError::Runtime(crate::player::ScriptError::new(
+                    "native invocation owner command queue closed".to_owned(),
+                ))
+            })?;
+        let value = future.await.map_err(NativeInvokeError::Runtime)?;
+        let result = self
+            .runtime
+            .with_context(|context| {
+                let mut active = HashSet::new();
+                let mut nodes = 0;
+                strict_native_global_value(
+                    context.player,
+                    context.symbols,
+                    &value,
+                    0,
+                    &mut nodes,
+                    &mut active,
+                )
+            })
+            .ok_or_else(|| {
+                NativeInvokeError::Runtime(crate::player::ScriptError::new(
+                    "native invocation owner was replaced before result serialization".to_owned(),
+                ))
+            })?
+            .map_err(NativeInvokeError::Returned)?;
+        if !self.runtime.owner_valid() {
+            return Err(NativeInvokeError::Runtime(crate::player::ScriptError::new(
+                "native invocation owner changed before returning its result".to_owned(),
+            )));
+        }
+        Ok(result)
     }
 
     pub(crate) fn effective_tempo_quiet(&self) -> Result<u32, crate::player::ScriptError> {
@@ -746,6 +1079,13 @@ impl Drop for TestPlayer {
             .session()
             .borrow_mut()
             .unbind_native_flash(self.runtime.player_id());
+        self.runtime
+            .session()
+            .borrow_mut()
+            .unbind_native_player_notification_sink(
+                self.runtime.player_id(),
+                self.runtime.owner(),
+            );
         self.native_presentation.dispose();
         self.runtime.retire_current();
     }
@@ -951,13 +1291,195 @@ impl StageSnapshot {
 mod native_movie_validation_tests {
     use super::{NativeMovieLoadError, TestPlayer, run_test, validate_native_movie_features};
     use crate::native_parity_worker::QualifiedExternalCasts;
-    use crate::player::cast_lib::{CastLib, CastLibState};
+    use crate::player::cast_lib::{CastLib, CastLibState, CastMemberRef};
     use crate::player::cast_manager::CastPreloadState;
+    use crate::player::cast_member::{ButtonMember, ButtonType, CastMember, CastMemberType, FieldMember};
+    use crate::player::score::SpriteChannel;
+    use crate::rendering::snapshot_native_for_owner;
+    use crate::rendering::{native_button_font_attempts, reset_native_button_font_attempts};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
 
     const PROBE_MOVIE: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/native_director_probe.dcr"
     );
+
+    #[test]
+    fn native_presentation_default_and_viewport_render_fixture() {
+        run_test(async {
+            let mut player = TestPlayer::try_new().expect("test player construction failed");
+            let movie_bytes = std::fs::read(PROBE_MOVIE).expect("probe fixture must exist");
+            player
+                .load_movie_quiet(PROBE_MOVIE, movie_bytes)
+                .await
+                .expect("probe fixture must load");
+
+            let (stage_width, stage_height) = player
+                .runtime
+                .with_context(|context| {
+                    (context.player.movie.rect.width(), context.player.movie.rect.height())
+                })
+                .expect("test player must remain live");
+            let owner = player.runtime.owner().clone();
+            let full = snapshot_native_for_owner(
+                &player.runtime.session(),
+                player.runtime.player_id(),
+                &owner,
+            )
+            .expect("default native presentation must render");
+            assert_eq!(full.width, stage_width as u16);
+            assert_eq!(full.height, stage_height as u16);
+
+            let viewport = crate::rendering::NativePresentationViewport {
+                x: 1,
+                y: 1,
+                width: i64::from(stage_width - 2),
+                height: i64::from(stage_height - 2),
+            };
+            player
+                .configure_native_presentation(Some(viewport))
+                .expect("fixture viewport must be valid");
+            let cropped = snapshot_native_for_owner(
+                &player.runtime.session(),
+                player.runtime.player_id(),
+                &owner,
+            )
+            .expect("configured native presentation must render");
+            let expected = full.crop_rgba(1, 1, (stage_width - 2) as u16, (stage_height - 2) as u16);
+            assert_eq!(cropped.width, expected.width);
+            assert_eq!(cropped.height, expected.height);
+            assert_eq!(cropped.data, expected.data);
+        });
+    }
+
+    #[test]
+    fn native_presentation_button_cull_reaches_font_only_when_visible_or_uncertain() {
+        run_test(async {
+            let mut player = TestPlayer::try_new().expect("test player construction failed");
+            let movie_bytes = std::fs::read(PROBE_MOVIE).expect("probe fixture must exist");
+            player
+                .load_movie_quiet(PROBE_MOVIE, movie_bytes)
+                .await
+                .expect("probe fixture must load");
+            let owner = player.runtime.owner().clone();
+            let (stage_width, stage_height) = player
+                .runtime
+                .with_context(|context| {
+                    (context.player.movie.rect.width(), context.player.movie.rect.height())
+                })
+                .expect("test player must remain live");
+            let viewport = crate::rendering::NativePresentationViewport {
+                x: 0,
+                y: 0,
+                width: i64::from((stage_width / 2).max(1)),
+                height: i64::from((stage_height / 2).max(1)),
+            };
+            player
+                .configure_native_presentation(Some(viewport))
+                .expect("fixture viewport must be valid");
+
+            let install_button = |player: &TestPlayer, loc_h: i32, loc_v: i32, trails: bool| {
+                player
+                    .runtime
+                    .with_context(|context| {
+                        context.player.font_manager.system_font = None;
+                        context.player.font_manager.font_cache.clear();
+                        let cast = context
+                            .player
+                            .movie
+                            .cast_manager
+                            .casts
+                            .first_mut()
+                            .expect("probe movie must have a cast");
+                        let cast_lib = cast.number as i32;
+                        let mut field = FieldMember::new();
+                        field.text = "EDIT LEVEL".to_owned();
+                        field.font = "native-test-font".to_owned();
+                        field.width = 20;
+                        field.height = 20;
+                        field.rect_right = 20;
+                        field.rect_bottom = 20;
+                        cast.members.insert(
+                            999,
+                            CastMember::new(
+                                999,
+                                CastMemberType::Button(ButtonMember {
+                                    field,
+                                    button_type: ButtonType::PushButton,
+                                    hilite: false,
+                                    script_id: 0,
+                                    member_script_ref: None,
+                                }),
+                            ),
+                        );
+                        let mut channel = SpriteChannel::new(1);
+                        channel.sprite.member = Some(CastMemberRef {
+                            cast_lib,
+                            cast_member: 999,
+                        });
+                        channel.sprite.puppet = true;
+                        channel.sprite.loc_h = loc_h;
+                        channel.sprite.loc_v = loc_v;
+                        channel.sprite.width = 20;
+                        channel.sprite.height = 20;
+                        channel.sprite.trails = trails;
+                        context.player.movie.score.channels.clear();
+                        context.player.movie.score.channels.push(SpriteChannel::new(0));
+                        context.player.movie.score.channels.push(channel);
+                        context.player.movie.score.invalidate_render_channel_cache();
+                        assert_eq!(context.player.movie.score.get_sorted_channels(context.player.movie.current_frame).len(), 1);
+                        assert!(context.player.movie.cast_manager.find_member_by_ref(&CastMemberRef {
+                            cast_lib,
+                            cast_member: 999,
+                        }).is_some());
+                    })
+                    .expect("test player must remain live");
+            };
+
+            reset_native_button_font_attempts();
+            install_button(&player, stage_width.saturating_sub(1), stage_height.saturating_sub(1), false);
+            player
+                .configure_native_presentation(Some(viewport))
+                .expect("fixture viewport must remain valid");
+            snapshot_native_for_owner(
+                &player.runtime.session(),
+                player.runtime.player_id(),
+                &owner,
+            )
+            .expect("disjoint Button must render without native font dispatch");
+            assert_eq!(native_button_font_attempts(), 0);
+
+            reset_native_button_font_attempts();
+            install_button(&player, 10, 10, false);
+            player
+                .configure_native_presentation(Some(viewport))
+                .expect("fixture viewport must remain valid");
+            let intersecting = catch_unwind(AssertUnwindSafe(|| {
+                snapshot_native_for_owner(
+                    &player.runtime.session(),
+                    player.runtime.player_id(),
+                    &owner,
+                )
+            }));
+            assert!(intersecting.is_err(), "intersecting Button must surface the existing native font failure");
+            assert_eq!(native_button_font_attempts(), 1);
+
+            reset_native_button_font_attempts();
+            install_button(&player, stage_width.saturating_sub(1), stage_height.saturating_sub(1), true);
+            player
+                .configure_native_presentation(Some(viewport))
+                .expect("fixture viewport must remain valid");
+            let uncertain = catch_unwind(AssertUnwindSafe(|| {
+                snapshot_native_for_owner(
+                    &player.runtime.session(),
+                    player.runtime.player_id(),
+                    &owner,
+                )
+            }));
+            assert!(uncertain.is_err(), "uncertain Button must reach the existing native font failure");
+            assert_eq!(native_button_font_attempts(), 1);
+        });
+    }
 
     #[test]
     fn applies_qualified_casts_through_owner_pipeline_before_movie_init() {
@@ -1014,6 +1536,7 @@ mod native_movie_validation_tests {
         });
     }
 
+
     #[test]
     fn rejects_external_casts_with_paths() {
         let error =
@@ -1038,6 +1561,87 @@ mod native_movie_validation_tests {
         assert!(
             matches!(error, NativeMovieLoadError::Unsupported(message) if message.contains("JavaScript"))
         );
+    }
+}
+
+#[cfg(test)]
+mod native_flash_observation_tests {
+    use super::TestPlayer;
+    use crate::player::{FlashActionFence, FlashHostAction, score::SpriteChannel};
+
+    #[test]
+    fn native_flash_snapshot_rejects_retired_owner() {
+        let mut player = TestPlayer::try_new().expect("test player construction failed");
+        player.runtime.retire_current();
+        let error = player
+            .native_flash_snapshots_quiet()
+            .expect_err("retired owner must not expose Flash state");
+        assert!(error.message.contains("owner is stale"));
+    }
+
+    #[test]
+    fn native_init_observation_reports_pending_seek_and_rejects_stale_owner() {
+        let mut player = TestPlayer::try_new().expect("test player construction failed");
+        player.runtime.with_context(|context| {
+            context.player.movie.score.channels =
+                (0..=1).map(SpriteChannel::new).collect();
+            let generation = context
+                .player
+                .flash_binding_state
+                .borrow_mut()
+                .reserve_for_pair(1, 7, 8)
+                .expect("Flash binding generation");
+            context.player.next_frame = Some(5);
+            context
+                .player
+                .movie
+                .score
+                .get_sprite_mut(1)
+                .flash_asserted_frame = Some(371);
+            context.player.flash_host_actions.push(FlashHostAction::Seek {
+                fence: FlashActionFence::legacy(
+                    context.player.owner.clone(),
+                    context.player.flash_binding_state.clone(),
+                ),
+                host_sprite: 1,
+                local_sprite: 1,
+                cast_lib: 7,
+                cast_member: 8,
+                generation,
+                frame: 371,
+            });
+        });
+
+        let observation = player
+            .native_init_state_quiet()
+            .expect("live owner must expose init state");
+        assert_eq!(observation.next_frame, Some(5));
+        assert_eq!(
+            observation.flash_bindings,
+            vec![crate::player::NativeFlashBindingObservation {
+                sprite: 1,
+                generation: 1,
+                cast_lib: 7,
+                cast_member: 8,
+                asserted_frame: Some(371),
+            }]
+        );
+        assert_eq!(
+            observation.pending_flash_actions,
+            vec![crate::player::NativeFlashActionSummary {
+                kind: "seek",
+                sprite: 1,
+                generation: 1,
+                cast_lib: 7,
+                cast_member: 8,
+            }]
+        );
+
+        player.runtime.retire_current();
+        let error = player
+            .native_init_state_quiet()
+            .expect_err("retired owner must not expose init state");
+        assert!(error.message.contains("owner is stale"));
     }
 }
 
@@ -1090,11 +1694,152 @@ mod native_global_validation_tests {
 mod native_lifecycle_tests {
     use super::*;
     use crate::rendering::{snapshot_native_for_owner, snapshot_native_fresh_for_owner};
+    use crate::player::symbols::{builtin::BuiltInSymbol, symbol::Symbol};
 
     const PROBE_MOVIE: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/native_director_probe.dcr"
     );
+
+    fn native_clock_values(player: &TestPlayer) -> (StaticDatum, StaticDatum) {
+        player
+            .runtime
+            .with_context(|context| {
+                let ticks = context
+                    .player
+                    .get_movie_prop(context.symbols, Symbol::builtin(BuiltInSymbol::Ticks))?;
+                let milliseconds = context.player.get_movie_prop(
+                    context.symbols,
+                    Symbol::builtin(BuiltInSymbol::MilliSeconds),
+                )?;
+                Ok::<_, crate::player::ScriptError>((
+                    crate::director::static_datum::static_datum_from_datum_ref(
+                        context.player,
+                        context.symbols,
+                        &ticks,
+                    )?,
+                    crate::director::static_datum::static_datum_from_datum_ref(
+                        context.player,
+                        context.symbols,
+                        &milliseconds,
+                    )?,
+                ))
+            })
+            .expect("test player must remain live")
+            .expect("native clock getters must resolve")
+    }
+
+    #[test]
+    fn native_clock_getters_follow_controlled_time_and_source_ambient_gate() {
+        run_test(async {
+            let combined = {
+                let mut player = TestPlayer::try_new().expect("test player construction failed");
+                player.load_movie(PROBE_MOVIE).await;
+                player.init_movie_at(0).await;
+                let initial = native_clock_values(&player);
+                assert_eq!(initial, (StaticDatum::Int(0), StaticDatum::Int(0)));
+                assert_eq!(
+                    matches!(&initial.0, StaticDatum::Int(ticks) if (*ticks as f64 / 60.0) > 0.0),
+                    false,
+                    "the source ambient predicate must be closed at native t=0"
+                );
+                player.advance_to(100).await;
+                let at_100 = native_clock_values(&player);
+                (
+                    at_100.0.clone(),
+                    at_100.1.clone(),
+                    StaticDatum::Int(if matches!(&at_100.0, StaticDatum::Int(ticks) if (*ticks as f64 / 60.0) > 0.0) { 1 } else { 0 }),
+                )
+            };
+
+            let split = {
+                let mut player = TestPlayer::try_new().expect("test player construction failed");
+                player.load_movie(PROBE_MOVIE).await;
+                player.init_movie_at(0).await;
+                player.advance_to(50).await;
+                player.advance_to(100).await;
+                let at_100 = native_clock_values(&player);
+                (
+                    at_100.0.clone(),
+                    at_100.1.clone(),
+                    StaticDatum::Int(if matches!(&at_100.0, StaticDatum::Int(ticks) if (*ticks as f64 / 60.0) > 0.0) { 1 } else { 0 }),
+                )
+            };
+
+            assert_eq!(combined, (StaticDatum::Int(6), StaticDatum::Int(100), StaticDatum::Int(1)));
+            assert_eq!(split, combined, "split and combined native clocks must agree");
+        });
+    }
+
+    #[test]
+    fn native_invoke_uses_owner_command_queue_for_sync_async_and_stale_paths() {
+        run_test(async {
+            let mut player = TestPlayer::try_new().expect("test player construction failed");
+            player.load_movie(PROBE_MOVIE).await;
+            player.init_movie_at(0).await;
+
+            let sync = player
+                .native_invoke_global_quiet(
+                    "integerp",
+                    vec![NativeInvokeArgument::Int(1)],
+                )
+                .await
+                .expect("synchronous global should return through the owner queue");
+            assert_eq!(sync, NativeGlobalValue::Int(1));
+
+            let async_result = player
+                .native_invoke_global_quiet("go", vec![NativeInvokeArgument::Int(1)])
+                .await
+                .expect("owned asynchronous global should complete through the command pump");
+            assert!(matches!(async_result, NativeGlobalValue::Void));
+
+            let error = player
+                .native_invoke_global_quiet("native_missing_handler", vec![])
+                .await
+                .expect_err("unknown handler must return a structured error");
+            assert!(matches!(error, NativeInvokeError::Runtime(error) if error.message.contains("handler") || error.message.contains("Handler")));
+
+            player.runtime.retire_current();
+            let stale = player
+                .native_invoke_global_quiet("value", vec![NativeInvokeArgument::Void])
+                .await
+                .expect_err("retired owner must reject invocation before queueing");
+            assert!(matches!(stale, NativeInvokeError::Runtime(error) if error.message.contains("stale")));
+        });
+    }
+
+    #[test]
+    fn native_object_stop_apply_opcode_continuation_completes_once() {
+        run_test(async {
+            let mut player = TestPlayer::try_new().expect("test player construction failed");
+            player.load_movie(PROBE_MOVIE).await;
+            player.init_movie_at(0).await;
+
+            // This is the source-shaped form emitted by SndSFX: the evaluator
+            // classifies `sound(1).stop()` as an owner-bound Object request
+            // with an InternalInvocation/ApplyOpcode ticket. The command loop
+            // must admit, execute, and resume that exact request once.
+            let first = player
+                .eval_datum_quiet("sound(1).stop()")
+                .await
+                .expect("Object/stop continuation must complete through the owner pump");
+            let second = player
+                .eval_datum_quiet("sound(1).stop()")
+                .await
+                .expect("repeating Object/stop must not retain a stale action");
+            assert_eq!(first, StaticDatum::Void);
+            assert_eq!(second, StaticDatum::Void);
+            assert_eq!(
+                player
+                    .runtime
+                    .session()
+                    .borrow()
+                    .has_pending_commands(player.runtime.player_id()),
+                false,
+                "Object/stop must retire its ApplyOpcode continuation exactly once"
+            );
+        });
+    }
 
     #[derive(Clone, Debug, PartialEq)]
     struct LifecycleRecord {
@@ -1129,6 +1874,88 @@ mod native_lifecycle_tests {
             }
         }
         data
+    }
+
+    #[test]
+    fn native_test_player_sink_accepts_over_capacity_command_notifications() {
+        run_test(async {
+            let mut player = TestPlayer::new();
+            player.load_movie(PROBE_MOVIE).await;
+            player.init_movie_at(0).await;
+            player
+                .eval_datum("value(\"frameState\")")
+                .await
+                .expect("initial command must complete before recording");
+            player.native_notification_observer.recorded.borrow_mut().clear();
+            player.native_notification_observer.delivered.set(0);
+            player.native_notification_observer.last_owner.set(None);
+            let owner = player.runtime.owner().clone();
+            player
+                .runtime
+                .with_context(|context| {
+                    for frame in 0..=256 {
+                        context.player.queue_player_notification(
+                            crate::player::cast_lib::PlayerNotificationKind::Host(
+                                crate::player::host_events::HostEvent::FrameChanged { frame },
+                            ),
+                        );
+                    }
+                })
+                .expect("test player must remain live");
+
+            player
+                .runtime
+                .dispatch(PlayerVMCommand::DrainInputFlagCleanup)
+                .await
+                .expect("command-loop command must accept the batch");
+
+            let events = player.native_notification_observer.recorded.borrow();
+            assert!(events.len() >= 257);
+            assert_eq!(player.native_notification_observer.delivered.get(), events.len() as u64);
+            assert_eq!(
+                player.native_notification_observer.last_owner.get(),
+                Some(owner.key())
+            );
+            assert!(
+                player
+                    .runtime
+                    .with_context(|context| context.player.host_event_backpressure.is_none())
+                    .unwrap()
+            );
+            let expected_frames: Vec<_> = (0..=256).collect();
+            let observed_frames: Vec<_> = events
+                .iter()
+                .filter_map(|event| match &event.kind {
+                    crate::player::host_events::NativePlayerNotificationKind::Host(
+                        crate::player::host_events::HostEvent::FrameChanged { frame },
+                    ) => Some(*frame),
+                    _ => None,
+                })
+                .collect();
+            assert!(observed_frames
+                .windows(expected_frames.len())
+                .any(|window| window == expected_frames.as_slice()));
+            for event in events.iter().filter(|event| {
+                matches!(
+                    event.kind,
+                    crate::player::host_events::NativePlayerNotificationKind::Host(
+                        crate::player::host_events::HostEvent::FrameChanged { .. }
+                    )
+                )
+            }) {
+                assert!(event.owner.same_identity(&owner));
+            }
+            assert!(
+                player
+                    .runtime
+                    .with_context(|context| context.player.owner.same_identity(&owner))
+                    .unwrap()
+            );
+            player
+                .eval_datum("value(\"frameState\")")
+                .await
+                .expect("subsequent command must remain usable");
+        });
     }
 
     fn snapshot_data(player: &TestPlayer) -> Vec<u8> {

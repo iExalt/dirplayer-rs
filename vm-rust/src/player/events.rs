@@ -1454,6 +1454,63 @@ pub fn dispatch_rollover_events() {
     }
 }
 
+/// Owner-bound rollover dispatch for session-owned input commands. The legacy
+/// wrapper above intentionally remains available to browser callers, but a
+/// native command must not consult the ambient player after an awaited handler
+/// can replace or retire its owner.
+pub(crate) async fn dispatch_rollover_events_owned(
+    session: RuntimeSessionHandle,
+    player_id: u32,
+    owner: OwnerToken,
+) -> Result<(), ScriptError> {
+    let (now_hovered, prev_hovered) = session
+        .borrow_mut()
+        .with_player(player_id, |context| -> Result<_, ScriptError> {
+            validate_event_owner(&context, &owner)?;
+            let (x, y) = context.player.mouse_loc;
+            let prev_hovered = std::mem::take(&mut context.player.hovered_sprites);
+            let now_hovered: Vec<i16> = crate::player::score::get_sprites_at(context.player, x, y)
+                .first()
+                .map(|num| *num as i16)
+                .into_iter()
+                .collect();
+            context.player.hovered_sprites = now_hovered.clone();
+            Ok((now_hovered, prev_hovered))
+        })
+        .ok_or_else(cancelled_scope_error)??;
+
+    for sprite_num in &prev_hovered {
+        if !now_hovered.contains(sprite_num) {
+            player_dispatch_event_to_sprite_targeted_owned(
+                session.clone(),
+                player_id,
+                owner.clone(),
+                Symbol::builtin(BuiltInSymbol::MouseLeave),
+                vec![],
+                *sprite_num as u16,
+            )
+            .await?;
+        }
+    }
+    for sprite_num in &now_hovered {
+        let handler = if prev_hovered.contains(sprite_num) {
+            BuiltInSymbol::MouseWithin
+        } else {
+            BuiltInSymbol::MouseEnter
+        };
+        player_dispatch_event_to_sprite_targeted_owned(
+            session.clone(),
+            player_id,
+            owner.clone(),
+            Symbol::builtin(handler),
+            vec![],
+            *sprite_num as u16,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 pub async fn player_dispatch_event_to_sprite_targeted(
     handler_name: Symbol,
     args: &Vec<DatumRef>,

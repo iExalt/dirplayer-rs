@@ -41,6 +41,26 @@ use crate::player::score_keyframes::SpritePathKeyframes;
 use crate::rendering_gpu::{DynamicRenderer, Renderer};
 use crate::player::{ownership::OwnerToken, session::{PlayerId, RuntimeSessionHandle}};
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+thread_local! {
+    static NATIVE_BUTTON_FONT_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) fn reset_native_button_font_attempts() {
+    NATIVE_BUTTON_FONT_ATTEMPTS.with(|attempts| attempts.set(0));
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) fn native_button_font_attempts() -> usize {
+    NATIVE_BUTTON_FONT_ATTEMPTS.with(Cell::get)
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+fn record_native_button_font_attempt() {
+    NATIVE_BUTTON_FONT_ATTEMPTS.with(|attempts| attempts.set(attempts.get() + 1));
+}
+
 /// 500ms-on, 500ms-off caret blink phase derived from wall time. The renderer
 /// runs every frame so this query is cheap and needs no separate timer.
 fn caret_blink_visible() -> bool {
@@ -462,36 +482,135 @@ pub fn render_stage_to_bitmap(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn render_stage_to_bitmap_with_viewport(
+    player: &mut DirPlayer,
+    bitmap: &mut Bitmap,
+    debug_sprite_num: Option<i16>,
+    viewport: &IntRect,
+) {
+    render_score_to_bitmap_with_offset(
+        player,
+        &ScoreRef::Stage,
+        bitmap,
+        debug_sprite_num,
+        IntRect::from_size(0, 0, player.movie.rect.width(), player.movie.rect.height()),
+        (0, 0),
+        None,
+        Some(viewport),
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 /// Owner-bound native presentation policy backed by the canonical CPU bitmap
 /// compositor. The session retains only a weak binding; the native harness or
 /// worker owns this policy for its player lifetime.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct NativePresentationViewport {
+    pub(crate) x: i64,
+    pub(crate) y: i64,
+    pub(crate) width: i64,
+    pub(crate) height: i64,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl NativePresentationViewport {
+    pub(crate) fn resolve(self, stage_width: i32, stage_height: i32) -> Result<IntRect, ScriptError> {
+        if self.x < 0 || self.y < 0 || self.width <= 0 || self.height <= 0 {
+            return Err(ScriptError::new(
+                "native presentation viewport must have a nonnegative origin and positive dimensions".to_owned(),
+            ));
+        }
+        let right = self
+            .x
+            .checked_add(self.width)
+            .ok_or_else(|| ScriptError::new("native presentation viewport x overflow".to_owned()))?;
+        let bottom = self
+            .y
+            .checked_add(self.height)
+            .ok_or_else(|| ScriptError::new("native presentation viewport y overflow".to_owned()))?;
+        if right > i64::from(stage_width) || bottom > i64::from(stage_height) {
+            return Err(ScriptError::new(
+                "native presentation viewport must remain inside the movie stage".to_owned(),
+            ));
+        }
+        Ok(IntRect::from(
+            i32::try_from(self.x).map_err(|_| ScriptError::new("native presentation viewport x is too large".to_owned()))?,
+            i32::try_from(self.y).map_err(|_| ScriptError::new("native presentation viewport y is too large".to_owned()))?,
+            i32::try_from(right).map_err(|_| ScriptError::new("native presentation viewport right is too large".to_owned()))?,
+            i32::try_from(bottom).map_err(|_| ScriptError::new("native presentation viewport bottom is too large".to_owned()))?,
+        ))
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct NativePresentationPolicy {
     bitmap: RefCell<Option<(OwnerToken, Bitmap)>>,
     disposed: Cell<bool>,
+    viewport: Cell<Option<NativePresentationViewport>>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl NativePresentationPolicy {
     pub(crate) fn new() -> Self {
-        Self { bitmap: RefCell::new(None), disposed: Cell::new(false) }
+        Self {
+            bitmap: RefCell::new(None),
+            disposed: Cell::new(false),
+            viewport: Cell::new(None),
+        }
+    }
+
+    pub(crate) fn set_viewport(
+        &self,
+        viewport: Option<NativePresentationViewport>,
+        stage_width: i32,
+        stage_height: i32,
+    ) -> Result<(), ScriptError> {
+        if let Some(viewport) = viewport {
+            viewport.resolve(stage_width, stage_height)?;
+        }
+        self.viewport.set(viewport);
+        self.bitmap.borrow_mut().take();
+        Ok(())
     }
 
     fn present(&self, player: &mut DirPlayer, owner: &OwnerToken) -> Result<(), ScriptError> {
         if self.disposed.get() {
             return Err(ScriptError::new("native presentation policy is disposed".to_owned()));
         }
-        let width = player.movie.rect.width().max(0) as u16;
-        let height = player.movie.rect.height().max(0) as u16;
+        let stage_width = player.movie.rect.width();
+        let stage_height = player.movie.rect.height();
+        let stage_width_u16 = u16::try_from(stage_width)
+            .map_err(|_| ScriptError::new("native movie width exceeds bitmap limits".to_owned()))?;
+        let stage_height_u16 = u16::try_from(stage_height)
+            .map_err(|_| ScriptError::new("native movie height exceeds bitmap limits".to_owned()))?;
         let mut bitmap = Bitmap::new(
-            width,
-            height,
+            stage_width_u16,
+            stage_height_u16,
             32,
             32,
             0,
             PaletteRef::BuiltIn(get_system_default_palette()),
         );
-        render_stage_to_bitmap(player, &mut bitmap, None);
-        *self.bitmap.borrow_mut() = Some((owner.clone(), bitmap));
+        let viewport = self
+            .viewport
+            .get()
+            .map(|viewport| viewport.resolve(stage_width, stage_height))
+            .transpose()?;
+        if let Some(viewport) = viewport.as_ref() {
+            render_stage_to_bitmap_with_viewport(player, &mut bitmap, None, viewport);
+        } else {
+            render_stage_to_bitmap(player, &mut bitmap, None);
+        }
+        let output = match viewport {
+            Some(viewport) => bitmap.crop_rgba(
+                viewport.left,
+                viewport.top,
+                viewport.width() as u16,
+                viewport.height() as u16,
+            ),
+            None => bitmap,
+        };
+        *self.bitmap.borrow_mut() = Some((owner.clone(), output));
         Ok(())
     }
 
@@ -511,7 +630,15 @@ impl NativePresentationPolicy {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod native_presentation_tests {
-    use super::{snapshot_native_for_owner, snapshot_native_fresh_for_owner, NativePresentationPolicy};
+    use super::{
+        native_button_cull_is_safe, snapshot_native_for_owner, snapshot_native_fresh_for_owner,
+        NativePresentationPolicy, NativePresentationViewport,
+    };
+    use crate::player::{
+        bitmap::bitmap::{get_system_default_palette, Bitmap, PaletteRef},
+        geometry::IntRect,
+        sprite::Sprite,
+    };
     use crate::player::testing_shared::HarnessRuntime;
     use std::rc::Rc;
 
@@ -569,6 +696,66 @@ mod native_presentation_tests {
             &replacement_owner,
         )
         .expect("the replacement owner should retain the presentation binding");
+    }
+
+    #[test]
+    fn presentation_viewport_validates_stage_relative_bounds() {
+        let viewport = NativePresentationViewport { x: 0, y: 0, width: 650, height: 420 };
+        let resolved = viewport.resolve(650, 440).unwrap();
+        assert_eq!(
+            (resolved.left, resolved.top, resolved.right, resolved.bottom),
+            (0, 0, 650, 420)
+        );
+        assert!(NativePresentationViewport { x: -1, y: 0, width: 1, height: 1 }
+            .resolve(650, 440)
+            .is_err());
+        assert!(NativePresentationViewport { x: 0, y: 420, width: 1, height: 21 }
+            .resolve(650, 440)
+            .is_err());
+        assert!(NativePresentationViewport { x: i64::MAX, y: 0, width: 1, height: 1 }
+            .resolve(650, 440)
+            .is_err());
+    }
+
+    #[test]
+    fn presentation_viewport_crop_preserves_stage_pixels() {
+        let mut stage = Bitmap::new(
+            4,
+            3,
+            32,
+            32,
+            8,
+            PaletteRef::BuiltIn(get_system_default_palette()),
+        );
+        stage.use_alpha = true;
+        stage.data = (0..48).collect();
+
+        let roi = stage.crop_rgba(1, 1, 2, 2);
+
+        assert_eq!(roi.width, 2);
+        assert_eq!(roi.height, 2);
+        assert_eq!(roi.data, (20..28).chain(36..44).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn edit_level_button_cull_requires_exact_plain_copy_geometry() {
+        let sprite = Sprite::new(12);
+        let output = IntRect::from(522, 429, 643, 444);
+        let visible_roi = IntRect::from(0, 0, 650, 420);
+        assert!(native_button_cull_is_safe(&sprite, &output, &visible_roi));
+
+        let boundary_roi = IntRect::from(0, 0, 650, 430);
+        assert!(!native_button_cull_is_safe(&sprite, &output, &boundary_roi));
+
+        let mut transformed = sprite.clone();
+        transformed.rotation = 1.0;
+        assert!(!native_button_cull_is_safe(&transformed, &output, &visible_roi));
+        transformed.rotation = 0.0;
+        transformed.ink = 2;
+        assert!(!native_button_cull_is_safe(&transformed, &output, &visible_roi));
+        transformed.ink = 0;
+        transformed.trails = true;
+        assert!(!native_button_cull_is_safe(&transformed, &output, &visible_roi));
     }
 }
 
@@ -869,7 +1056,55 @@ pub fn render_score_to_bitmap(
     debug_sprite_num: Option<i16>,
     dest_rect: IntRect,
 ) {
-    render_score_to_bitmap_with_offset(player, score_source, bitmap, debug_sprite_num, dest_rect, (0, 0), None);
+    render_score_to_bitmap_with_offset(
+        player,
+        score_source,
+        bitmap,
+        debug_sprite_num,
+        dest_rect,
+        (0, 0),
+        None,
+        None,
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn should_cull_native_button(
+    viewport: Option<&IntRect>,
+    player: &DirPlayer,
+    channel_num: i16,
+    member_type: &CastMemberType,
+) -> bool {
+    let Some(viewport) = viewport else { return false };
+    if !matches!(member_type, CastMemberType::Button(_)) {
+        return false;
+    }
+    let Some(sprite) = get_score_sprite(&player.movie, &ScoreRef::Stage, channel_num) else {
+        return false;
+    };
+    let output = get_concrete_sprite_rect(player, sprite);
+    native_button_cull_is_safe(sprite, &output, viewport)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn native_button_cull_is_safe(sprite: &crate::player::sprite::Sprite, output: &IntRect, viewport: &IntRect) -> bool {
+    // The Button branch writes chrome/text into a temporary bitmap and composites
+    // it with an untransformed copy blit. Restrict culling to the source-proven
+    // plain-copy state; any transform, trail, flip, or alternate ink remains
+    // uncullable because its complete output extent is not established here.
+    if sprite.ink != 0
+        || sprite.trails
+        || sprite.rotation != 0.0
+        || sprite.skew != 0.0
+        || sprite.flip_h
+        || sprite.flip_v
+    {
+        return false;
+    }
+    output.left >= viewport.right
+        || output.right <= viewport.left
+        || output.top >= viewport.bottom
+        || output.bottom <= viewport.top
 }
 
 /// Get the filmloop's info rect (the authoritative viewport from the Director file).
@@ -1853,6 +2088,7 @@ fn render_filmloop_from_channel_data(
                         color: child_color.clone(),
                         bg_color: child_bg_color.clone(),
                     }),
+                    None,
                 );
 
                 let blend = crate::player::score::convert_raw_blend(data.blend, data.sprite_flags, player.movie.dir_version);
@@ -1927,6 +2163,7 @@ pub fn render_score_to_bitmap_with_offset(
     dest_rect: IntRect,
     offset: (i32, i32),
     parent_props: Option<FilmLoopParentProps>,
+    button_cull_rect: Option<&IntRect>,
 ) {
     let palettes = player.movie.cast_manager.palettes();
 
@@ -2096,6 +2333,11 @@ pub fn render_score_to_bitmap_with_offset(
             continue;
         }
         let member = member.unwrap();
+
+        #[cfg(not(target_arch = "wasm32"))]
+        if should_cull_native_button(button_cull_rect, player, channel_num, &member.member_type) {
+            continue;
+        }
 
         // Debug: log each channel being rendered on stage
         if matches!(score_source, ScoreRef::Stage) {
@@ -2690,6 +2932,8 @@ pub fn render_score_to_bitmap_with_offset(
                         0
                     };
 
+                    #[cfg(all(test, not(target_arch = "wasm32")))]
+                    record_native_button_font_attempt();
                     if let Err(e) = FontMemberHandlers::render_native_text_to_bitmap(
                         &mut temp,
                         &[span],
@@ -3187,6 +3431,7 @@ pub fn render_score_to_bitmap_with_offset(
                         color: color.clone(),
                         bg_color: bg_color.clone(),
                     }),
+                    None,
                 );
 
                 // ---- 4. Composite filmloop onto stage ----

@@ -13,6 +13,7 @@ use web_sys::{
 };
 
 use crate::player::cast_member::CastMemberType;
+use crate::player::cast_lib::{INVALID_CAST_MEMBER_REF, NULL_CAST_MEMBER_REF};
 use std::convert::TryInto;
 
 use wasm_bindgen::prelude::*;
@@ -20,6 +21,11 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsValue;
 
 use crate::player::cast_member::SoundMember;
+#[cfg(not(target_arch = "wasm32"))]
+use ruffle_core::backend::audio::{
+    swf::{SoundEvent, SoundInfo},
+    AudioMixer, SoundHandle, SoundInstanceHandle, SoundTransform,
+};
 use binary_reader::BinaryReader;
 use binary_reader::Endian;
 
@@ -49,9 +55,13 @@ const INDEX_TABLE: [i32; 16] = [
     8, // (The full nibble 0-15 is used to map, but the first 8 and last 8 are often symmetrical)
 ];
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SoundSegment {
     pub member_ref: DatumRef,
+    /// The member value resolved while queueing with the caller's SymbolTable.
+    /// Native playback uses this exact value; the original proplist reference
+    /// remains available for the browser/legacy route.
+    pub resolved_member: Option<Datum>,
     pub loop_count: i32,
     pub loops_remaining: i32,
     pub playback_rate: f32,
@@ -479,6 +489,11 @@ impl SoundChannelDatumHandlers {
     ) -> Result<(), ScriptError> {
         debug!("🎵 handle_play_member() - Playing member directly");
 
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            return Self::handle_play_file(player, datum, member_ref, 1);
+        }
+
         let channel_rc = Self::get_sound_channel_mut(player, datum)?;
 
         // Clear any playlist and play this member directly
@@ -500,6 +515,70 @@ impl SoundChannelDatumHandlers {
     }
 
     fn handle_play(player: &mut DirPlayer, datum: &DatumRef) -> Result<(), ScriptError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let channel_idx = Self::get_channel_index(datum, player)?;
+            let channel = Self::get_sound_channel_mut(player, datum)?;
+            let (segments, volume, pan) = {
+                let ch = channel.borrow();
+                (ch.playlist_segments.clone(), ch.volume, ch.pan)
+            };
+            let mut native_segments = Vec::with_capacity(segments.len());
+            for (segment_index, segment) in segments.into_iter().enumerate() {
+                let segment_datum = segment
+                    .resolved_member
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or_else(|| player.get_datum(&segment.member_ref).clone());
+                // Director uses member(0, 0) and unresolved member(...)'s
+                // member(-1, -1) as empty sound-channel entries. The browser
+                // route leaves such a channel idle after its asynchronous
+                // resolution attempt; they must not turn native playback into
+                // a hard error. Keep positive unresolved refs and malformed
+                // sound data on the strict error path below.
+                if is_empty_sound_member_sentinel(&segment_datum) {
+                    continue;
+                }
+                let sound_member = SoundChannel::resolve_sound_member(
+                    player,
+                    &segment_datum,
+                    if segment.resolved_member.is_some() {
+                        ""
+                    } else {
+                        &segment.member_name
+                    },
+                )
+                .ok_or_else(|| {
+                    ScriptError::new(format!(
+                        "queued member is not a sound ({})",
+                        SoundChannel::queued_member_diagnostic(
+                            player,
+                            channel_idx,
+                            segment_index,
+                            &segment_datum,
+                            &segment.member_name,
+                            segment.resolved_member.is_some(),
+                        ),
+                    ))
+                })?;
+                native_segments.push((sound_member, segment.loop_count, segment.playback_rate));
+            }
+            if native_segments.is_empty() {
+                player.sound_manager.native_stop_channel(channel_idx)?;
+                channel.borrow_mut().stop();
+                return Ok(());
+            }
+            player.sound_manager.native_play_queue(channel_idx, native_segments, volume, pan)?;
+            let mut ch = channel.borrow_mut();
+            ch.current_segment_index = (!ch.playlist_segments.is_empty()).then_some(0);
+            ch.status = if ch.current_segment_index.is_some() {
+                SoundStatus::Playing
+            } else {
+                SoundStatus::Idle
+            };
+            return Ok(());
+        }
+
         let channel = Self::get_sound_channel_mut(player, datum)?;
         let mut ch = channel.borrow_mut();
 
@@ -540,6 +619,32 @@ impl SoundChannelDatumHandlers {
         member: &DatumRef,
         loop_count: i32,
     ) -> Result<(), ScriptError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let channel_idx = Self::get_channel_index(datum, player)?;
+            let sound_datum = player.get_datum(member).clone();
+            let sound_member = SoundChannel::resolve_sound_member(player, &sound_datum, "")
+                .ok_or_else(|| ScriptError::new("member is not a sound".to_owned()))?;
+            let channel = Self::get_sound_channel_mut(player, datum)?;
+            let (volume, pan) = {
+                let ch = channel.borrow();
+                (ch.volume, ch.pan)
+            };
+            // Decode/register/start before changing the visible channel state.
+            player
+                .sound_manager
+                .native_play_member(channel_idx, sound_member.clone(), loop_count, 1.0, volume, pan)?;
+            let mut ch = channel.borrow_mut();
+            ch.stop_playback_nodes();
+            ch.sound_member = Some(sound_member);
+            ch.member = Some(member.clone());
+            ch.loop_count = loop_count;
+            ch.loops_remaining = loop_count;
+            ch.current_segment_index = None;
+            ch.status = SoundStatus::Playing;
+            return Ok(());
+        }
+
         // Get the channel as Rc<RefCell<SoundChannel>> (do NOT borrow)
         let channel_rc = Self::get_sound_channel_mut(player, datum)?;
 
@@ -582,6 +687,8 @@ impl SoundChannelDatumHandlers {
         let channel = Self::get_sound_channel_mut(player, datum)?;
         let channel_num = channel.borrow().channel_num;
         channel.borrow_mut().stop();
+        #[cfg(not(target_arch = "wasm32"))]
+        player.sound_manager.native_stop_channel(channel_num as usize)?;
         // Release the audio-time sync anchor when sound 1 stops — the score
         // frame loop returns to its normal tempo'd advance.
         if channel_num == 0 {
@@ -746,6 +853,7 @@ impl SoundChannelDatumHandlers {
                         // to match queue() behavior - play_segment_for_member extracts #member from proplist
                         segments.push(SoundSegment {
                             member_ref: segment_ref.clone(),
+                            resolved_member: member_value.clone(),
                             loop_count,
                             loops_remaining: loop_count,
                             playback_rate: SoundChannel::entry_playback_rate(player, symbols, &segment_datum)?,
@@ -1130,6 +1238,245 @@ impl WebAudioBackend {
 pub struct SoundManager {
     channels: Vec<Rc<RefCell<SoundChannel>>>,
     audio_context: Option<Arc<AudioContext>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    native_audio: NativeAudioState,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct NativeAudioState {
+    mixer: AudioMixer,
+    active: Vec<Option<NativeSoundInstance>>,
+    queued: Vec<VecDeque<NativeQueuedSound>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct NativeSoundInstance {
+    _sound: SoundHandle,
+    instance: SoundInstanceHandle,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct NativeQueuedSound {
+    sound: SoundHandle,
+    loop_count: i32,
+    playback_rate: f32,
+    transform: SoundTransform,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn native_sound_transform(source_channels: u16, volume: f64, pan: f64) -> SoundTransform {
+    let gain = (volume / 255.0).clamp(0.0, 1.0) as f32;
+    let pan = (pan / 100.0).clamp(-1.0, 1.0);
+    let theta = (pan + 1.0) * std::f64::consts::FRAC_PI_4;
+    let left = theta.cos() as f32 * gain;
+    let right = theta.sin() as f32 * gain;
+
+    // Ruffle exposes every decoder as a stereo frame. For a mono Director
+    // member, model the browser's equal-power mono-to-stereo pan explicitly;
+    // for stereo members preserve channel separation while applying gain.
+    if source_channels <= 1 {
+        SoundTransform {
+            left_to_left: left,
+            left_to_right: right,
+            right_to_left: 0.0,
+            right_to_right: 0.0,
+        }
+    } else {
+        SoundTransform {
+            left_to_left: gain * ((1.0 - pan).max(0.0) as f32),
+            left_to_right: 0.0,
+            right_to_left: 0.0,
+            right_to_right: gain * ((1.0 + pan).max(0.0) as f32),
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn native_num_loops(loop_count: i32) -> Result<u16, ScriptError> {
+    if loop_count <= 0 {
+        return Err(ScriptError::new(
+            "native rate-0 audio requires a positive loop count".to_owned(),
+        ));
+    }
+    Ok(loop_count.saturating_sub(1) as u16)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn native_validate_playback_rate(playback_rate: f32) -> Result<(), ScriptError> {
+    if !playback_rate.is_finite() || playback_rate <= 0.0 {
+        return Err(ScriptError::new(format!(
+            "native playback rate must be finite and positive: {playback_rate}"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl NativeAudioState {
+    fn new(num_channels: usize) -> Self {
+        Self {
+            mixer: AudioMixer::new(2, 48_000),
+            active: (0..num_channels).map(|_| None).collect(),
+            queued: (0..num_channels).map(|_| VecDeque::new()).collect(),
+        }
+    }
+
+    fn register_member(
+        &mut self,
+        sound_member: &SoundMember,
+        loop_count: i32,
+        playback_rate: f32,
+        volume: f64,
+        pan: f64,
+    ) -> Result<NativeQueuedSound, ScriptError> {
+        native_num_loops(loop_count)?;
+        native_validate_playback_rate(playback_rate)?;
+        if !sound_member.sound.codec().eq_ignore_ascii_case("mp3") {
+            return Err(ScriptError::new(format!(
+                "native rate-0 audio does not support {} sound members",
+                sound_member.sound.codec()
+            )));
+        }
+        let sound = self
+            .mixer
+            .register_mp3(&sound_member.sound.data())
+            .map_err(|error| ScriptError::new(format!("Failed to decode MP3: {error}")))?;
+        Ok(NativeQueuedSound {
+            sound,
+            loop_count,
+            playback_rate,
+            transform: native_sound_transform(sound_member.info.channels, volume, pan),
+        })
+    }
+
+    fn start_mp3(&mut self, channel: usize, bytes: &[u8]) -> Result<(), ScriptError> {
+        if channel >= self.active.len() {
+            return Err(ScriptError::new(format!("Invalid sound channel {}", channel + 1)));
+        }
+        let sound = self
+            .mixer
+            .register_mp3(bytes)
+            .map_err(|error| ScriptError::new(format!("Failed to decode MP3: {error}")))?;
+        let next = self.start_registered(NativeQueuedSound {
+            sound,
+            loop_count: 1,
+            playback_rate: 1.0,
+            transform: SoundTransform::default(),
+        })?;
+        self.queued[channel].clear();
+        if let Some(previous) = self.active[channel].replace(next) {
+            self.mixer.stop_sound(previous.instance);
+        }
+        Ok(())
+    }
+
+    fn start_registered(
+        &mut self,
+        segment: NativeQueuedSound,
+    ) -> Result<NativeSoundInstance, ScriptError> {
+        native_validate_playback_rate(segment.playback_rate)?;
+        let settings = SoundInfo {
+            event: SoundEvent::Event,
+            in_sample: None,
+            out_sample: None,
+            num_loops: native_num_loops(segment.loop_count)?,
+            envelope: None,
+        };
+        let instance = self
+            .mixer
+            .start_sound_with_playback_rate(segment.sound, &settings, segment.playback_rate)
+            .map_err(|error| ScriptError::new(format!("Failed to start MP3: {error}")))?;
+        self.mixer.set_sound_transform(instance, segment.transform);
+        Ok(NativeSoundInstance {
+            _sound: segment.sound,
+            instance,
+        })
+    }
+
+    fn play_member(
+        &mut self,
+        channel: usize,
+        sound_member: SoundMember,
+        loop_count: i32,
+        playback_rate: f32,
+        volume: f64,
+        pan: f64,
+    ) -> Result<(), ScriptError> {
+        if channel >= self.active.len() {
+            return Err(ScriptError::new(format!("Invalid sound channel {}", channel + 1)));
+        }
+        let segment = self.register_member(&sound_member, loop_count, playback_rate, volume, pan)?;
+        let next = self.start_registered(segment)?;
+        self.queued[channel].clear();
+        if let Some(previous) = self.active[channel].replace(next) {
+            self.mixer.stop_sound(previous.instance);
+        }
+        Ok(())
+    }
+
+    fn play_queue(
+        &mut self,
+        channel: usize,
+        segments: Vec<(SoundMember, i32, f32)>,
+        volume: f64,
+        pan: f64,
+    ) -> Result<(), ScriptError> {
+        if channel >= self.active.len() {
+            return Err(ScriptError::new(format!("Invalid sound channel {}", channel + 1)));
+        }
+        if segments.is_empty() {
+            return Err(ScriptError::new("native audio queue is empty".to_owned()));
+        }
+        let mut registered = Vec::with_capacity(segments.len());
+        for (member, loop_count, playback_rate) in segments {
+            registered.push(self.register_member(&member, loop_count, playback_rate, volume, pan)?);
+        }
+        let first = registered.remove(0);
+        let next = self.start_registered(first)?;
+        self.queued[channel] = registered.into_iter().collect();
+        if let Some(previous) = self.active[channel].replace(next) {
+            self.mixer.stop_sound(previous.instance);
+        }
+        Ok(())
+    }
+
+    fn stop_channel(&mut self, channel: usize) -> Result<(), ScriptError> {
+        let Some(active) = self.active.get_mut(channel) else {
+            return Err(ScriptError::new(format!("Invalid sound channel {}", channel + 1)));
+        };
+        if let Some(previous) = active.take() {
+            self.mixer.stop_sound(previous.instance);
+        }
+        self.queued[channel].clear();
+        Ok(())
+    }
+
+    fn mix(&mut self, output: &mut [f32]) -> Result<(), ScriptError> {
+        self.mixer.mix(output);
+        for channel in 0..self.active.len() {
+            let finished = self.active[channel]
+                .as_ref()
+                .is_some_and(|active| self.mixer.get_sound_position(active.instance).is_none());
+            if finished {
+                self.active[channel] = None;
+                if let Some(next) = self.queued[channel].pop_front() {
+                    self.active[channel] = Some(self.start_registered(next)?);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn stop_all(&mut self) {
+        self.mixer.stop_all_sounds();
+        for active in &mut self.active {
+            *active = None;
+        }
+        for queued in &mut self.queued {
+            queued.clear();
+        }
+    }
+
 }
 
 impl SoundManager {
@@ -1139,6 +1486,8 @@ impl SoundManager {
         Self {
             channels: Vec::new(),
             audio_context: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            native_audio: NativeAudioState::new(0),
         }
     }
 
@@ -1159,6 +1508,8 @@ impl SoundManager {
         Ok(Self {
             channels,
             audio_context: context,
+            #[cfg(not(target_arch = "wasm32"))]
+            native_audio: NativeAudioState::new(num_channels),
         })
     }
 
@@ -1205,11 +1556,75 @@ impl SoundManager {
         for channel in &self.channels {
             channel.borrow_mut().stop();
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        self.native_audio.stop_all();
+    }
+
+    pub(crate) fn reset(&mut self) {
+        self.stop_all();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.native_audio = NativeAudioState::new(self.channels.len());
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn native_start_mp3(
+        &mut self,
+        channel: usize,
+        bytes: &[u8],
+    ) -> Result<(), ScriptError> {
+        self.native_audio.start_mp3(channel, bytes)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn native_play_member(
+        &mut self,
+        channel: usize,
+        sound_member: SoundMember,
+        loop_count: i32,
+        playback_rate: f32,
+        volume: f64,
+        pan: f64,
+    ) -> Result<(), ScriptError> {
+        self.native_audio
+            .play_member(channel, sound_member, loop_count, playback_rate, volume, pan)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn native_play_queue(
+        &mut self,
+        channel: usize,
+        segments: Vec<(SoundMember, i32, f32)>,
+        volume: f64,
+        pan: f64,
+    ) -> Result<(), ScriptError> {
+        self.native_audio.play_queue(channel, segments, volume, pan)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn native_stop_channel(&mut self, channel: usize) -> Result<(), ScriptError> {
+        self.native_audio.stop_channel(channel)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn native_mix(&mut self, output: &mut [f32]) -> Result<(), ScriptError> {
+        self.native_audio.mix(output)
     }
 
     pub fn audio_context(&self) -> Option<Arc<AudioContext>> {
         self.audio_context.clone()
     }
+}
+
+fn is_empty_sound_member_sentinel(datum: &Datum) -> bool {
+    let Datum::CastMember(member_ref) = datum else {
+        return false;
+    };
+    (member_ref.cast_lib == INVALID_CAST_MEMBER_REF.cast_lib
+        && member_ref.cast_member == INVALID_CAST_MEMBER_REF.cast_member)
+        || (member_ref.cast_lib == NULL_CAST_MEMBER_REF.cast_lib
+            && member_ref.cast_member == NULL_CAST_MEMBER_REF.cast_member)
 }
 
 #[derive(Clone)]
@@ -1618,6 +2033,48 @@ impl SoundChannel {
             }
         }
         None
+    }
+
+    fn queued_member_diagnostic(
+        player: &DirPlayer,
+        channel_idx: usize,
+        segment_index: usize,
+        datum: &Datum,
+        prepared_name: &str,
+        retained: bool,
+    ) -> String {
+        let value_category = match datum {
+            Datum::CastMember(member_ref) => {
+                let cast_name = player
+                    .movie
+                    .cast_manager
+                    .find_member_by_ref(member_ref)
+                    .map(|member| member.name.as_str())
+                    .unwrap_or("<unloaded>");
+                format!(
+                    "CastMember cast_ref={}:{} cast_name={:?}",
+                    member_ref.cast_lib,
+                    member_ref.cast_member,
+                    cast_name.chars().take(64).collect::<String>(),
+                )
+            }
+            Datum::String(_) => "String".to_owned(),
+            Datum::StringChunk(_, _, _) => "StringChunk".to_owned(),
+            Datum::Symbol(_) => "Symbol".to_owned(),
+            Datum::Int(_) => "Int".to_owned(),
+            Datum::Float(_) => "Float".to_owned(),
+            Datum::PropList(_, _) => "PropList".to_owned(),
+            other => other.type_str().to_owned(),
+        };
+        let prepared_name = prepared_name.chars().take(64).collect::<String>();
+        format!(
+            "channel={} segment={} datum={} prepared_name={:?} retained={}",
+            channel_idx + 1,
+            segment_index,
+            value_category,
+            prepared_name,
+            retained,
+        )
     }
 
     pub fn snd_to_wav(
@@ -3815,6 +4272,7 @@ impl SoundChannel {
         let playback_rate = SoundChannel::entry_playback_rate(player, symbols, datum)?;
         let segment = SoundSegment {
             member_ref: datum_ref.clone(),
+            resolved_member: member_opt.clone(),
             loop_count,
             loops_remaining: loop_count,
             playback_rate,
@@ -3863,6 +4321,7 @@ impl SoundChannel {
 
                 self.playlist_segments.push(SoundSegment {
                     member_ref: datum_ref.clone(),
+                    resolved_member: Some(member_datum.clone()),
                     loop_count,
                     loops_remaining: loop_count,
                     playback_rate: SoundChannel::entry_playback_rate(player, symbols, datum)?,
@@ -4411,10 +4870,13 @@ impl SoundChannel {
     }
 
     pub fn set_pan(&mut self, pan: f64) -> Result<(), JsValue> {
-        let clamped = pan.clamp(-1.0, 1.0);
+        // Director stores pan in percentage units (-100..100); browser
+        // StereoPanner receives the normalized value below.
+        let clamped = pan.clamp(-100.0, 100.0);
+        self.pan = clamped;
 
         if let Some(ref pan_node) = self.pan_node {
-            let _ = pan_node.pan().set_value(clamped as f32);
+            let _ = pan_node.pan().set_value((clamped / 100.0) as f32);
             debug!("🎚️ Pan set to {:.2}", clamped);
         }
 
@@ -4798,7 +5260,7 @@ mod stop_tests {
     #[test]
     fn stop_empties_the_playlist() {
         let mut ch = SoundChannel::new(4, None);
-        ch.playlist_segments.push(SoundSegment { member_ref: DatumRef::Void, loop_count: 1, loops_remaining: 1, playback_rate: 1.0, member_name: String::new() });
+        ch.playlist_segments.push(SoundSegment { member_ref: DatumRef::Void, resolved_member: None, loop_count: 1, loops_remaining: 1, playback_rate: 1.0, member_name: String::new() });
         ch.playlist.push(DatumRef::Void);
         ch.current_segment_index = Some(0);
         ch.stop();
@@ -4873,5 +5335,649 @@ mod rate_shift_tests {
         channel.playback_rate = 0.5;
         assert_eq!(channel.source_position_ms(2.0), 1250.0);
         assert_eq!(channel.source_position_ms(-1.0), 250.0);
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod native_audio_tests {
+    use std::collections::VecDeque;
+
+    use super::{
+        native_num_loops, native_sound_transform, NativeAudioState, SoundChannelDatumHandlers,
+        SoundManager, SoundStatus, INVALID_CAST_MEMBER_REF, NULL_CAST_MEMBER_REF,
+    };
+    use crate::director::chunks::{media::MediaChunk, sound::SoundChunk};
+    use crate::director::enums::SoundInfo as DirectorSoundInfo;
+    use crate::director::lingo::datum::Datum;
+    use crate::player::cast_lib::{CastLib, CastMemberRef};
+    use crate::player::cast_member::{CastMember, CastMemberType, SoundMember};
+    use crate::player::ownership::{OwnerKey, OwnerToken};
+    use crate::player::symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolTable};
+    use crate::player::DirPlayer;
+    use async_std::channel;
+    use sha2::{Digest, Sha256};
+
+    // This is the 3397-byte s.win_flag member extracted from the recovered DCR
+    // and copied into the dirplayer fixture. B_Rollover's mouseEnter still
+    // references the unresolved, unqualified snd_rollover export; its mouseDown
+    // path is snd_im_button -> s.select at rateShift -2. Neither is a silence
+    // waiver for the missing rollover export.
+    const WIN_FLAG: &[u8] = include_bytes!("../../../../tests/fixtures/s.win_flag.mp3");
+    const WIN_FLAG_SHA256: &str =
+        "0d24c9d2b7d8df85dbe0dfd41f653add1a2ab41bbae347932108b977ed3d41fe";
+    const DCR_WIN_FLAG_MEDIA: &[u8] =
+        include_bytes!("../../../../tests/fixtures/spybot_s_win_flag_dcr_media.bin");
+    const DCR_WIN_FLAG_MEDIA_SHA256: &str =
+        "e274ab9e1d3f0d04d00cf5e27a37dec72f4cfb199e4cd8f2f158ee195df1c55f";
+    const DCR_SELECT_MEDIA: &[u8] =
+        include_bytes!("../../../../tests/fixtures/spybot_s_select_dcr_media.bin");
+    const DCR_SELECT_MEDIA_SHA256: &str =
+        "833077dc5f504e1177f5627f92ef94a6284a56575b14c7e5c30071867e698d72";
+
+    fn fixture_member(bytes: &[u8]) -> SoundMember {
+        let media = MediaChunk {
+            sample_rate: 48_000,
+            data_size_field: bytes.len() as u32,
+            guid: None,
+            audio_data: bytes.to_vec(),
+            is_compressed: true,
+        };
+        SoundMember {
+            info: DirectorSoundInfo {
+                sample_rate: 48_000,
+                sample_size: 0,
+                channels: 1,
+                sample_count: 0,
+                duration: 0,
+                loop_enabled: false,
+            },
+            sound: SoundChunk::from_media(&media),
+            cue_point_times: Vec::new(),
+            cue_point_names: Vec::new(),
+        }
+    }
+
+    fn dcr_fixture_member() -> SoundMember {
+        let media = MediaChunk {
+            sample_rate: 16_000,
+            data_size_field: 22_198,
+            guid: Some([
+                0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                0, 2, 0, 1, 77, 65, 67, 82,
+            ]),
+            audio_data: DCR_WIN_FLAG_MEDIA.to_vec(),
+            is_compressed: true,
+        };
+        SoundMember {
+            info: DirectorSoundInfo {
+                sample_rate: 16_000,
+                sample_size: 16,
+                channels: 1,
+                sample_count: 0,
+                duration: 0,
+                loop_enabled: false,
+            },
+            sound: SoundChunk::from_media(&media),
+            cue_point_times: Vec::new(),
+            cue_point_names: Vec::new(),
+        }
+    }
+
+    fn dcr_select_fixture_member() -> SoundMember {
+        let media = MediaChunk {
+            sample_rate: 16_000,
+            data_size_field: DCR_SELECT_MEDIA.len() as u32,
+            guid: None,
+            audio_data: DCR_SELECT_MEDIA.to_vec(),
+            is_compressed: true,
+        };
+        SoundMember {
+            info: DirectorSoundInfo {
+                sample_rate: 16_000,
+                sample_size: 16,
+                channels: 1,
+                sample_count: 0,
+                duration: 0,
+                loop_enabled: false,
+            },
+            sound: SoundChunk::from_media(&media),
+            cue_point_times: Vec::new(),
+            cue_point_names: Vec::new(),
+        }
+    }
+
+    fn call_fixture_player() -> (
+        DirPlayer,
+        SymbolTable,
+        crate::player::datum_ref::DatumRef,
+        crate::player::datum_ref::DatumRef,
+    ) {
+        let (tx, _rx) = channel::unbounded();
+        let owner = OwnerToken::new(OwnerKey { session: 900, player: 1, generation: 1 });
+        let mut player = DirPlayer::new_with_owner(tx, owner);
+        let mut symbols = SymbolTable::new();
+        let mut cast = CastLib::test_external(1, 0);
+        cast.insert_member(
+            1,
+            CastMember::new(1, CastMemberType::Sound(fixture_member(WIN_FLAG))),
+            &mut symbols,
+        );
+        player.movie.cast_manager.casts.push(cast);
+        let channel = player.alloc_datum(Datum::SoundChannel(1));
+        let member = player.alloc_datum(Datum::CastMember(CastMemberRef {
+            cast_lib: 1,
+            cast_member: 1,
+        }));
+        (player, symbols, channel, member)
+    }
+
+    #[test]
+    fn set_pan_stores_director_units_and_clamps() {
+        let mut channel = super::SoundChannel::new(0, None);
+        channel.set_pan(37.5).unwrap();
+        assert_eq!(channel.pan, 37.5);
+        channel.set_pan(200.0).unwrap();
+        assert_eq!(channel.pan, 100.0);
+        channel.set_pan(-200.0).unwrap();
+        assert_eq!(channel.pan, -100.0);
+    }
+
+    #[test]
+    fn call_queue_play_stop_uses_the_native_owner_bound_backend() {
+        let (mut player, mut symbols, channel, member) = call_fixture_player();
+        SoundChannelDatumHandlers::call(
+            &mut player,
+            &symbols,
+            &channel,
+            Symbol::builtin(BuiltInSymbol::Queue),
+            &vec![member.clone()],
+        )
+        .expect("queue through the public datum handler");
+        SoundChannelDatumHandlers::call(
+            &mut player,
+            &symbols,
+            &channel,
+            Symbol::builtin(BuiltInSymbol::Play),
+            &vec![],
+        )
+        .expect("play through the public datum handler");
+        assert_eq!(player.sound_manager.get_channel(0).unwrap().borrow().status, SoundStatus::Playing);
+        let mut output = vec![0.0; 48_000 * 2];
+        player.sound_manager.native_mix(&mut output).unwrap();
+        assert!(output.iter().any(|sample| *sample != 0.0));
+
+        player.movie.cast_manager.casts[0].insert_member(
+            2,
+            CastMember::new(2, CastMemberType::Sound(fixture_member(&vec![0; WIN_FLAG.len()]))),
+            &mut symbols,
+        );
+        let corrupt = player.alloc_datum(Datum::CastMember(CastMemberRef {
+            cast_lib: 1,
+            cast_member: 2,
+        }));
+        SoundChannelDatumHandlers::call(
+            &mut player,
+            &symbols,
+            &channel,
+            Symbol::builtin(BuiltInSymbol::Queue),
+            &vec![corrupt],
+        )
+        .expect("corrupt segment can remain queued until play admission");
+        let error = SoundChannelDatumHandlers::call(
+            &mut player,
+            &symbols,
+            &channel,
+            Symbol::builtin(BuiltInSymbol::Play),
+            &vec![],
+        )
+        .expect_err("corrupt queued segment must fail through the public handler");
+        assert!(error.to_string().contains("native rate-0 audio"));
+        assert_eq!(player.sound_manager.get_channel(0).unwrap().borrow().status, SoundStatus::Playing);
+
+        SoundChannelDatumHandlers::call(
+            &mut player,
+            &symbols,
+            &channel,
+            Symbol::builtin(BuiltInSymbol::Stop),
+            &vec![],
+        )
+        .expect("stop through the public datum handler");
+        let mut stopped = vec![0.0; 8_192];
+        player.sound_manager.native_mix(&mut stopped).unwrap();
+        assert!(stopped.iter().all(|sample| *sample == 0.0));
+    }
+
+    #[test]
+    fn queue_play_uses_member_value_resolved_with_local_member_symbol() {
+        let (tx, _rx) = channel::unbounded();
+        let owner = OwnerToken::new(OwnerKey { session: 901, player: 1, generation: 1 });
+        let mut player = DirPlayer::new_with_owner(tx, owner);
+        let mut local_symbols = SymbolTable::new();
+        let mut cast = CastLib::test_external(1, 0);
+        cast.insert_member(
+            72,
+            CastMember::new(72, CastMemberType::Sound(dcr_fixture_member())),
+            &mut local_symbols,
+        );
+        player.movie.cast_manager.casts.push(cast);
+
+        let channel = player.alloc_datum(Datum::SoundChannel(1));
+        let member = player.alloc_datum(Datum::CastMember(CastMemberRef {
+            cast_lib: 1,
+            cast_member: 72,
+        }));
+        let local_member_key = player.alloc_datum(Datum::Symbol(local_symbols.intern("member")));
+        let entry = player.alloc_datum(Datum::PropList(
+            VecDeque::from([(local_member_key, member)]),
+            false,
+        ));
+
+        SoundChannelDatumHandlers::call(
+            &mut player,
+            &local_symbols,
+            &channel,
+            Symbol::builtin(BuiltInSymbol::Queue),
+            &vec![entry],
+        )
+        .expect("queue should resolve a local #member symbol by display text");
+        SoundChannelDatumHandlers::call(
+            &mut player,
+            &local_symbols,
+            &channel,
+            Symbol::builtin(BuiltInSymbol::Play),
+            &vec![],
+        )
+        .expect("native play should use the queue-time resolved member datum");
+
+        let mut output = vec![0.0; 48_000 * 2];
+        player.sound_manager.native_mix(&mut output).unwrap();
+        assert!(output.iter().any(|sample| *sample != 0.0));
+    }
+
+    #[test]
+    fn queued_member_error_reports_resolution_context() {
+        let (mut player, symbols, channel, _member) = call_fixture_player();
+        let missing_member = player.alloc_datum(Datum::CastMember(CastMemberRef {
+            cast_lib: 1,
+            cast_member: 999,
+        }));
+
+        SoundChannelDatumHandlers::call(
+            &mut player,
+            &symbols,
+            &channel,
+            Symbol::builtin(BuiltInSymbol::Queue),
+            &vec![missing_member],
+        )
+        .expect("invalid member remains queued until native play admission");
+        let error = SoundChannelDatumHandlers::call(
+            &mut player,
+            &symbols,
+            &channel,
+            Symbol::builtin(BuiltInSymbol::Play),
+            &vec![],
+        )
+        .expect_err("native play should report the unresolved queued member");
+        let message = error.to_string();
+        assert!(message.contains("channel=1 segment=0"));
+        assert!(message.contains("CastMember cast_ref=1:999"));
+        assert!(message.contains("cast_name=\"<unloaded>\""));
+        assert!(message.contains("retained=true"));
+    }
+
+    #[test]
+    fn source_shaped_sndsfx_missing_member_sentinel_is_idle_noop() {
+        let (mut player, symbols, channel, _member) = call_fixture_player();
+        for sentinel in [INVALID_CAST_MEMBER_REF, NULL_CAST_MEMBER_REF] {
+            let missing = player.alloc_datum(Datum::CastMember(sentinel));
+            SoundChannelDatumHandlers::call(
+                &mut player,
+                &symbols,
+                &channel,
+                Symbol::builtin(BuiltInSymbol::Queue),
+                &vec![missing],
+            )
+            .expect("SndSFX's missing member may remain queued");
+            SoundChannelDatumHandlers::call(
+                &mut player,
+                &symbols,
+                &channel,
+                Symbol::builtin(BuiltInSymbol::Play),
+                &vec![],
+            )
+            .expect("empty SndSFX channel must complete as a native no-op");
+
+            let state = player.sound_manager.get_channel(0).unwrap();
+            let state = state.borrow();
+            assert_eq!(state.status, SoundStatus::Idle);
+            assert!(state.playlist_segments.is_empty());
+            assert_eq!(state.current_segment_index, None);
+            drop(state);
+
+            let mut output = vec![0.0; 8_192];
+            player
+                .sound_manager
+                .native_mix(&mut output)
+                .expect("a sentinel no-op must leave the mixer usable");
+            assert!(output.iter().all(|sample| *sample == 0.0));
+        }
+    }
+
+    #[test]
+    fn native_transform_matches_mono_equal_power_and_director_units() {
+        let center = native_sound_transform(1, 255.0, 0.0);
+        let center_gain = 2.0_f32.sqrt().recip();
+        assert!((center.left_to_left - center_gain).abs() < 1e-6);
+        assert!((center.left_to_right - center_gain).abs() < 1e-6);
+        assert_eq!(center.right_to_left, 0.0);
+        assert_eq!(center.right_to_right, 0.0);
+
+        let quiet = native_sound_transform(1, 128.0, 0.0);
+        assert!((quiet.left_to_left - center_gain * (128.0 / 255.0)).abs() < 1e-6);
+        let left = native_sound_transform(1, 255.0, -100.0);
+        let right = native_sound_transform(1, 255.0, 100.0);
+        assert!((left.left_to_left - 1.0).abs() < 1e-6);
+        assert!(left.left_to_right.abs() < 1e-6);
+        assert!(right.left_to_left.abs() < 1e-6);
+        assert!((right.left_to_right - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn native_loop_count_matches_ruffle_total_play_semantics() {
+        assert_eq!(native_num_loops(1).unwrap(), 0);
+        assert_eq!(native_num_loops(2).unwrap(), 1);
+        assert!(native_num_loops(0).is_err());
+    }
+
+    #[test]
+    fn native_member_queue_registers_the_two_initial_segments_in_order() {
+        let media = MediaChunk {
+            sample_rate: 48_000,
+            data_size_field: WIN_FLAG.len() as u32,
+            guid: None,
+            audio_data: WIN_FLAG.to_vec(),
+            is_compressed: true,
+        };
+        let member = SoundMember {
+            info: DirectorSoundInfo {
+                sample_rate: 48_000,
+                sample_size: 0,
+                channels: 1,
+                sample_count: 0,
+                duration: 0,
+                loop_enabled: false,
+            },
+            sound: SoundChunk::from_media(&media),
+            cue_point_times: Vec::new(),
+            cue_point_names: Vec::new(),
+        };
+        let mut state = NativeAudioState::new(1);
+        state
+            .play_queue(
+                0,
+                vec![(member.clone(), 1, 1.0), (member, 1, 1.0)],
+                255.0,
+                0.0,
+            )
+            .expect("both title segments should register");
+        assert!(state.active[0].is_some());
+        assert_eq!(state.queued[0].len(), 1);
+    }
+
+    fn render(parts: &[usize]) -> Vec<f32> {
+        let mut manager = SoundManager::new(1).expect("native sound manager");
+        manager
+            .native_start_mp3(0, WIN_FLAG)
+            .expect("fixture MP3 should start");
+        let mut output = Vec::new();
+        for frames in parts {
+            let mut chunk = vec![0.0; frames * 2];
+            manager.native_mix(&mut chunk).expect("native mix should succeed");
+            if *frames != 0 {
+                output.extend(chunk);
+            }
+        }
+        output
+    }
+
+    #[test]
+    fn actual_dcr_cue_decodes_to_deterministic_stereo_output() {
+        let digest = Sha256::digest(WIN_FLAG);
+        assert_eq!(format!("{digest:x}"), WIN_FLAG_SHA256);
+
+        let output = render(&[48_000]);
+        assert_eq!(output.len(), 96_000);
+        assert!(output.iter().any(|sample| *sample != 0.0));
+        let first_nonzero = output
+            .chunks_exact(2)
+            .position(|frame| frame[0] != 0.0 || frame[1] != 0.0);
+        assert_eq!(first_nonzero, Some(2_706));
+        assert_eq!(output, render(&[48_000]));
+    }
+
+    #[test]
+    fn actual_dcr_media_member_queue_play_reaches_native_mixer() {
+        let digest = Sha256::digest(DCR_WIN_FLAG_MEDIA);
+        assert_eq!(format!("{digest:x}"), DCR_WIN_FLAG_MEDIA_SHA256);
+        let member = dcr_fixture_member();
+        assert_eq!(member.sound.codec(), "mp3");
+        assert_eq!(member.sound.data().len(), 3_528);
+
+        let mut state = NativeAudioState::new(1);
+        state
+            .play_queue(0, vec![(member, 1, 1.0)], 255.0, 0.0)
+            .expect("prefixed DCR MP3 should queue and play");
+        let mut output = vec![0.0; 48_000 * 2];
+        state.mix(&mut output).expect("native mixer should decode DCR MP3");
+        assert!(output.iter().any(|sample| *sample != 0.0));
+        let first_nonzero = output
+            .chunks_exact(2)
+            .position(|frame| frame[0] != 0.0 || frame[1] != 0.0);
+        assert!(first_nonzero.is_some_and(|frame| frame >= 2_706));
+    }
+
+    fn render_dcr_select(parts: &[usize], playback_rate: f32) -> Vec<f32> {
+        let mut state = NativeAudioState::new(1);
+        state
+            .play_queue(
+                0,
+                vec![(dcr_select_fixture_member(), 1, playback_rate)],
+                255.0,
+                0.0,
+            )
+            .expect("DCR s.select should queue and play");
+        let mut output = Vec::new();
+        for frames in parts {
+            let mut chunk = vec![0.0; frames * 2];
+            state.mix(&mut chunk).expect("native mixer should decode s.select");
+            output.extend(chunk);
+        }
+        output
+    }
+
+    fn render_dcr_select_until_idle(playback_rate: f32) -> (Vec<f32>, usize, usize) {
+        let mut state = NativeAudioState::new(1);
+        state
+            .play_queue(
+                0,
+                vec![(dcr_select_fixture_member(), 1, playback_rate)],
+                255.0,
+                0.0,
+            )
+            .expect("DCR s.select should queue and play");
+        let mut output = Vec::new();
+        let mut last_nonzero = None;
+        for frame in 0..200_000 {
+            let mut chunk = [0.0; 2];
+            state.mix(&mut chunk).expect("native mixer should decode s.select");
+            if chunk.iter().any(|sample| *sample != 0.0) {
+                last_nonzero = Some(frame);
+            }
+            output.extend(chunk);
+            if state.active[0].is_none() {
+                return (output, frame + 1, last_nonzero.expect("sound should be nonzero"));
+            }
+        }
+        panic!("s.select did not reach idle");
+    }
+
+    #[test]
+    fn actual_dcr_s_select_rate_shift_is_split_equivalent() {
+        let digest = Sha256::digest(DCR_SELECT_MEDIA);
+        assert_eq!(format!("{digest:x}"), DCR_SELECT_MEDIA_SHA256);
+        let member = dcr_select_fixture_member();
+        assert_eq!(member.sound.codec(), "mp3");
+        assert_eq!(member.sound.sample_rate(), 16_000);
+        assert_eq!(member.sound.sample_count(), 0);
+        assert_eq!(member.sound.data().len(), 1_440);
+
+        let playback_rate = 2.0_f32.powf(-2.0 / 12.0);
+        let combined = render_dcr_select(&[48_000], playback_rate);
+        let split = render_dcr_select(&[24_000, 24_000], playback_rate);
+        assert_eq!(combined, split);
+        assert!(combined.iter().any(|sample| *sample != 0.0));
+    }
+
+    #[test]
+    fn actual_dcr_s_select_rate_shift_scales_terminal_duration_and_reset() {
+        let playback_rate = 2.0_f32.powf(-2.0 / 12.0);
+        let (rate_one_output, rate_one_frames, rate_one_last_nonzero) =
+            render_dcr_select_until_idle(1.0);
+        let (slow_output, slow_frames, slow_last_nonzero) =
+            render_dcr_select_until_idle(playback_rate);
+        assert_eq!(rate_one_frames, 34_561);
+        assert_eq!(rate_one_last_nonzero, 22_903);
+        assert_eq!(slow_frames, 38_793);
+        assert_eq!(slow_last_nonzero, 25_707);
+        assert_eq!(rate_one_output.len(), rate_one_frames * 2);
+        assert_eq!(slow_output.len(), slow_frames * 2);
+        assert!(slow_frames > rate_one_frames);
+        assert!(slow_last_nonzero > rate_one_last_nonzero);
+        assert!(rate_one_last_nonzero >= 2_706);
+        assert!(slow_last_nonzero >= rate_one_last_nonzero);
+
+        let mut state = NativeAudioState::new(1);
+        state
+            .play_queue(
+                0,
+                vec![(dcr_select_fixture_member(), 1, playback_rate)],
+                255.0,
+                0.0,
+            )
+            .expect("DCR s.select should queue and play");
+        state.stop_all();
+        let mut output = [0.0; 2];
+        state.mix(&mut output).expect("stopped mixer should remain usable");
+        assert_eq!(output, [0.0; 2]);
+        assert!(state.active[0].is_none());
+        assert!(state.queued[0].is_empty());
+    }
+
+    #[test]
+    fn native_playback_rate_rejects_invalid_values_before_registration() {
+        for playback_rate in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            let mut state = NativeAudioState::new(1);
+            let error = state
+                .play_queue(
+                    0,
+                    vec![(dcr_select_fixture_member(), 1, playback_rate)],
+                    255.0,
+                    0.0,
+                )
+                .expect_err("invalid playback rate must fail synchronously");
+            assert!(error.to_string().contains("finite and positive"));
+            assert!(state.active[0].is_none());
+            assert!(state.queued[0].is_empty());
+        }
+    }
+
+    #[test]
+    fn native_mix_is_split_equivalent_and_empty_mix_is_a_noop() {
+        assert_eq!(render(&[48_000]), render(&[24_000, 24_000]));
+        assert_eq!(render(&[48_000]), render(&[0, 48_000]));
+        assert_eq!(render(&[48_000]), render(&[24_000, 0, 24_000]));
+    }
+
+    #[test]
+    fn corrupt_native_cue_fails_before_active_playback() {
+        let mut manager = SoundManager::new(1).expect("native sound manager");
+        let error = manager
+            .native_start_mp3(0, &vec![0; WIN_FLAG.len()])
+            .expect_err("corrupt MP3 must fail synchronously");
+        assert!(error.to_string().contains("Failed to decode MP3"));
+
+        let mut output = vec![0.0; 8_192];
+        manager.native_mix(&mut output).expect("native mix should succeed");
+        assert!(output.iter().all(|sample| *sample == 0.0));
+    }
+
+    #[test]
+    fn stop_and_reset_isolate_native_instances_between_owners() {
+        let mut first = SoundManager::new(1).expect("native sound manager");
+        first.native_start_mp3(0, WIN_FLAG).unwrap();
+        first.stop_all();
+        let mut stopped = vec![0.0; 8_192];
+        first.native_mix(&mut stopped).expect("native mix should succeed");
+        assert!(stopped.iter().all(|sample| *sample == 0.0));
+
+        first.native_start_mp3(0, WIN_FLAG).unwrap();
+        let mut second = SoundManager::new(1).expect("native sound manager");
+        second.native_start_mp3(0, WIN_FLAG).unwrap();
+        first.reset();
+
+        let mut first_after_reset = vec![0.0; 8_192];
+        first.native_mix(&mut first_after_reset).expect("native mix should succeed");
+        assert!(first_after_reset.iter().all(|sample| *sample == 0.0));
+
+        let mut second_after_first_reset = vec![0.0; 8_192];
+        second.native_mix(&mut second_after_first_reset).expect("native mix should succeed");
+        assert!(second_after_first_reset.iter().any(|sample| *sample != 0.0));
+
+        let (first_tx, _first_rx) = channel::unbounded();
+        let first_owner = OwnerToken::new(OwnerKey {
+            session: 1,
+            player: 1,
+            generation: 1,
+        });
+        let mut first_player = DirPlayer::new_with_owner(first_tx, first_owner.clone());
+        let (second_tx, _second_rx) = channel::unbounded();
+        let second_owner = OwnerToken::new(OwnerKey {
+            session: 1,
+            player: 2,
+            generation: 1,
+        });
+        let mut second_player = DirPlayer::new_with_owner(second_tx, second_owner);
+        first_player
+            .sound_manager
+            .native_start_mp3(0, WIN_FLAG)
+            .unwrap();
+        second_player
+            .sound_manager
+            .native_start_mp3(0, WIN_FLAG)
+            .unwrap();
+
+        let old_identity = first_player.owner.clone();
+        let old_key = old_identity.key();
+        first_player.reset_owned_core();
+        assert!(!old_identity.same_identity(&first_player.owner));
+        assert_eq!(first_player.owner.key().session, old_key.session);
+        assert_eq!(first_player.owner.key().player, old_key.player);
+        assert_eq!(first_player.owner.key().generation, old_key.generation + 1);
+
+        let mut first_after_owned_reset = vec![0.0; 8_192];
+        first_player
+            .sound_manager
+            .native_mix(&mut first_after_owned_reset)
+            .expect("native mix should succeed");
+        assert!(first_after_owned_reset.iter().all(|sample| *sample == 0.0));
+
+        let mut second_after_owned_reset = vec![0.0; 8_192];
+        second_player
+            .sound_manager
+            .native_mix(&mut second_after_owned_reset)
+            .expect("native mix should succeed");
+        assert!(second_after_owned_reset
+            .iter()
+            .any(|sample| *sample != 0.0));
     }
 }

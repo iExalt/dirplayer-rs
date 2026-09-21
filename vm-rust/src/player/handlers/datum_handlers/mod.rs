@@ -157,6 +157,15 @@ pub(crate) fn try_call_datum_handler_sync(
                 DatumType::StringChunk => SyncDatumCall::Handled(
                     StringChunkHandlers::call(runtime, datum, handler_name, args),
                 ),
+                DatumType::SoundChannel => SyncDatumCall::Handled(
+                    sound_channel::SoundChannelDatumHandlers::call(
+                        runtime.player,
+                        runtime.symbols,
+                        datum,
+                        handler_name,
+                        args,
+                    ),
+                ),
                 DatumType::ScriptRef => {
                     let name_lower = runtime.symbols.lower(&handler_name).map(str::to_owned);
                     match name_lower {

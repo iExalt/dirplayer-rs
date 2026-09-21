@@ -631,6 +631,19 @@ impl CastManager {
         cast_name_or_num: Option<&Datum>,
         datums: &DatumAllocator,
     ) -> Result<Option<CastMemberRef>, ScriptError> {
+        // Director's `word`/`line` expressions retain their resolved value as
+        // a StringChunk. Member identifiers use the same string semantics as
+        // plain String values, so normalize only that string-like form before
+        // entering the existing name-cache/cast lookup paths.
+        let normalized_member_name;
+        let member_name_or_num = match member_name_or_num {
+            Datum::StringChunk(_, _, value) => {
+                normalized_member_name = Datum::String(value.clone());
+                &normalized_member_name
+            }
+            _ => member_name_or_num,
+        };
+
         // --- Determine cast library ---
         let cast_lib = if cast_name_or_num.is_none()
             || cast_name_or_num.is_some_and(|x| matches!(x, Datum::Void))

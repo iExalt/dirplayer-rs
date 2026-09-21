@@ -17,7 +17,11 @@ use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::director::file::{DirectorFile, read_director_file_bytes};
-use crate::player::testing::{NativeGlobalReadError, NativeGlobalValue, TestPlayer};
+use crate::player::testing::{
+    NativeGlobalReadError, NativeGlobalValue, NativeInvokeArgument, NativeInvokeError, TestPlayer,
+};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::rendering::NativePresentationViewport;
 
 const PROTOCOL_VERSION: u16 = 1;
 const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
@@ -86,6 +90,7 @@ enum Response {
     Capabilities(Capabilities),
     Started { session: SessionHandle },
     Observation(Value),
+    Invoked(Value),
     Captured(Capture),
     Acknowledged,
     Error(StructuredError),
@@ -105,6 +110,8 @@ enum Capability {
     VirtualInput,
     ControlledTime,
     RgbaCapture,
+    PcmCapture,
+    Invocation,
 }
 
 #[derive(Debug, Deserialize)]
@@ -219,9 +226,28 @@ struct RgbaCapture {
 }
 
 #[derive(Debug, Serialize)]
+struct PcmCapture {
+    timestamp_us: u64,
+    sample_rate: u32,
+    channels: u16,
+    samples: Vec<[f32; 2]>,
+    sha256: String,
+}
+
+#[derive(Debug, Serialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 enum Capture {
     Rgba(RgbaCapture),
+    Pcm(PcmCapture),
+}
+
+fn pcm_sha256(samples: &[[f32; 2]]) -> String {
+    let mut hasher = Sha256::new();
+    for frame in samples {
+        hasher.update(frame[0].to_le_bytes());
+        hasher.update(frame[1].to_le_bytes());
+    }
+    format!("{:x}", hasher.finalize())
 }
 
 #[derive(Debug, Deserialize)]
@@ -242,6 +268,28 @@ struct AdapterConfig {
     source_dcr_sha256: String,
     loading_policy: String,
     resource_aliases: Option<BTreeMap<String, ExternalCastAlias>>,
+    #[serde(default)]
+    presentation_viewport: Option<PresentationViewportConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PresentationViewportConfig {
+    x: i64,
+    y: i64,
+    width: i64,
+    height: i64,
+}
+
+impl PresentationViewportConfig {
+    fn native(&self) -> NativePresentationViewport {
+        NativePresentationViewport {
+            x: self.x,
+            y: self.y,
+            width: self.width,
+            height: self.height,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -345,12 +393,22 @@ impl Worker {
                     Capability::VirtualInput,
                     Capability::ControlledTime,
                     Capability::RgbaCapture,
+                    Capability::PcmCapture,
+                    Capability::Invocation,
                 ],
             })),
             Request::Start { config } => self.start(config),
-            Request::Reset | Request::Modify { .. } | Request::Invoke { .. } => Err(unsupported(
-                "native worker does not implement reset, mutation, or invocation",
+            Request::Reset | Request::Modify { .. } => Err(unsupported(
+                "native worker does not implement reset or mutation",
             )),
+            Request::Invoke {
+                target,
+                function,
+                arguments,
+            } => {
+                self.require_started()?;
+                self.invoke(target, &function, arguments)
+            }
             Request::Inspect { target, path } => {
                 self.require_started()?;
                 if !matches!(target, Target::Root) {
@@ -369,11 +427,10 @@ impl Worker {
                 self.require_started()?;
                 self.advance(duration_us)
             }
-            Request::Capture {
-                kind: CaptureKind::Pcm,
-            } => Err(unsupported(
-                "native Director worker does not implement PCM capture",
-            )),
+            Request::Capture { kind: CaptureKind::Pcm } => {
+                self.require_started()?;
+                self.pcm_capture()
+            }
             Request::Capture {
                 kind: CaptureKind::Rgba,
             } => {
@@ -518,6 +575,11 @@ impl Worker {
             crate::player::testing::NativeMovieLoadError::Runtime(error) => runtime_error(error),
         });
         load_result?;
+        if let Some(viewport) = config.adapter.presentation_viewport.as_ref() {
+            player
+                .configure_native_presentation(Some(viewport.native()))
+                .map_err(runtime_error)?;
+        }
         let tempo = player.effective_tempo_quiet().map_err(runtime_error)?;
         if tempo != config.clock.frame_rate_num {
             return Err(error_with(
@@ -555,7 +617,84 @@ impl Worker {
         };
         let value = match path {
             "current_frame" => json!(player.current_frame_quiet()),
+            "current_label" => player
+                .current_label_quiet()
+                .map_or(Value::Null, |label| json!(label)),
             "simulation_time_us" => json!(self.elapsed_us),
+            "init_state" => {
+                let state = player.native_init_state_quiet().map_err(runtime_error)?;
+                json!({
+                    "session": self.session,
+                    "next_frame": state.next_frame,
+                    "flash_bindings": state
+                        .flash_bindings
+                        .into_iter()
+                        .map(|binding| {
+                            json!({
+                                "sprite": binding.sprite,
+                                "generation": binding.generation,
+                                "cast_lib": binding.cast_lib,
+                                "cast_member": binding.cast_member,
+                                "asserted_frame": binding.asserted_frame,
+                            })
+                        })
+                        .collect::<Vec<_>>(),
+                    "pending_flash_actions": state
+                        .pending_flash_actions
+                        .into_iter()
+                        .map(|action| {
+                            json!({
+                                "kind": action.kind,
+                                "sprite": action.sprite,
+                                "generation": action.generation,
+                                "cast_lib": action.cast_lib,
+                                "cast_member": action.cast_member,
+                            })
+                        })
+                        .collect::<Vec<_>>(),
+                })
+            }
+            "flash_instances" => {
+                let snapshots = player.native_flash_snapshots_quiet().map_err(runtime_error)?;
+                json!({
+                    "session": self.session,
+                    "instances": snapshots
+                        .into_iter()
+                        .map(|snapshot| {
+                            json!({
+                                "sprite": snapshot.sprite,
+                                "generation": snapshot.generation,
+                                "width": snapshot.width,
+                                "height": snapshot.height,
+                                "current_frame": snapshot.current_frame,
+                            })
+                        })
+                        .collect::<Vec<_>>(),
+                })
+            }
+            "input_state" => {
+                let state = player.native_input_state_quiet().map_err(runtime_error)?;
+                let sprite_json = |sprite: crate::player::testing::NativeInputSpriteObservation| {
+                    json!({
+                        "sprite": sprite.sprite,
+                        "member_ref": sprite.member_ref,
+                        "member_name": sprite.member_name,
+                    })
+                };
+                json!({
+                    "session": self.session,
+                    "owner": {
+                        "session": state.owner.session,
+                        "player": state.owner.player,
+                        "generation": state.owner.generation,
+                    },
+                    "pointer": state.pointer.map(|(x, y)| json!({"x": x, "y": y})),
+                    "mouse_down": state.mouse_down,
+                    "captured_sprite": state.captured_sprite.map(&sprite_json),
+                    "click_on_sprite": state.click_on_sprite.map(&sprite_json),
+                    "hovered_sprites": state.hovered_sprites.into_iter().map(sprite_json).collect::<Vec<_>>(),
+                })
+            }
             _ if path.starts_with("globals") => {
                 let name = path.strip_prefix("globals.").ok_or_else(|| {
                     error(
@@ -579,6 +718,33 @@ impl Worker {
         Ok(Response::Observation(value))
     }
 
+    fn invoke(
+        &self,
+        target: Target,
+        function: &str,
+        arguments: Vec<Value>,
+    ) -> Result<Response, StructuredError> {
+        if !matches!(target, Target::Root) {
+            return Err(error(
+                ErrorCode::InvalidHandle,
+                "native invocation accepts only the current root owner",
+            ));
+        }
+        // Validate before TestPlayer interns the handler in the owner-local
+        // symbol table. This prevents malformed wire names from mutating the
+        // runtime's symbol arena.
+        validate_global_identifier(function)?;
+        let arguments = arguments
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| native_invoke_argument(index, value))
+            .collect::<Result<Vec<_>, _>>()?;
+        let player = self.player.as_ref().ok_or_else(not_ready)?;
+        let value = async_std::task::block_on(player.native_invoke_global_quiet(function, arguments))
+            .map_err(native_invoke_error)?;
+        Ok(Response::Invoked(native_global_value_to_json(value)?))
+    }
+
     fn input(&mut self, event: VirtualInput) -> Result<Response, StructuredError> {
         match event {
             VirtualInput::Pointer {
@@ -589,6 +755,11 @@ impl Worker {
                 let x = checked_coordinate(x, "x")?;
                 let y = checked_coordinate(y, "y")?;
                 self.pointer = Some((x, y));
+                let Some(player) = self.player.as_ref() else {
+                    return Err(not_ready());
+                };
+                async_std::task::block_on(player.try_native_mouse_move(x, y))
+                    .map_err(runtime_error)?;
                 Ok(Response::Acknowledged)
             }
             VirtualInput::Pointer {
@@ -612,7 +783,26 @@ impl Worker {
                     .map_err(runtime_error)?;
                 Ok(Response::Acknowledged)
             }
-            VirtualInput::Button { .. } => Err(unsupported("only left button down is qualified")),
+            VirtualInput::Button {
+                button: MouseButton::Left,
+                state: ButtonState::Up,
+            } => {
+                let (x, y) = self.pointer.ok_or_else(|| {
+                    error(
+                        ErrorCode::InvalidRequest,
+                        "left button up requires a prior stage pointer",
+                    )
+                })?;
+                let Some(player) = self.player.as_ref() else {
+                    return Err(not_ready());
+                };
+                async_std::task::block_on(player.try_native_mouse_up(x, y))
+                    .map_err(runtime_error)?;
+                Ok(Response::Acknowledged)
+            }
+            VirtualInput::Button { .. } => {
+                Err(unsupported("only left button down/up is qualified"))
+            }
             VirtualInput::Key { .. } => Err(unsupported("keyboard input is not qualified")),
             VirtualInput::Focus { .. } | VirtualInput::Leave | VirtualInput::Resize { .. } => {
                 Err(unsupported("this virtual input form is not qualified"))
@@ -652,6 +842,26 @@ impl Worker {
             height: snapshot.height,
             sha256: format!("{:x}", hasher.finalize()),
             pixels: snapshot.data,
+        })))
+    }
+
+    fn pcm_capture(&self) -> Result<Response, StructuredError> {
+        let Some(player) = self.player.as_ref() else {
+            return Err(not_ready());
+        };
+        let samples = player.native_pcm_snapshot_quiet();
+        if samples.is_empty() {
+            return Err(unsupported(
+                "native PCM capture is empty; advance the simulation first",
+            ));
+        }
+        let sha256 = pcm_sha256(&samples);
+        Ok(Response::Captured(Capture::Pcm(PcmCapture {
+            timestamp_us: 0,
+            sample_rate: 48_000,
+            channels: 2,
+            samples,
+            sha256,
         })))
     }
 }
@@ -1053,6 +1263,58 @@ fn validate_global_identifier(identifier: &str) -> Result<(), StructuredError> {
     Ok(())
 }
 
+fn native_invoke_argument(
+    index: usize,
+    value: Value,
+) -> Result<NativeInvokeArgument, StructuredError> {
+    let invalid = |reason: &str| {
+        error(
+            ErrorCode::InvalidRequest,
+            format!("invoke argument {index} {reason}"),
+        )
+    };
+    match value {
+        Value::Null => Ok(NativeInvokeArgument::Void),
+        Value::Bool(value) => {
+            // This is the established browser/protocol convention: Director
+            // booleans are represented as integer 1/0 in Lingo datum values.
+            Ok(NativeInvokeArgument::Int(i32::from(value)))
+        }
+        Value::String(value) => Ok(NativeInvokeArgument::String(value)),
+        Value::Number(value) => {
+            if let Some(value) = value.as_i64() {
+                let value = i32::try_from(value)
+                    .map_err(|_| invalid("integer is outside the Director Int range"))?;
+                Ok(NativeInvokeArgument::Int(value))
+            } else {
+                let value = value
+                    .as_f64()
+                    .filter(|value| value.is_finite())
+                    .ok_or_else(|| invalid("number must be finite"))?;
+                Ok(NativeInvokeArgument::Float(value))
+            }
+        }
+        Value::Object(mut object) => {
+            let kind = object
+                .remove("type")
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .ok_or_else(|| invalid("object must be a typed symbol"))?;
+            if kind != "symbol" {
+                return Err(invalid("object type is unsupported"));
+            }
+            let value = object
+                .remove("value")
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .ok_or_else(|| invalid("symbol value must be a string"))?;
+            if !object.is_empty() {
+                return Err(invalid("symbol object has unknown fields"));
+            }
+            Ok(NativeInvokeArgument::Symbol(value))
+        }
+        Value::Array(_) => Err(invalid("arrays are unsupported")),
+    }
+}
+
 fn native_global_value_to_json(value: NativeGlobalValue) -> Result<Value, StructuredError> {
     Ok(match value {
         NativeGlobalValue::Int(value) => json!(value),
@@ -1083,13 +1345,28 @@ fn native_global_value_to_json(value: NativeGlobalValue) -> Result<Value, Struct
 }
 
 fn native_global_read_error(error: NativeGlobalReadError) -> StructuredError {
+    native_value_read_error("global", error)
+}
+
+fn native_value_read_error(
+    subject: &str,
+    error: NativeGlobalReadError,
+) -> StructuredError {
     match error {
         NativeGlobalReadError::Runtime(error) => runtime_error(error),
         NativeGlobalReadError::Unsupported { datum_type, reason } => error_with(
             ErrorCode::Unsupported,
-            format!("global datum type {datum_type} is not representable in v1"),
+            format!("{subject} datum type {datum_type} is not representable in v1"),
             Some(json!({"datum_type": datum_type, "reason": reason})),
         ),
+    }
+}
+
+fn native_invoke_error(error: NativeInvokeError) -> StructuredError {
+    match error {
+        NativeInvokeError::Runtime(error) => runtime_error(error),
+        NativeInvokeError::Returned(error) => native_value_read_error("returned", error),
+        NativeInvokeError::UnsupportedContinuation(reason) => unsupported(reason),
     }
 }
 
@@ -1129,6 +1406,7 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
+
     #[test]
     fn global_symbol_uses_typed_wire_shape() {
         assert_eq!(
@@ -1147,6 +1425,44 @@ mod tests {
         assert_eq!(
             error.details,
             Some(json!({"datum_type": "null", "reason": null}))
+        );
+    }
+
+    #[test]
+    fn invoke_arguments_use_director_boolean_and_typed_symbol_conventions() {
+        assert!(matches!(
+            native_invoke_argument(0, json!(true)).unwrap(),
+            NativeInvokeArgument::Int(1)
+        ));
+        assert!(matches!(
+            native_invoke_argument(1, json!({"type": "symbol", "value": "snd_start"}))
+                .unwrap(),
+            NativeInvokeArgument::Symbol(value) if value == "snd_start"
+        ));
+        assert!(native_invoke_argument(2, json!([1, 2])).is_err());
+    }
+
+    #[test]
+    fn returned_datum_errors_are_labeled_as_returned_values() {
+        let error = native_invoke_error(NativeInvokeError::Returned(
+            NativeGlobalReadError::Unsupported {
+                datum_type: "sound_channel",
+                reason: Some("wire_shape"),
+            },
+        ));
+        assert!(error.message.starts_with("returned datum type sound_channel"));
+        assert_eq!(
+            error.details,
+            Some(json!({"datum_type": "sound_channel", "reason": "wire_shape"}))
+        );
+    }
+
+    #[test]
+    fn pcm_hash_uses_little_endian_stereo_frames() {
+        let frames = [[0.0_f32, 1.0], [0.25, -0.5]];
+        assert_eq!(
+            pcm_sha256(&frames),
+            "a598f911bbd93c4319b851d86ba51db07e740f128e3d82eb72be86d2aa38e9de"
         );
     }
 

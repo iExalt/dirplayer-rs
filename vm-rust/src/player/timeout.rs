@@ -98,6 +98,40 @@ impl NativeTime {
             Err(ScriptError::new("native time cannot be represented as f64".to_owned()))
         }
     }
+
+    pub(crate) fn to_micros(self) -> Result<u64, ScriptError> {
+        let micros = self.to_f64()? * 1_000.0;
+        if !micros.is_finite() || micros < 0.0 || micros > u64::MAX as f64 {
+            return Err(ScriptError::new(
+                "native time cannot be represented in microseconds".to_owned(),
+            ));
+        }
+        Ok(micros.round() as u64)
+    }
+
+    /// Return whole milliseconds using the native clock's exact rational value.
+    /// Native Lingo exposes `milliSeconds` as an integer, so fractional values
+    /// are truncated without passing through floating point.
+    pub(crate) fn to_milliseconds_floor(self) -> Result<u64, ScriptError> {
+        let milliseconds = self.numerator / self.denominator;
+        u64::try_from(milliseconds)
+            .map_err(|_| ScriptError::new("native milliseconds exceed supported range".to_owned()))
+    }
+
+    /// Return whole Director ticks (60 per second) from the exact native time.
+    pub(crate) fn to_ticks_floor(self) -> Result<i32, ScriptError> {
+        let scaled_numerator = self
+            .numerator
+            .checked_mul(60)
+            .ok_or_else(|| ScriptError::new("native tick conversion overflow".to_owned()))?;
+        let scaled_denominator = self
+            .denominator
+            .checked_mul(1_000)
+            .ok_or_else(|| ScriptError::new("native tick conversion overflow".to_owned()))?;
+        let ticks = scaled_numerator / scaled_denominator;
+        i32::try_from(ticks)
+            .map_err(|_| ScriptError::new("native ticks exceed supported range".to_owned()))
+    }
 }
 
 fn gcd(mut left: u128, mut right: u128) -> u128 {
@@ -452,6 +486,22 @@ mod tests {
             first_frame.cmp(NativeTime::from_micros(33_334).unwrap()).unwrap(),
             Ordering::Less
         );
+    }
+
+    #[test]
+    fn native_clock_conversions_use_exact_floor_units() {
+        let cases = [
+            (0, 0, 0),
+            (16_666, 16, 0),
+            (16_667, 16, 1),
+            (100_000, 100, 6),
+            (1_000_000, 1_000, 60),
+        ];
+        for (microseconds, milliseconds, ticks) in cases {
+            let now = NativeTime::from_micros(microseconds).unwrap();
+            assert_eq!(now.to_milliseconds_floor().unwrap(), milliseconds);
+            assert_eq!(now.to_ticks_floor().unwrap(), ticks);
+        }
     }
 
     #[test]

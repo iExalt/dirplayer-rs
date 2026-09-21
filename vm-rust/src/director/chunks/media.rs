@@ -3,6 +3,50 @@ use std::convert::TryInto;
 
 use log::{debug};
 
+fn mp3_frame_len(h: &[u8]) -> Option<usize> {
+    if h.len() < 4 || h[0] != 0xFF || (h[1] & 0xE0) != 0xE0 {
+        return None;
+    }
+    let version_id = (h[1] >> 3) & 0x03;
+    let layer = (h[1] >> 1) & 0x03;
+    let bitrate_idx = (h[2] >> 4) & 0x0F;
+    let rate_idx = (h[2] >> 2) & 0x03;
+    if version_id == 1 || layer == 0 || bitrate_idx == 0 || bitrate_idx == 15 || rate_idx == 3 {
+        return None;
+    }
+    let mpeg1 = version_id == 3;
+    const V1L1: [u32; 16] = [0,32,64,96,128,160,192,224,256,288,320,352,384,416,448,0];
+    const V1L2: [u32; 16] = [0,32,48,56,64,80,96,112,128,160,192,224,256,320,384,0];
+    const V1L3: [u32; 16] = [0,32,40,48,56,64,80,96,112,128,160,192,224,256,320,0];
+    const V2L1: [u32; 16] = [0,32,48,56,64,80,96,112,128,144,160,176,192,224,256,0];
+    const V2L23: [u32; 16] = [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160,0];
+    let bitrate = match (mpeg1, layer) {
+        (true, 3) => V1L1[bitrate_idx as usize],
+        (true, 2) => V1L2[bitrate_idx as usize],
+        (true, 1) => V1L3[bitrate_idx as usize],
+        (false, 3) => V2L1[bitrate_idx as usize],
+        (false, _) => V2L23[bitrate_idx as usize],
+        _ => 0,
+    } * 1000;
+    if bitrate == 0 {
+        return None;
+    }
+    let base_rate = [44100u32, 48000, 32000][rate_idx as usize];
+    let sample_rate = match version_id {
+        3 => base_rate,
+        2 => base_rate / 2,
+        _ => base_rate / 4,
+    };
+    let padding = ((h[2] >> 1) & 0x01) as u32;
+    let len = if layer == 3 {
+        (12 * bitrate / sample_rate + padding) * 4
+    } else {
+        let coeff = if mpeg1 { 144 } else { 72 };
+        coeff * bitrate / sample_rate + padding
+    };
+    (len >= 4).then_some(len as usize)
+}
+
 #[derive(Debug, Clone)]
 pub struct MediaChunk {
     pub sample_rate: u32,
@@ -13,6 +57,44 @@ pub struct MediaChunk {
 }
 
 impl MediaChunk {
+    /// Find a valid MPEG frame after a short Director media prefix. Require two
+    /// complete chained frames so arbitrary PCM bytes are not classified as MP3.
+    pub(crate) fn find_mp3_start(data: &[u8]) -> Option<usize> {
+        let limit = data.len().min(2048);
+        for off in 0..limit {
+            let Some(first_len) = mp3_frame_len(&data[off..]) else {
+                continue;
+            };
+            let first_end = off.checked_add(first_len)?;
+            if first_end > data.len() {
+                continue;
+            }
+            if first_end == data.len() {
+                return Some(off);
+            }
+            let next = &data[first_end..];
+            let Some(next_len) = mp3_frame_len(next) else {
+                continue;
+            };
+            if next_len <= next.len() {
+                return Some(off);
+            }
+        }
+        None
+    }
+
+    fn has_explicit_ima_guid(&self) -> bool {
+        self.guid.is_some_and(|guid| {
+            &guid[0..8] == &[0x5A, 0x08, 0xCD, 0x40, 0x53, 0x5B, 0x11, 0xD0]
+        })
+    }
+
+    pub(crate) fn mp3_start(&self) -> Option<usize> {
+        (!self.has_explicit_ima_guid())
+            .then(|| Self::find_mp3_start(&self.audio_data))
+            .flatten()
+    }
+
     pub fn from_reader(reader: &mut BinaryReader) -> Result<Self, String> {
         let mut data_test = Vec::new();
 
@@ -109,7 +191,7 @@ impl MediaChunk {
         let skip_bytes = (header_size as usize).saturating_sub(bytes_read);
 
         // Read GUID if present
-        let guid = if skip_bytes >= 16 {
+        let guid: Option<[u8; 16]> = if skip_bytes >= 16 {
             let b = reader.read_bytes(16).map_err(|e| e.to_string())?;
             Some(b.try_into().unwrap())
         } else {
@@ -129,10 +211,11 @@ impl MediaChunk {
             audio_data.push(byte);
         }
 
-        // Detect compression type
-        // MP3: starts with 0xFF 0xFx
-        let is_mp3 =
-            audio_data.len() >= 2 && audio_data[0] == 0xFF && (audio_data[1] & 0xE0) == 0xE0;
+        // Director media can prepend a short framing field before MP3. Use the
+        // chained-frame validator rather than an offset-zero sync heuristic.
+        let is_mp3 = !guid.is_some_and(|guid| {
+            &guid[0..8] == &[0x5A, 0x08, 0xCD, 0x40, 0x53, 0x5B, 0x11, 0xD0]
+        }) && MediaChunk::find_mp3_start(&audio_data).is_some();
 
         // IMA ADPCM: data is significantly smaller than data_size_field
         // data_size_field represents uncompressed PCM size
@@ -194,19 +277,11 @@ impl MediaChunk {
     }
 
     pub fn get_codec_name(&self) -> &str {
-        if let Some(guid) = self.guid {
-            // Check against known DirectSound/Windows Media GUIDs
-            // 5A08CD40-535B-11D0-A8BB-00A0C9008A48 is IMA ADPCM
-            if &guid[0..8] == &[0x5A, 0x08, 0xCD, 0x40, 0x53, 0x5B, 0x11, 0xD0] {
-                return "ima_adpcm";
-            }
+        if self.has_explicit_ima_guid() {
+            return "ima_adpcm";
         }
 
-        // Check for MP3
-        if self.audio_data.len() >= 2
-            && self.audio_data[0] == 0xFF
-            && (self.audio_data[1] & 0xE0) == 0xE0
-        {
+        if self.mp3_start().is_some() {
             return "mp3";
         }
 
@@ -227,5 +302,60 @@ impl MediaChunk {
     pub fn is_sound(&self) -> bool {
         // Consider both compressed (MP3) and raw PCM as valid sound
         self.is_compressed || !self.audio_data.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MediaChunk;
+    use sha2::{Digest, Sha256};
+
+    const DCR_MEDIA: &[u8] = include_bytes!("../../../tests/fixtures/spybot_s_win_flag_dcr_media.bin");
+    const DCR_MEDIA_SHA256: &str =
+        "e274ab9e1d3f0d04d00cf5e27a37dec72f4cfb199e4cd8f2f158ee195df1c55f";
+
+    #[test]
+    fn dcr_media_prefix_is_trimmed_as_mp3() {
+        let media = MediaChunk {
+            sample_rate: 16_000,
+            data_size_field: 22_198,
+            guid: Some([
+                0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                0, 2, 0, 1, 77, 65, 67, 82,
+            ]),
+            audio_data: DCR_MEDIA.to_vec(),
+            is_compressed: true,
+        };
+        assert_eq!(format!("{:x}", Sha256::digest(DCR_MEDIA)), DCR_MEDIA_SHA256);
+        assert_eq!(MediaChunk::find_mp3_start(DCR_MEDIA), Some(4));
+        assert_eq!(media.get_codec_name(), "mp3");
+
+        let sound = crate::director::chunks::sound::SoundChunk::from_media(&media);
+        assert_eq!(sound.codec(), "mp3");
+        assert_eq!(sound.sample_rate(), 16_000);
+        assert_eq!(sound.sample_count(), 0);
+        assert_eq!(sound.data().len(), 3_528);
+        assert_eq!(&sound.data()[..4], &[0xff, 0xf3, 0x28, 0xc4]);
+    }
+
+    #[test]
+    fn mp3_prefix_classifier_rejects_false_sync_and_truncation() {
+        assert_eq!(MediaChunk::find_mp3_start(&[0xff, 0xf3, 0x28, 0xc4]), None);
+        assert_eq!(MediaChunk::find_mp3_start(&[0; 512]), None);
+        let first_len = super::mp3_frame_len(&DCR_MEDIA[4..]).unwrap();
+        assert_eq!(MediaChunk::find_mp3_start(&DCR_MEDIA[..4 + first_len + 1]), None);
+    }
+
+    #[test]
+    fn explicit_ima_guid_takes_precedence_over_mp3_sync() {
+        let media = MediaChunk {
+            sample_rate: 16_000,
+            data_size_field: 22_198,
+            guid: Some([0x5a, 0x08, 0xcd, 0x40, 0x53, 0x5b, 0x11, 0xd0, 0, 0, 0, 0, 0, 0, 0, 0]),
+            audio_data: DCR_MEDIA.to_vec(),
+            is_compressed: true,
+        };
+        assert_eq!(media.get_codec_name(), "ima_adpcm");
+        assert_eq!(media.mp3_start(), None);
     }
 }

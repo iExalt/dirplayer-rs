@@ -70,7 +70,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     future::Future,
     pin::Pin,
-    rc::Rc,
+    rc::{Rc, Weak},
     sync::{Arc, OnceLock},
     time::Duration,
 };
@@ -788,12 +788,99 @@ pub(crate) enum FlashHostAction {
         width: u32,
         height: u32,
     },
+    Seek {
+        fence: FlashActionFence,
+        host_sprite: i32,
+        local_sprite: i16,
+        cast_lib: i32,
+        cast_member: i32,
+        generation: u64,
+        frame: i32,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct NativeFlashBindingObservation {
+    pub(crate) sprite: i16,
+    pub(crate) generation: u64,
+    pub(crate) cast_lib: i32,
+    pub(crate) cast_member: i32,
+    pub(crate) asserted_frame: Option<i32>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct NativeFlashActionSummary {
+    pub(crate) kind: &'static str,
+    pub(crate) sprite: i16,
+    pub(crate) generation: u64,
+    pub(crate) cast_lib: i32,
+    pub(crate) cast_member: i32,
 }
 
 impl FlashHostAction {
+    pub(crate) fn summary(&self) -> NativeFlashActionSummary {
+        match self {
+            Self::Load {
+                local_sprite,
+                generation,
+                cast_lib,
+                cast_member,
+                ..
+            } => NativeFlashActionSummary {
+                kind: "load",
+                sprite: *local_sprite,
+                generation: *generation,
+                cast_lib: *cast_lib,
+                cast_member: *cast_member,
+            },
+            Self::Unload {
+                local_sprite,
+                generation,
+                cast_lib,
+                cast_member,
+                ..
+            } => NativeFlashActionSummary {
+                kind: "unload",
+                sprite: *local_sprite,
+                generation: *generation,
+                cast_lib: *cast_lib,
+                cast_member: *cast_member,
+            },
+            Self::Resize {
+                local_sprite,
+                generation,
+                cast_lib,
+                cast_member,
+                ..
+            } => NativeFlashActionSummary {
+                kind: "resize",
+                sprite: *local_sprite,
+                generation: *generation,
+                cast_lib: *cast_lib,
+                cast_member: *cast_member,
+            },
+            Self::Seek {
+                local_sprite,
+                generation,
+                cast_lib,
+                cast_member,
+                ..
+            } => NativeFlashActionSummary {
+                kind: "seek",
+                sprite: *local_sprite,
+                generation: *generation,
+                cast_lib: *cast_lib,
+                cast_member: *cast_member,
+            },
+        }
+    }
+
     fn owner(&self) -> OwnerToken {
         let fence = match self {
-            Self::Load { fence, .. } | Self::Unload { fence, .. } | Self::Resize { fence, .. } => {
+            Self::Load { fence, .. }
+            | Self::Unload { fence, .. }
+            | Self::Resize { fence, .. }
+            | Self::Seek { fence, .. } => {
                 fence
             }
         };
@@ -802,7 +889,10 @@ impl FlashHostAction {
 
     fn bind_owned(&mut self, session: RuntimeSessionHandle, player_id: session::PlayerId) {
         let fence = match self {
-            Self::Load { fence, .. } | Self::Unload { fence, .. } | Self::Resize { fence, .. } => {
+            Self::Load { fence, .. }
+            | Self::Unload { fence, .. }
+            | Self::Resize { fence, .. }
+            | Self::Seek { fence, .. } => {
                 fence
             }
         };
@@ -920,6 +1010,8 @@ impl FlashHostAction {
                         &fence.owner,
                         *local_sprite,
                         *generation,
+                        *cast_lib,
+                        *cast_member,
                         data,
                         *width,
                         *height,
@@ -1110,6 +1202,65 @@ impl FlashHostAction {
                     Some((*cast_lib, *cast_member)),
                 )
             }
+            Self::Seek {
+                fence,
+                host_sprite,
+                local_sprite,
+                cast_lib,
+                cast_member,
+                generation,
+                frame,
+            } => {
+                fence.revalidated(
+                    *local_sprite,
+                    Some(*generation),
+                    Some((*cast_lib, *cast_member)),
+                )?;
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let Some(session) = fence.session.as_ref() else {
+                        return Err(ScriptError::new(
+                            "Flash host is unavailable on native".to_owned(),
+                        ));
+                    };
+                    let Some(player_id) = fence.player_id else {
+                        return Err(ScriptError::new(
+                            "Flash host is unavailable on native".to_owned(),
+                        ));
+                    };
+                    let binding = session
+                        .borrow()
+                        .native_flash(player_id)
+                        .and_then(|binding| binding.upgrade())
+                        .ok_or_else(|| {
+                            ScriptError::new("Flash host is unavailable on native".to_owned())
+                        })?;
+                    binding.borrow_mut().seek(
+                        session,
+                        player_id,
+                        &fence.owner,
+                        *local_sprite,
+                        *generation,
+                        *frame,
+                    )?;
+                    fence.revalidated(
+                        *local_sprite,
+                        Some(*generation),
+                        Some((*cast_lib, *cast_member)),
+                    )?;
+                    let _ = host_sprite;
+                    return Ok(());
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let _ = (host_sprite, frame);
+                    fence.revalidated(
+                        *local_sprite,
+                        Some(*generation),
+                        Some((*cast_lib, *cast_member)),
+                    )
+                }
+            }
         }
     }
 }
@@ -1151,13 +1302,53 @@ pub(crate) fn emit_flash_host_actions(actions: Vec<FlashHostAction>) -> Result<(
     Ok(())
 }
 
+/// Drain native Flash actions after an owned async phase has released the
+/// RuntimeSession borrow. InitExitFrame may queue a seek after the initial
+/// pre-script drain, so the owner-bound initializer performs this one final
+/// lifecycle drain before it reports Start complete.
+pub(crate) fn drain_flash_host_actions_owned(
+    session: RuntimeSessionHandle,
+    player_id: session::PlayerId,
+    owner: OwnerToken,
+) -> Result<(), ScriptError> {
+    let actions = session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            if !owner.is_arena_live() || !owner.same_identity(&context.player.owner) {
+                return Err(cancelled_scope_error());
+            }
+            Ok::<_, ScriptError>(context.player.take_flash_host_actions())
+        })
+        .ok_or_else(cancelled_scope_error)??;
+    let actions = bind_flash_host_actions(actions, session.clone(), player_id);
+    emit_flash_host_actions(actions)?;
+    let still_owned = session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            owner.is_arena_live() && owner.same_identity(&context.player.owner)
+        })
+        .unwrap_or(false);
+    if still_owned {
+        Ok(())
+    } else {
+        Err(cancelled_scope_error())
+    }
+}
+
 #[cfg(test)]
 mod flash_binding_state_tests {
-    use super::FlashBindingState;
+    use super::{FlashBindingState, drain_flash_host_actions_owned};
     use crate::player::{
-        owner_key_string, session::RuntimeSession, symbols::symbol_table::SymbolOwner,
+        cast_lib::CastLib,
+        cast_member::{CastMember, CastMemberType, FlashMember},
+        owner_key_string,
+        score::{sprite_set_prop, SpriteChannel},
+        session::RuntimeSession,
+        symbols::{symbol_table::SymbolOwner, symbol::Symbol},
         timeout::Timeout,
     };
+    use crate::director::lingo::datum::Datum;
+    use crate::player::symbols::builtin::BuiltInSymbol;
     use async_std::channel;
     use std::rc::Rc;
 
@@ -1175,6 +1366,84 @@ mod flash_binding_state_tests {
             native_next_fire: None,
             registration_sequence: 0,
         }
+    }
+
+    #[test]
+    fn init_tail_drain_takes_frame_seek_once_after_sprite_setter() {
+        let session = RuntimeSession::new(SymbolOwner {
+            session: 942,
+            generation: 1,
+        })
+        .into_handle();
+        assert!(session.borrow_mut().add_player(1, channel::unbounded().0));
+        let owner = session
+            .borrow_mut()
+            .with_player(1, |context| {
+                let swf = include_bytes!("../../tests/fixtures/flash_initial_access.swf").to_vec();
+                let mut cast = CastLib::test_external(1, 0);
+                cast.members.insert(
+                    1,
+                    CastMember::new(
+                        1,
+                        CastMemberType::Flash(FlashMember {
+                            data: swf,
+                            reg_point: (0, 0),
+                            flash_info: None,
+                        }),
+                    ),
+                );
+                context.player.movie.cast_manager.casts.push(cast);
+                context.player.movie.score.channels =
+                    vec![SpriteChannel::new(0), SpriteChannel::new(1)];
+                context.player.movie.score.channels[1].sprite.member =
+                    Some(crate::player::cast_lib::CastMemberRef {
+                        cast_lib: 1,
+                        cast_member: 1,
+                    });
+                context
+                    .player
+                    .flash_binding_state
+                    .borrow_mut()
+                    .reserve_for_pair(1, 1, 1)
+                    .expect("generation");
+                let owner = context.player.owner.clone();
+                sprite_set_prop(
+                    context.player,
+                    context.symbols,
+                    1,
+                    Symbol::builtin(BuiltInSymbol::Frame),
+                    Datum::Int(371),
+                )
+                .expect("numeric Flash frame setter");
+                owner
+            })
+            .expect("fixture player must exist");
+
+        let queued = session
+            .borrow_mut()
+            .with_player(1, |context| context.player.take_flash_host_actions())
+            .expect("queued actions");
+        assert_eq!(queued.len(), 1);
+        assert!(matches!(queued[0], super::FlashHostAction::Seek { frame: 371, .. }));
+        session
+            .borrow_mut()
+            .with_player(1, |context| context.player.flash_host_actions.extend(queued))
+            .expect("restore queued tail");
+
+        let error = drain_flash_host_actions_owned(session.clone(), 1, owner)
+            .expect_err("missing host must be reported after exactly one drain");
+        assert_eq!(error.code, super::ScriptErrorCode::Generic);
+        let remaining = session
+            .borrow_mut()
+            .with_player(1, |context| context.player.take_flash_host_actions())
+            .expect("remaining actions");
+        assert!(remaining.is_empty(), "tail action must be taken exactly once");
+        let current_owner = session
+            .borrow_mut()
+            .with_player(1, |context| context.player.owner.clone())
+            .expect("current owner");
+        drain_flash_host_actions_owned(session.clone(), 1, current_owner)
+            .expect("second empty drain must be a no-op");
     }
 
     #[test]
@@ -1629,18 +1898,14 @@ mod flash_binding_state_tests {
                     cast_member: 2,
                 });
         });
-        let action = super::FlashHostAction::Load {
+        let action = super::FlashHostAction::Seek {
             fence: super::FlashActionFence::owned(owner, binding, session.clone(), 1),
             host_sprite: 1,
             local_sprite: 1,
             cast_lib: 1,
             cast_member: 1,
-            data: Vec::new(),
-            width: 1,
-            height: 1,
-            paused_at_start: false,
-            asserted_frame: -1,
             generation,
+            frame: 371,
         };
         let error = action.emit().expect_err("replaced cast pair must reject");
         assert_eq!(error.code, crate::player::ScriptErrorCode::InvalidReference);
@@ -1678,17 +1943,64 @@ mod flash_binding_state_tests {
             })
             .expect("fixture player must exist");
         binding.borrow_mut().invalidate(1, generation);
-        let action = super::FlashHostAction::Resize {
+        let action = super::FlashHostAction::Seek {
             fence: super::FlashActionFence::owned(owner, binding, session, 1),
             host_sprite: 1,
             local_sprite: 1,
             cast_lib: 1,
             cast_member: 1,
             generation,
-            width: 2,
-            height: 2,
+            frame: 371,
         };
         let error = action.emit().expect_err("stale generation must reject");
+        assert_eq!(error.code, crate::player::ScriptErrorCode::InvalidReference);
+    }
+
+    #[test]
+    fn stale_flash_owner_is_rejected_before_native_transport() {
+        let session = RuntimeSession::new(SymbolOwner {
+            session: 941,
+            generation: 1,
+        })
+        .into_handle();
+        assert!(session.borrow_mut().add_player(1, channel::unbounded().0));
+        let (owner, binding, generation) = session
+            .borrow_mut()
+            .with_player(1, |context| {
+                context.player.movie.score.channels = vec![
+                    super::score::SpriteChannel::new(0),
+                    super::score::SpriteChannel::new(1),
+                ];
+                context.player.movie.score.channels[1].sprite.member =
+                    Some(super::cast_lib::CastMemberRef {
+                        cast_lib: 1,
+                        cast_member: 1,
+                    });
+                let generation = context
+                    .player
+                    .reserve_flash_instance_generation(1)
+                    .expect("generation");
+                (
+                    context.player.owner.clone(),
+                    context.player.flash_binding_state.clone(),
+                    generation,
+                )
+            })
+            .expect("fixture player must exist");
+        session
+            .borrow_mut()
+            .reset_player_owned(1, &owner)
+            .expect("owner reset must succeed");
+        let action = super::FlashHostAction::Seek {
+            fence: super::FlashActionFence::owned(owner, binding, session, 1),
+            host_sprite: 1,
+            local_sprite: 1,
+            cast_lib: 1,
+            cast_member: 1,
+            generation,
+            frame: 371,
+        };
+        let error = action.emit().expect_err("stale owner must reject");
         assert_eq!(error.code, crate::player::ScriptErrorCode::InvalidReference);
     }
 
@@ -2171,6 +2483,11 @@ pub struct DirPlayer {
     /// (or `LeechProtectionRemovalHelp`'s `setExternalParam`) supplied the
     /// params in is observable from Lingo.
     pub external_params: IndexMap<String, String>,
+    /// Native-only replacement for the browser preference store. Preferences
+    /// belong to this player generation and must never cross session or owner
+    /// boundaries.
+    #[cfg(not(target_arch = "wasm32"))]
+    native_preferences: HashMap<String, String>,
     // XML document storage - maps XML document IDs to parsed XML structures
     pub xml_documents: HashMap<u32, XmlDocument>,
     // XML node storage - maps node IDs to XML nodes
@@ -2543,6 +2860,27 @@ pub enum MovieFrameTarget {
 }
 
 impl DirPlayer {
+    /// Refresh owner-local caches after a cast has been applied through the
+    /// session-owned completion path. Cast application itself must not consult
+    /// the legacy ambient player because nested/session players can differ.
+    pub(crate) fn refresh_after_cast_apply(&mut self) {
+        self.movie.cast_manager.clear_movie_script_cache();
+        self.movie.cast_manager.invalidate_member_name_cache();
+        self.movie
+            .cast_manager
+            .load_fonts_into_manager(&mut self.font_manager);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn native_preference(&self, name: &str) -> Option<&str> {
+        self.native_preferences.get(name).map(String::as_str)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn set_native_preference(&mut self, name: String, value: String) {
+        self.native_preferences.insert(name, value);
+    }
+
     pub(crate) fn set_nested_flash_host_route(&mut self, route: FlashHostRoute) {
         debug_assert!(matches!(
             route,
@@ -2590,6 +2928,48 @@ impl DirPlayer {
             .generations
             .get(&sprite_num)
             .copied()
+    }
+
+    pub(crate) fn native_flash_bindings(&self) -> Vec<NativeFlashBindingObservation> {
+        let state = self.flash_binding_state.borrow();
+        let mut bindings = state
+            .generations
+            .iter()
+            .filter_map(|(&sprite, &generation)| {
+                let (cast_lib, cast_member) = match state.origin(sprite) {
+                    FlashBindingOrigin::Exact {
+                        cast_lib,
+                        cast_member,
+                    }
+                    | FlashBindingOrigin::FirstPublished {
+                        cast_lib,
+                        cast_member,
+                    } => (cast_lib, cast_member),
+                    FlashBindingOrigin::Absent => return None,
+                };
+                let asserted_frame = self
+                    .movie
+                    .score
+                    .get_sprite(sprite)
+                    .and_then(|sprite| sprite.flash_asserted_frame);
+                Some(NativeFlashBindingObservation {
+                    sprite,
+                    generation,
+                    cast_lib,
+                    cast_member,
+                    asserted_frame,
+                })
+            })
+            .collect::<Vec<_>>();
+        bindings.sort_by_key(|binding| binding.sprite);
+        bindings
+    }
+
+    pub(crate) fn pending_flash_action_summaries(&self) -> Vec<NativeFlashActionSummary> {
+        self.flash_host_actions
+            .iter()
+            .map(FlashHostAction::summary)
+            .collect()
     }
 
     pub(crate) fn flash_binding_origin(&self, sprite_num: i16) -> FlashBindingOrigin {
@@ -2956,6 +3336,41 @@ impl DirPlayer {
         });
     }
 
+    pub(crate) fn queue_flash_seek(&mut self, local_sprite: i16, frame: i32) {
+        let Some(generation) = self.flash_instance_generation(local_sprite) else {
+            return;
+        };
+        let Some((cast_lib, cast_member)) = self
+            .movie
+            .score
+            .get_sprite(local_sprite)
+            .and_then(|sprite| sprite.member.as_ref())
+            .map(|member| (member.cast_lib, member.cast_member))
+        else {
+            return;
+        };
+        if !self
+            .movie
+            .cast_manager
+            .find_member_by_ref(&crate::player::cast_lib::CastMemberRef {
+                cast_lib,
+                cast_member,
+            })
+            .is_some_and(|member| matches!(member.member_type, crate::player::cast_member::CastMemberType::Flash(_)))
+        {
+            return;
+        }
+        self.queue_flash_host_action(FlashHostAction::Seek {
+            fence: self.flash_action_fence(),
+            host_sprite: local_sprite as i32,
+            local_sprite,
+            cast_lib,
+            cast_member,
+            generation,
+            frame,
+        });
+    }
+
     pub(crate) fn next_flash_object_id(&mut self) -> Result<u32, ScriptError> {
         self.flash_object_counter = self
             .flash_object_counter
@@ -3166,6 +3581,8 @@ impl DirPlayer {
             scope_count: 0,
             scope_invalidation_epoch: 0,
             external_params: IndexMap::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            native_preferences: HashMap::new(),
             xml_documents: HashMap::new(),
             xml_nodes: HashMap::new(),
             next_xml_id: 1000,
@@ -4483,7 +4900,12 @@ impl DirPlayer {
     }
 
     pub fn get_next_frame(&self) -> u32 {
-        if !self.is_playing {
+        let stopped_owned_go = !self.is_playing
+            && self.has_frame_changed_in_go
+            && self
+                .next_frame
+                .is_some_and(|next_frame| next_frame != self.movie.current_frame);
+        if !self.is_playing && !stopped_owned_go {
             return self.movie.current_frame;
         } else if let Some(next_frame) = self.next_frame {
             return next_frame;
@@ -4500,7 +4922,12 @@ impl DirPlayer {
     }
 
     pub fn advance_frame(&mut self) {
-        if !self.is_playing {
+        let stopped_owned_go = !self.is_playing
+            && self.has_frame_changed_in_go
+            && self
+                .next_frame
+                .is_some_and(|next_frame| next_frame != self.movie.current_frame);
+        if !self.is_playing && !stopped_owned_go {
             return;
         }
         // A score transition is playing out (rendered per-frame by the renderer):
@@ -4642,6 +5069,11 @@ impl DirPlayer {
             .collect::<Vec<_>>();
         self.bump_scope_invalidation_epoch();
         self.stop();
+        self.mouse_down_sprite = 0;
+        self.click_on_sprite = 0;
+        self.hovered_sprites.clear();
+        self.mouse_loc = (0, 0);
+        self.movie.mouse_down = false;
         self.pending_player_notifications.clear();
         self.host_event_mailbox.clear();
         self.host_event_backpressure = None;
@@ -4649,7 +5081,7 @@ impl DirPlayer {
         // Silence any sound still playing from the movie we're leaving and tear
         // down its Flash/Ruffle instances (their capture RAF loops + SWF audio),
         // so switching movies doesn't leave old sounds looping or leak players.
-        self.sound_manager.stop_all();
+        self.sound_manager.reset();
         self.flash_frame_buffers.clear();
         self.flash_sprite_loaded.clear();
         self.flash_host_actions.clear();
@@ -4688,6 +5120,8 @@ impl DirPlayer {
         self.pending_goto_net_movie = None;
         self.goto_wait_active = false;
         self.pending_movie_init = false;
+        #[cfg(not(target_arch = "wasm32"))]
+        self.native_preferences.clear();
         self.last_initialized_frame = None;
         self.playback_init_count = 0;
         self.playback_frame_count = 0;
@@ -5927,6 +6361,11 @@ impl DirPlayer {
                 // (`repeat while (the milliSeconds - t0) < N`); mark it so the
                 // backward-jump handler yields cooperatively (see input_polled).
                 self.input_polled = true;
+                if let Some(now) = self.native_logical_time {
+                    let milliseconds = i32::try_from(now.to_milliseconds_floor()?)
+                        .map_err(|_| ScriptError::new("native milliseconds exceed Lingo integer range".to_owned()))?;
+                    return Ok(self.alloc_datum(Datum::Int(milliseconds)));
+                }
                 // `Utc`, not `Local`: the difference is identical (both are
                 // absolute epoch instants) but `Local::now()` re-resolves the
                 // timezone offset on every call under WASM. This is polled in
@@ -6041,6 +6480,9 @@ impl DirPlayer {
             // backward-jump handler yields cooperatively (see input_polled).
             BuiltInSymbol::Ticks => {
                 self.input_polled = true;
+                if let Some(now) = self.native_logical_time {
+                    return Ok(self.alloc_datum(Datum::Int(now.to_ticks_floor()?)));
+                }
                 Ok(self.alloc_datum(Datum::Int(get_elapsed_ticks(self.system_start_time))))
             }
             BuiltInSymbol::FrameLabel => {
@@ -9948,6 +10390,148 @@ impl Drop for FrameUpdateFlagGuard {
     }
 }
 
+/// Run behavior defaults and the owner-bound BeginSprite phases for the
+/// currently entered score. This is shared by movie initialization and an
+/// owned different-frame Go transition so target-frame behaviors receive the
+/// same ordered lifecycle treatment as initial behaviors.
+async fn run_owned_begin_sprite_phase(
+    session: RuntimeSessionHandle,
+    player_id: u32,
+    owner: OwnerToken,
+) -> Result<(), ScriptError> {
+    let behaviors = session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                return Err(cancelled_scope_error());
+            }
+            let player = &mut *context.player;
+            let mut result = Vec::new();
+            for channel in player.active_stage_behavior_channels() {
+                let Some((sprite_num, fallback)) =
+                    player.movie.score.channels.get(channel).map(|channel| {
+                        (
+                            channel.sprite.number as u32,
+                            channel.sprite.script_instance_list.clone(),
+                        )
+                    })
+                else {
+                    continue;
+                };
+                for behavior in
+                    player.get_sprite_script_instance_ids(sprite_num as i16, fallback.as_slice())
+                {
+                    if player
+                        .allocator
+                        .get_script_instance_entry(behavior.id())
+                        .is_some_and(|entry| !entry.script_instance.begin_sprite_called)
+                    {
+                        result.push((behavior, sprite_num));
+                    }
+                }
+            }
+            Ok::<_, ScriptError>(result)
+        })
+        .ok_or_else(cancelled_scope_error)??;
+
+    for (behavior, sprite_num) in behaviors {
+        Score::initialize_behavior_defaults_async(
+            session.clone(),
+            player_id,
+            owner.clone(),
+            behavior,
+            sprite_num,
+        )
+        .await?;
+    }
+
+    // Preserve Director's ordered frame/movie, stage-sprite, and film-loop
+    // dispatch. The owner-bound dispatcher returns only the channels whose
+    // callback phase completed; this helper owns the final state mutation.
+    let begin_sprite = crate::player::events::player_dispatch_event_beginsprite_owned(
+        session.clone(),
+        player_id,
+        owner.clone(),
+        Symbol::builtin(BuiltInSymbol::BeginSprite),
+        Vec::new(),
+    )
+    .await?;
+    session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                return Err(cancelled_scope_error());
+            }
+            for (score_source, sprite_num) in &begin_sprite.initialized_channels {
+                if let Some(sprite) = get_score_sprite_mut(
+                    &mut context.player.movie,
+                    score_source,
+                    *sprite_num as i16,
+                ) {
+                    for script_ref in &sprite.script_instance_list {
+                        if let Some(entry) = context
+                            .player
+                            .allocator
+                            .get_script_instance_entry_mut(script_ref.id())
+                        {
+                            entry.script_instance.begin_sprite_called = true;
+                        }
+                    }
+                }
+            }
+            Ok::<(), ScriptError>(())
+        })
+        .ok_or_else(cancelled_scope_error)??;
+
+    // Preserve the targeted remainder for active behaviors that had no handler
+    // during the ordered dispatcher pass, while keeping the callback
+    // owner-bound across the await.
+    for behavior_ref in begin_sprite.unhandled_behaviors {
+        let handler = session
+            .borrow_mut()
+            .with_player(player_id, |context| {
+                if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                    return Err(cancelled_scope_error());
+                }
+                ScriptInstanceUtils::get_script_instance_handler(
+                    Symbol::builtin(BuiltInSymbol::BeginSprite),
+                    &behavior_ref,
+                    context.player,
+                )
+            })
+            .ok_or_else(cancelled_scope_error)??;
+        if let Some(handler) = handler {
+            crate::player::eval::invoke_script_callback_owned(
+                session.clone(),
+                player_id,
+                owner.clone(),
+                Some(behavior_ref.clone()),
+                handler,
+                Vec::new(),
+                false,
+            )
+            .await?;
+        }
+        session
+            .borrow_mut()
+            .with_player(player_id, |context| {
+                if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                    return Err(cancelled_scope_error());
+                }
+                if let Some(entry) = context
+                    .player
+                    .allocator
+                    .get_script_instance_entry_mut(behavior_ref.id())
+                {
+                    entry.script_instance.begin_sprite_called = true;
+                }
+                Ok::<(), ScriptError>(())
+            })
+            .ok_or_else(cancelled_scope_error)??;
+    }
+    Ok(())
+}
+
 /// Owner-bound movie initialization entrypoint with an explicit frame-clock
 /// sample captured by the caller before entering the async phase sequence.
 /// Every phase reacquires the session only for its synchronous mutation and
@@ -10018,134 +10602,7 @@ pub async fn run_movie_init_owned_at(
         .ok_or_else(cancelled_scope_error)??;
     // Defaults and beginSprite belong between prepareMovie and startMovie,
     // matching Director's initialization order.
-    let behaviors = session
-        .borrow_mut()
-        .with_player(player_id, |context| {
-            if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
-                return Err(cancelled_scope_error());
-            }
-            let player = &mut *context.player;
-            let mut result = Vec::new();
-            for channel in player.active_stage_behavior_channels() {
-                let Some((sprite_num, fallback)) =
-                    player.movie.score.channels.get(channel).map(|channel| {
-                        (
-                            channel.sprite.number as u32,
-                            channel.sprite.script_instance_list.clone(),
-                        )
-                    })
-                else {
-                    continue;
-                };
-                for behavior in
-                    player.get_sprite_script_instance_ids(sprite_num as i16, fallback.as_slice())
-                {
-                    if player
-                        .allocator
-                        .get_script_instance_entry(behavior.id())
-                        .is_some_and(|entry| !entry.script_instance.begin_sprite_called)
-                    {
-                        result.push((behavior, sprite_num));
-                    }
-                }
-            }
-            Ok::<_, ScriptError>(result)
-        })
-        .ok_or_else(cancelled_scope_error)??;
-    for (behavior, sprite_num) in behaviors {
-        Score::initialize_behavior_defaults_async(
-            session.clone(),
-            player_id,
-            owner.clone(),
-            behavior,
-            sprite_num,
-        )
-        .await?;
-    }
-    // Preserve Director's ordered frame/movie, stage-sprite, and film-loop
-    // dispatch. The owner-bound dispatcher returns only the channels whose
-    // callback phase completed; this caller owns the final state mutation.
-    let begin_sprite = crate::player::events::player_dispatch_event_beginsprite_owned(
-        session.clone(),
-        player_id,
-        owner.clone(),
-        Symbol::builtin(BuiltInSymbol::BeginSprite),
-        Vec::new(),
-    )
-    .await?;
-    session
-        .borrow_mut()
-        .with_player(player_id, |context| {
-            if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
-                return Err(cancelled_scope_error());
-            }
-            for (score_source, sprite_num) in &begin_sprite.initialized_channels {
-                if let Some(sprite) = get_score_sprite_mut(
-                    &mut context.player.movie,
-                    score_source,
-                    *sprite_num as i16,
-                ) {
-                    for script_ref in &sprite.script_instance_list {
-                        if let Some(entry) = context
-                            .player
-                            .allocator
-                            .get_script_instance_entry_mut(script_ref.id())
-                        {
-                            entry.script_instance.begin_sprite_called = true;
-                        }
-                    }
-                }
-            }
-            Ok::<(), ScriptError>(())
-        })
-        .ok_or_else(cancelled_scope_error)??;
-
-    // Preserve the legacy targeted remainder for active behaviors that had no
-    // handler during the ordered dispatcher pass, while keeping the callback
-    // owner-bound across the await.
-    for behavior_ref in begin_sprite.unhandled_behaviors {
-        let handler = session
-            .borrow_mut()
-            .with_player(player_id, |context| {
-                if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
-                    return Err(cancelled_scope_error());
-                }
-                ScriptInstanceUtils::get_script_instance_handler(
-                    Symbol::builtin(BuiltInSymbol::BeginSprite),
-                    &behavior_ref,
-                    context.player,
-                )
-            })
-            .ok_or_else(cancelled_scope_error)??;
-        if let Some(handler) = handler {
-            crate::player::eval::invoke_script_callback_owned(
-                session.clone(),
-                player_id,
-                owner.clone(),
-                Some(behavior_ref.clone()),
-                handler,
-                Vec::new(),
-                false,
-            )
-            .await?;
-        }
-        session
-            .borrow_mut()
-            .with_player(player_id, |context| {
-                if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
-                    return Err(cancelled_scope_error());
-                }
-                if let Some(entry) = context
-                    .player
-                    .allocator
-                    .get_script_instance_entry_mut(behavior_ref.id())
-                {
-                    entry.script_instance.begin_sprite_called = true;
-                }
-                Ok::<(), ScriptError>(())
-            })
-            .ok_or_else(cancelled_scope_error)??;
-    }
+    run_owned_begin_sprite_phase(session.clone(), player_id, owner.clone()).await?;
     // Initialization keeps the frame-update guard across the split phases:
     // stepFrame/PrepareFrame/W3D run before StartMovie, while EnterFrame and
     // ExitFrame run afterward, matching the legacy sequence.
@@ -10194,6 +10651,9 @@ pub async fn run_movie_init_owned_at(
             Vec::new(),
         )
         .await?;
+        if apply_owned_pending_go_transition(session.clone(), player_id, owner.clone()).await? {
+            run_owned_begin_sprite_phase(session.clone(), player_id, owner.clone()).await?;
+        }
         crate::player::handlers::movie::execute_movie_async(
             session.clone(),
             crate::player::handlers::movie::MovieAsyncRequest {
@@ -10228,6 +10688,7 @@ pub async fn run_movie_init_owned_at(
     if let Err(error) = frame_result {
         return Err(error);
     }
+    drain_flash_host_actions_owned(session.clone(), player_id, owner.clone())?;
     frame_guard.clear_now()?;
     run_startup_go_owned(session.clone(), player_id, owner.clone()).await?;
     session
@@ -10932,6 +11393,94 @@ pub(crate) async fn run_single_frame_owned_at_without_timeouts(
     run_single_frame_owned_at_inner(session, player_id, owner, frame_now_ms, false).await
 }
 
+/// Apply a pending owner-bound different-frame `go` at an explicit frame
+/// boundary. The command handler only schedules the target; this helper owns
+/// the EndSprite/advance/BeginSprite sequence and never holds the session
+/// borrow across the EndSprite await.
+async fn apply_owned_pending_go_transition(
+    session: RuntimeSessionHandle,
+    player_id: u32,
+    owner: OwnerToken,
+) -> Result<bool, ScriptError> {
+    let (previous_frame, next_frame, has_frame_changed_in_go) = session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                return Err(cancelled_scope_error());
+            }
+            Ok((
+                context.player.movie.current_frame,
+                context.player.next_frame,
+                context.player.has_frame_changed_in_go,
+            ))
+        })
+        .ok_or_else(cancelled_scope_error)??;
+    let Some(next_frame) = next_frame else {
+        return Ok(false);
+    };
+    if !has_frame_changed_in_go || next_frame == previous_frame {
+        return Ok(false);
+    }
+
+    let ended = end_score_sprites_owned(
+        session.clone(),
+        player_id,
+        owner.clone(),
+        ScoreRef::Stage,
+        previous_frame,
+        next_frame,
+        false,
+    )
+    .await?;
+    Ok(session
+        .borrow_mut()
+        .with_player(player_id, |context| {
+            if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                return Err(cancelled_scope_error());
+            }
+            // EndSprite may schedule a newer navigation. Preserve that state
+            // instead of restoring the stale target captured before await.
+            if context.player.next_frame.is_none()
+                || (context.player.go_same_frame
+                    && context.player.next_frame == Some(context.player.movie.current_frame))
+            {
+                return Ok(false);
+            }
+            for sprite_num in ended {
+                if let Some(sprite) = get_score_sprite_mut(
+                    &mut context.player.movie,
+                    &ScoreRef::Stage,
+                    sprite_num as i16,
+                ) {
+                    sprite.exited = true;
+                }
+            }
+            context.player.advance_frame();
+            context.player.has_player_frame_changed = false;
+            context.player.has_frame_changed_in_go = false;
+            context.player.go_same_frame = false;
+            context.player.go_direction = 0;
+            if !context.player.is_playing {
+                // A callback can enter a new frame after the playback loop
+                // naturally retires. Preserve the target frame's existing
+                // script instances while constructing its BeginSprite phase;
+                // begin_all_sprites otherwise rewinds them for initial load.
+                context.player.is_playing = true;
+                context.player.begin_all_sprites(context.symbols);
+                context.player.is_playing = false;
+            } else {
+                context.player.begin_all_sprites(context.symbols);
+            }
+            context
+                .player
+                .movie
+                .score
+                .apply_tween_modifiers(context.player.movie.current_frame);
+            Ok(true)
+        })
+        .ok_or_else(cancelled_scope_error)??)
+}
+
 async fn run_single_frame_owned_at_inner(
     session: RuntimeSessionHandle,
     player_id: u32,
@@ -10953,7 +11502,14 @@ async fn run_single_frame_owned_at_inner(
             ))
         })
         .ok_or_else(cancelled_scope_error)??;
-    if !playing {
+    if !playing && !paused {
+        // A native Flash callback can schedule an owned different-frame Go
+        // after the playback loop has naturally retired. Consume that handoff
+        // at the next controlled Director boundary before treating the stopped
+        // player as idle. Same-frame and stale-owner state remains untouched.
+        if apply_owned_pending_go_transition(session.clone(), player_id, owner.clone()).await? {
+            run_owned_begin_sprite_phase(session.clone(), player_id, owner.clone()).await?;
+        }
         return Ok((false, paused));
     }
     if pending_init && stack_depth == 0 {
@@ -10982,6 +11538,9 @@ async fn run_single_frame_owned_at_inner(
         return Ok((playing, paused));
     }
     if paused {
+        if apply_owned_pending_go_transition(session.clone(), player_id, owner.clone()).await? {
+            run_owned_begin_sprite_phase(session.clone(), player_id, owner.clone()).await?;
+        }
         return Ok((playing, paused));
     }
     // A puppet transition owns the playhead until its deadline. Keep the
@@ -11156,6 +11715,7 @@ async fn run_single_frame_owned_at_inner(
     // Exit-frame handlers have already completed in the owned MovieAsync
     // phase. Preserve go()'s same-frame and explicit-frame state before the
     // ordinary advance, and consume these flags only after owner validation.
+    let mut owned_go_applied = false;
     if has_player_frame_changed {
         session
             .borrow_mut()
@@ -11172,7 +11732,7 @@ async fn run_single_frame_owned_at_inner(
                 Ok::<(), ScriptError>(())
             })
             .ok_or_else(cancelled_scope_error)??;
-    } else if go_same_frame {
+    } else if go_same_frame && !has_frame_changed_in_go {
         session
             .borrow_mut()
             .with_player(player_id, |context| {
@@ -11185,17 +11745,11 @@ async fn run_single_frame_owned_at_inner(
             })
             .ok_or_else(cancelled_scope_error)??;
     } else if has_frame_changed_in_go {
-        session
-            .borrow_mut()
-            .with_player(player_id, |context| {
-                if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
-                    return Err(cancelled_scope_error());
-                }
-                context.player.has_frame_changed_in_go = false;
-                context.player.has_player_frame_changed = false;
-                Ok::<(), ScriptError>(())
-            })
-            .ok_or_else(cancelled_scope_error)??;
+        owned_go_applied =
+            apply_owned_pending_go_transition(session.clone(), player_id, owner.clone()).await?;
+        if owned_go_applied {
+            run_owned_begin_sprite_phase(session.clone(), player_id, owner.clone()).await?;
+        }
     } else {
         let ended = end_score_sprites_owned(
             session.clone(),
@@ -11226,14 +11780,17 @@ async fn run_single_frame_owned_at_inner(
             })
             .ok_or_else(cancelled_scope_error)??;
     }
-    let result = session
+    let (result, ordinary_advanced) = session
         .borrow_mut()
         .with_player(player_id, |mut context| {
             if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
                 return Err(cancelled_scope_error());
             }
             let ordinary_advance =
-                !has_player_frame_changed && !go_same_frame && !has_frame_changed_in_go;
+                !has_player_frame_changed
+                    && !go_same_frame
+                    && !has_frame_changed_in_go
+                    && !owned_go_applied;
             if !context.player.is_script_paused && ordinary_advance {
                 context.player.advance_frame();
                 context.player.begin_all_sprites(context.symbols);
@@ -11243,9 +11800,32 @@ async fn run_single_frame_owned_at_inner(
                     .score
                     .apply_tween_modifiers(context.player.movie.current_frame);
             }
-            Ok((context.player.is_playing, context.player.is_script_paused))
+            Ok::<_, ScriptError>(
+                (
+                    (context.player.is_playing, context.player.is_script_paused),
+                    !context.player.is_script_paused && ordinary_advance,
+                ),
+            )
         })
         .ok_or_else(cancelled_scope_error)??;
+    if ordinary_advanced {
+        run_owned_begin_sprite_phase(session.clone(), player_id, owner.clone()).await?;
+        session
+            .borrow_mut()
+            .with_player(player_id, |context| {
+                if !owner.same_identity(&context.player.owner) || !owner.is_arena_live() {
+                    return Err(cancelled_scope_error());
+                }
+                // `advance_frame` marks the handoff for the legacy renderer;
+                // the owned phase has consumed it. Preserve a newer callback
+                // navigation if BeginSprite re-entered the player.
+                if !context.player.has_frame_changed_in_go && !context.player.go_same_frame {
+                    context.player.has_player_frame_changed = false;
+                }
+                Ok::<(), ScriptError>(())
+            })
+            .ok_or_else(cancelled_scope_error)??;
+    }
     // The legacy frame loop returns before film-loop advancement while paused or
     // stopped. Keep that gate here so a retained playhead does not mutate a
     // paused/replacement score after callbacks have completed.
@@ -14883,11 +15463,21 @@ mod interp_bench {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod cursor_reset_tests {
     use super::*;
+    use crate::director::chunks::handler::{Bytecode, HandlerDef};
+    use crate::director::chunks::score::FrameLabel;
+    use crate::director::chunks::script::ScriptChunk;
+    use crate::director::enums::ScriptType;
+    use crate::director::lingo::datum::Datum;
+    use crate::director::lingo::opcode::OpCode;
     use crate::player::cast_lib::{CastLib, CastMemberRef};
-    use crate::player::score::SpriteChannel;
+    use crate::player::score::{ScoreBehaviorReference, ScoreSpriteSpan, SpriteChannel};
+    use crate::player::script::Script;
     use crate::player::script::ScriptInstance;
     use crate::player::testing::{run_test, TestHarness, TestPlayer};
     use crate::player::timeout::Timeout;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::rc::Rc;
 
     #[test]
     fn a_new_movie_starts_with_the_arrow() {
@@ -14956,6 +15546,835 @@ mod cursor_reset_tests {
                 }),
                 Some((true, true))
             );
+        });
+    }
+
+    #[test]
+    fn owned_init_applies_start_movie_go_before_old_exit_frame_go() {
+        run_test(async {
+            let player = TestPlayer::new();
+            let runtime = player.harness_runtime();
+            let session = runtime.session();
+            let player_id = runtime.player_id();
+            let owner = runtime.owner().clone();
+            runtime
+                .with_context(|context| {
+                    let ready = context.symbols.intern("ready");
+                    let do_start_movie = context.symbols.intern("doStartMovie");
+                    let preload_loop = context.symbols.intern("preload_loop");
+                    let go = Symbol::builtin(BuiltInSymbol::Go);
+                    let start_movie = Symbol::builtin(BuiltInSymbol::StartMovie);
+                    let exit_frame = Symbol::builtin(BuiltInSymbol::ExitFrame);
+                    let begin_sprite = Symbol::builtin(BuiltInSymbol::BeginSprite);
+                    let end_sprite = Symbol::builtin(BuiltInSymbol::EndSprite);
+                    let member_movie = CastMemberRef { cast_lib: 1, cast_member: 2 };
+                    let member_behavior = CastMemberRef { cast_lib: 1, cast_member: 145 };
+                    let member_new_behavior = CastMemberRef { cast_lib: 1, cast_member: 146 };
+                    let old_end_count = context.symbols.intern("oldEndCount");
+                    let new_begin_count = context.symbols.intern("newBeginCount");
+                    let script_chunk = || ScriptChunk {
+                        script_number: 1,
+                        literals: vec![],
+                        handlers: vec![],
+                        property_name_ids: vec![],
+                        property_defaults: HashMap::new(),
+                    };
+                    let handler = |name_id: u16, bytecode_array: Vec<Bytecode>| {
+                        Rc::new(HandlerDef {
+                            name_id,
+                            bytecode_array,
+                            bytecode_index_map: fxhash::FxHashMap::default(),
+                            argument_name_ids: vec![],
+                            local_name_ids: vec![],
+                            global_name_ids: vec![],
+                            compiled_ir: RefCell::new(None),
+                        })
+                    };
+                    let counter_handler = |name_id: u16, global_name_id: u16| {
+                        Rc::new(HandlerDef {
+                            name_id,
+                            bytecode_array: vec![
+                                Bytecode::new(OpCode::GetGlobal, global_name_id as i64, 0),
+                                Bytecode::new(OpCode::PushInt8, 1, 1),
+                                Bytecode::new(OpCode::Add, 0, 2),
+                                Bytecode::new(OpCode::SetGlobal, global_name_id as i64, 3),
+                                Bytecode::new(OpCode::Ret, 0, 4),
+                            ],
+                            bytecode_index_map: fxhash::FxHashMap::default(),
+                            argument_name_ids: vec![],
+                            local_name_ids: vec![],
+                            global_name_ids: vec![global_name_id],
+                            compiled_ir: RefCell::new(None),
+                        })
+                    };
+                    let movie_script = Rc::new(Script {
+                        member_ref: member_movie.clone(),
+                        name: "MovieScript 2".to_owned(),
+                        chunk: script_chunk(),
+                        script_type: ScriptType::Movie,
+                        handlers: FxHashMap::from_iter([
+                            (
+                                start_movie.clone(),
+                                handler(
+                                    0,
+                                    vec![
+                                        Bytecode::new(OpCode::PushArgListNoRet, 0, 0),
+                                        Bytecode::new(OpCode::ExtCall, 1, 1),
+                                        Bytecode::new(OpCode::Ret, 0, 2),
+                                    ],
+                                ),
+                            ),
+                            (
+                                do_start_movie.clone(),
+                                handler(
+                                    0,
+                                    vec![
+                                        Bytecode::new(OpCode::PushSymb, 0, 0),
+                                        Bytecode::new(OpCode::PushArgListNoRet, 1, 1),
+                                        Bytecode::new(OpCode::ExtCall, 2, 2),
+                                        Bytecode::new(OpCode::Ret, 0, 3),
+                                    ],
+                                ),
+                            ),
+                        ]),
+                        handler_names_raw: vec![
+                            "startMovie".to_owned(),
+                            "doStartMovie".to_owned(),
+                            "go".to_owned(),
+                            "ready".to_owned(),
+                        ],
+                        handler_names: vec![
+                            start_movie.clone(),
+                            do_start_movie.clone(),
+                            go.clone(),
+                            ready.clone(),
+                        ],
+                        properties: RefCell::new(FxHashMap::default()),
+                    });
+                    let behavior_script = Rc::new(Script {
+                        member_ref: member_behavior.clone(),
+                        name: "preload_loop".to_owned(),
+                        chunk: script_chunk(),
+                        script_type: ScriptType::Score,
+                        handlers: FxHashMap::from_iter([(
+                            exit_frame.clone(),
+                            handler(
+                                0,
+                                vec![
+                                    Bytecode::new(OpCode::PushInt8, 1, 0),
+                                    Bytecode::new(OpCode::PushArgListNoRet, 1, 1),
+                                    Bytecode::new(OpCode::ExtCall, 2, 2),
+                                    Bytecode::new(OpCode::Ret, 0, 3),
+                                    ],
+                                ),
+                        ), (
+                            end_sprite.clone(),
+                            counter_handler(0, 6),
+                        )]),
+                        handler_names_raw: vec![
+                            "exitFrame".to_owned(),
+                            "endSprite".to_owned(),
+                            "go".to_owned(),
+                        ],
+                        handler_names: vec![exit_frame, end_sprite.clone(), go.clone()],
+                        properties: RefCell::new(FxHashMap::default()),
+                    });
+                    let new_behavior_script = Rc::new(Script {
+                        member_ref: member_new_behavior.clone(),
+                        name: "new-sprite".to_owned(),
+                        chunk: script_chunk(),
+                        script_type: ScriptType::Score,
+                        handlers: FxHashMap::from_iter([(
+                            begin_sprite.clone(),
+                            counter_handler(0, 7),
+                        )]),
+                        handler_names_raw: vec!["beginSprite".to_owned()],
+                        handler_names: vec![begin_sprite.clone()],
+                        properties: RefCell::new(FxHashMap::default()),
+                    });
+                    let mut cast = CastLib::test_external(1, 0);
+                    cast.name_symbols = Rc::from(vec![
+                        ready,
+                        do_start_movie,
+                        go,
+                        preload_loop,
+                        end_sprite,
+                        begin_sprite,
+                        old_end_count.clone(),
+                        new_begin_count.clone(),
+                    ]);
+                    cast.scripts.insert(2, movie_script);
+                    cast.scripts.insert(145, behavior_script);
+                    cast.scripts.insert(146, new_behavior_script);
+                    context.player.movie.cast_manager.casts.push(cast);
+                    context.player.is_playing = true;
+                    context.player.movie.current_frame = 1;
+                    context.player.movie.score.frame_count = Some(3);
+                    context.player.movie.score.frame_labels = vec![FrameLabel {
+                        frame_num: 3,
+                        label: "ready".to_owned(),
+                    }];
+                    let instance = context.player.allocator.alloc_script_instance(ScriptInstance {
+                        instance_id: 145,
+                        script: member_behavior,
+                        ancestor: None,
+                        properties: FxHashMap::default(),
+                        begin_sprite_called: false,
+                    });
+                    let mut channel = SpriteChannel::new(1);
+                    channel.sprite.script_instance_list = vec![instance];
+                    context.player.movie.score.channels =
+                        vec![SpriteChannel::new(0), channel, SpriteChannel::new(2)];
+                    context.player.movie.score.sprite_spans = vec![
+                        ScoreSpriteSpan {
+                            channel_number: 1,
+                            start_frame: 1,
+                            end_frame: 1,
+                            scripts: Vec::new(),
+                        },
+                        ScoreSpriteSpan {
+                            channel_number: 2,
+                            start_frame: 3,
+                            end_frame: 3,
+                            scripts: vec![ScoreBehaviorReference {
+                                cast_lib: 1,
+                                cast_member: 146,
+                                parameter: Vec::new(),
+                            }],
+                        },
+                    ];
+                    (old_end_count, new_begin_count)
+                })
+                .expect("harness player must remain owned");
+
+            run_movie_init_owned_at(session.clone(), player_id, owner, 0.0)
+                .await
+                .expect("owned movie initialization should complete");
+            let state = session
+                .borrow_mut()
+                .with_player(player_id, |context| {
+                    let old_end_count = context.symbols.intern("oldEndCount");
+                    let new_begin_count = context.symbols.intern("newBeginCount");
+                    (
+                        context.player.movie.current_frame,
+                        context.player.movie.current_frame == 3,
+                        context.player.next_frame,
+                        context.player.has_frame_changed_in_go,
+                        context.player.go_same_frame,
+                        context.player.go_direction,
+                        context.player.last_initialized_frame,
+                        context.player.globals.get(&old_end_count).map(|value| {
+                            context.player.get_datum(value).int_value().unwrap_or_default()
+                        }),
+                        context.player.globals.get(&new_begin_count).map(|value| {
+                            context.player.get_datum(value).int_value().unwrap_or_default()
+                        }),
+                        context.player.movie.score.channels[2]
+                            .sprite
+                            .script_instance_list
+                            .iter()
+                            .filter_map(|instance| {
+                                context.player.allocator.get_script_instance_opt(instance)
+                            })
+                            .any(|instance| instance.begin_sprite_called),
+                    )
+                })
+                .expect("harness player must remain live");
+            assert_eq!(
+                state,
+                (3, true, None, false, false, 0, Some(3), Some(1), Some(1), true)
+            );
+        });
+    }
+
+    #[test]
+    fn owned_go_label_applies_one_frame_boundary_and_lifecycle_once() {
+        run_test(async {
+            let player = TestPlayer::new();
+            let runtime = player.harness_runtime();
+            let session = runtime.session();
+            let player_id = runtime.player_id();
+            let owner = runtime.owner().clone();
+            runtime
+                .with_context(|context| {
+                    context.player.is_playing = true;
+                    context.player.movie.current_frame = 1;
+                    context.player.movie.score.frame_count = Some(4);
+                    context.player.movie.score.frame_labels = vec![FrameLabel {
+                        frame_num: 3,
+                        label: "ready".to_owned(),
+                    }];
+                    context.player.movie.score.channels = vec![
+                        SpriteChannel::new(0),
+                        SpriteChannel::new(1),
+                        SpriteChannel::new(2),
+                    ];
+                    context.player.movie.score.sprite_spans = vec![
+                        ScoreSpriteSpan {
+                            channel_number: 1,
+                            start_frame: 1,
+                            end_frame: 1,
+                            scripts: Vec::new(),
+                        },
+                        ScoreSpriteSpan {
+                            channel_number: 2,
+                            start_frame: 3,
+                            end_frame: 3,
+                            scripts: Vec::new(),
+                        },
+                    ];
+                    context.player.begin_all_sprites(context.symbols);
+                    assert!(context.player.movie.score.channels[1].sprite.entered);
+                })
+                .expect("owned player must remain live");
+
+            let go_arg = runtime
+                .with_context(|context| {
+                    context
+                        .player
+                        .alloc_datum(Datum::String("ready".to_owned()))
+                })
+                .expect("owned player must remain live");
+            crate::player::handlers::movie::execute_movie_async(
+                session.clone(),
+                crate::player::handlers::movie::MovieAsyncRequest {
+                    player_id,
+                    owner: owner.clone(),
+                    kind: crate::player::handlers::movie::MovieAsyncKind::Go,
+                    args: vec![go_arg],
+                },
+            )
+            .await
+            .expect("owned go should resolve the ready label");
+            assert_eq!(
+                session
+                    .borrow_mut()
+                    .with_player(player_id, |context| {
+                        (
+                            context.player.movie.current_frame,
+                            context.player.next_frame,
+                            context.player.has_frame_changed_in_go,
+                        )
+                    }),
+                Some((1, Some(3), true))
+            );
+
+            run_single_frame_owned_at(session.clone(), player_id, owner.clone(), 50.0)
+                .await
+                .expect("owned go frame boundary should complete");
+
+            let state = session
+                .borrow_mut()
+                .with_player(player_id, |context| {
+                    (
+                        context.player.movie.current_frame,
+                        context.player.next_frame,
+                        context.player.has_player_frame_changed,
+                        context.player.has_frame_changed_in_go,
+                        context.player.go_same_frame,
+                        context.player.go_direction,
+                        context.player.movie.score.channels[1].sprite.entered,
+                        context.player.movie.score.channels[1].sprite.exited,
+                        context.player.movie.score.channels[2].sprite.entered,
+                    )
+                })
+                .expect("owned player must remain live");
+            assert_eq!(state, (3, None, false, false, false, 0, false, false, true));
+        });
+    }
+
+    #[test]
+    fn owned_ordinary_frame_transition_runs_end_and_begin_once() {
+        run_test(async {
+            let player = TestPlayer::new();
+            let runtime = player.harness_runtime();
+            let session = runtime.session();
+            let player_id = runtime.player_id();
+            let owner = runtime.owner().clone();
+            let (old_end, new_begin) = runtime
+                .with_context(|context| {
+                    let begin_sprite = Symbol::builtin(BuiltInSymbol::BeginSprite);
+                    let end_sprite = Symbol::builtin(BuiltInSymbol::EndSprite);
+                    let old_end = context.symbols.intern("ordinaryOldEnd");
+                    let new_begin = context.symbols.intern("ordinaryNewBegin");
+                    let old_ref = CastMemberRef { cast_lib: 1, cast_member: 201 };
+                    let new_ref = CastMemberRef { cast_lib: 1, cast_member: 202 };
+                    let counter_handler = |global_name_id: u16| {
+                        Rc::new(HandlerDef {
+                            name_id: 0,
+                            bytecode_array: vec![
+                                Bytecode::new(OpCode::GetGlobal, global_name_id as i64, 0),
+                                Bytecode::new(OpCode::PushInt8, 1, 1),
+                                Bytecode::new(OpCode::Add, 0, 2),
+                                Bytecode::new(OpCode::SetGlobal, global_name_id as i64, 3),
+                                Bytecode::new(OpCode::Ret, 0, 4),
+                            ],
+                            bytecode_index_map: fxhash::FxHashMap::default(),
+                            argument_name_ids: vec![],
+                            local_name_ids: vec![],
+                            global_name_ids: vec![global_name_id],
+                            compiled_ir: RefCell::new(None),
+                        })
+                    };
+                    let chunk = || ScriptChunk {
+                        script_number: 1,
+                        literals: vec![],
+                        handlers: vec![],
+                        property_name_ids: vec![],
+                        property_defaults: HashMap::new(),
+                    };
+                    let old_script = Rc::new(Script {
+                        member_ref: old_ref,
+                        name: "ordinary-old".to_owned(),
+                        chunk: chunk(),
+                        script_type: ScriptType::Score,
+                        handlers: FxHashMap::from_iter([(end_sprite.clone(), counter_handler(2))]),
+                        handler_names_raw: vec!["endSprite".to_owned()],
+                        handler_names: vec![end_sprite.clone()],
+                        properties: RefCell::new(FxHashMap::default()),
+                    });
+                    let new_script = Rc::new(Script {
+                        member_ref: new_ref,
+                        name: "ordinary-new".to_owned(),
+                        chunk: chunk(),
+                        script_type: ScriptType::Score,
+                        handlers: FxHashMap::from_iter([(begin_sprite.clone(), counter_handler(3))]),
+                        handler_names_raw: vec!["beginSprite".to_owned()],
+                        handler_names: vec![begin_sprite],
+                        properties: RefCell::new(FxHashMap::default()),
+                    });
+                    let mut cast = CastLib::test_external(1, 0);
+                    cast.name_symbols = Rc::from(vec![
+                        Symbol::builtin(BuiltInSymbol::BeginSprite),
+                        Symbol::builtin(BuiltInSymbol::EndSprite),
+                        old_end.clone(),
+                        new_begin.clone(),
+                    ]);
+                    cast.scripts.insert(201, old_script);
+                    cast.scripts.insert(202, new_script);
+                    context.player.movie.cast_manager.casts.push(cast);
+                    context.player.is_playing = true;
+                    context.player.movie.current_frame = 1;
+                    context.player.movie.score.frame_count = Some(3);
+                    context.player.movie.score.channels = vec![
+                        SpriteChannel::new(0),
+                        SpriteChannel::new(1),
+                        SpriteChannel::new(2),
+                    ];
+                    context.player.movie.score.sprite_spans = vec![
+                        ScoreSpriteSpan {
+                            channel_number: 1,
+                            start_frame: 1,
+                            end_frame: 1,
+                            scripts: Vec::new(),
+                        },
+                        ScoreSpriteSpan {
+                            channel_number: 2,
+                            start_frame: 3,
+                            end_frame: 3,
+                            scripts: vec![ScoreBehaviorReference {
+                                cast_lib: 1,
+                                cast_member: 202,
+                                parameter: Vec::new(),
+                            }],
+                        },
+                    ];
+                    let old_instance = context.player.allocator.alloc_script_instance(ScriptInstance {
+                        instance_id: 201,
+                        script: old_ref,
+                        ancestor: None,
+                        properties: FxHashMap::default(),
+                        begin_sprite_called: false,
+                    });
+                    context.player.movie.score.channels[1].sprite.script_instance_list =
+                        vec![old_instance];
+                    context.player.begin_all_sprites(context.symbols);
+                    (old_end, new_begin)
+                })
+                .expect("ordinary lifecycle fixture must remain owned");
+
+            run_single_frame_owned_at(session.clone(), player_id, owner.clone(), 50.0)
+                .await
+                .expect("first ordinary frame must complete");
+            run_single_frame_owned_at(session.clone(), player_id, owner, 100.0)
+                .await
+                .expect("second ordinary frame must complete");
+
+            let state = session
+                .borrow_mut()
+                .with_player(player_id, |context| {
+                    let old_end_value = context.player.globals.get(&old_end).map(|value| {
+                        context.player.get_datum(value).int_value().unwrap_or_default()
+                    });
+                    let new_begin_value = context.player.globals.get(&new_begin).map(|value| {
+                        context.player.get_datum(value).int_value().unwrap_or_default()
+                    });
+                    (
+                        context.player.movie.current_frame,
+                        old_end_value,
+                        new_begin_value,
+                        context.player.movie.score.channels[2]
+                            .sprite
+                            .script_instance_list
+                            .iter()
+                            .filter_map(|instance| {
+                                context.player.allocator.get_script_instance_opt(instance)
+                            })
+                            .any(|instance| instance.begin_sprite_called),
+                        context.player.has_player_frame_changed,
+                        context.player.has_frame_changed_in_go,
+                        context.player.go_same_frame,
+                        context.player.go_direction,
+                    )
+                })
+                .expect("ordinary lifecycle player must remain live");
+            assert_eq!(state, (3, Some(1), Some(1), true, false, false, false, 0));
+        });
+    }
+
+    #[test]
+    fn stopped_native_flash_go_waits_for_next_owned_boundary() {
+        run_test(async {
+            let player = TestPlayer::new();
+            let runtime = player.harness_runtime();
+            let session = runtime.session();
+            let player_id = runtime.player_id();
+            let owner = runtime.owner().clone();
+            let (old_end, new_begin) = runtime
+                .with_context(|context| {
+                    let begin_sprite = Symbol::builtin(BuiltInSymbol::BeginSprite);
+                    let end_sprite = Symbol::builtin(BuiltInSymbol::EndSprite);
+                    let old_end = context.symbols.intern("pausedOldEnd");
+                    let new_begin = context.symbols.intern("pausedNewBegin");
+                    let old_ref = CastMemberRef { cast_lib: 1, cast_member: 201 };
+                    let new_ref = CastMemberRef { cast_lib: 1, cast_member: 202 };
+                    let counter_handler = |global_name_id: u16| {
+                        Rc::new(HandlerDef {
+                            name_id: 0,
+                            bytecode_array: vec![
+                                Bytecode::new(OpCode::GetGlobal, global_name_id as i64, 0),
+                                Bytecode::new(OpCode::PushInt8, 1, 1),
+                                Bytecode::new(OpCode::Add, 0, 2),
+                                Bytecode::new(OpCode::SetGlobal, global_name_id as i64, 3),
+                                Bytecode::new(OpCode::Ret, 0, 4),
+                            ],
+                            bytecode_index_map: fxhash::FxHashMap::default(),
+                            argument_name_ids: vec![],
+                            local_name_ids: vec![],
+                            global_name_ids: vec![global_name_id],
+                            compiled_ir: RefCell::new(None),
+                        })
+                    };
+                    let chunk = || ScriptChunk {
+                        script_number: 1,
+                        literals: vec![],
+                        handlers: vec![],
+                        property_name_ids: vec![],
+                        property_defaults: HashMap::new(),
+                    };
+                    let old_script = Rc::new(Script {
+                        member_ref: old_ref,
+                        name: "paused-old".to_owned(),
+                        chunk: chunk(),
+                        script_type: ScriptType::Score,
+                        handlers: FxHashMap::from_iter([(end_sprite.clone(), counter_handler(2))]),
+                        handler_names_raw: vec!["endSprite".to_owned()],
+                        handler_names: vec![end_sprite.clone()],
+                        properties: RefCell::new(FxHashMap::default()),
+                    });
+                    let new_script = Rc::new(Script {
+                        member_ref: new_ref,
+                        name: "paused-new".to_owned(),
+                        chunk: chunk(),
+                        script_type: ScriptType::Score,
+                        handlers: FxHashMap::from_iter([(begin_sprite.clone(), counter_handler(3))]),
+                        handler_names_raw: vec!["beginSprite".to_owned()],
+                        handler_names: vec![begin_sprite],
+                        properties: RefCell::new(FxHashMap::default()),
+                    });
+                    let mut cast = CastLib::test_external(1, 0);
+                    cast.name_symbols = Rc::from(vec![
+                        Symbol::builtin(BuiltInSymbol::BeginSprite),
+                        Symbol::builtin(BuiltInSymbol::EndSprite),
+                        old_end.clone(),
+                        new_begin.clone(),
+                    ]);
+                    cast.scripts.insert(201, old_script);
+                    cast.scripts.insert(202, new_script);
+                    context.player.movie.cast_manager.casts.push(cast);
+                    context.player.is_playing = true;
+                    context.player.is_script_paused = false;
+                    context.player.movie.current_frame = 1;
+                    context.player.movie.score.frame_count = Some(3);
+                    context.player.movie.score.channels = vec![
+                        SpriteChannel::new(0),
+                        SpriteChannel::new(1),
+                        SpriteChannel::new(2),
+                    ];
+                    context.player.movie.score.sprite_spans = vec![
+                        ScoreSpriteSpan {
+                            channel_number: 1,
+                            start_frame: 1,
+                            end_frame: 1,
+                            scripts: Vec::new(),
+                        },
+                        ScoreSpriteSpan {
+                            channel_number: 2,
+                            start_frame: 3,
+                            end_frame: 3,
+                            scripts: vec![ScoreBehaviorReference {
+                                cast_lib: 1,
+                                cast_member: 202,
+                                parameter: Vec::new(),
+                            }],
+                        },
+                    ];
+                    let old_instance = context.player.allocator.alloc_script_instance(ScriptInstance {
+                        instance_id: 201,
+                        script: old_ref,
+                        ancestor: None,
+                        properties: FxHashMap::default(),
+                        begin_sprite_called: false,
+                    });
+                    context.player.movie.score.channels[1].sprite.script_instance_list =
+                        vec![old_instance];
+                    context.player.begin_all_sprites(context.symbols);
+                    // Retain the initialized old-frame behavior while modeling
+                    // the playback loop having naturally retired before the
+                    // native callback schedules its Go.
+                    context.player.is_playing = false;
+                    (old_end, new_begin)
+                })
+                .expect("paused callback fixture must remain owned");
+
+            crate::player::commands::dispatch_native_flash_callback(
+                session.clone(),
+                player_id,
+                owner.clone(),
+                crate::native_flash::NativeFlashCallback {
+                    sprite: 1,
+                    generation: 1,
+                    cast_lib: 1,
+                    cast_member: 1,
+                    url: "lingo:go 3".to_owned(),
+                },
+            )
+            .await
+            .expect("native callback Go must complete");
+            let before = session
+                .borrow_mut()
+                .with_player(player_id, |context| {
+                    (context.player.movie.current_frame, context.player.next_frame)
+                })
+                .expect("paused callback player must remain live");
+            assert_eq!(before, (1, Some(3)));
+            run_single_frame_owned_at(session.clone(), player_id, owner, 2_450.0)
+                .await
+                .expect("stopped callback Go must apply at the next boundary");
+            let after = session
+                .borrow_mut()
+                .with_player(player_id, |context| {
+                    let old_end_value = context.player.globals.get(&old_end).map(|value| {
+                        context.player.get_datum(value).int_value().unwrap_or_default()
+                    });
+                    let new_begin_value = context.player.globals.get(&new_begin).map(|value| {
+                        context.player.get_datum(value).int_value().unwrap_or_default()
+                    });
+                    (
+                        context.player.movie.current_frame,
+                        context.player.next_frame,
+                        context.player.has_player_frame_changed,
+                        context.player.has_frame_changed_in_go,
+                        context.player.go_same_frame,
+                        context.player.go_direction,
+                        old_end_value,
+                        new_begin_value,
+                    )
+                })
+                .expect("paused callback player must remain live");
+            assert_eq!(after, (3, None, false, false, false, 0, Some(1), Some(1)));
+        });
+    }
+
+    #[test]
+    fn owned_same_frame_go_does_not_end_or_advance_sprites() {
+        run_test(async {
+            let player = TestPlayer::new();
+            let runtime = player.harness_runtime();
+            let session = runtime.session();
+            let player_id = runtime.player_id();
+            let owner = runtime.owner().clone();
+            let (begin_count, end_count) = runtime
+                .with_context(|context| {
+                    context.player.is_playing = true;
+                    context.player.movie.current_frame = 1;
+                    let begin_sprite = Symbol::builtin(BuiltInSymbol::BeginSprite);
+                    let end_sprite = Symbol::builtin(BuiltInSymbol::EndSprite);
+                    let begin_count = context.symbols.intern("sameFrameBeginCount");
+                    let end_count = context.symbols.intern("sameFrameEndCount");
+                    let member_ref = CastMemberRef { cast_lib: 1, cast_member: 201 };
+                    let counter_handler = |global_name_id: u16| {
+                        Rc::new(HandlerDef {
+                            name_id: 0,
+                            bytecode_array: vec![
+                                Bytecode::new(OpCode::GetGlobal, global_name_id as i64, 0),
+                                Bytecode::new(OpCode::PushInt8, 1, 1),
+                                Bytecode::new(OpCode::Add, 0, 2),
+                                Bytecode::new(OpCode::SetGlobal, global_name_id as i64, 3),
+                                Bytecode::new(OpCode::Ret, 0, 4),
+                            ],
+                            bytecode_index_map: fxhash::FxHashMap::default(),
+                            argument_name_ids: vec![],
+                            local_name_ids: vec![],
+                            global_name_ids: vec![],
+                            compiled_ir: RefCell::new(None),
+                        })
+                    };
+                    let script = Rc::new(Script {
+                        member_ref: member_ref.clone(),
+                        name: "same-frame-lifecycle".to_owned(),
+                        chunk: ScriptChunk {
+                            script_number: 1,
+                            literals: vec![],
+                            handlers: vec![],
+                            property_name_ids: vec![],
+                            property_defaults: HashMap::new(),
+                        },
+                        script_type: ScriptType::Score,
+                        handlers: FxHashMap::from_iter([
+                            (begin_sprite.clone(), counter_handler(2)),
+                            (end_sprite.clone(), counter_handler(3)),
+                        ]),
+                        handler_names_raw: vec!["beginSprite".to_owned(), "endSprite".to_owned()],
+                        handler_names: vec![begin_sprite, end_sprite],
+                        properties: RefCell::new(FxHashMap::default()),
+                    });
+                    let mut cast = CastLib::test_external(1, 0);
+                    cast.name_symbols = Rc::from(vec![
+                        Symbol::builtin(BuiltInSymbol::BeginSprite),
+                        Symbol::builtin(BuiltInSymbol::EndSprite),
+                        begin_count.clone(),
+                        end_count.clone(),
+                    ]);
+                    cast.scripts.insert(201, script);
+                    context.player.movie.cast_manager.casts.push(cast);
+                    let instance = context.player.allocator.alloc_script_instance(ScriptInstance {
+                        instance_id: 201,
+                        script: member_ref,
+                        ancestor: None,
+                        properties: FxHashMap::default(),
+                        begin_sprite_called: false,
+                    });
+                    let mut channel = SpriteChannel::new(1);
+                    channel.sprite.script_instance_list = vec![instance];
+                    context.player.movie.score.channels = vec![SpriteChannel::new(0), channel];
+                    context.player.movie.score.sprite_spans = vec![ScoreSpriteSpan {
+                        channel_number: 1,
+                        start_frame: 1,
+                        end_frame: 1,
+                        scripts: Vec::new(),
+                    }];
+                    context.player.begin_all_sprites(context.symbols);
+                    (begin_count, end_count)
+                })
+                .expect("owned player must remain live");
+            let go_arg = runtime
+                .with_context(|context| context.player.alloc_datum(Datum::Int(1)))
+                .expect("owned player must remain live");
+            crate::player::handlers::movie::execute_movie_async(
+                session.clone(),
+                crate::player::handlers::movie::MovieAsyncRequest {
+                    player_id,
+                    owner: owner.clone(),
+                    kind: crate::player::handlers::movie::MovieAsyncKind::Go,
+                    args: vec![go_arg],
+                },
+            )
+            .await
+            .expect("same-frame go should resolve");
+            run_single_frame_owned_at(session.clone(), player_id, owner, 50.0)
+                .await
+                .expect("same-frame boundary should complete");
+            let state = session
+                .borrow_mut()
+                .with_player(player_id, |context| {
+                    (
+                        context.player.movie.current_frame,
+                        context.player.movie.score.channels[1].sprite.entered,
+                        context.player.movie.score.channels[1].sprite.exited,
+                        context.player.globals.get(&begin_count).map(|value| {
+                            context.player.get_datum(value).int_value().unwrap_or_default()
+                        }),
+                        context.player.globals.get(&end_count).map(|value| {
+                            context.player.get_datum(value).int_value().unwrap_or_default()
+                        }),
+                    )
+                })
+                .expect("owned player must remain live");
+            assert_eq!(state, (1, true, false, None, None));
+        });
+    }
+
+    #[test]
+    fn retired_owner_drops_pending_owned_go_without_touching_replacement() {
+        run_test(async {
+            let player = TestPlayer::new();
+            let runtime = player.harness_runtime();
+            let session = runtime.session();
+            let player_id = runtime.player_id();
+            let owner = runtime.owner().clone();
+            runtime
+                .with_context(|context| {
+                    context.player.is_playing = true;
+                    context.player.movie.current_frame = 1;
+                    context.player.movie.score.frame_count = Some(3);
+                })
+                .expect("owned player must remain live");
+            let go_arg = runtime
+                .with_context(|context| context.player.alloc_datum(Datum::Int(3)))
+                .expect("owned player must remain live");
+            crate::player::handlers::movie::execute_movie_async(
+                session.clone(),
+                crate::player::handlers::movie::MovieAsyncRequest {
+                    player_id,
+                    owner: owner.clone(),
+                    kind: crate::player::handlers::movie::MovieAsyncKind::Go,
+                    args: vec![go_arg],
+                },
+            )
+            .await
+            .expect("owned go should be admitted before retirement");
+            let replacement = session
+                .borrow_mut()
+                .reset_player_owned(player_id, &owner)
+                .expect("captured owner should be retired cleanly");
+            let replacement_before = session
+                .borrow_mut()
+                .with_player(player_id, |context| {
+                    (
+                        context.player.owner.same_identity(&replacement),
+                        context.player.movie.current_frame,
+                        context.player.next_frame,
+                        context.player.has_frame_changed_in_go,
+                    )
+                })
+                .expect("replacement player must remain live");
+            let error = run_single_frame_owned_at(session.clone(), player_id, owner, 50.0)
+                .await
+                .expect_err("retired pending go must be cancelled");
+            assert_eq!(error.code, ScriptErrorCode::Abort);
+            let replacement_after = session
+                .borrow_mut()
+                .with_player(player_id, |context| {
+                    (
+                        context.player.owner.same_identity(&replacement),
+                        context.player.movie.current_frame,
+                        context.player.next_frame,
+                        context.player.has_frame_changed_in_go,
+                    )
+                })
+                .expect("replacement player must remain live");
+            assert_eq!(replacement_after, replacement_before);
         });
     }
 

@@ -4,10 +4,18 @@
 //! handler tickets.  They do not replace the VM with a mock callback or
 //! fabricate a completion capability.
 
-use std::{cell::RefCell, collections::HashMap, future::Future, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    future::Future,
+    rc::Rc,
+    task::{Context, Poll},
+};
 
 use async_std::channel;
 use fxhash::FxHashMap;
+use futures::FutureExt;
+use manual_future::ManualFuture;
 
 use crate::{
     director::{
@@ -19,16 +27,19 @@ use crate::{
         lingo::{datum::Datum, opcode::OpCode},
     },
     player::{
+        allocator::ScriptInstanceAllocatorTrait,
         cast_lib::{CastLib, CastMemberRef},
         cast_member::{CastMember, CastMemberType, FlashMember},
         driver::{ActionCompletion, BroadcastPlan, DriverTurn, GlobalDispatch, InternalVmRequest, PendingAction, PendingCommand},
         eval::{EvalPending, EvalTurn, LingoExpr},
         ownership::OwnerToken,
-        script::{Script, ScriptHandlerRef},
-        session::{EvalRequestTurn, RuntimeSession},
+        script::{Script, ScriptHandlerRef, ScriptInstance},
+        session::{EvalRequestTurn, RuntimeSession, RuntimeSessionHandle},
         symbols::{builtin::BuiltInSymbol, symbol::Symbol, symbol_table::SymbolOwner},
         score::SpriteChannel,
-        DatumRef,
+        handlers::datum_handlers::sound_channel::SoundStatus,
+        testing::{TestHarness, TestPlayer},
+        DatumRef, PlayerVMCommand, PlayerVMExecutionItem,
     },
 };
 
@@ -56,12 +67,36 @@ fn callback_session() -> (
     });
     assert!(session.add_player(1, channel::unbounded().0));
 
+    let (primary, pass, error) = callback_session_into(&mut session);
+    (session, primary, pass, error)
+}
+
+fn callback_session_into(
+    session: &mut RuntimeSession,
+) -> (ScriptHandlerRef, ScriptHandlerRef, ScriptHandlerRef) {
+    callback_session_into_mode(session, false)
+}
+
+fn callback_session_into_mode(
+    session: &mut RuntimeSession,
+    direct_go: bool,
+) -> (ScriptHandlerRef, ScriptHandlerRef, ScriptHandlerRef) {
     let (primary_name, pass_name, error_name) = session
         .with_player(1, |context| {
             (
                 context.symbols.intern("primaryCallback"),
                 context.symbols.intern("passCallback"),
                 context.symbols.intern("errorCallback"),
+            )
+        })
+        .expect("callback fixture player exists");
+    let (begin_sprite_name, check_status_name, do_start_movie_name, update_stage) = session
+        .with_player(1, |context| {
+            (
+                context.symbols.intern("beginSprite"),
+                context.symbols.intern("CheckStatus"),
+                context.symbols.intern("doStartMovie"),
+                Symbol::builtin(BuiltInSymbol::UpdateStage),
             )
         })
         .expect("callback fixture player exists");
@@ -84,6 +119,29 @@ fn callback_session() -> (
         Bytecode::new(OpCode::ExtCall, 1, 1),
         Bytecode::new(OpCode::Invalid, 0, 2),
     ];
+    let begin_sprite = if direct_go {
+        vec![
+            Bytecode::new(OpCode::PushArgListNoRet, 0, 0),
+            Bytecode::new(OpCode::ExtCall, 9, 1),
+            Bytecode::new(OpCode::Ret, 0, 2),
+        ]
+    } else {
+        vec![
+            Bytecode::new(OpCode::PushArgListNoRet, 0, 0),
+            Bytecode::new(OpCode::ExtCall, 6, 1),
+            Bytecode::new(OpCode::Ret, 0, 2),
+        ]
+    };
+    let check_status = vec![
+        Bytecode::new(OpCode::PushArgListNoRet, 0, 0),
+        Bytecode::new(OpCode::ExtCall, 7, 1),
+        Bytecode::new(OpCode::Ret, 0, 2),
+    ];
+    let do_start_movie = vec![
+        Bytecode::new(OpCode::PushArgListNoRet, 0, 0),
+        Bytecode::new(OpCode::ExtCall, 8, 1),
+        Bytecode::new(OpCode::Ret, 0, 2),
+    ];
     let script = Rc::new(Script {
         member_ref: member_ref.clone(),
         name: "callback-fixture".to_owned(),
@@ -99,6 +157,9 @@ fn callback_session() -> (
             (primary_name.clone(), handler(0, suspend_then_pass.clone())),
             (pass_name.clone(), handler(3, suspend_then_pass)),
             (error_name.clone(), handler(4, suspend_then_error)),
+            (begin_sprite_name.clone(), handler(5, begin_sprite)),
+            (check_status_name.clone(), handler(6, check_status)),
+            (do_start_movie_name.clone(), handler(7, do_start_movie)),
         ]),
         handler_names_raw: vec![
             "primaryCallback".to_owned(),
@@ -106,6 +167,11 @@ fn callback_session() -> (
             "pass".to_owned(),
             "passCallback".to_owned(),
             "errorCallback".to_owned(),
+            "beginSprite".to_owned(),
+            "CheckStatus".to_owned(),
+            "doStartMovie".to_owned(),
+            "updateStage".to_owned(),
+            "go".to_owned(),
         ],
         handler_names: vec![
             primary_name.clone(),
@@ -113,6 +179,11 @@ fn callback_session() -> (
             pass.clone(),
             pass_name.clone(),
             error_name.clone(),
+            begin_sprite_name.clone(),
+            check_status_name.clone(),
+            do_start_movie_name.clone(),
+            update_stage.clone(),
+            Symbol::builtin(BuiltInSymbol::Go),
         ],
         properties: RefCell::new(FxHashMap::default()),
     });
@@ -126,6 +197,11 @@ fn callback_session() -> (
                 pass,
                 pass_name.clone(),
                 error_name.clone(),
+                begin_sprite_name,
+                check_status_name,
+                do_start_movie_name,
+                update_stage,
+                Symbol::builtin(BuiltInSymbol::Go),
             ]);
             cast.scripts.insert(1, script);
             context.player.movie.cast_manager.casts.push(cast);
@@ -133,7 +209,6 @@ fn callback_session() -> (
         .expect("callback fixture player exists");
 
     (
-        session,
         (member_ref.clone(), primary_name),
         (member_ref.clone(), pass_name),
         (member_ref, error_name),
@@ -144,6 +219,28 @@ fn owner(session: &mut RuntimeSession) -> OwnerToken {
     session
         .with_player(1, |context| context.player.owner.clone())
         .expect("callback fixture player exists")
+}
+
+fn update_stage_callback_fixture() -> (
+    RuntimeSession,
+    ScriptHandlerRef,
+    Rc<crate::rendering::NativePresentationPolicy>,
+) {
+    let (mut session, _primary, _pass_handler, _error_handler) = callback_session();
+    let begin_sprite = session
+        .with_player(1, |context| {
+            (
+                CastMemberRef {
+                    cast_lib: 1,
+                    cast_member: 1,
+                },
+                context.symbols.intern("beginSprite"),
+            )
+        })
+        .expect("callback fixture player exists");
+    let native_presentation = Rc::new(crate::rendering::NativePresentationPolicy::new());
+    session.bind_native_presentation(1, &native_presentation);
+    (session, begin_sprite, native_presentation)
 }
 
 fn pending_internal(
@@ -241,6 +338,44 @@ fn pending_child_internal(
         }
     }
     panic!("child did not reach a pending internal action");
+}
+
+fn prepare_pending_child_action(
+    session: &mut RuntimeSession,
+    pending: &mut PendingCommand,
+) -> crate::player::driver::CompletionTicket {
+    let id = pending
+        .eval_child
+        .clone()
+        .expect("callback child command should retain its evaluator child");
+    assert!(pending.action.is_none());
+    assert!(!pending.started);
+    assert!(pending.ticket.is_none());
+    let action = (0..8)
+        .find_map(|_| match session
+            .turn_eval_child(id.clone())
+            .expect("child continuation remains registered while waiting")
+        {
+            EvalRequestTurn::Child(DriverTurn::Waiting) => None,
+            EvalRequestTurn::Child(DriverTurn::Pending(action)) => Some(action),
+            EvalRequestTurn::Child(other) => {
+                panic!("expected a pending child action, got {}", turn_kind(&other))
+            }
+            EvalRequestTurn::Evaluator(_)
+            | EvalRequestTurn::SpriteAsync(_)
+            | EvalRequestTurn::MovieAsync(_)
+            | EvalRequestTurn::Flash(_)
+            | EvalRequestTurn::ExternalXtra(_)
+            | EvalRequestTurn::ExternalXtraLoad(_)
+            | EvalRequestTurn::XtraPending(_) => {
+                panic!("child completed before issuing its internal action")
+            }
+        })
+        .expect("child did not reach a pending action");
+    let ticket = action.ticket().clone();
+    pending.action = Some(action);
+    pending.ticket = Some(ticket.clone());
+    ticket
 }
 
 fn finish_primary(session: &mut RuntimeSession) {
@@ -810,6 +945,227 @@ fn nested_callback_runs_actual_movie_async_child_through_command_pump() {
 }
 
 #[test]
+fn command_owned_callback_pump_services_nested_movie_async_go() {
+    let (mut session, _primary, _pass_handler, _error_handler) = callback_session();
+    let native_presentation = Rc::new(crate::rendering::NativePresentationPolicy::new());
+    session.bind_native_presentation(1, &native_presentation);
+    let (queue_tx, queue_rx) = channel::unbounded();
+    let begin_sprite = session
+        .with_player(1, |mut context| {
+            context.player.queue_tx = queue_tx.clone();
+            let begin_sprite = context.symbols.intern("beginSprite");
+            let instance_id = context.player.allocator.get_free_script_instance_id();
+            context
+                .player
+                .allocator
+                .alloc_script_instance(ScriptInstance {
+                    instance_id,
+                    script: CastMemberRef {
+                        cast_lib: 1,
+                        cast_member: 1,
+                    },
+                    ancestor: None,
+                    properties: FxHashMap::default(),
+                    begin_sprite_called: false,
+                });
+            begin_sprite
+        })
+        .expect("callback fixture player exists");
+    let session = Rc::new(RefCell::new(session));
+    let captured = owner(&mut session.borrow_mut());
+    let (future, completer) = ManualFuture::new();
+    queue_tx
+        .try_send(PlayerVMExecutionItem {
+            command: PlayerVMCommand::TriggerLingoCallbackOnScript {
+                cast_lib: 1,
+                cast_member: 1,
+                handler_name: begin_sprite,
+                args: vec![],
+            },
+            completer: Some(completer),
+        })
+        .expect("command-owned callback should enter the owner queue");
+
+    let loop_result = async_std::task::block_on(async_std::future::timeout(
+        std::time::Duration::from_secs(2),
+        async {
+            futures::select! {
+                result = future.fuse() => result,
+                _ = crate::player::commands::run_command_loop(
+                    queue_rx,
+                    session.clone(),
+                    1,
+                    captured.clone(),
+                ).fuse() => panic!("command loop ended before callback completion"),
+            }
+        },
+    ))
+    .expect("command-owned nested callback should make progress before timeout")
+    .expect("command-owned nested callback should complete successfully");
+    assert_eq!(loop_result, DatumRef::Void);
+    assert!(session.borrow().eval_drivers.is_empty());
+    assert!(session.borrow().evals.is_empty());
+    assert!(!session.borrow().has_pending_commands(1));
+}
+
+fn configure_native_callback_fixture(
+    player: &TestPlayer,
+    direct_go: bool,
+) -> (RuntimeSessionHandle, OwnerToken) {
+    let runtime = player.harness_runtime();
+    let session = runtime.session();
+    let owner = runtime.owner().clone();
+    let mut session_ref = session.borrow_mut();
+    let _ = callback_session_into_mode(&mut session_ref, direct_go);
+    session_ref
+        .with_player(1, |context| {
+            let (instance_ref, _instance_datum) = crate::player::handlers::datum_handlers::script::ScriptDatumHandlers::create_script_instance(
+                context.player,
+                context.symbols,
+                &CastMemberRef {
+                    cast_lib: 1,
+                    cast_member: 1,
+                },
+            )
+            .expect("callback fixture script instance should be creatable");
+            context.player.movie.score.channels = vec![
+                SpriteChannel::new(0),
+                SpriteChannel::new(1),
+            ];
+            context.player.is_playing = true;
+            context.player.movie.score.channels[1].sprite.member = Some(CastMemberRef {
+                cast_lib: 1,
+                cast_member: 1,
+            });
+            context.player.movie.score.channels[1].sprite.entered = true;
+            context.player.movie.score.channels[1]
+                .sprite
+                .script_instance_list
+                .push(instance_ref);
+        })
+        .expect("callback fixture player exists");
+    drop(session_ref);
+    (session, owner)
+}
+
+#[test]
+fn owned_callback_begin_status_start_movie_update_stage_wakes_once() {
+    let (session, begin_sprite, _native_presentation) = update_stage_callback_fixture();
+    let session = Rc::new(RefCell::new(session));
+    let captured = owner(&mut session.borrow_mut());
+    let mut callback = Box::pin(crate::player::eval::invoke_script_callback_owned(
+        session.clone(),
+        1,
+        captured.clone(),
+        None,
+        begin_sprite,
+        vec![],
+        false,
+    ));
+    let waker = futures::task::noop_waker();
+    let mut context = Context::from_waker(&waker);
+    assert!(matches!(callback.as_mut().poll(&mut context), Poll::Pending));
+
+    let mut queued = session.borrow_mut().take_pending_commands_for(1);
+    assert_eq!(queued.len(), 1, "callback should retain one child command");
+    let mut pending = queued.pop().expect("callback child command should exist");
+    let ticket = prepare_pending_child_action(&mut session.borrow_mut(), &mut pending);
+    assert!(pending.eval_child.is_some());
+    assert!(pending.started == false);
+    match pending.action.as_ref() {
+        Some(PendingAction::Internal(request)) => match &request.request {
+            InternalVmRequest::MovieAsync(movie)
+                if matches!(
+                    movie.kind,
+                    crate::player::handlers::movie::MovieAsyncKind::UpdateStage { .. }
+                ) => {}
+            _ => panic!("callback chain produced an unexpected internal request"),
+        },
+        _ => panic!("callback chain did not retain an internal action"),
+    }
+    assert!(pending
+        .action
+        .as_ref()
+        .is_some_and(|action| action.ticket().same_identity(&ticket)));
+    assert!(session.borrow().action_details(&ticket).is_some());
+    session.borrow_mut().requeue_pending_command(pending);
+
+    let ((), result) = async_std::task::block_on(async {
+        futures::join!(
+            crate::player::commands::drive_pending_owner(&session, 1, &captured),
+            callback,
+        )
+    });
+    let result = result.expect("beginSprite callback should wake after UpdateStage");
+    assert_eq!(result.return_value, DatumRef::Void);
+    assert!(!session.borrow().has_pending_commands(1));
+    assert!(session.borrow().eval_drivers.is_empty());
+    assert!(session.borrow().evals.is_empty());
+    assert!(session.borrow().action_details(&ticket).is_none());
+
+    session.borrow_mut().submit_pending_command_completion(
+        1,
+        ticket,
+        ActionCompletion::InternalError(crate::player::ScriptError::new(
+            "late callback UpdateStage completion".to_owned(),
+        )),
+    );
+    assert!(crate::player::commands::pump_pending_commands(&session, 1).is_empty());
+    assert!(!session.borrow().has_pending_commands(1));
+}
+
+#[test]
+fn owned_callback_begin_status_start_movie_update_stage_rejects_retired_ticket() {
+    let (session, begin_sprite, _native_presentation) = update_stage_callback_fixture();
+    let session = Rc::new(RefCell::new(session));
+    let captured = owner(&mut session.borrow_mut());
+    let mut callback = Box::pin(crate::player::eval::invoke_script_callback_owned(
+        session.clone(),
+        1,
+        captured.clone(),
+        None,
+        begin_sprite,
+        vec![],
+        false,
+    ));
+    let waker = futures::task::noop_waker();
+    let mut context = Context::from_waker(&waker);
+    assert!(matches!(callback.as_mut().poll(&mut context), Poll::Pending));
+
+    let mut queued = session.borrow_mut().take_pending_commands_for(1);
+    assert_eq!(queued.len(), 1, "callback should retain one child command");
+    let mut pending = queued.pop().expect("callback child command should exist");
+    let ticket = prepare_pending_child_action(&mut session.borrow_mut(), &mut pending);
+    session.borrow_mut().requeue_pending_command(pending);
+
+    let replacement = session
+        .borrow_mut()
+        .reset_player_owned(1, &captured)
+        .expect("captured callback owner should reset the player");
+    assert!(!captured.same_identity(&replacement));
+    let error = match async_std::task::block_on(callback) {
+        Ok(_) => panic!("retired callback unexpectedly completed successfully"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code, crate::player::ScriptErrorCode::Abort);
+    assert!(session.borrow().eval_drivers.is_empty());
+    assert!(session.borrow().evals.is_empty());
+    assert!(session.borrow().action_details(&ticket).is_none());
+
+    session.borrow_mut().submit_pending_command_completion(
+        1,
+        ticket,
+        ActionCompletion::InternalResult(DatumRef::Void),
+    );
+    assert!(crate::player::commands::pump_pending_commands(&session, 1).is_empty());
+    assert!(!session.borrow().has_pending_commands(1));
+    assert!(session
+        .borrow_mut()
+        .with_player(1, |context| context.player.owner.same_identity(&replacement))
+        .unwrap());
+}
+
+#[test]
 fn nested_callback_external_load_wait_is_cancelled_by_owner_reset() {
     let (session, _primary, pass_handler, _error_handler) = callback_session();
     let session = Rc::new(RefCell::new(session));
@@ -931,6 +1287,123 @@ fn evaluator_sync_xtra_close_completes_receiver_and_drains_teardown() {
     );
     assert!(!session.borrow().has_pending_eval_requests(1));
     assert_eq!(session.borrow().pending_host_teardown_count(), 0);
+}
+
+#[test]
+fn evaluator_sound_channel_stop_is_sync_and_owner_bound() {
+    let mut session = RuntimeSession::new(SymbolOwner { session: 917, generation: 1 });
+    assert!(session.add_player(1, channel::unbounded().0));
+    let (sound_ref, owner) = session
+        .with_player(1, |context| {
+            let sound_ref = context.player.alloc_datum(Datum::SoundChannel(1));
+            context
+                .player
+                .sound_manager
+                .get_channel_mut(0)
+                .expect("sound channel 1 exists")
+                .borrow_mut()
+                .status = SoundStatus::Playing;
+            (sound_ref, context.player.owner.clone())
+        })
+        .expect("sound fixture player exists");
+    let stop = Symbol::builtin(BuiltInSymbol::Stop);
+    let direct_dispatch = session
+        .with_player(1, |mut context| {
+            crate::player::handlers::datum_handlers::player_call_datum_handler(
+                &mut context,
+                &sound_ref,
+                stop.clone(),
+                &Vec::new(),
+            )
+        })
+        .expect("sound fixture owner remains live");
+    assert!(matches!(
+        direct_dispatch,
+        crate::player::handlers::datum_handlers::DatumDispatch::Sync(Ok(_))
+    ));
+
+    session
+        .with_player(1, |context| {
+            context
+                .player
+                .sound_manager
+                .get_channel_mut(0)
+                .expect("sound channel 1 exists")
+                .borrow_mut()
+                .status = SoundStatus::Playing;
+        })
+        .expect("sound fixture owner remains live");
+    let request = InternalVmRequest::Object {
+        receiver: sound_ref.clone(),
+        name: stop,
+        args: Vec::new(),
+    };
+    let session = Rc::new(RefCell::new(session));
+    let (_id, _action, result_receiver) = session
+        .borrow_mut()
+        .start_eval_request(1, request)
+        .expect("sound stop evaluator request should start");
+    assert!(async_std::task::block_on(crate::player::commands::pump_pending_eval_requests(
+        &session, 1,
+    )));
+    let result = async_std::task::block_on(result_receiver.recv())
+        .expect("sound stop evaluator receiver remains connected")
+        .expect("same-owner sound stop should complete");
+    assert_eq!(result, sound_ref);
+    assert!(!session.borrow().has_pending_eval_requests(1));
+    assert_eq!(
+        session
+            .borrow_mut()
+            .with_player(1, |context| {
+                context
+                    .player
+                    .sound_manager
+                    .get_channel(0)
+                    .expect("sound channel 1 exists")
+                    .borrow()
+                    .status
+                    .clone()
+            }),
+        Some(SoundStatus::Idle)
+    );
+
+    let mut stale_session = RuntimeSession::new(SymbolOwner { session: 918, generation: 1 });
+    assert!(stale_session.add_player(1, channel::unbounded().0));
+    let (stale_sound, stale_owner) = stale_session
+        .with_player(1, |context| {
+            (
+                context.player.alloc_datum(Datum::SoundChannel(1)),
+                context.player.owner.clone(),
+            )
+        })
+        .expect("stale sound fixture player exists");
+    let stale_session = Rc::new(RefCell::new(stale_session));
+    let (_id, _action, stale_receiver) = stale_session
+        .borrow_mut()
+        .start_eval_request(
+            1,
+            InternalVmRequest::Object {
+                receiver: stale_sound,
+                name: Symbol::builtin(BuiltInSymbol::Stop),
+                args: Vec::new(),
+            },
+        )
+        .expect("stale sound stop evaluator request should start");
+    let replacement = stale_session
+        .borrow_mut()
+        .reset_player_owned(1, &stale_owner)
+        .expect("owner reset should retire stale sound request");
+    let _ = async_std::task::block_on(crate::player::commands::pump_pending_eval_requests(
+        &stale_session, 1,
+    ));
+    let stale_error = async_std::task::block_on(stale_receiver.recv())
+        .expect("stale sound receiver remains connected")
+        .expect_err("stale sound stop must be rejected");
+    assert_eq!(stale_error.code, crate::player::ScriptErrorCode::Abort);
+    assert!(stale_session
+        .borrow_mut()
+        .with_player(1, |context| context.player.owner.same_identity(&replacement))
+        .unwrap_or(false));
 }
 
 #[test]
