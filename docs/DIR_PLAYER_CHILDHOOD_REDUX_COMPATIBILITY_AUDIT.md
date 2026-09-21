@@ -216,8 +216,9 @@ their own outcome and acceptance decisions; S1 is not a proxy for any of them.
 - **Proven:** S1 production scheduling integration, protocol/lifecycle edges,
   source callbacks/retirement, and exact menu RGBA/PCM under the final campaign.
 - **Unproven:** later migration milestones and the explicit out-of-S1 capabilities.
-- **Next action:** bound S2 input/coordinate adoption using the existing stage-space
-  oracle before implementing a window/input adapter.
+- **Next action:** reassess S4 asset/readiness ownership. The user deferred
+  desktop/input after S2 discovery; S3.0 qualified the existing service-lifetime
+  boundary without identifying a production service move.
 - **Authority:** the user subsequently authorized implementation using
   `subagent-pair-program` and milestone commits/pushes. Assign component-level
   items, retain the stated acceptance criteria, and assess later milestones at
@@ -266,6 +267,40 @@ and the existing destination exclusions remain explicit.
 In-process multi-session behavior, simultaneous readiness, physical-display/Retina
 fidelity, and destination gameplay remain unqualified. S1 does not establish
 rendering, audio-backend, font, or asset migration.
+
+### Execution checkpoint: S2 deferred; S3.0 accepted
+
+S2 discovery found no native DirPlayer desktop frontend. Routing the already
+qualified stage-space protocol through synthetic window coordinates would add
+machinery without consolidating a production window-input path. Director focus
+loss/cancellation is also unqualified. The user chose to defer desktop/input and
+continue headless host services/ownership, then reassess later boundaries.
+
+S1 already gives Bevy transitive ownership of presentation, native Flash,
+notifications, and source pumps through its non-send player resource. Extra ECS
+resource wrappers would duplicate that ownership. S3.0 therefore tested the
+remaining two-owner service-lifetime uncertainty instead of moving resources.
+
+Commit `cb6a8a01` adds a serialized, test-only dual-host admission that retains the
+existing process test lock across both hosts. Normal production admission still
+takes the exclusive lifetime lock. The exact full-DCR ignored test passed in
+3.69 s: staggered operations left the idle host unchanged; 14 synchronized RGBA
+and four cumulative PCM captures matched; each owner received its own title
+callback once; retiring A rejected its stale work and removed only A's bindings,
+while B continued and then retired. Focused host/worker suites also passed.
+
+See the [dual-host experiment receipt](../../childhood-redux/docs/checkpoints/spybot-native-menu-campaign-20260921/20260921-s3-0-dual-host-01/summary.json)
+for exact command, binary identity, assertions, and the initial owner-identity
+comparison repair. Whole-file rustfmt checks reported existing formatting drift;
+no broad reformat was performed.
+
+**Accepted:** current single-session production service ownership and bounded
+test-only two-owner lifetime evidence. **Not established:** production admission
+of two hosts, threaded/simultaneous sessions, or general-movie isolation. The
+experiment found no concrete service leak requiring production refactoring;
+retain the existing admission boundary and revisit it when production in-process
+multi-session support becomes a selected outcome. S3.0 is complete; broader S3
+multi-session support is deferred, not silently certified.
 
 ## Completed audit and probe record
 
