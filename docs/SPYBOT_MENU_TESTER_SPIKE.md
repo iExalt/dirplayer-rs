@@ -4,8 +4,8 @@ Decision date: 2026-09-19.
 
 ## Current checkpoint (2026-09-21)
 
-The published baselines are dirplayer-rs `3e44c1c3` and childhood-redux
-`01212bff`; the active nested Ruffle used by the current native visual recipe is
+The published baselines are dirplayer-rs `f1df5b68` and childhood-redux
+`792e9a2a`; the active nested Ruffle used by the current native visual recipe is
 `fd5d8dda`. Native source rasterization is canonical for opening frames
 371–419, with Bevy scheduling, input, and state remaining independent.
 The normal source path reaches Flash 371, advances through 419, dispatches the
@@ -26,10 +26,18 @@ and timestamps. In one normal-source 2.45-second run, native and Bevy produced
 the same 117,600-frame stereo capture, SHA-256
 `422c4f9dc76d58af3b11c8d360f735da8daa06d009209e766e626792273851d5`,
 with first active frame 2401. Representative native/Bevy pixels are also exact
-at the accepted checkpoints. The complete repeated comparison campaign has not
-run, so final fidelity remains open. All later checkpoint sections are
-historical evidence unless this section explicitly promotes their result; in
-particular, the experimental cast-property fast path was reverted.
+at the accepted checkpoints. The accepted normal-source campaign consists of
+five fresh serial matched pairs plus four concurrent matched pairs. In the
+concurrent phase, all eight runner processes were directly observed live via
+`try_wait() == None` in one bounded observation window before waits; this does
+not claim worker-ready overlap. All exact 11 pre-release RGBA checkpoints,
+three cumulative PCM windows, semantic activation checks, and teardown/reap
+gates passed. This verifies isolated-process menu coverage only; in-process
+multi-session behavior, gameplay, destination screens, physical display/Retina
+qualification, and the scoped post-release visual mapping remain excluded.
+All older setup and diagnostic sections are historical evidence unless this
+section explicitly promotes their result; in particular, the experimental
+cast-property fast path was reverted.
 
 ## Outcome and priority
 
@@ -111,11 +119,7 @@ mixes, SHA-256
 `b139015c8c3813e50503daa007f72eb15c91cc1dd3a48be5e87b966eed8ea4d`;
 the source reaches idle at frame 38,761 with last active frame 26,810.
 
-The next boundary is the full normal-source comparison campaign through START:
-repeat exact visual/state/PCM checkpoints, qualify select and begin under real
-input, and preserve clean teardown. Direct-title/frame requests remain
-diagnostic-only and cannot replace normal startup evidence. Embedded Flash
-continues to use the pinned Ruffle path; this audio change does not replace it.
+The current campaign result is recorded in the [accepted aggregate](../../childhood-redux/docs/checkpoints/spybot-native-menu-campaign-20260921/repeated-concurrent-liveness-final/campaign-aggregate.json), with a [fresh-run recipe](../../childhood-redux/docs/checkpoints/spybot-native-menu-campaign-20260921/repeated-concurrent-liveness-final/README.md). Direct-title/frame requests remain diagnostic-only and cannot replace normal startup evidence. Embedded Flash continues to use the pinned Ruffle path; this audio change does not replace it.
 
 The current audio qualification was run from dirplayer-rs HEAD
 `3e44c1c392c9274ef125a9b9b961f6b26415620f` plus the reviewed audio worktree,
