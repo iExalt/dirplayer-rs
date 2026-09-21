@@ -26,6 +26,8 @@ use crate::player::session::NativeFlashCallbackObservation;
 use crate::player::testing::{
     NativeGlobalReadError, NativeGlobalValue, NativeInvokeArgument, NativeInvokeError, TestPlayer,
 };
+#[cfg(all(test, not(target_arch = "wasm32")))]
+use crate::player::testing::TestPlayerAdmission;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::rendering::NativePresentationViewport;
 
@@ -381,6 +383,8 @@ pub(crate) struct Worker {
     pub(crate) callback_observer: Option<Rc<RefCell<Vec<NativeFlashCallbackObservation>>>>,
     #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) start_failure_witness: Option<crate::player::testing::NativeTeardownWitness>,
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) test_admission: Option<Rc<TestPlayerAdmission>>,
 }
 
 fn request(host: &mut NativeBevyHost, request: Request) -> Result<Response, StructuredError> {
@@ -521,7 +525,18 @@ impl Worker {
             callback_observer: None,
             #[cfg(all(test, not(target_arch = "wasm32")))]
             start_failure_witness: None,
+            #[cfg(all(test, not(target_arch = "wasm32")))]
+            test_admission: None,
         }
+    }
+
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn new_with_test_admission(
+        admission: Rc<TestPlayerAdmission>,
+    ) -> Self {
+        let mut worker = Self::new();
+        worker.test_admission = Some(admission);
+        worker
     }
 
     pub(crate) fn start(&mut self, config: StartConfig) -> Result<Response, StructuredError> {
@@ -622,6 +637,14 @@ impl Worker {
             })
             .transpose()?;
 
+        #[cfg(all(test, not(target_arch = "wasm32")))]
+        let mut player = if let Some(admission) = self.test_admission.as_ref() {
+            TestPlayer::try_new_with_test_admission(admission.clone())
+        } else {
+            TestPlayer::try_new()
+        }
+        .map_err(runtime_error)?;
+        #[cfg(any(not(test), target_arch = "wasm32"))]
         let mut player = TestPlayer::try_new().map_err(runtime_error)?;
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(observer) = self.callback_observer.as_ref() {
@@ -1607,9 +1630,152 @@ mod tests {
             witness
                 .session
                 .borrow()
-                .native_flash(witness.player_id)
-                .is_none()
+            .native_flash(witness.player_id)
+            .is_none()
         );
+        assert!(witness
+            .session
+            .borrow()
+            .native_player_notification_sink(witness.player_id, &witness.owner)
+            .is_none());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn assert_live(witness: &crate::player::testing::NativeTeardownWitness) {
+        assert!(witness.owner.is_arena_live());
+        assert!(witness
+            .session
+            .borrow_mut()
+            .with_player(witness.player_id, |_| ())
+            .is_some());
+        assert!(witness
+            .session
+            .borrow()
+            .native_presentation(witness.player_id)
+            .is_some());
+        assert!(witness
+            .session
+            .borrow()
+            .native_flash(witness.player_id)
+            .is_some());
+        assert!(witness
+            .session
+            .borrow()
+            .native_player_notification_sink(witness.player_id, &witness.owner)
+            .is_some());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn response_value(response: Response) -> Value {
+        serde_json::to_value(response).expect("native response must serialize")
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn pair_submit(
+        first: &mut NativeBevyHost,
+        second: &mut NativeBevyHost,
+        operation: impl Fn() -> HostOperation,
+    ) -> (Response, Response) {
+        let first_result = first
+            .submit(operation())
+            .expect("first host operation must succeed");
+        let second_result = second
+            .submit(operation())
+            .expect("second host operation must succeed");
+        (first_result, second_result)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn pair_observation(
+        first: &mut NativeBevyHost,
+        second: &mut NativeBevyHost,
+        path: &str,
+    ) -> (Value, Value) {
+        let (first_response, second_response) = pair_submit(first, second, || {
+            HostOperation::Inspect(path.to_owned())
+        });
+        match (first_response, second_response) {
+            (Response::Observation(first), Response::Observation(second)) => (first, second),
+            responses => panic!("expected observations for {path}, got {responses:?}"),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn single_observation(host: &mut NativeBevyHost, path: &str) -> Value {
+        match host
+            .submit(HostOperation::Inspect(path.to_owned()))
+            .expect("host observation must succeed")
+        {
+            Response::Observation(value) => value,
+            response => panic!("expected observation for {path}, got {response:?}"),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn pair_capture(
+        first: &mut NativeBevyHost,
+        second: &mut NativeBevyHost,
+        kind: CaptureKind,
+    ) -> (Value, Value) {
+        let (first_response, second_response) = pair_submit(first, second, || {
+            HostOperation::Capture(match &kind {
+                CaptureKind::Rgba => CaptureKind::Rgba,
+                CaptureKind::Pcm => CaptureKind::Pcm,
+            })
+        });
+        let first = response_value(first_response);
+        let second = response_value(second_response);
+        assert_eq!(first["kind"], json!("captured"));
+        assert_eq!(second["kind"], json!("captured"));
+        assert_eq!(first, second, "dual-host capture diverged");
+        (first, second)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn single_capture(host: &mut NativeBevyHost, kind: CaptureKind) -> Value {
+        response_value(
+            host.submit(HostOperation::Capture(kind))
+                .expect("host capture must succeed"),
+        )
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn capture_metadata(value: &Value) -> Value {
+        let capture = &value["value"]["value"];
+        json!({
+            "kind": value["value"]["kind"],
+            "timestamp_us": capture["timestamp_us"],
+            "frame_count": capture["samples"].as_array().map(Vec::len),
+            "width": capture["width"],
+            "height": capture["height"],
+            "sha256": capture["sha256"],
+        })
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn assert_equal_input_state(
+        first: &Value,
+        second: &Value,
+        first_owner: crate::player::ownership::OwnerKey,
+        second_owner: crate::player::ownership::OwnerKey,
+    ) {
+        for (value, owner) in [(first, first_owner), (second, second_owner)] {
+            assert_eq!(value["owner"]["session"], json!(owner.session));
+            assert_eq!(value["owner"]["player"], json!(owner.player));
+            assert_eq!(value["owner"]["generation"], json!(owner.generation));
+        }
+        for field in [
+            "pointer",
+            "mouse_down",
+            "captured_sprite",
+            "click_on_sprite",
+            "hovered_sprites",
+        ] {
+            assert_eq!(
+                first[field], second[field],
+                "dual-host input state diverged in {field}"
+            );
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -2089,6 +2255,432 @@ mod tests {
             Ok(Response::Acknowledged)
         ));
         assert_retired(witness);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "requires SPYBOT_RESOURCE_ROOT and the native rendering backend"]
+    fn spybot_dual_host_interleaves_full_dcr_lifecycles() {
+        let Some(first_config) = spybot_start_config_from_env() else {
+            eprintln!("SPYBOT_RESOURCE_ROOT is unset; skipping dual-host proof");
+            return;
+        };
+        let second_config = spybot_start_config_from_env()
+            .expect("SPYBOT_RESOURCE_ROOT must remain available for both hosts");
+        let admission = TestPlayerAdmission::acquire();
+        let mut first = NativeBevyHost::new_with_test_admission(admission.clone());
+        let mut second = NativeBevyHost::new_with_test_admission(admission.clone());
+        let first_callbacks = first.install_callback_observer();
+        let second_callbacks = second.install_callback_observer();
+
+        assert!(matches!(
+            first.submit(HostOperation::Start(first_config)),
+            Ok(Response::Started { .. })
+        ));
+        assert!(matches!(
+            second.submit(HostOperation::Start(second_config)),
+            Ok(Response::Started { .. })
+        ));
+        let first_witness = first
+            .test_live_teardown_witness()
+            .expect("first host must expose a teardown witness");
+        let second_witness = second
+            .test_live_teardown_witness()
+            .expect("second host must expose a teardown witness");
+        let first_owner_key = first_witness.owner.key();
+        let second_owner_key = second_witness.owner.key();
+        assert_ne!(first_owner_key, second_owner_key);
+        assert_eq!(first_witness.player_id, second_witness.player_id);
+
+        let second_initial_frame = single_observation(&mut second, "current_frame");
+        let second_initial_input = single_observation(&mut second, "input_state");
+        assert!(matches!(
+            first.submit(HostOperation::Advance(50_000)),
+            Ok(Response::Acknowledged)
+        ));
+        assert_eq!(first.test_elapsed_us(), 50_000);
+        assert_eq!(second.test_elapsed_us(), 0);
+        assert_eq!(
+            single_observation(&mut second, "current_frame"),
+            second_initial_frame
+        );
+        assert_eq!(first_callbacks.borrow().len(), 0);
+        assert_eq!(second_callbacks.borrow().len(), 0);
+        assert!(matches!(
+            first.submit(HostOperation::Input(VirtualInput::Pointer {
+                space: PointerSpace::Stage,
+                x: 200.0,
+                y: 350.0,
+            })),
+            Ok(Response::Acknowledged)
+        ));
+        assert_eq!(
+            single_observation(&mut second, "input_state"),
+            second_initial_input
+        );
+        assert!(matches!(
+            second.submit(HostOperation::Input(VirtualInput::Pointer {
+                space: PointerSpace::Stage,
+                x: 200.0,
+                y: 350.0,
+            })),
+            Ok(Response::Acknowledged)
+        ));
+        assert!(matches!(
+            second.submit(HostOperation::Advance(50_000)),
+            Ok(Response::Acknowledged)
+        ));
+        for _ in 0..47 {
+            let (first_result, second_result) = pair_submit(&mut first, &mut second, || {
+                HostOperation::Advance(50_000)
+            });
+            assert!(matches!(first_result, Response::Acknowledged));
+            assert!(matches!(second_result, Response::Acknowledged));
+        }
+        assert_eq!(first.test_elapsed_us(), 2_400_000);
+        assert_eq!(second.test_elapsed_us(), 2_400_000);
+
+        let (first_frame, second_frame) = pair_observation(&mut first, &mut second, "current_frame");
+        assert_eq!(first_frame, json!(5));
+        assert_eq!(first_frame, second_frame);
+        let (first_label, second_label) = pair_observation(&mut first, &mut second, "current_label");
+        assert_eq!(first_label, json!("title"));
+        assert_eq!(first_label, second_label);
+        let (first_flash, second_flash) = pair_observation(&mut first, &mut second, "flash_instances");
+        assert_eq!(first_flash, second_flash);
+        assert_eq!(first_flash["instances"][0]["sprite"], json!(1));
+        assert_eq!(first_flash["instances"][0]["generation"], json!(1));
+        assert_eq!(first_flash["instances"][0]["current_frame"], json!(419));
+        let (first_init, second_init) = pair_observation(&mut first, &mut second, "init_state");
+        assert_eq!(first_init, second_init);
+        assert_eq!(first_init["pending_flash_actions"], json!([]));
+        assert_eq!(first_init["flash_bindings"][0]["asserted_frame"], json!(371));
+
+        for callbacks in [&first_callbacks, &second_callbacks] {
+            let callbacks = callbacks.borrow();
+            assert_eq!(callbacks.len(), 1);
+            assert_eq!(callbacks[0].now_us, 2_400_000);
+        }
+        assert_eq!(first_callbacks.borrow()[0].owner, first_owner_key);
+        assert_eq!(second_callbacks.borrow()[0].owner, second_owner_key);
+
+        let mut rgba = Vec::new();
+        let mut pcm = Vec::new();
+        let mut source = Vec::new();
+        let record_rgba = |name: &str,
+                           first: &mut NativeBevyHost,
+                           second: &mut NativeBevyHost,
+                           rgba: &mut Vec<Value>,
+                           source: &mut Vec<Value>| {
+            let (first_capture, _) = pair_capture(first, second, CaptureKind::Rgba);
+            rgba.push(json!({"name": name, "capture": capture_metadata(&first_capture)}));
+            let (first_frame, second_frame) = pair_observation(first, second, "current_frame");
+            let (first_label, second_label) = pair_observation(first, second, "current_label");
+            let (first_input, second_input) = pair_observation(first, second, "input_state");
+            assert_eq!(first_frame, second_frame);
+            assert_eq!(first_label, second_label);
+            assert_equal_input_state(
+                &first_input,
+                &second_input,
+                first_owner_key,
+                second_owner_key,
+            );
+            source.push(json!({
+                "name": name,
+                "frame": first_frame,
+                "label": first_label,
+                "input": first_input,
+            }));
+        };
+        let record_pcm = |name: &str,
+                          first: &mut NativeBevyHost,
+                          second: &mut NativeBevyHost,
+                          pcm: &mut Vec<Value>| {
+            let (first_capture, _) = pair_capture(first, second, CaptureKind::Pcm);
+            pcm.push(json!({"name": name, "capture": capture_metadata(&first_capture)}));
+        };
+
+        let (first_capture, _) = pair_capture(&mut first, &mut second, CaptureKind::Rgba);
+        rgba.push(json!({"name": "t2400", "capture": capture_metadata(&first_capture)}));
+        let (first_pcm, _) = pair_capture(&mut first, &mut second, CaptureKind::Pcm);
+        pcm.push(json!({"name": "t2400", "capture": capture_metadata(&first_pcm)}));
+
+        let (first_result, second_result) = pair_submit(&mut first, &mut second, || {
+            HostOperation::Advance(50_000)
+        });
+        assert!(matches!(first_result, Response::Acknowledged));
+        assert!(matches!(second_result, Response::Acknowledged));
+        record_rgba("settled_t2450", &mut first, &mut second, &mut rgba, &mut source);
+        record_pcm("settled_t2450", &mut first, &mut second, &mut pcm);
+
+        for (name, event) in [
+            (
+                "hover_start",
+                VirtualInput::Pointer {
+                    space: PointerSpace::Stage,
+                    x: 322.0,
+                    y: 381.0,
+                },
+            ),
+            (
+                "press_start",
+                VirtualInput::Button {
+                    button: MouseButton::Left,
+                    state: ButtonState::Down,
+                },
+            ),
+            (
+                "move_outside",
+                VirtualInput::Pointer {
+                    space: PointerSpace::Stage,
+                    x: 200.0,
+                    y: 350.0,
+                },
+            ),
+            (
+                "release_outside",
+                VirtualInput::Button {
+                    button: MouseButton::Left,
+                    state: ButtonState::Up,
+                },
+            ),
+        ] {
+            let first_result = first.submit(HostOperation::Input(event));
+            let second_event = match name {
+                "hover_start" | "move_outside" => VirtualInput::Pointer {
+                    space: PointerSpace::Stage,
+                    x: if name == "hover_start" { 322.0 } else { 200.0 },
+                    y: if name == "hover_start" { 381.0 } else { 350.0 },
+                },
+                "press_start" => VirtualInput::Button {
+                    button: MouseButton::Left,
+                    state: ButtonState::Down,
+                },
+                "release_outside" => VirtualInput::Button {
+                    button: MouseButton::Left,
+                    state: ButtonState::Up,
+                },
+                _ => unreachable!(),
+            };
+            let second_result = second.submit(HostOperation::Input(second_event));
+            assert!(matches!(first_result, Ok(Response::Acknowledged)));
+            assert!(matches!(second_result, Ok(Response::Acknowledged)));
+            record_rgba(name, &mut first, &mut second, &mut rgba, &mut source);
+        }
+
+        let (first_result, second_result) = pair_submit(&mut first, &mut second, || {
+            HostOperation::Advance(1_000_000)
+        });
+        assert!(matches!(first_result, Response::Acknowledged));
+        assert!(matches!(second_result, Response::Acknowledged));
+        record_rgba(
+            "cancel_tail_t3450",
+            &mut first,
+            &mut second,
+            &mut rgba,
+            &mut source,
+        );
+        record_pcm("cancel_tail_t3450", &mut first, &mut second, &mut pcm);
+
+        for (name, event) in [
+            (
+                "reenter_start",
+                VirtualInput::Pointer {
+                    space: PointerSpace::Stage,
+                    x: 322.0,
+                    y: 381.0,
+                },
+            ),
+            (
+                "press_start_again",
+                VirtualInput::Button {
+                    button: MouseButton::Left,
+                    state: ButtonState::Down,
+                },
+            ),
+            (
+                "drag_outside_again",
+                VirtualInput::Pointer {
+                    space: PointerSpace::Stage,
+                    x: 200.0,
+                    y: 350.0,
+                },
+            ),
+            (
+                "reenter_start_again",
+                VirtualInput::Pointer {
+                    space: PointerSpace::Stage,
+                    x: 322.0,
+                    y: 381.0,
+                },
+            ),
+            (
+                "release_inside",
+                VirtualInput::Button {
+                    button: MouseButton::Left,
+                    state: ButtonState::Up,
+                },
+            ),
+        ] {
+            let first_result = first.submit(HostOperation::Input(event));
+            let second_event = match name {
+                "reenter_start" | "reenter_start_again" => VirtualInput::Pointer {
+                    space: PointerSpace::Stage,
+                    x: 322.0,
+                    y: 381.0,
+                },
+                "press_start_again" => VirtualInput::Button {
+                    button: MouseButton::Left,
+                    state: ButtonState::Down,
+                },
+                "drag_outside_again" => VirtualInput::Pointer {
+                    space: PointerSpace::Stage,
+                    x: 200.0,
+                    y: 350.0,
+                },
+                "release_inside" => VirtualInput::Button {
+                    button: MouseButton::Left,
+                    state: ButtonState::Up,
+                },
+                _ => unreachable!(),
+            };
+            let second_result = second.submit(HostOperation::Input(second_event));
+            assert!(matches!(first_result, Ok(Response::Acknowledged)));
+            assert!(matches!(second_result, Ok(Response::Acknowledged)));
+            record_rgba(name, &mut first, &mut second, &mut rgba, &mut source);
+        }
+
+        let (first_result, second_result) = pair_submit(&mut first, &mut second, || {
+            HostOperation::Advance(50_000)
+        });
+        assert!(matches!(first_result, Response::Acknowledged));
+        assert!(matches!(second_result, Response::Acknowledged));
+        record_rgba(
+            "activated_t3500",
+            &mut first,
+            &mut second,
+            &mut rgba,
+            &mut source,
+        );
+        let (first_frame, _) = pair_observation(&mut first, &mut second, "current_frame");
+        assert_eq!(first_frame, json!(8));
+        let (first_label, _) = pair_observation(&mut first, &mut second, "current_label");
+        assert_eq!(first_label, json!("menu"));
+
+        let (first_result, second_result) = pair_submit(&mut first, &mut second, || {
+            HostOperation::Advance(950_000)
+        });
+        assert!(matches!(first_result, Response::Acknowledged));
+        assert!(matches!(second_result, Response::Acknowledged));
+        record_rgba(
+            "activation_tail_t4450",
+            &mut first,
+            &mut second,
+            &mut rgba,
+            &mut source,
+        );
+        record_pcm("activation_tail_t4450", &mut first, &mut second, &mut pcm);
+
+        let first_flash_handle = first
+            .test_live_native_flash()
+            .expect("first host must expose native Flash before retirement");
+        let stale_session = first_witness.session.clone();
+        let stale_player_id = first_witness.player_id;
+        let stale_owner = first_witness.owner.clone();
+        let mut stale_frame_pump = crate::player::session::NativeFramePump::new(
+            first_witness.session.clone(),
+            first_witness.player_id,
+            first_witness.owner.clone(),
+        );
+        let stale_input_pump = crate::player::session::NativeInputPump::new(
+            first_witness.session.clone(),
+            first_witness.player_id,
+            first_witness.owner.clone(),
+        );
+        let first_callback_count = first_callbacks.borrow().len();
+        let stale_callback = {
+            let observed = first_callbacks.borrow()[0].clone();
+            crate::native_flash::NativeFlashCallback {
+                sprite: observed.sprite,
+                generation: observed.generation,
+                cast_lib: observed.cast_lib,
+                cast_member: observed.cast_member,
+                url: observed.url,
+            }
+        };
+        let stale_callback_delivery = Rc::new(RefCell::new(Vec::new()));
+        assert!(matches!(
+            first.submit(HostOperation::Shutdown),
+            Ok(Response::Acknowledged)
+        ));
+        assert_retired(first_witness);
+        assert_live(&second_witness);
+        assert!(async_std::task::block_on(stale_frame_pump.advance_to_us(4_500_000)).is_err());
+        assert!(async_std::task::block_on(stale_input_pump.mouse_move(200, 350)).is_err());
+        assert!(first_flash_handle
+            .borrow_mut()
+            .dispatch_mouse(
+                &stale_session,
+                stale_player_id,
+                &stale_owner,
+                1,
+                1,
+                "move",
+                0,
+                0,
+                1,
+                1,
+            )
+            .is_err());
+        assert!(!async_std::task::block_on(
+            stale_frame_pump.test_dispatch_native_flash_callback_if_current(
+                stale_callback,
+                stale_callback_delivery.clone(),
+            )
+        )
+        .expect("stale callback dispatch must complete"));
+        assert!(stale_callback_delivery.borrow().is_empty());
+        assert_eq!(first_callbacks.borrow().len(), first_callback_count);
+        assert!(second_callbacks
+            .borrow()
+            .iter()
+            .all(|callback| callback.owner == second_witness.owner.key()));
+
+        assert!(matches!(
+            second.submit(HostOperation::Advance(50_000)),
+            Ok(Response::Acknowledged)
+        ));
+        assert_eq!(second.test_elapsed_us(), 4_500_000);
+        let second_capture = single_capture(&mut second, CaptureKind::Rgba);
+        assert_eq!(second_capture["value"]["kind"], json!("rgba"));
+        let second_frame = single_observation(&mut second, "current_frame");
+        assert_eq!(second_frame, json!(8));
+        assert!(matches!(
+            second.submit(HostOperation::Shutdown),
+            Ok(Response::Acknowledged)
+        ));
+        assert_retired(second_witness);
+
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "dcr_sha256": "ddf24b667a8d014856d9db42e1658cbf9714847f1cadc2c2c14d21f8e5950c77",
+                "owner_keys": {
+                    "first": format!("{:?}", first_owner_key),
+                    "second": format!("{:?}", second_owner_key),
+                },
+                "rgba": rgba,
+                "pcm": pcm,
+                "source": source,
+                "stale_frame_rejected": true,
+                "stale_input_rejected": true,
+                "stale_flash_input_rejected": true,
+                "stale_callback_rejected": true,
+                "first_retired": true,
+                "second_retired": true,
+            }))
+            .expect("dual-host evidence must serialize")
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]

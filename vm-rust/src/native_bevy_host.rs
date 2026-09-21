@@ -43,8 +43,19 @@ pub(crate) struct NativeBevyHost {
 
 impl NativeBevyHost {
     pub(crate) fn new() -> Self {
+        Self::from_worker(Worker::new())
+    }
+
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn new_with_test_admission(
+        admission: Rc<crate::player::testing::TestPlayerAdmission>,
+    ) -> Self {
+        Self::from_worker(Worker::new_with_test_admission(admission))
+    }
+
+    fn from_worker(worker: Worker) -> Self {
         let mut app = App::new();
-        app.insert_non_send_resource(Worker::new());
+        app.insert_non_send_resource(worker);
         app.insert_non_send_resource(HostMailbox::default());
         app.add_systems(
             Update,
@@ -143,6 +154,18 @@ impl NativeBevyHost {
             .player
             .as_ref()
             .map(crate::player::testing::TestPlayer::native_teardown_witness)
+    }
+
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn test_live_native_flash(
+        &self,
+    ) -> Option<Rc<std::cell::RefCell<crate::native_flash::NativeFlashHost>>> {
+        self.app
+            .world()
+            .non_send_resource::<Worker>()
+            .player
+            .as_ref()
+            .map(crate::player::testing::TestPlayer::native_flash_handle)
     }
 
     #[cfg(test)]

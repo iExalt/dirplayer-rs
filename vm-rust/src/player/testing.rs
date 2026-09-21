@@ -33,6 +33,31 @@ use crate::player::session::NativeFlashCallbackObservation;
 /// The player uses global mutable statics, so tests must be serialized.
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
+/// Test-only admission held by the dual-host ownership experiment. The guard
+/// stays alive while both admitted players run, so unrelated TestPlayer tests
+/// cannot enter the process-wide mutable state concurrently.
+#[cfg(test)]
+pub(crate) struct TestPlayerAdmission {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl TestPlayerAdmission {
+    pub(crate) fn acquire() -> Rc<Self> {
+        let lock = match TEST_LOCK.lock() {
+            Ok(lock) => lock,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        Rc::new(Self { _lock: lock })
+    }
+}
+
+enum TestPlayerAdmissionState {
+    Exclusive(std::sync::MutexGuard<'static, ()>),
+    #[cfg(test)]
+    Shared(Rc<TestPlayerAdmission>),
+}
+
 /// Bounded native parity adapter. The production sink acknowledges each DTO
 /// synchronously and retains only delivery metadata; tests add a recording
 /// side channel to verify FIFO delivery without changing production memory.
@@ -66,7 +91,7 @@ impl NativePlayerNotificationSink for NativeParityNotificationSink {
 /// Native test harness. Wraps the global DirPlayer for in-memory testing.
 pub struct TestPlayer {
     _tx: channel::Sender<PlayerVMExecutionItem>,
-    _lock: std::sync::MutexGuard<'static, ()>,
+    _admission: TestPlayerAdmissionState,
     runtime: HarnessRuntime,
     native_presentation: Rc<crate::rendering::NativePresentationPolicy>,
     native_flash: Rc<std::cell::RefCell<crate::native_flash::NativeFlashHost>>,
@@ -176,6 +201,20 @@ impl TestPlayer {
             Err(poisoned) => poisoned.into_inner(),
         };
 
+        Self::try_new_with_admission(TestPlayerAdmissionState::Exclusive(lock))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn try_new_with_test_admission(
+        admission: Rc<TestPlayerAdmission>,
+    ) -> Result<Self, crate::player::ScriptError> {
+        Self::try_new_with_admission(TestPlayerAdmissionState::Shared(admission))
+    }
+
+    fn try_new_with_admission(
+        admission: TestPlayerAdmissionState,
+    ) -> Result<Self, crate::player::ScriptError> {
+
         let (tx, rx) = channel::unbounded();
 
         let runtime = HarnessRuntime::try_new(tx.clone())?;
@@ -220,7 +259,7 @@ impl TestPlayer {
         });
         Ok(TestPlayer {
             _tx: tx,
-            _lock: lock,
+            _admission: admission,
             runtime,
             native_presentation,
             native_flash,
@@ -368,6 +407,13 @@ impl TestPlayer {
             player_id: self.runtime.player_id(),
             owner: self.runtime.owner().clone(),
         }
+    }
+
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn native_flash_handle(
+        &self,
+    ) -> Rc<std::cell::RefCell<crate::native_flash::NativeFlashHost>> {
+        self.native_flash.clone()
     }
 
     pub(crate) async fn load_movie_quiet(

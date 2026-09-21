@@ -830,6 +830,19 @@ impl NativeFramePump {
         }
     }
 
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) async fn test_dispatch_native_flash_callback_if_current(
+        &self,
+        callback: crate::native_flash::NativeFlashCallback,
+        delivered: Rc<RefCell<Vec<String>>>,
+    ) -> Result<bool, ScriptError> {
+        self.dispatch_native_flash_callback_if_current(callback, move |callback| async move {
+            delivered.borrow_mut().push(callback.url);
+            Ok(())
+        })
+        .await
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     fn apply_native_flash_frame_or_drop(
         &self,
