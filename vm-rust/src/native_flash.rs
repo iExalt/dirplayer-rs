@@ -1893,6 +1893,95 @@ mod tests {
 
     #[test]
     #[ignore = "requires PARITY_OPENING_ANIM_SWF pointing to the verified opening_anim SWF"]
+    fn native_flash_checkpoint_display_graph_frame_371() {
+        let path = std::env::var_os("PARITY_OPENING_ANIM_SWF")
+            .expect("PARITY_OPENING_ANIM_SWF must point to the verified opening_anim SWF");
+        let bytes = std::fs::read(&path).expect("verified opening_anim SWF must be readable");
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&bytes)),
+            "d964a7e594109f8923004333e129f9c655fabde0533a4b4bf74dce238bf3215f"
+        );
+        let callbacks = std::sync::Arc::new(std::sync::Mutex::new(
+            super::NativeFlashCallbackBuffer::default(),
+        ));
+        let (player, baseline) = NativeFlashHost::build_player_with_callbacks_and_baseline(
+            &bytes, 650, 420, 0, callbacks.clone(), 1, 1, 1, 1,
+        )
+        .expect("verified opening_anim SWF must load in Ruffle");
+
+        let (before, graph, frame_before, fifo_before) = {
+            let mut source = player.lock().expect("Ruffle player lock");
+            NativeFlashHost::apply_seek(&mut source, 371, false);
+            let frame = source.current_frame();
+            let fifo = callbacks
+                .lock()
+                .expect("callback buffer lock")
+                .callbacks
+                .len();
+            let before = source.checkpoint_census_with_baseline(Some(&baseline));
+            let graph = source
+                .checkpoint_capture_display_graph(
+                    &[2],
+                    "d964a7e594109f8923004333e129f9c655fabde0533a4b4bf74dce238bf3215f",
+                )
+                .expect("frame-371 display graph must be field-complete");
+            (format!("{before}"), graph, frame, fifo)
+        };
+
+        assert_eq!(graph.nodes().len(), 11);
+        assert_eq!(graph.tree_edges().len(), 10);
+        assert_eq!(graph.depth_edges().len(), 10);
+        assert_eq!(graph.parent_edges().len(), 10);
+        assert_eq!(graph.mask_edges().len(), 0);
+        println!("display_graph_execution_edges={:?}", graph.execution_edges());
+        assert_eq!(graph.execution_edges(), &[(2, 1), (3, 2), (5, 6), (6, 3)]);
+        assert_eq!(
+            graph.strong_edge_count(),
+            graph.tree_edges().len()
+                + graph.depth_edges().len()
+                + graph.parent_edges().len()
+                + graph.mask_edges().len()
+                + graph.execution_edges().len()
+                + graph.nodes().iter().filter(|node| node.avm1_graph_id().is_some()).count()
+        );
+        assert_eq!(graph.strong_edge_count(), 39);
+        assert_eq!(graph.weak_entry_count(), 0);
+        assert_eq!(graph.nodes()[0].kind(), "Stage");
+        assert_eq!(graph.nodes().iter().filter(|node| node.kind() == "MovieClip").count(), 5);
+        assert_eq!(graph.nodes().iter().filter(|node| node.kind() == "Graphic").count(), 5);
+        assert_eq!(graph.nodes()[0].parent(), None);
+        assert_eq!(graph.nodes()[0].render_index(), 0);
+        assert!(graph.nodes().iter().filter(|node| node.kind() == "MovieClip").all(|node| node.avm1_graph_id().is_some()));
+        assert!(graph.nodes().iter().filter(|node| node.kind() != "MovieClip").all(|node| node.avm1_graph_id().is_none()));
+        for node in graph.nodes() {
+            println!(
+                "display_node id={} kind={} parent={:?} render_index={} depth={} definition_kind={} character_id={} mask=none avm1_graph_id={:?} unsupported={:?}",
+                node.id(), node.kind(), node.parent(), node.render_index(), node.depth(),
+                node.kind(), node.definition_id(), node.avm1_graph_id(), node.unsupported()
+            );
+            assert!(node.unsupported().is_empty(), "non-empty display state must be classified: node {}", node.id());
+        }
+
+        let player_after = player.lock().expect("Ruffle player lock");
+        let after = player_after.checkpoint_census_with_baseline(Some(&baseline));
+        let frame_after = player_after.current_frame();
+        let fifo_after = callbacks
+            .lock()
+            .expect("callback buffer lock")
+            .callbacks
+            .len();
+        assert_eq!(before, format!("{after}"));
+        assert_eq!(frame_before, frame_after);
+        assert_eq!(fifo_before, fifo_after);
+        println!(
+            "display_graph_frame_371 asset={} nodes={} tree_edges={} strong_edges={} weak_entries={} source_receipt_unchanged=true frame={:?} callback_fifo={}",
+            graph.asset_identity(), graph.nodes().len(), graph.tree_edges().len(),
+            graph.strong_edge_count(), graph.weak_entry_count(), frame_after, fifo_after
+        );
+    }
+
+    #[test]
+    #[ignore = "requires PARITY_OPENING_ANIM_SWF pointing to the verified opening_anim SWF"]
     fn native_flash_checkpoint_bootstrap_resolves_actual_frame_371_bindings() {
         let path = std::env::var_os("PARITY_OPENING_ANIM_SWF")
             .expect("PARITY_OPENING_ANIM_SWF must point to the verified opening_anim SWF");

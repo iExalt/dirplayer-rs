@@ -8,8 +8,9 @@ constructs a private source-free Player and resolves all 1,854 actual frame-371
 AVM1 native builtins. The accepted [R2 AVM1 graph prerequisite](checkpoints/save-state-r2-20260922/graph/R2_AVM1_GRAPH_RECEIPT.md)
 then round-trips an actual 16-node bootstrap/builtin subset with exact aliases,
 cycles, values, attributes, and prototypes. It does not restore game continuation;
-display/timeline/resources remain unimplemented and R3 is in progress. C1 and C2 remain
-unimplemented.** See the [Q0 qualification report](Q0_SAVE_STATE_QUALIFICATION.md),
+display/timeline/resources remain unimplemented. The [R3 passive display report](checkpoints/save-state-r3-20260922/graph/R3_DISPLAY_PASSIVE_REPORT.md)
+captures the actual 11-node display tree but records a failed fresh-allocation
+discriminator, so R3 remains incomplete. C1 and C2 remain unimplemented.** See the [Q0 qualification report](Q0_SAVE_STATE_QUALIFICATION.md),
 [B1 graph-boundary design](B1_RUFFLE_BOUNDARY_DESIGN.md), [B1 asset/AVM
 inventory](checkpoints/save-state-b1-20260921/assets/SPYBOT_ASSET_INVENTORY.md),
 and [B2 live census](checkpoints/save-state-b2-20260921/graph/B2_GRAPH_CENSUS_REPORT.md).
@@ -252,6 +253,18 @@ arrays, accessors, MovieClips, display/timeline/resource identity, and continuat
 R3 is the currently authorized display-identity/topology component. Neither R2
 nor R3 by itself qualifies a fresh worker, Director audio, or C1.
 
+The [R3 passive display report](checkpoints/save-state-r3-20260922/graph/R3_DISPLAY_PASSIVE_REPORT.md)
+records exact field/topology capture for the actual 11-node frame-371 display
+tree and unchanged source census/frame/callback FIFO. It also records the
+bounded parser-only resolution of the fresh-allocation scanner's logical-End
+defect. No fresh display allocation, no-event topology fixup, normalized
+candidate comparison, cleanup proof, or continuation equality has passed; R3
+therefore remains incomplete. The preliminary remaining estimate is 0.5 to 1
+active day for the smallest connected-subtree discriminator, another 1 to 2
+active days for the full 11-node display component, and 4 to 7 additional active
+days for the broader fresh-Player experiment. These are agent estimates, not
+measured delivery time or implicit approval.
+
 Q0 was a bounded block, not a promise to build full save states in three hours.
 It used one component-level discovery item under subagent-pair-program.
 
@@ -372,8 +385,11 @@ Cross-runtime-upgrade fixture migration remains a separate deferred requirement.
   AVM1 nodes plus display/timeline/resources remain deferred.
 - [ ] Complete the approved R3 actual display-identity/topology component for
   the five MovieClips and Stage/Graphics crosslinks without running movie scripts.
-  The overall experiment retains a preliminary, not measured, 2–4 active-day
-  estimate and is not a full C1 estimate.
+  Passive capture of all 11 nodes and exact definition ranges has passed, but
+  fresh allocation, no-event fixup, normalized comparison, and cleanup remain.
+  The revised preliminary estimate is 0.5–1 active day for the smallest subtree,
+  1–2 more for full R3, and 4–7 additional days for the broader experiment; it
+  is not a measured estimate, implicit approval, or a full C1 estimate.
 - [ ] Implement and accept C1; commit/push accepted milestones during execution.
 - [ ] Merge accepted work back to `dev` and verify interaction with the parallel next-screen lane.
 - [ ] Reassess C2 independently of the destination port.

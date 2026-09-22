@@ -1,0 +1,51 @@
+R3 passive display receipt
+Date: 2026-09-22
+
+Pinned parent baseline: 7090796e83940adae97f5532d4ff62c3124577ec
+Pinned Ruffle baseline: 979ca0ef98769a29f8d7b466a2133d45780afa9d
+Accepted Ruffle commit: d735dfa811ee415500199a97b701bf9172523b0d on iExalt/ruffle:r3-display-passive
+Asset SHA-256: d964a7e594109f8923004333e129f9c655fabde0533a4b4bf74dce238bf3215f
+
+Parser-only command:
+PARITY_OPENING_ANIM_SWF=/Users/clliaw/Projects/childhood-redux/.cache/spybot-recovery/embedded-probe/opening_anim.swf CARGO_TARGET_DIR=$PWD/.cache/r3-display-target mise exec -- cargo test --manifest-path ../vm-rust/Cargo.toml --locked --offline native_flash_checkpoint_display_definition_probe_frame_371 -- --ignored --nocapture
+
+Parser-only result: PASS, 1 passed, 0 failed
+logical_end_reached=true data_len=39012
+Graphic 11 range 22980..23013
+MovieClip 0 range 0..39012 frames 419
+MovieClip 3 range 7102..7114 frames 1
+MovieClip 6 range 22239..22251 frames 1
+MovieClip 8 range 22768..22780 frames 1
+MovieClip 10 range 22844..22862 frames 2
+
+Malformed/truncated command:
+CARGO_TARGET_DIR=$PWD/.cache/r3-display-target mise exec -- cargo test --manifest-path ../vm-rust/Cargo.toml --locked --offline native_flash_checkpoint_display_definition_probe_rejects_truncated -- --nocapture
+
+Malformed/truncated result: PASS, 1 passed, 0 failed; three-byte FWS input rejected with AssetParse.
+
+Passive core check:
+CARGO_TARGET_DIR=$PWD/.cache/r3-display-target mise exec -- cargo check -p ruffle_core --locked --offline
+Result: PASS.
+
+Passive negative tests:
+CARGO_TARGET_DIR=$PWD/.cache/r3-display-target mise exec -- cargo test -p ruffle_core --locked --offline checkpoint_display --lib
+Result: PASS, 2 passed, 0 failed.
+
+Actual passive fixture:
+PARITY_OPENING_ANIM_SWF=/Users/clliaw/Projects/childhood-redux/.cache/spybot-recovery/embedded-probe/opening_anim.swf CARGO_TARGET_DIR=$PWD/.cache/r3-display-target mise exec -- cargo test --manifest-path vm-rust/Cargo.toml --locked --offline native_flash_checkpoint_display_graph_frame_371 -- --ignored --nocapture
+Result: PASS, 1 passed, 0 failed, 767 filtered.
+nodes=11 tree_edges=10 depth_edges=10 parent_edges=10 execution_edges=4 avm_links=5 strong_edges=39 weak_entries=0
+source_receipt_unchanged=true frame=Some(371) callback_fifo=0
+
+Existing R2 actual fixture on the split passive tree:
+PARITY_OPENING_ANIM_SWF=/Users/clliaw/Projects/childhood-redux/.cache/spybot-recovery/embedded-probe/opening_anim.swf CARGO_TARGET_DIR=$PWD/.cache/r3-display-target mise exec -- cargo test --manifest-path vm-rust/Cargo.toml --locked --offline native_flash_checkpoint_bootstrap_resolves_actual_frame_371_bindings -- --ignored --nocapture
+Result: PASS, 1 passed, 0 failed, 767 filtered.
+Selected closure: 16 nodes, 31 data edges, 0 accessors, 0 weak entries; source-free guard unchanged.
+
+Local retained WIP only:
+Ruffle b048f1598c25f9f70a34e2936f7efa6cbbda7528
+Parent 7bd7289b07c1a3d53a85426d0e9e4b6d67262aa7
+
+Parser logs retained in lane-owned cache:
+ruffle/.cache/r3-display-target/parser-fixture.log sha256=3280fbbd1bdb35752580d788c8f86250d0b26037bde24b4cebca5cef784c5e5b bytes=430547
+ruffle/.cache/r3-display-target/parser-compile.log sha256=4680102108af65357162d168f42670429592d5d98bd956127f81cce1d75df19d bytes=428937
