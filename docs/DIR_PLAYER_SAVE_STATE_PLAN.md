@@ -1,8 +1,11 @@
 # DirPlayer durable runtime save states
 
-Status: **planned; architecture unqualified; no save-state implementation or
-experiment has run under this plan.** Decisions were made with agentic-workflow
-on 2026-09-21. The next proposed work block has a three-hour qualification cap.
+Status: **Q0 source audit completed 2026-09-21; runtime restore qualification is
+blocked before probe selection. C1 and C2 remain unimplemented.** See the
+[Q0 qualification report](Q0_SAVE_STATE_QUALIFICATION.md). The recommended
+Ruffle boundary-design item requires a new 1–2 active-day commitment beyond the
+completed three-hour Q0 block. Decisions were made with agentic-workflow on
+2026-09-21.
 The [Spybot next-screen spike](../../childhood-redux/docs/SPYBOT_NEXT_SCREEN_SPIKE_PLAN.md) is an independent
 parallel workstream; it does not wait for checkpoint support.
 
@@ -197,9 +200,15 @@ only after its semantics and the versioned capture contract are established.
 
 ## Q0: three-hour architecture qualification
 
-This is the next proposed bounded block, not a promise to build full save states
-in three hours. Once execution is requested, assign one component-level discovery
-item using subagent-pair-program; routine technical decisions remain with the team.
+The [Q0 source audit](Q0_SAVE_STATE_QUALIFICATION.md) completed on 2026-09-21.
+It found that the pinned public Ruffle boundary has no live player-graph capture
+or reconstruction operation. No concrete runtime probe was selected or executed
+because creating that prerequisite would exceed Q0; the allowed source-established
+blocker path below was taken instead. This result does not qualify fresh-worker
+restore or implement checkpoint support.
+
+Q0 was a bounded block, not a promise to build full save states in three hours.
+It used one component-level discovery item under subagent-pair-program.
 
 | Work | Allowance | Required output |
 | --- | --- | --- |
@@ -298,7 +307,12 @@ Cross-runtime-upgrade fixture migration remains a separate deferred requirement.
   fresh workers, and pinned-build/assets compatibility.
 - [x] Reserve arbitrary-moment C2 and reject silent safe-point substitution.
 - [x] Set the three-hour Q0 cap and isolate parallel `save-state` / `next-screen` worktrees.
-- [ ] Execute Q0 and choose the first implementation item from its evidence.
+- [x] Complete the Q0 source audit and record the blocked/narrow route; no runtime
+  qualification was run.
+- [ ] Approve and execute the 1–2 active-day Ruffle boundary-design item; this is
+  an expanded commitment beyond Q0, not an accepted implementation item.
+- [ ] Select and run one narrow executable restore-dependency probe after a viable
+  Ruffle graph boundary exists.
 - [ ] Implement and accept C1; commit/push accepted milestones during execution.
 - [ ] Merge accepted work back to `dev` and verify interaction with the parallel next-screen lane.
 - [ ] Reassess C2 independently of the destination port.
