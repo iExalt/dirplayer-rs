@@ -3,7 +3,7 @@
 Status: **planned; architecture unqualified; no save-state implementation or
 experiment has run under this plan.** Decisions were made with agentic-workflow
 on 2026-09-21. The next proposed work block has a three-hour qualification cap.
-The [Spybot next-screen spike](SPYBOT_NEXT_SCREEN_SPIKE_PLAN.md) is an independent
+The [Spybot next-screen spike](../../childhood-redux/docs/SPYBOT_NEXT_SCREEN_SPIKE_PLAN.md) is an independent
 parallel workstream; it does not wait for checkpoint support.
 
 ## Outcome and decisions

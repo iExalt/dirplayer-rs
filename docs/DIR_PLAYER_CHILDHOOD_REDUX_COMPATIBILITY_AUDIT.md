@@ -9,7 +9,7 @@ retention decisions do not claim those migrations were implemented.
 Next selected architecture work: [durable runtime save states](DIR_PLAYER_SAVE_STATE_PLAN.md).
 The user selected a three-hour qualification block before implementation, with
 real Spybot/Flash/active-audio fresh-process restoration as the first milestone.
-The [Spybot next-screen reference spike](SPYBOT_NEXT_SCREEN_SPIKE_PLAN.md) can run
+The [Spybot next-screen reference spike](../../childhood-redux/docs/SPYBOT_NEXT_SCREEN_SPIKE_PLAN.md) can run
 in parallel. The two plans isolate `save-state` and `next-screen` local branches
 and sibling worktrees, then merge accepted work back to the integration branches.
 
