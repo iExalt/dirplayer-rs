@@ -1,0 +1,179 @@
+{
+  "schema": "dirplayer.save-state.b2.graph-census-receipt.v1",
+  "status": "b2-display-slice-passed-full-graph-incomplete",
+  "parent_worktree": "/Users/clliaw/Projects/dirplayer-rs-save-state",
+  "parent_commit": "480430efec6242bf2aaab52e2135db11d35838b6",
+  "parent_branch": "save-state",
+  "ruffle_commit": "fd5d8dda1cc7b8cf91de141a48574750fa8f86b2",
+  "ruffle_base_commit": "fd5d8dda1cc7b8cf91de141a48574750fa8f86b2",
+  "ruffle_child_commit": "6ebf1bcf7c5d26deb83ee4a2b2b8c318b07de3de",
+  "ruffle_branch": "b2-graph-census",
+  "ruffle_trusted_destination": {
+    "url": "https://github.com/iExalt/ruffle.git",
+    "branch": "b2-graph-census",
+    "commit": "6ebf1bcf7c5d26deb83ee4a2b2b8c318b07de3de"
+  },
+  "ruffle_local_origin": "https://github.com/chameleonxxl/ruffle.git",
+  "ruffle_local_origin_preserved": true,
+  "ruffle_local_origin_used_after_review_rejection": false,
+  "publication": {
+    "status_as_of": "pre-parent-publication-evidence-review",
+    "child_commit": true,
+    "child_push": true,
+    "parent_commit": false,
+    "parent_push": false
+  },
+  "cargo_features": ["deterministic", "audio", "mp3"],
+  "tool_identity": {
+    "config": "mise.toml",
+    "rust": "1.98.1",
+    "target_dir": ".cache/b2-census-target",
+    "command": "PARITY_OPENING_ANIM_SWF=/Users/clliaw/Projects/childhood-redux/.cache/spybot-recovery/embedded-probe/opening_anim.swf CARGO_TARGET_DIR=$PWD/.cache/b2-census-target mise exec -- cargo test --manifest-path vm-rust/Cargo.toml native_flash_checkpoint_census_is_read_only_before_title_continuation --locked -- --ignored --nocapture"
+  },
+  "evidence_log": {
+    "path": "docs/checkpoints/save-state-b2-20260921/graph/display-slice-test.log",
+    "sha256": "4d0dbb169e6bc792ea83e034814c17564c5955d6b9ec9f17bdb10f0fc59df5f2",
+    "raw_stdout_stderr": true,
+    "summary_markers": [
+      "checkpoint census: phase=Idle frame=Some(371) roots=23 library_fields=8 coverage_complete=false",
+      "display_avm1[0..10]",
+      "display_traversal: nodes=11 edges=10 node_budget=10000 edge_budget=50000 complete=true stop_reason=None",
+      "host_fifo_depth=Some(0)",
+      "continuation control: callbacks_equal=true rgba_equal=true",
+      "test result: ok. 1 passed; 0 failed"
+    ]
+  },
+  "asset": {
+    "inventory": "docs/checkpoints/save-state-b1-20260921/assets/SPYBOT_ASSET_INVENTORY.md",
+    "dcr_sha256": "ddf24b667a8d014856d9db42e1658cbf9714847f1cadc2c2c14d21f8e5950c77",
+    "swf_sha256": "d964a7e594109f8923004333e129f9c655fabde0533a4b4bf74dce238bf3215f",
+    "format": "FWS5",
+    "frames": 419,
+    "fps": 20.0,
+    "avm": "AVM1",
+    "sound_tags": 0,
+    "asset_loaded_read_only": true
+  },
+  "boundary": {
+    "flash_frame": 371,
+    "phase": "Idle",
+    "source_time_frozen_during_census": true,
+    "source_executed_during_census": false,
+    "update_called_during_census": false,
+    "run_frame_called_during_census": false,
+    "render_called_during_census": false,
+    "tick_called_during_census": false,
+    "gc_called_during_census": false,
+    "callback_fifo_drained_during_census": false,
+    "host_fifo_depth": 0,
+    "frame_unchanged_after_census": true,
+    "host_fifo_unchanged_after_census": true
+  },
+  "coverage": {
+    "gc_root_names": [
+      "library", "stage", "mouse_data", "drag_object", "avm1", "avm2", "action_queue", "interner", "load_manager", "avm1_shared_objects", "avm2_shared_objects", "unbound_text_fields", "timers", "current_context_menu", "external_interface", "audio_manager", "stream_manager", "sockets", "net_connections", "local_connections", "orphan_manager", "dynamic_root", "post_frame_callbacks"
+    ],
+    "library_field_names": [
+      "movie_libraries", "device_fonts", "global_fonts", "font_lookup_cache", "font_sort_cache", "default_font_names", "default_font_cache", "avm2_class_registry"
+    ],
+    "gc_root_count": 23,
+    "library_field_count": 8,
+    "library_surface": {
+      "field_count": 8,
+      "all_fields_traversal_incomplete": true,
+      "observed_occupancy": {
+        "movie_libraries": "Present",
+        "device_fonts": "Unknown",
+        "global_fonts": "Unknown",
+        "font_lookup_cache": "Unknown",
+        "font_sort_cache": "Unknown",
+        "default_font_names": "Unknown",
+        "default_font_cache": "Unknown",
+        "avm2_class_registry": "Unknown"
+      },
+      "unknown_occupancy_count": 7
+    },
+    "avm1_stack_len": 0,
+    "avm1_register_kinds": ["Undefined", "Undefined", "Undefined", "Undefined"],
+    "avm2_operand_stack_len": null,
+    "avm2_scope_stack_len": 0,
+    "avm2_call_stack_empty": true,
+    "avm2_execution": "unknown",
+    "strong_node_count": null,
+    "edge_count": null,
+    "weak_edge_count": null,
+    "budgets": {
+      "strong_nodes_max": 10000,
+      "edges_max": 50000,
+      "weak_edges_max": 10000
+    },
+    "coverage_complete": false,
+    "unsupported": [
+      "incomplete_coverage",
+      "avm2_operand_stack_not_inspected",
+      "avm2_execution_state_incomplete"
+    ],
+    "source_review_blockers": [
+      "display_object_general_graph_private",
+      "avm2_stack_pointer_private"
+    ]
+  },
+  "display_bound_avm1": {
+    "status": "eligible_for_next_graph_step",
+    "scope": "actual frame-371 Stage/display tree only",
+    "record_count": 11,
+    "traversal": {
+      "node_count": 11,
+      "edge_count": 10,
+      "node_budget": 10000,
+      "edge_budget": 50000,
+      "complete": true,
+      "stop_reason": null
+    },
+    "records": [
+      {"ordinal": 0, "display_kind": "Stage", "has_avm1_object": false, "native_kind": null, "function_kind": null, "function_table_index": null, "classification": "no-avm1-object"},
+      {"ordinal": 1, "display_kind": "MovieClip", "has_avm1_object": true, "native_kind": "MovieClip", "function_kind": null, "function_table_index": null, "classification": "supported-display-native"},
+      {"ordinal": 2, "display_kind": "MovieClip", "has_avm1_object": true, "native_kind": "MovieClip", "function_kind": null, "function_table_index": null, "classification": "supported-display-native"},
+      {"ordinal": 3, "display_kind": "MovieClip", "has_avm1_object": true, "native_kind": "MovieClip", "function_kind": null, "function_table_index": null, "classification": "supported-display-native"},
+      {"ordinal": 4, "display_kind": "Graphic", "has_avm1_object": false, "native_kind": null, "function_kind": null, "function_table_index": null, "classification": "no-avm1-object"},
+      {"ordinal": 5, "display_kind": "MovieClip", "has_avm1_object": true, "native_kind": "MovieClip", "function_kind": null, "function_table_index": null, "classification": "supported-display-native"},
+      {"ordinal": 6, "display_kind": "MovieClip", "has_avm1_object": true, "native_kind": "MovieClip", "function_kind": null, "function_table_index": null, "classification": "supported-display-native"},
+      {"ordinal": 7, "display_kind": "Graphic", "has_avm1_object": false, "native_kind": null, "function_kind": null, "function_table_index": null, "classification": "no-avm1-object"},
+      {"ordinal": 8, "display_kind": "Graphic", "has_avm1_object": false, "native_kind": null, "function_kind": null, "function_table_index": null, "classification": "no-avm1-object"},
+      {"ordinal": 9, "display_kind": "Graphic", "has_avm1_object": false, "native_kind": null, "function_kind": null, "function_table_index": null, "classification": "no-avm1-object"},
+      {"ordinal": 10, "display_kind": "Graphic", "has_avm1_object": false, "native_kind": null, "function_kind": null, "function_table_index": null, "classification": "no-avm1-object"}
+    ],
+    "source_executed_during_slice": false,
+    "allocating_avm1_adapter_used": false,
+    "general_property_or_global_graph_traversed": false,
+    "unsupported": []
+  },
+  "continuation_oracle": {
+    "fresh_test_process": true,
+    "fresh_player_restore": false,
+    "frame_after_2400000_us": 419,
+    "callback_count": 1,
+    "callback": "lingo:introTitleReady()",
+    "census_callback_payloads": [
+      {"sprite": 1, "generation": 1, "cast_lib": 1, "cast_member": 1, "url": "lingo:introTitleReady()"}
+    ],
+    "control_callback_payloads": [
+      {"sprite": 1, "generation": 1, "cast_lib": 1, "cast_member": 1, "url": "lingo:introTitleReady()"}
+    ],
+    "rgba_bytes": 1092000,
+    "callbacks_equal_to_no_census_control": true,
+    "rgba_equal_to_no_census_control": true,
+    "census_rgba_sha256": "debf718b22be325d22487445c5a41665a9495c634be84ca9ac260da5c5b7b4e3",
+    "control_rgba_sha256": "debf718b22be325d22487445c5a41665a9495c634be84ca9ac260da5c5b7b4e3",
+    "passed": true
+  },
+  "verification": {
+    "runtime_probe": "passed the display-bound AVM1 slice and continuation oracle; full graph census remains incomplete",
+    "asset_test_mode": "ignored opt-in; run with --ignored and verified PARITY_OPENING_ANIM_SWF",
+    "fresh_worker_restore": "not exercised",
+    "director_audio_restore": "not exercised",
+    "codec_or_rehydration": "not implemented",
+    "commit": false,
+    "push": false
+  }
+}

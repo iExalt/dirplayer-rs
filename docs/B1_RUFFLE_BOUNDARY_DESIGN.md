@@ -1,13 +1,30 @@
 # B1 Ruffle graph boundary design
 
-Status: **B1 complete as a source-backed design investigation; the bounded
-graph-slice experiment remains unrun**.
+Status: **B1 complete as a source-backed design investigation; a partial B2
+display-bound census and matched-control continuation passed on 2026-09-22,
+while the full census and fresh-Player restore remain incomplete**.
 
 This document defines the smallest source-backed boundary that could support a
 controlled C1 checkpoint. It does not implement a codec, change Ruffle, or
 claim that the asset receipt enumerates the live Ruffle heap/type graph. Entries
 distinguish accepted asset facts, the observed runtime endpoint, static source
 possibilities, and facts that remain pending the first graph-slice experiment.
+
+## B2 partial follow-up — 2026-09-22
+
+The accepted [B2 graph census report](checkpoints/save-state-b2-20260921/graph/B2_GRAPH_CENSUS_REPORT.md)
+records a partial display-bound AVM1 census: 11 nodes and 10 edges, with a
+matched no-census continuation that produced identical callback vectors and
+identical 650x420 RGBA output. This is diagnostic evidence only. The full
+23-root/8-Library census, general object/property traversal, strong and weak
+edge census, and fresh-Player restore remain incomplete or unimplemented; no
+codec or C1 qualification follows from this result.
+
+The revised remaining estimates are preliminary and not measured: 2–4 active
+days to complete the root/Library/strong/weak census, followed by a conditional
+fresh-Player experiment requiring an additional 2–4 active days. Neither item
+is implicitly approved. The historical B1 statement that no experiment ran in
+B1 remains unchanged; this dated follow-up records the later partial B2 result.
 
 ## Baseline and scope
 

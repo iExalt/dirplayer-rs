@@ -1112,6 +1112,153 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires PARITY_OPENING_ANIM_SWF pointing to the verified opening_anim SWF"]
+    fn native_flash_checkpoint_census_is_read_only_before_title_continuation() {
+        let path = std::env::var_os("PARITY_OPENING_ANIM_SWF")
+            .expect("PARITY_OPENING_ANIM_SWF must point to the verified opening_anim SWF");
+        let bytes = std::fs::read(&path).expect("verified opening_anim SWF must be readable");
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes);
+        assert_eq!(
+            format!("{:x}", hasher.finalize()),
+            "d964a7e594109f8923004333e129f9c655fabde0533a4b4bf74dce238bf3215f",
+            "opening_anim bytes must match the recovered embedded SWF"
+        );
+
+        let build_instance = || {
+            let callbacks = std::sync::Arc::new(std::sync::Mutex::new(
+                super::NativeFlashCallbackBuffer::default(),
+            ));
+            let player = NativeFlashHost::build_player_with_callbacks(
+                &bytes,
+                650,
+                420,
+                0,
+                callbacks.clone(),
+                1,
+                1,
+                1,
+                1,
+            )
+            .expect("verified opening_anim SWF must load in Ruffle");
+            (
+                NativeFlashInstance {
+                    generation: 1,
+                    cast_lib: 0,
+                    cast_member: 0,
+                    width: 650,
+                    height: 420,
+                    paused_at_start: false,
+                    player,
+                    callbacks: callbacks.clone(),
+                },
+                callbacks,
+            )
+        };
+        let (mut census_instance, census_callbacks) = build_instance();
+        let (mut control_instance, control_callbacks) = build_instance();
+
+        let (before_frame, before_fifo, census) = {
+            let mut player = census_instance
+                .player
+                .lock()
+                .expect("Ruffle player lock");
+            NativeFlashHost::apply_seek(&mut player, 371, false);
+            assert_eq!(player.current_frame(), Some(371));
+            let before_frame = player.current_frame();
+            let before_fifo = census_callbacks
+                .lock()
+                .expect("native Flash callback buffer lock")
+                .callbacks
+                .len();
+            let mut census = player.checkpoint_census();
+            census.host_fifo_depth = Some(before_fifo);
+            (before_frame, before_fifo, census)
+        };
+
+        assert_eq!(census.roots.len(), 23);
+        assert_eq!(census.library_fields.len(), 8);
+        assert_eq!(census.phase, "Idle");
+        assert!(!census.coverage_complete, "the staged hook must fail closed while graph traversal is incomplete");
+        assert!(census.unsupported.contains(&"incomplete_coverage"));
+        assert_eq!(census.display_avm1.len(), 11);
+        assert_eq!(census.display_avm1[0].display_kind, "Stage");
+        assert!(census
+            .display_avm1
+            .iter()
+            .any(|entry| entry.classification == "supported-display-native"));
+        assert!(census
+            .display_avm1
+            .iter()
+            .all(|entry| !entry.classification.starts_with("unsupported-")));
+        assert_eq!(census.display_traversal.node_count, 11);
+        assert!(census.display_traversal.edge_count < census.display_traversal.edge_budget);
+        assert!(census.display_traversal.complete);
+        assert_eq!(census.display_traversal.stop_reason, None);
+        println!("{census}");
+
+        {
+            let mut player = control_instance
+                .player
+                .lock()
+                .expect("Ruffle control player lock");
+            NativeFlashHost::apply_seek(&mut player, 371, false);
+            assert_eq!(player.current_frame(), Some(371));
+        }
+
+        {
+            let player = census_instance
+                .player
+                .lock()
+                .expect("Ruffle player lock");
+            assert_eq!(player.current_frame(), before_frame);
+            let after_fifo = census_callbacks
+                .lock()
+                .expect("native Flash callback buffer lock")
+                .callbacks
+                .len();
+            assert_eq!(after_fifo, before_fifo);
+        }
+
+        let continue_instance = |instance: &mut NativeFlashInstance,
+                                 callbacks: &super::NativeFlashCallbackBufferHandle| {
+            let _clock = super::ControlledTimeGuard::new(2_400_000)
+                .expect("controlled frame-419 time");
+            let frame = {
+                let mut player = instance.player.lock().expect("Ruffle player lock");
+                NativeFlashHost::tick_exact(&mut player, 2_400_000);
+                assert_eq!(player.current_frame(), Some(419));
+                player.render();
+                player.current_frame()
+            };
+            let callbacks = NativeFlashHost::take_callbacks(callbacks)
+                .expect("frame-419 callback buffer drain");
+            let rgba = NativeFlashHost::capture(instance)
+                .expect("opening_anim continuation must produce a capturable rendered frame");
+            (frame, callbacks, rgba)
+        };
+        let (census_frame, census_callbacks, census_rgba) =
+            continue_instance(&mut census_instance, &census_callbacks);
+        let (control_frame, control_callbacks, control_rgba) =
+            continue_instance(&mut control_instance, &control_callbacks);
+        assert_eq!(census_frame, Some(419));
+        assert_eq!(control_frame, Some(419));
+        assert_eq!(census_callbacks.len(), 1);
+        assert_eq!(census_callbacks[0].url, "lingo:introTitleReady()");
+        assert_eq!(census_callbacks, control_callbacks);
+        assert_eq!(census_rgba.len(), 650 * 420 * 4);
+        assert_eq!(control_rgba.len(), 650 * 420 * 4);
+        assert_eq!(census_rgba, control_rgba);
+        println!(
+            "continuation control: callbacks_equal=true rgba_equal=true census_callbacks={:?} control_callbacks={:?} census_rgba_sha256={} control_rgba_sha256={}",
+            census_callbacks,
+            control_callbacks,
+            format!("{:x}", Sha256::digest(&census_rgba)),
+            format!("{:x}", Sha256::digest(&control_rgba)),
+        );
+    }
+
+    #[test]
     fn native_flash_callback_fifo_is_once_for_split_and_combined_advance() {
         let path = std::env::var_os("PARITY_OPENING_ANIM_SWF")
             .expect("PARITY_OPENING_ANIM_SWF must point to the verified opening_anim SWF");
