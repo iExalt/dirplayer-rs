@@ -1,0 +1,91 @@
+{
+  "schema": "spybot-asset-inventory/v1",
+  "status": "complete-read-only",
+  "worktree": "/Users/clliaw/Projects/dirplayer-rs-save-state",
+  "branch": "save-state",
+  "baseline": "68af1562015ac3a565ccecb54d66194be6e29f60",
+  "source": {
+    "dcr_path": "/Users/clliaw/Projects/childhood-redux/resources/spybot/spybot-nightfall-incident.dcr",
+    "bytes": 1369435,
+    "sha256": "ddf24b667a8d014856d9db42e1658cbf9714847f1cadc2c2c14d21f8e5950c77"
+  },
+  "provenance": {
+    "cast_chunk": 210280,
+    "member": "opening_anim",
+    "xmed_chunk": 220486,
+    "fourcc": "XMED",
+    "wrapper_bytes": 12,
+    "payload_range_in_materialized_xmed": [12, 39045],
+    "global_dcr_offset": null,
+    "xmed_path": "/Users/clliaw/Projects/childhood-redux/.cache/spybot-recovery/decompiled/spybot-nightfall-incident/chunks/XMED-220486.bin",
+    "candidate_cast_paths": [
+      "/Users/clliaw/Projects/childhood-redux/.cache/spybot-recovery/decompiled/spybot-nightfall-incident/chunks/CASt-50101.json",
+      "/Users/clliaw/Projects/childhood-redux/.cache/spybot-recovery/decompiled/spybot-nightfall-incident/chunks/CASt-50102.json",
+      "/Users/clliaw/Projects/childhood-redux/.cache/spybot-recovery/decompiled/spybot-nightfall-incident/chunks/CASt-147014.json",
+      "/Users/clliaw/Projects/childhood-redux/.cache/spybot-recovery/decompiled/spybot-nightfall-incident/chunks/CASt-147179.json",
+      "/Users/clliaw/Projects/childhood-redux/.cache/spybot-recovery/decompiled/spybot-nightfall-incident/chunks/CASt-147180.json",
+      "/Users/clliaw/Projects/childhood-redux/.cache/spybot-recovery/decompiled/spybot-nightfall-incident/chunks/CASt-147181.json",
+      "/Users/clliaw/Projects/childhood-redux/.cache/spybot-recovery/decompiled/spybot-nightfall-incident/chunks/CASt-147182.json"
+    ],
+    "candidate_xmed_paths": [
+      "/Users/clliaw/Projects/childhood-redux/.cache/spybot-recovery/decompiled/spybot-nightfall-incident/chunks/XMED-220714.bin",
+      "/Users/clliaw/Projects/childhood-redux/.cache/spybot-recovery/decompiled/spybot-nightfall-incident/chunks/XMED-220716.bin",
+      "/Users/clliaw/Projects/childhood-redux/.cache/spybot-recovery/decompiled/spybot-nightfall-incident/chunks/XMED-220738.bin",
+      "/Users/clliaw/Projects/childhood-redux/.cache/spybot-recovery/decompiled/spybot-nightfall-incident/chunks/XMED-220740.bin",
+      "/Users/clliaw/Projects/childhood-redux/.cache/spybot-recovery/decompiled/spybot-nightfall-incident/chunks/XMED-220742.bin",
+      "/Users/clliaw/Projects/childhood-redux/.cache/spybot-recovery/decompiled/spybot-nightfall-incident/chunks/XMED-220744.bin",
+      "/Users/clliaw/Projects/childhood-redux/.cache/spybot-recovery/decompiled/spybot-nightfall-incident/chunks/XMED-220746.bin"
+    ],
+    "xmed_bytes": 39045,
+    "xmed_sha256": "1ebf3db4fd73a123a9146da1973e728b20fdaf0be9baec951f31774d55bb2e7b",
+    "swf_bytes": 39033,
+    "swf_sha256": "d964a7e594109f8923004333e129f9c655fabde0533a4b4bf74dce238bf3215f"
+  },
+  "parser": {
+    "artifact": "/Users/clliaw/Projects/childhood-redux/.cache/spybot-recovery/embedded-probe/opening_anim.xml",
+    "tool": "FFDec/JPEXS 26.2.1",
+    "tool_sha256": "23c1e70ff2b08388e35de10afd97a2875386cbfdc2ef99c8176d40b4f8a3ada9",
+    "signature": "FWS",
+    "swf_version": 5,
+    "frame_count": 419,
+    "frame_rate": 20.0,
+    "do_action_tags": 3,
+    "absent_avm1_action_tags": ["DoInitAction"],
+    "absent_avm2_tags": ["DoABC", "DoABC2", "SymbolClass"],
+    "file_attributes_tag": "absent; no AS3 flag evidence present",
+    "absent_sound_tags": ["DefineSound", "SoundStream", "StartSound"],
+    "classification": "AVM1 from FWS5 header plus DoAction presence; DoInitAction is separately absent as an AVM1 action tag; AVM2 remains static/unqualified from absent DoABC/DoABC2, SymbolClass, and AS3 FileAttributes evidence"
+  },
+  "candidates": [
+    {"member": "door_right", "cast_chunk": 50102, "xmed_chunk": 220714, "raw_bytes": 99, "raw_sha256": "4488f49e2c6326cc66d15de55e01e86f4cb508951b1e2b873672b29168a11e0f", "payload_bytes": 87, "payload_sha256": "b37949189189bdf4a934995326001caa8f341b650557e463b3f17a48979e2c13", "parsed": "FWS1, one frame, no actions", "runtime_use": "static only; excluded"},
+    {"member": "door_left", "cast_chunk": 50101, "xmed_chunk": 220716, "raw_bytes": 99, "raw_sha256": "4488f49e2c6326cc66d15de55e01e86f4cb508951b1e2b873672b29168a11e0f", "payload_bytes": 87, "payload_sha256": "b37949189189bdf4a934995326001caa8f341b650557e463b3f17a48979e2c13", "parsed": "FWS1, one frame, no actions", "runtime_use": "static only; excluded"},
+    {"member": "companay_logo_1", "cast_chunk": 147014, "xmed_chunk": 220738, "raw_bytes": 8753, "raw_sha256": "786d72094e187a8a8c8d69952a1e161df32b57b8a3d860130b2b9b694cb205eb", "payload_bytes": 8741, "payload_sha256": "295d94498899471ee03a2a895423b0a6bdd2e71214d4b52b9e42f79c4218618a", "parsed": "FWS5, one frame, no actions", "runtime_use": "static only; excluded"},
+    {"member": "companay_logo_2", "cast_chunk": 147182, "xmed_chunk": 220740, "raw_bytes": 8753, "raw_sha256": "5166dfc24bce335feaac7500f82a349b00b0bdce515bbfacdb1e55a7ba91dfa3", "payload_bytes": 8741, "payload_sha256": "8500e0a9299dca5de31cea09d4f9ce1da55b790723e604a5c3d193fe64fd1727", "parsed": "FWS5, one frame, no actions", "runtime_use": "static only; excluded"},
+    {"member": "companay_logo_3", "cast_chunk": 147181, "xmed_chunk": 220742, "raw_bytes": 8753, "raw_sha256": "7044425edb3efb6af72e1e0f8339e5b1bece24455a6fa8a26a8fbfb144d5e5ac", "payload_bytes": 8741, "payload_sha256": "8d63ff486c662763bf785bc1fd66c306f76d472cb80d7f426a74092bd0a4880b", "parsed": "FWS5, one frame, no actions", "runtime_use": "static only; excluded"},
+    {"member": "companay_logo_4", "cast_chunk": 147180, "xmed_chunk": 220744, "raw_bytes": 8753, "raw_sha256": "2cea0a7e12ba4e8feb25d9dc6dd7a5fd5fa03b18501b37ffe5693f300d6549e7", "payload_bytes": 8741, "payload_sha256": "72be066e4278b81bd4d14f849760283079bcc2d0f6d60647603d8151bd73b8e1", "parsed": "FWS5, one frame, no actions", "runtime_use": "static only; excluded"},
+    {"member": "companay_logo_5", "cast_chunk": 147179, "xmed_chunk": 220746, "raw_bytes": 8753, "raw_sha256": "4a8abef0063d1f809854131582059328717874b5ef1e3c497313ac8264946f7e", "payload_bytes": 8741, "payload_sha256": "5c36916b31a4164e799c4ff5d34e4aafbb1535ffaf905c9bb70b740f21a75d40", "parsed": "FWS5, one frame, no actions", "runtime_use": "static only; excluded"},
+    {"member": "opening_anim", "cast_chunk": 210280, "xmed_chunk": 220486, "raw_bytes": 39045, "raw_sha256": "1ebf3db4fd73a123a9146da1973e728b20fdaf0be9baec951f31774d55bb2e7b", "payload_bytes": 39033, "payload_sha256": "d964a7e594109f8923004333e129f9c655fabde0533a4b4bf74dce238bf3215f", "parsed": "FWS5, 419 frames, three DoActionTag", "runtime_use": "observed opening/title"}
+  ],
+  "runtime_evidence": [
+    {"path": "docs/checkpoints/s6-title-operand-census-20260921.json#L109-L130", "fact": "Director frame 6, channel 1, Flash member_ref [2,3], member opening_anim, 650x420"},
+    {"path": "docs/SPYBOT_MENU_TESTER_SPIKE.md#L70-L78", "fact": "BehaviorScript 18 sets sprite 1 to frame 371 and enters title; frame 419 callback settles Director start"},
+    {"path": "vm-rust/src/native_flash.rs#L1051-L1111", "fact": "hash-gated SWF operation oracle: seek frame 371, tick 2400000 microseconds, assert frame 419 and lingo:introTitleReady(); source is not itself a runtime receipt"},
+    {"path": "/Users/clliaw/Projects/dirplayer-rs/vm-rust/.cache/native-bevy-schedule-probe-20260921/receipt.json", "sha256": "da87aada0fdb1c1b6c025a133bcc93af9cfbeb019ad0cb73a1582d1d30fade9e", "fact": "accepted full-DCR receipt, status passed, exact source DCR/hash, Director frame 6/start, asserted frame 371, endpoint frame 419, lingo:introTitleReady() at 2400000 us, teardown_ok true"},
+    {"path": "docs/DIR_PLAYER_CHILDHOOD_REDUX_COMPATIBILITY_AUDIT.md#L884", "fact": "tracked summary of accepted receipt: endpoint frame 419, asserted frame 371, callback now_us 2400000, successful teardown"}
+  ],
+  "commands": [
+    "stat -f '%z %N' /Users/clliaw/Projects/childhood-redux/resources/spybot/spybot-nightfall-incident.dcr",
+    "shasum -a 256 /Users/clliaw/Projects/childhood-redux/resources/spybot/spybot-nightfall-incident.dcr",
+    "shasum -a 256 /Users/clliaw/Projects/childhood-redux/.cache/spybot-recovery/decompiled/spybot-nightfall-incident/chunks/XMED-220486.bin",
+    "shasum -a 256 /Users/clliaw/Projects/childhood-redux/.cache/spybot-recovery/embedded-probe/opening_anim.swf",
+    "rg -o 'type=\"[A-Za-z0-9]+Tag\"' /Users/clliaw/Projects/childhood-redux/.cache/spybot-recovery/embedded-probe/opening_anim.xml | sort | uniq -c",
+    "shasum -a 256 /Users/clliaw/Projects/dirplayer-rs/vm-rust/.cache/native-bevy-schedule-probe-20260921/receipt.json"
+  ],
+  "limitations": [
+    "No retained global DCR byte offset for XMED-220486; payload range is relative to materialized XMED bytes.",
+    "No original-Director receipt; the accepted native full-DCR receipt is a separate runtime evidence source.",
+    "The complete parsed SWF tag inventory has no sound-related tags; Director audio remains C1 and null-backend qualification is out of scope."
+  ],
+  "read_only": true,
+  "binary_copies_into_repo": false
+}

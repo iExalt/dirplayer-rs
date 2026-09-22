@@ -1,11 +1,13 @@
 # DirPlayer durable runtime save states
 
-Status: **Q0 source audit completed 2026-09-21; runtime restore qualification is
-blocked before probe selection. C1 and C2 remain unimplemented.** See the
-[Q0 qualification report](Q0_SAVE_STATE_QUALIFICATION.md). The recommended
-Ruffle boundary-design item requires a new 1–2 active-day commitment beyond the
-completed three-hour Q0 block. Decisions were made with agentic-workflow on
-2026-09-21.
+Status: **Q0 source audit and the accepted B1 source-backed design publication
+completed 2026-09-21; the bounded graph-slice experiment and runtime restore
+qualification remain unrun. C1 and C2 remain unimplemented.** See the
+[Q0 qualification report](Q0_SAVE_STATE_QUALIFICATION.md), [B1 graph-boundary
+design](B1_RUFFLE_BOUNDARY_DESIGN.md), and [B1 asset/AVM inventory](checkpoints/save-state-b1-20260921/assets/SPYBOT_ASSET_INVENTORY.md).
+The next bounded graph-slice experiment has a preliminary, not measured,
+2–4 active-day estimate and is not yet authorized. Decisions were made with
+agentic-workflow on 2026-09-21.
 The [Spybot next-screen spike](../../childhood-redux/docs/SPYBOT_NEXT_SCREEN_SPIKE_PLAN.md) is an independent
 parallel workstream; it does not wait for checkpoint support.
 
@@ -207,6 +209,13 @@ because creating that prerequisite would exceed Q0; the allowed source-establish
 blocker path below was taken instead. This result does not qualify fresh-worker
 restore or implement checkpoint support.
 
+The accepted B1 publication follows this historical Q0 result: its
+[asset/AVM inventory](checkpoints/save-state-b1-20260921/assets/SPYBOT_ASSET_INVENTORY.md)
+and [Ruffle graph-boundary design](B1_RUFFLE_BOUNDARY_DESIGN.md) resolve the
+source-backed design questions for the actual AVM1 title workload. B1 ran no
+graph-slice experiment, did not retroactively execute Q0's missing executable
+check, and does not qualify fresh-process restore or C1.
+
 Q0 was a bounded block, not a promise to build full save states in three hours.
 It used one component-level discovery item under subagent-pair-program.
 
@@ -309,10 +318,12 @@ Cross-runtime-upgrade fixture migration remains a separate deferred requirement.
 - [x] Set the three-hour Q0 cap and isolate parallel `save-state` / `next-screen` worktrees.
 - [x] Complete the Q0 source audit and record the blocked/narrow route; no runtime
   qualification was run.
-- [ ] Approve and execute the 1–2 active-day Ruffle boundary-design item; this is
-  an expanded commitment beyond Q0, not an accepted implementation item.
-- [ ] Select and run one narrow executable restore-dependency probe after a viable
-  Ruffle graph boundary exists.
+- [x] Publish the accepted B1 source-backed asset/AVM inventory and Ruffle
+  graph-boundary design on 2026-09-21; this is docs-only evidence and does not
+  implement or qualify C1.
+- [ ] Authorize and execute the selected preliminary, not measured, 2–4 active-day
+  bounded Ruffle graph-slice experiment after B1; it is the one executable
+  restore-dependency experiment and remains unauthorized and unrun.
 - [ ] Implement and accept C1; commit/push accepted milestones during execution.
 - [ ] Merge accepted work back to `dev` and verify interaction with the parallel next-screen lane.
 - [ ] Reassess C2 independently of the destination port.

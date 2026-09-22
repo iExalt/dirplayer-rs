@@ -1,0 +1,111 @@
+{
+  "schema": "dirplayer.save-state.b1.graph-boundary-receipt.v1",
+  "status": "b1-complete-design-only",
+  "worktree": "/Users/clliaw/Projects/dirplayer-rs-save-state",
+  "branch": "save-state",
+  "dirplayer_commit": "68af1562015ac3a565ccecb54d66194be6e29f60",
+  "ruffle_commit": "fd5d8dda1cc7b8cf91de141a48574750fa8f86b2",
+  "cargo_features": ["deterministic", "audio", "mp3"],
+  "tool_identity": {
+    "config": "mise.toml",
+    "rust": "1.98.1",
+    "build_run": false,
+    "runtime_probe_run": false
+  },
+  "asset_evidence": {
+    "status": "accepted-independent-asset-pilot",
+    "asset_evidence_used": true,
+    "asset_loaded_by_graph_lane": false,
+    "actual_avm_version": "AVM1",
+    "inventory_ref": "docs/checkpoints/save-state-b1-20260921/assets/SPYBOT_ASSET_INVENTORY.md",
+    "dcr_sha256": "ddf24b667a8d014856d9db42e1658cbf9714847f1cadc2c2c14d21f8e5950c77",
+    "swf_sha256": "d964a7e594109f8923004333e129f9c655fabde0533a4b4bf74dce238bf3215f",
+    "opening_anim": {
+      "cast_chunk": 210280,
+      "xmed_chunk": 220486,
+      "wrapper_bytes": 12,
+      "swf_bytes": 39033,
+      "format": "FWS5",
+      "frames": 419,
+      "fps": 20.0,
+      "display_tags": ["DefineSprite", "DefineShape", "DefineBitsJPEG2", "DefineBitsLossless2", "PlaceObject2", "RemoveObject2"],
+      "sound_tags": [],
+      "avm_basis": "SWF5 plus three DoAction tags; DoInitAction absent as another AVM1 action tag; DoABC, DoABC2, and SymbolClass absent as AVM2-related tags"
+    },
+    "live_graph_enumerated": false,
+    "accepted_runtime_receipt": {
+      "path": "/Users/clliaw/Projects/dirplayer-rs/vm-rust/.cache/native-bevy-schedule-probe-20260921/receipt.json",
+      "sha256": "da87aada0fdb1c1b6c025a133bcc93af9cfbeb019ad0cb73a1582d1d30fade9e",
+      "observations": "Director frame 6/start; Flash 371->419; one callback at 2.4s; teardown_ok",
+      "graph_types_enumerated": false,
+      "original_director_evidence": false
+    }
+  },
+  "source_design": {
+    "report": "docs/B1_RUFFLE_BOUNDARY_DESIGN.md",
+    "matrix": "docs/checkpoints/save-state-b1-20260921/graph/graph-boundary-matrix.json",
+    "capture_hook_required": "ruffle_core::Player::checkpoint_eligibility (new internal hook; not implemented)",
+    "restore_hook_required": "checkpoint-mode Player allocation plus graph allocate/fixup/rehydrate/publish API (not implemented)",
+    "experiment": "actual opening/title Ruffle graph slice into fresh checkpoint-mode Player; no durable format, Director codec, Director audio restore, replay, or pixel toy",
+    "experiment_run": false,
+    "fresh_player_process": "not exercised",
+    "director_audio_restore": "not part of B1 experiment; remains independent C1 dependency",
+    "estimate": "2-4 active days including the minimal private eligibility/capture and checkpoint-mode allocate/fixup/rehydrate/publish hooks for this narrow graph slice",
+    "estimate_excludes": ["durable format", "Director session/audio codecs", "broad AVM coverage", "arbitrary continuations", "full C1 acceptance"],
+    "estimate_stop_condition": "blocked if the required hooks expand into a general codec or serialization framework",
+    "preflight_first": true,
+    "preflight": {
+      "source_execution": false,
+      "census": ["all GcRootData field occupancy including Library subfields", "AVM1 object/native kinds", "strong/weak edge counts and liveness", "pending action/timer/loader/callback capabilities"],
+      "pass": "all 23 root fields accounted for; actual graph within declared AVM1 slice and node/edge budget; no unsupported capability; host FIFO already empty; no live Activation/handler; persistent AVM1 values have logical representation",
+      "fail": "budget exceeded, unsupported/opaque kind, live activation/handler, nonempty host FIFO, nonempty live AVM2 infrastructure, or incomplete root/edge census",
+      "budget": {"graph_nodes_max": 10000, "edges_max": 50000, "weak_edges_max": 10000, "unsupported_capabilities_max": 0},
+      "stall_threshold": "no census pass/fail by the first active day or two nonadvancing setup/repair attempts"
+    },
+    "callback_fifo_policy": "capture never drains; B1 requires FIFO already empty at the selected post-accepted-operation point and returns structured unsupported otherwise; future frame-419 callback remains in Ruffle state",
+    "avm1_eligibility": "persistent Avm1 stack/register values may be captured when semantically live; current Activation/local registers/executing handlers must be absent",
+    "render_weak_policy": "persistent render history is canonical; derived GPU/cache artifacts rebuild; weak targets serialize nil/dead only when actually nil/dead or a retained GraphId only when already in the strong graph; live weak-only targets fail as weak_target_not_strongly_retained; no root promotion",
+    "weak_only_liveness_qualification": "separate future qualification; not accepted by B1"
+  },
+  "coverage": {
+    "gc_root_field_count": 23,
+    "matrix_row_count": 18,
+    "gc_root_fields": ["library", "stage", "mouse_data", "drag_object", "avm1", "avm2", "action_queue", "interner", "load_manager", "avm1_shared_objects", "avm2_shared_objects", "unbound_text_fields", "timers", "current_context_menu", "external_interface", "audio_manager", "stream_manager", "sockets", "net_connections", "local_connections", "orphan_manager", "dynamic_root", "post_frame_callbacks"],
+    "object_sources": ["ruffle/core/src/avm1/object/script_object.rs:93-100", "ruffle/core/src/avm1/object.rs:124-177", "ruffle/core/src/avm1/function.rs:20-33", "ruffle/core/src/avm1/function.rs:417-465"],
+    "library_source": "ruffle/core/src/library.rs:429-452",
+    "library_subfields": ["movie_libraries", "device_fonts", "global_fonts", "font_lookup_cache", "font_sort_cache", "default_font_names", "default_font_cache", "avm2_class_registry"],
+    "library_policy": "movie definitions are immutable references; dynamic registrations/bindings are canonical; pure lookup caches rebuild; unclassified mutable or opaque device-font/backend state fails closed",
+    "avm2_status": "initialized/dormant infrastructure is censused; live AVM2 state is outside the AVM1 first experiment"
+  },
+  "classification": {
+    "mixed_library_root": "Library movie definitions are immutable references; dynamic font/class registrations and mutable movie-library bindings are canonical; pure lookup caches rebuild only without effects; unclassified mutable or opaque device-font/backend state fails closed",
+    "canonical_saved_state": "logical mutable graph, display topology, interpreter state at clean boundary, timers/actions/callback order, exact clocks/RNG, owner-visible logical bindings",
+    "immutable_asset_reference": "exact SWF/DCR/cast/code/build/feature identity and hashes",
+    "reconstructible_resource": "fresh backend instances, GPU handles, render caches, weak process references, notification senders",
+    "unsupported_or_fail_closed": "unknown node kinds, live activation frames/executing handlers and opaque AVM2 continuations, opaque closures/futures, network/external effects, unsupported loaders, current Flash audio continuation, unclassified resources"
+  },
+  "verification_intent": {
+    "allowed_now": ["source link review", "JSON syntax validation", "git diff --check"],
+    "forbidden_now": ["Cargo build", "runtime experiment", "Ruffle source edit", "production Rust edit", "asset discovery duplication"],
+    "fresh_process_status": "not exercised"
+  },
+  "validation": {
+    "commands": [
+      "python3 -m json.tool docs/checkpoints/save-state-b1-20260921/graph/graph-boundary-matrix.json",
+      "python3 -m json.tool docs/checkpoints/save-state-b1-20260921/graph/graph-boundary-receipt.json",
+      "git diff --check",
+      "git diff --no-index --check /dev/null docs/B1_RUFFLE_BOUNDARY_DESIGN.md",
+      "git diff --no-index --check /dev/null docs/checkpoints/save-state-b1-20260921/graph/graph-boundary-matrix.json",
+      "git diff --no-index --check /dev/null docs/checkpoints/save-state-b1-20260921/graph/graph-boundary-receipt.json"
+    ],
+    "mise_json_attempt": "blocked: lane mise.toml is untrusted; config was not trusted or mutated",
+    "python3_json_tool": "pass for matrix and receipt",
+    "git_diff_check": "pass",
+    "untracked_file_whitespace_checks": "pass via git diff --no-index --check",
+    "source_link_targets": "pass",
+    "asset_hashes_cross_checked": "pass against accepted asset inventory",
+    "sha256_invariant": "pass: every SHA-256 field is exactly 64 lowercase hexadecimal characters; graph DCR/SWF/accepted-runtime hashes equal the asset inventory values",
+    "cargo_or_runtime_execution": "not run",
+    "experiment_status": "not run by design; fresh-process restore unexercised"
+  }
+}

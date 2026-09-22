@@ -185,6 +185,19 @@ Fresh-worker status: **not exercised**. No worker was launched, no checkpoint
 was written, no restore was attempted, and no assets were used. C1's required
 continuation comparison therefore has no pass/fail evidence.
 
+## Post-Q0 B1 publication follow-up — 2026-09-21
+
+The accepted [B1 asset/AVM inventory](checkpoints/save-state-b1-20260921/assets/SPYBOT_ASSET_INVENTORY.md)
+and [B1 Ruffle graph-boundary design](B1_RUFFLE_BOUNDARY_DESIGN.md) resolve the
+source-backed design questions for the actual AVM1 opening/title workload. The
+outcome is narrow: B1 did not run the fresh-Player graph-slice experiment,
+did not retroactively execute Q0's missing executable check, and did not
+qualify fresh-process restore or C1. The next bounded graph-slice item is a
+preliminary, not measured, 2–4 active-day estimate. The existing limited-
+workload codec/resource range of preliminary, not measured, 2–4+ weeks remains
+an estimate after that experiment; neither range is an accepted delivery
+estimate.
+
 ## Verification and limitations
 
 Commands and observed results:
