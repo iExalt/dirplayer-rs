@@ -77,3 +77,10 @@ restore properties, attributes, prototypes, aliases, and cycles without raw
 pointer export, source execution, getters, fake display placeholders, or
 dynamic-root leaks. Display/timeline identity, other resources, continuation,
 fresh-worker consumption, and Director audio remain later components.
+
+R2 was accepted on 2026-09-22 as a bounded prerequisite; see the
+[R2 AVM1 graph receipt](../../save-state-r2-20260922/graph/R2_AVM1_GRAPH_RECEIPT.md).
+It round-trips an actual 16-node subset that is mostly builtin/bootstrap state,
+plus synthetic fresh plain-object cases. It does not close the wider boundary
+described above: arrays, accessors, MovieClips, display/timeline/resources,
+continuation, fresh-worker consumption, and Director audio remain deferred.

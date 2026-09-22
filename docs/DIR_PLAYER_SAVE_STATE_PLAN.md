@@ -4,9 +4,11 @@ Status: **Q0 source audit and the accepted B1 source-backed design publication
 completed 2026-09-21; the full actual-profile B2 live census and matched-control
 continuation passed on 2026-09-22 with reproducibly pinned source/config. The
 accepted [R1 bootstrap prerequisite](checkpoints/save-state-r1-20260922/graph/R1_BOOTSTRAP_RECEIPT.md)
-now constructs a private source-free Player and resolves all 1,854 actual
-frame-371 AVM1 native builtins, while mutable fresh-Player restore remains
-unimplemented and unqualified. C1 and C2 remain
+constructs a private source-free Player and resolves all 1,854 actual frame-371
+AVM1 native builtins. The accepted [R2 AVM1 graph prerequisite](checkpoints/save-state-r2-20260922/graph/R2_AVM1_GRAPH_RECEIPT.md)
+then round-trips an actual 16-node bootstrap/builtin subset with exact aliases,
+cycles, values, attributes, and prototypes. It does not restore game continuation;
+display/timeline/resources remain unimplemented and R3 is in progress. C1 and C2 remain
 unimplemented.** See the [Q0 qualification report](Q0_SAVE_STATE_QUALIFICATION.md),
 [B1 graph-boundary design](B1_RUFFLE_BOUNDARY_DESIGN.md), [B1 asset/AVM
 inventory](checkpoints/save-state-b1-20260921/assets/SPYBOT_ASSET_INVENTORY.md),
@@ -240,6 +242,16 @@ bounded experiment; its accepted R1 bootstrap prerequisite is recorded in the
 R1 does not restore mutable graph state or qualify continuation, a fresh worker,
 Director audio, or C1.
 
+The accepted [R2 graph receipt](checkpoints/save-state-r2-20260922/graph/R2_AVM1_GRAPH_RECEIPT.md)
+records a pointer-free two-pass round trip for an actual 16-node frame-371 AVM1
+subset plus focused synthetic alias/cycle and failure coverage. The actual subset
+is mostly builtin/bootstrap state: 2 bootstrap-reused objects and 14 native
+functions, with no fresh allocation and no game continuation. Of the actual
+2,023-node AVM1 graph, 2,007 nodes and 4,168 edges remain deferred, including
+arrays, accessors, MovieClips, display/timeline/resource identity, and continuation.
+R3 is the currently authorized display-identity/topology component. Neither R2
+nor R3 by itself qualifies a fresh worker, Director audio, or C1.
+
 Q0 was a bounded block, not a promise to build full save states in three hours.
 It used one component-level discovery item under subagent-pair-program.
 
@@ -354,10 +366,14 @@ Cross-runtime-upgrade fixture migration remains a separate deferred requirement.
 - [x] Begin the approved bounded fresh-Player experiment and accept R1: an
   isolated source-free Player plus logical resolution of all 1,854 actual
   frame-371 AVM1 native builtins, with no mutable graph restoration.
-- [ ] Complete the approved R2 mutable AVM1 plain/script-object capture,
-  allocation, and fixup component; display/timeline/resources and continuation
-  remain subsequent components. The experiment retains a preliminary, not
-  measured, 2–4 active-day estimate and is not a full C1 estimate.
+- [x] Accept and publish R2's bounded AVM1 graph prerequisite: exact pointer-free
+  capture/fixup for an actual 16-node bootstrap/builtin subset and synthetic
+  fresh-object alias/cycle coverage. This is not game continuation; 2,007 actual
+  AVM1 nodes plus display/timeline/resources remain deferred.
+- [ ] Complete the approved R3 actual display-identity/topology component for
+  the five MovieClips and Stage/Graphics crosslinks without running movie scripts.
+  The overall experiment retains a preliminary, not measured, 2–4 active-day
+  estimate and is not a full C1 estimate.
 - [ ] Implement and accept C1; commit/push accepted milestones during execution.
 - [ ] Merge accepted work back to `dev` and verify interaction with the parallel next-screen lane.
 - [ ] Reassess C2 independently of the destination port.

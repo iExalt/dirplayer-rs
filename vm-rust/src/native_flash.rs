@@ -888,7 +888,220 @@ mod tests {
     use ruffle_core::backend::navigator::NavigatorBackend;
     use ruffle_core::FloatDuration;
     use sha2::{Digest, Sha256};
+    use std::collections::{BTreeMap, BTreeSet, VecDeque};
     use std::io::Read;
+
+    #[derive(Debug)]
+    enum Avm1SubsetProbe {
+        Found {
+            root: usize,
+            nodes: Vec<(usize, String, &'static str, Option<&'static str>, Option<usize>)>,
+            edges: Vec<(usize, usize, &'static str, Option<usize>)>,
+            alias_targets: Vec<usize>,
+            back_edges: Vec<(usize, usize, &'static str, Option<usize>)>,
+        },
+        Blocked {
+            examined_roots: usize,
+            reason: &'static str,
+            dependencies: Vec<(usize, usize, &'static str, Option<usize>, Option<usize>)>,
+        },
+    }
+
+    fn supported_avm1_node(
+        native_kind: Option<&'static str>,
+        function_kind: Option<&'static str>,
+        display_ordinal: Option<usize>,
+    ) -> bool {
+        display_ordinal.is_none()
+            && match native_kind {
+                Some("None") => true,
+                Some("Function") => matches!(function_kind, Some("Native" | "TableNative")),
+                _ => false,
+            }
+    }
+
+    fn probe_avm1_subset(
+        graph: &ruffle_core::Avm1GraphCensus,
+        required_fresh: Option<&BTreeSet<usize>>,
+        property_only: bool,
+    ) -> Avm1SubsetProbe {
+        let nodes_by_id = graph
+            .nodes
+            .iter()
+            .map(|node| (node.id, node))
+            .collect::<BTreeMap<_, _>>();
+        let edges_by_from = graph.edges.iter().fold(BTreeMap::new(), |mut edges, edge| {
+            edges.entry(edge.from).or_insert_with(Vec::new).push(edge);
+            edges
+        });
+        let roots = graph
+            .root_seeds
+            .iter()
+            .map(|seed| seed.graph_id)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let mut blocked_dependencies = Vec::new();
+        let mut candidates = Vec::new();
+
+        for root in roots.iter().copied() {
+            let Some(root_node) = nodes_by_id.get(&root) else {
+                continue;
+            };
+            if !supported_avm1_node(
+                root_node.native_kind,
+                root_node.function_kind,
+                root_node.display_ordinal,
+            ) {
+                continue;
+            }
+            let mut queue = VecDeque::from([root]);
+            let mut seen = BTreeSet::new();
+            let mut closure_edges = Vec::new();
+            let mut dependencies = Vec::new();
+            let mut valid = true;
+            while let Some(from) = queue.pop_front() {
+                if !seen.insert(from) {
+                    continue;
+                }
+                for edge in edges_by_from.get(&from).into_iter().flatten() {
+                    let Some(target) = nodes_by_id.get(&edge.to) else {
+                        valid = false;
+                        continue;
+                    };
+                    closure_edges.push((edge.from, edge.to, edge.kind, edge.ordinal));
+                    if property_only && edge.kind != "property_data" {
+                        dependencies.push((
+                            edge.from,
+                            edge.to,
+                            edge.kind,
+                            edge.ordinal,
+                            target.display_ordinal,
+                        ));
+                        valid = false;
+                        continue;
+                    }
+                    if edge.kind == "interface"
+                        || edge.kind == "watcher_callback"
+                        || edge.kind == "watcher_user_data"
+                        || target.display_ordinal.is_some()
+                    {
+                        dependencies.push((
+                            edge.from,
+                            edge.to,
+                            edge.kind,
+                            edge.ordinal,
+                            target.display_ordinal,
+                        ));
+                        valid = false;
+                        continue;
+                    }
+                    if !matches!(
+                        edge.kind,
+                        "property_data" | "property_getter" | "property_setter"
+                    ) || !supported_avm1_node(
+                        target.native_kind,
+                        target.function_kind,
+                        target.display_ordinal,
+                    ) {
+                        valid = false;
+                        continue;
+                    }
+                    if !seen.contains(&edge.to) {
+                        queue.push_back(edge.to);
+                    }
+                }
+            }
+            if !valid {
+                blocked_dependencies.extend(dependencies);
+                continue;
+            }
+            if required_fresh.is_some_and(|required| !seen.iter().any(|id| required.contains(id))) {
+                continue;
+            }
+            let mut inbound = BTreeMap::<usize, usize>::new();
+            for (_, to, _, _) in &closure_edges {
+                *inbound.entry(*to).or_default() += 1;
+            }
+            let alias_targets = inbound
+                .into_iter()
+                .filter_map(|(id, count)| (count > 1).then_some(id))
+                .collect::<Vec<_>>();
+            if alias_targets.is_empty() {
+                continue;
+            }
+            let mut adjacency =
+                BTreeMap::<usize, Vec<(usize, &'static str, Option<usize>)>>::new();
+            for (from, to, kind, ordinal) in &closure_edges {
+                adjacency
+                    .entry(*from)
+                    .or_default()
+                    .push((*to, *kind, *ordinal));
+            }
+            let mut colors = BTreeMap::<usize, u8>::new();
+            let mut back_edges = Vec::new();
+            fn visit(
+                id: usize,
+                adjacency: &BTreeMap<usize, Vec<(usize, &'static str, Option<usize>)>>,
+                colors: &mut BTreeMap<usize, u8>,
+                back_edges: &mut Vec<(usize, usize, &'static str, Option<usize>)>,
+            ) {
+                colors.insert(id, 1);
+                for (to, kind, ordinal) in adjacency.get(&id).into_iter().flatten() {
+                    match colors.get(to).copied().unwrap_or(0) {
+                        0 => visit(*to, adjacency, colors, back_edges),
+                        1 => back_edges.push((id, *to, *kind, *ordinal)),
+                        _ => {}
+                    }
+                }
+                colors.insert(id, 2);
+            }
+            visit(root, &adjacency, &mut colors, &mut back_edges);
+            if back_edges.is_empty() {
+                continue;
+            }
+            let mut node_receipt = seen
+                .iter()
+                .filter_map(|id| nodes_by_id.get(id))
+                .map(|node| {
+                    (
+                        node.id,
+                        node.path.clone(),
+                        node.native_kind.unwrap_or("unknown"),
+                        node.function_kind,
+                        node.display_ordinal,
+                    )
+                })
+                .collect::<Vec<_>>();
+            node_receipt.sort_unstable_by_key(|node| node.0);
+            closure_edges.sort_unstable();
+            candidates.push((
+                (node_receipt.len(), closure_edges.len(), root),
+                Avm1SubsetProbe::Found {
+                    root,
+                    nodes: node_receipt,
+                    edges: closure_edges,
+                    alias_targets,
+                    back_edges,
+                },
+            ));
+        }
+        candidates.sort_unstable_by_key(|candidate| candidate.0);
+        candidates.into_iter().next().map_or_else(
+            || Avm1SubsetProbe::Blocked {
+                examined_roots: roots.len(),
+                reason: if required_fresh.is_some() {
+                    "no-supported-property-only-alias-cycle-with-unresolved-none"
+                } else if blocked_dependencies.is_empty() {
+                    "no-supported-non-display-root-with-local-alias-and-cycle"
+                } else {
+                    "every-alias-cycle-candidate-has-an-unsupported-dependency"
+                },
+                dependencies: blocked_dependencies,
+            },
+            |candidate| candidate.1,
+        )
+    }
 
     fn test_instance(
         player: super::NativeRufflePlayer,
@@ -1379,6 +1592,106 @@ mod tests {
         assert_eq!(census.avm1_graph.nodes.len(), 2023);
         assert_eq!(census.avm1_graph.edges.len(), 4199);
         assert_eq!(census.avm1_graph.weak_observations, 0);
+        let native_kind_histogram = census
+            .avm1_graph
+            .nodes
+            .iter()
+            .fold(BTreeMap::<&'static str, usize>::new(), |mut histogram, node| {
+                *histogram
+                    .entry(node.native_kind.unwrap_or("unknown"))
+                    .or_default() += 1;
+                histogram
+            });
+        let edge_kind_histogram = census
+            .avm1_graph
+            .edges
+            .iter()
+            .fold(BTreeMap::<&'static str, usize>::new(), |mut histogram, edge| {
+                *histogram.entry(edge.kind).or_default() += 1;
+                histogram
+            });
+        println!(
+            "avm1_graph_boundary nodes={} edges={} weak={} native_kinds={native_kind_histogram:?} edge_kinds={edge_kind_histogram:?}",
+            census.avm1_graph.nodes.len(),
+            census.avm1_graph.edges.len(),
+            census.avm1_graph.weak_observations,
+        );
+        let mut root_seed_records = census
+            .avm1_graph
+            .root_seeds
+            .iter()
+            .map(|seed| format!("{}|{}", seed.graph_id, seed.path))
+            .collect::<Vec<_>>();
+        root_seed_records.sort_unstable();
+        let root_seed_digest = format!(
+            "{:x}",
+            Sha256::digest(root_seed_records.join("\n").as_bytes())
+        );
+        println!(
+            "avm1_root_seeds count={} digest={} first={:?} last={:?}",
+            root_seed_records.len(),
+            root_seed_digest,
+            root_seed_records.first(),
+            root_seed_records.last(),
+        );
+        let mut builtin_binding_records = census
+            .checkpoint_builtin_bindings()
+            .into_iter()
+            .map(|binding| {
+                format!(
+                    "{}|{}|{}|{:?}|{}",
+                    binding.graph_id(),
+                    binding.path(),
+                    binding.function_kind(),
+                    binding.table_index(),
+                    binding.constructor_present(),
+                )
+            })
+            .collect::<Vec<_>>();
+        builtin_binding_records.sort_unstable();
+        let builtin_binding_digest = format!(
+            "{:x}",
+            Sha256::digest(builtin_binding_records.join("\n").as_bytes())
+        );
+        println!(
+            "avm1_builtin_bindings count={} digest={} first={:?} last={:?}",
+            builtin_binding_records.len(),
+            builtin_binding_digest,
+            builtin_binding_records.first(),
+            builtin_binding_records.last(),
+        );
+        match probe_avm1_subset(&census.avm1_graph, None, false) {
+            Avm1SubsetProbe::Found {
+                root,
+                nodes,
+                edges,
+                alias_targets,
+                back_edges,
+            } => {
+                println!(
+                    "avm1_subset_probe=found root={} node_count={} edge_count={} alias_targets={alias_targets:?} back_edges={back_edges:?} nodes={nodes:?} edges={edges:?}",
+                    root,
+                    nodes.len(),
+                    edges.len(),
+                );
+                assert!(!alias_targets.is_empty());
+                assert!(!back_edges.is_empty());
+                assert!(nodes
+                    .iter()
+                    .all(|(_, _, _, _, display_ordinal)| display_ordinal.is_none()));
+            }
+            Avm1SubsetProbe::Blocked {
+                examined_roots,
+                reason,
+                dependencies,
+            } => {
+                println!(
+                    "avm1_subset_probe=blocked examined_roots={} reason={} dependencies={dependencies:?}",
+                    examined_roots, reason,
+                );
+                panic!("actual supported AVM1 alias/cycle subset is blocked: {reason}");
+            }
+        }
         assert!(!census
             .unsupported
             .contains(&"avm1_native_function_registry_identity_unavailable"));
@@ -1615,7 +1928,7 @@ mod tests {
         )
         .expect("verified opening_anim SWF must load in Ruffle");
 
-        let (source_config, bindings, before_receipt) = {
+        let (source_config, bindings, graph, before_receipt) = {
             let mut source = player.lock().expect("Ruffle player lock");
             NativeFlashHost::apply_seek(&mut source, 371, false);
             assert_eq!(source.current_frame(), Some(371));
@@ -1627,9 +1940,10 @@ mod tests {
                 .len();
             let census = source.checkpoint_census_with_baseline(Some(&baseline));
             let bindings = census.checkpoint_builtin_bindings();
+            let graph = census.avm1_graph.clone();
             let source_config = source.checkpoint_bootstrap_config();
             let receipt = census_receipt(census, frame, callback_fifo);
-            (source_config, bindings, receipt)
+            (source_config, bindings, graph, receipt)
         }; // Release the source player lock before constructing any candidate.
 
         assert_eq!(bindings.len(), 1_854);
@@ -1662,25 +1976,201 @@ mod tests {
                 && binding.path().starts_with("root.")
         }));
 
-        let mut candidate = ruffle_core::checkpoint_bootstrap::CheckpointCandidate::new(
-            source_config,
-        )
-        .expect("candidate bootstrap must be source-free");
-        assert_eq!(candidate.config(), source_config);
-        let resolution = candidate
-            .resolve_builtin_bindings(&bindings)
-            .expect("the complete frame-371 binding set must resolve atomically");
-        assert_eq!(resolution.handles().len(), bindings.len());
-        assert_eq!(resolution.exact_match_count(), bindings.len());
-        assert_eq!(resolution.alias_reuse_count(), 0);
-        assert!(candidate.state().source_free());
-        assert!(candidate.guard_receipt().is_zero());
+        let none_paths = graph
+            .nodes
+            .iter()
+            .filter(|node| node.native_kind == Some("None"))
+            .map(|node| {
+                ruffle_core::checkpoint_bootstrap::CheckpointAvm1PathCandidate::new(
+                    node.id,
+                    node.path.clone(),
+                    "None",
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(none_paths.len(), 148);
+        let mut classification_candidate =
+            ruffle_core::checkpoint_bootstrap::CheckpointCandidate::new(source_config)
+                .expect("classification candidate bootstrap must be source-free");
+        let classification_before = classification_candidate.state();
+        let classification_guard_before = classification_candidate.guard_receipt();
+        let classification_cleanup = classification_candidate.cleanup_token();
+        let classifications = classification_candidate
+            .classify_avm1_paths(&none_paths)
+            .expect("all actual None paths must classify without side effects");
+        let classification_after = classification_candidate.state();
+        assert_eq!(classifications.len(), none_paths.len());
+        assert!(classification_after.source_free());
         assert_eq!(
-            candidate.host_configuration(),
+            classification_before.interner_state(),
+            classification_after.interner_state()
+        );
+        assert_eq!(
+            classification_guard_before,
+            classification_candidate.guard_receipt()
+        );
+        let mut classification_by_id = BTreeMap::new();
+        let mut bootstrap_reuse = 0;
+        let mut fresh_allocation = BTreeSet::new();
+        let mut classification_records = Vec::new();
+        for result in &classifications {
+            match result.classification() {
+                ruffle_core::checkpoint_bootstrap::CheckpointAvm1PathClassification::BootstrapReuse => {
+                    assert_eq!(result.observed_native_kind(), Some("None"));
+                    bootstrap_reuse += 1;
+                }
+                ruffle_core::checkpoint_bootstrap::CheckpointAvm1PathClassification::FreshAllocation => {
+                    assert_eq!(result.observed_native_kind(), None);
+                    fresh_allocation.insert(result.graph_id());
+                }
+            }
+            classification_by_id.insert(
+                result.graph_id(),
+                (result.classification(), result.observed_native_kind()),
+            );
+            classification_records.push(format!(
+                "{}|{}|{:?}|{:?}",
+                result.graph_id(),
+                result.path(),
+                result.classification(),
+                result.observed_native_kind(),
+            ));
+        }
+        classification_records.sort_unstable();
+        println!(
+            "avm1_none_classification count={} bootstrap_reuse={} fresh_allocation={} digest={:x}",
+            classifications.len(),
+            bootstrap_reuse,
+            fresh_allocation.len(),
+            Sha256::digest(classification_records.join("\n").as_bytes()),
+        );
+        let mut selected_graph_ids = Vec::new();
+        let mut selected_root_ids = Vec::new();
+        if fresh_allocation.is_empty() {
+            match probe_avm1_subset(&graph, None, false) {
+                Avm1SubsetProbe::Found {
+                    root,
+                    nodes,
+                    edges,
+                    alias_targets,
+                    back_edges,
+                    } => {
+                        let selected_paths = nodes
+                            .iter()
+                        .map(|(id, path, _, _, _)| {
+                            format!("{}|{}|{:?}", id, path, classification_by_id.get(id))
+                        })
+                        .collect::<Vec<_>>();
+                    println!(
+                        "avm1_unresolved_none_closure=absent fallback_root={} node_count={} edge_count={} alias_targets={alias_targets:?} back_edges={back_edges:?} paths={selected_paths:?}",
+                        root,
+                        nodes.len(),
+                        edges.len(),
+                    );
+                    assert_eq!(root, 2);
+                    selected_root_ids.push(root);
+                    selected_graph_ids.extend(nodes.iter().map(|(id, _, _, _, _)| *id));
+                    assert_eq!(nodes.len(), 16);
+                    assert_eq!(edges.len(), 31);
+                    assert_eq!(alias_targets, vec![2, 4]);
+                    assert_eq!(back_edges.len(), 6);
+                }
+                Avm1SubsetProbe::Blocked { reason, .. } => {
+                    panic!("fallback bootstrap closure is blocked: {reason}");
+                }
+            }
+        } else {
+            match probe_avm1_subset(&graph, Some(&fresh_allocation), true) {
+                Avm1SubsetProbe::Found {
+                    root,
+                    nodes,
+                    edges,
+                    alias_targets,
+                    back_edges,
+                    } => {
+                        let selected_paths = nodes
+                            .iter()
+                        .map(|(id, path, _, _, _)| {
+                            format!("{}|{}|{:?}", id, path, classification_by_id.get(id))
+                        })
+                        .collect::<Vec<_>>();
+                    println!(
+                        "avm1_unresolved_none_closure=found root={} node_count={} edge_count={} alias_targets={alias_targets:?} back_edges={back_edges:?} paths={selected_paths:?}",
+                        root,
+                        nodes.len(),
+                        edges.len(),
+                    );
+                    assert!(!alias_targets.is_empty());
+                    assert!(!back_edges.is_empty());
+                    assert!(nodes.iter().any(|(id, _, _, _, _)| fresh_allocation.contains(id)));
+                    selected_root_ids.push(root);
+                    selected_graph_ids.extend(nodes.iter().map(|(id, _, _, _, _)| *id));
+                }
+                Avm1SubsetProbe::Blocked {
+                    examined_roots,
+                    reason,
+                    dependencies,
+                } => {
+                    println!(
+                        "avm1_unresolved_none_closure=blocked examined_roots={} reason={} dependencies={dependencies:?}",
+                        examined_roots,
+                        reason,
+                    );
+                    panic!("actual unresolved None alias/cycle subset is blocked: {reason}");
+                }
+            }
+        }
+        drop(classification_candidate);
+        assert!(!classification_cleanup.is_alive());
+
+        assert_eq!(selected_graph_ids.len(), 16);
+        assert_eq!(selected_root_ids, vec![2]);
+        let selected_graph = {
+            let source = player.lock().expect("Ruffle player lock");
+            source
+                .checkpoint_capture_avm1_graph_subset(
+                    &graph,
+                    &selected_graph_ids,
+                    &selected_root_ids,
+                    &bindings,
+                    true,
+                )
+                .expect("actual root-2 subset must capture passively")
+        };
+        assert_eq!(selected_graph.node_count(), 16);
+        assert_eq!(selected_graph.root_binding_count(), 1);
+        assert_eq!(selected_graph.property_data_edge_count(), 31);
+        assert_eq!(selected_graph.accessor_edge_count(), 0);
+        assert_eq!(selected_graph.weak_entry_count(), 0);
+        println!(
+            "avm1_selected_graph root_seed_ids={selected_root_ids:?} nodes={} data_edges={} accessors={} weak={} scalar_strings={:?}",
+            selected_graph.node_count(),
+            selected_graph.property_data_edge_count(),
+            selected_graph.accessor_edge_count(),
+            selected_graph.weak_entry_count(),
+            selected_graph.scalar_string_receipt(),
+        );
+
+        let candidate = ruffle_core::checkpoint_bootstrap::CheckpointCandidate::new(source_config)
+            .expect("candidate bootstrap must be source-free");
+        assert_eq!(candidate.config(), source_config);
+        let before_candidate = candidate.state();
+        let cleanup = candidate.cleanup_token();
+        let handle = candidate
+            .restore_avm1_graph(&selected_graph, &bindings)
+            .expect("actual root-2 subset must restore in a fresh candidate");
+        assert_eq!(handle.normalized_receipt(), &selected_graph);
+        assert!(handle.state().source_free());
+        assert_eq!(
+            before_candidate.interner_state(),
+            handle.state().interner_state()
+        );
+        assert!(handle.guard_receipt().is_zero());
+        assert_eq!(
+            handle.candidate_host_configuration(),
             ruffle_core::checkpoint_bootstrap::CheckpointHostConfiguration::default()
         );
-        let cleanup = candidate.cleanup_token();
-        drop(candidate);
+        drop(handle);
         assert!(!cleanup.is_alive(), "candidate guard ownership must be released");
 
         let after_receipt = {
