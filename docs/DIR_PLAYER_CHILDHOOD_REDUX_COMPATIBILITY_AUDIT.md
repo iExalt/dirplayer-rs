@@ -6,6 +6,11 @@ user-deferred. S4–S7 were reassessed against the current headless title worklo
 and retain their specialized backends for the concrete reasons below. These
 retention decisions do not claim those migrations were implemented.
 
+Next selected architecture work: [durable runtime save states](DIR_PLAYER_SAVE_STATE_PLAN.md).
+The user selected a three-hour qualification block before implementation, with
+real Spybot/Flash/active-audio fresh-process restoration as the first milestone.
+The smaller destination-port implementation is paused pending that qualification.
+
 ## Action plan: production headless Bevy scheduling
 
 Decision recorded 2026-09-21 using the agentic-workflow skill. The user selected
