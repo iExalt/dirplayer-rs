@@ -19,6 +19,7 @@ pub use crate::player::testing_shared::{SnapshotOutput, TestHarness};
 use crate::player::{
     PlayerVMExecutionItem,
     commands::{PlayerVMCommand, run_command_loop},
+    allocator::ScriptInstanceAllocatorTrait,
     host_events::{NativePlayerNotification, NativePlayerNotificationSink, NativePlayerNotificationSinkRef},
     ownership::OwnerKey,
     session::{
@@ -153,6 +154,41 @@ pub(crate) struct NativeInputSpriteObservation {
     pub(crate) sprite: i16,
     pub(crate) member_ref: Option<(u32, u32)>,
     pub(crate) member_name: Option<String>,
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) struct NativeSpriteGeometryObservation {
+    pub(crate) draw_order: usize,
+    pub(crate) sprite: i16,
+    pub(crate) name: String,
+    pub(crate) member_ref: Option<(u32, u32)>,
+    pub(crate) member_name: Option<String>,
+    pub(crate) member_type: Option<String>,
+    pub(crate) member_text: Option<String>,
+    pub(crate) behavior_instances: Vec<NativeBehaviorObservation>,
+    pub(crate) visible: bool,
+    pub(crate) puppet: bool,
+    pub(crate) loc: [i32; 3],
+    pub(crate) size: [i32; 2],
+    pub(crate) rect: [i32; 4],
+    pub(crate) ink: i32,
+    pub(crate) blend: i32,
+    pub(crate) rotation: f64,
+    pub(crate) skew: f64,
+    pub(crate) stretch: i32,
+    pub(crate) entered: bool,
+    pub(crate) exited: bool,
+    pub(crate) has_size_tweened: bool,
+    pub(crate) has_size_changed: bool,
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) struct NativeBehaviorObservation {
+    pub(crate) instance_id: u32,
+    pub(crate) script_ref: Option<(u32, u32)>,
+    pub(crate) script_name: Option<String>,
+    pub(crate) script_type: Option<String>,
+    pub(crate) begin_sprite_called: Option<bool>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -709,6 +745,108 @@ impl TestPlayer {
         if !self.runtime.owner_valid() {
             return Err(crate::player::ScriptError::new(
                 "native input inspection owner changed".to_owned(),
+            ));
+        }
+        Ok(observation)
+    }
+
+    pub(crate) fn native_sprite_geometry_quiet(
+        &self,
+    ) -> Result<Vec<NativeSpriteGeometryObservation>, crate::player::ScriptError> {
+        if !self.runtime.owner_valid() {
+            return Err(crate::player::ScriptError::new(
+                "native sprite geometry inspection owner is stale".to_owned(),
+            ));
+        }
+        let observation = self
+            .runtime
+            .with_context(|context| {
+                let player = context.player;
+                player
+                    .movie
+                    .score
+                    .get_sorted_channels(player.movie.current_frame)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(draw_order, channel)| {
+                        let sprite = &channel.sprite;
+                        let member_ref = sprite.member.clone();
+                        let member = member_ref.as_ref().and_then(|member_ref| {
+                            player
+                                .movie
+                                .cast_manager
+                                .find_member_by_ref(member_ref)
+                        });
+                        let member_name = member.map(|member| member.name.clone());
+                        let member_type = member.map(|member| member.member_type.type_string().to_owned());
+                        let member_text = member.and_then(|member| match &member.member_type {
+                            crate::player::cast_member::CastMemberType::Field(field) => Some(field.text.clone()),
+                            crate::player::cast_member::CastMemberType::Text(text) => Some(text.text.clone()),
+                            crate::player::cast_member::CastMemberType::Button(button) => Some(button.field.text.clone()),
+                            _ => None,
+                        });
+                        let behavior_instances = sprite
+                            .script_instance_list
+                            .iter()
+                            .map(|instance_ref| {
+                                let instance = player.allocator.get_script_instance_opt(instance_ref);
+                                let script_ref = instance.map(|instance| {
+                                    (instance.script.cast_lib as u32, instance.script.cast_member as u32)
+                                });
+                                let script_member = instance.and_then(|instance| {
+                                    player.movie.cast_manager.find_member_by_ref(&instance.script)
+                                });
+                                NativeBehaviorObservation {
+                                    instance_id: instance_ref.id(),
+                                    script_ref,
+                                    script_name: script_member.map(|member| member.name.clone()),
+                                    script_type: script_member
+                                        .and_then(|member| member.member_type.as_script())
+                                        .map(|script| format!("{:?}", script.script_type)),
+                                    begin_sprite_called: instance.map(|instance| instance.begin_sprite_called),
+                                }
+                            })
+                            .collect();
+                        let rect =
+                            crate::player::score::get_concrete_sprite_rect(player, sprite);
+                        NativeSpriteGeometryObservation {
+                            draw_order,
+                            sprite: sprite.number as i16,
+                            name: sprite.name.clone(),
+                            member_ref: member_ref
+                                .map(|member_ref| {
+                                    (member_ref.cast_lib as u32, member_ref.cast_member as u32)
+                                }),
+                            member_name,
+                            member_type,
+                            member_text,
+                            behavior_instances,
+                            visible: sprite.visible,
+                            puppet: sprite.puppet,
+                            loc: [sprite.loc_h, sprite.loc_v, sprite.loc_z],
+                            size: [sprite.width, sprite.height],
+                            rect: [rect.left, rect.top, rect.right, rect.bottom],
+                            ink: sprite.ink,
+                            blend: sprite.blend,
+                            rotation: sprite.rotation,
+                            skew: sprite.skew,
+                            stretch: sprite.stretch,
+                            entered: sprite.entered,
+                            exited: sprite.exited,
+                            has_size_tweened: sprite.has_size_tweened,
+                            has_size_changed: sprite.has_size_changed,
+                        }
+                    })
+                    .collect()
+            })
+            .ok_or_else(|| {
+                crate::player::ScriptError::new(
+                    "native sprite geometry inspection owner changed".to_owned(),
+                )
+            })?;
+        if !self.runtime.owner_valid() {
+            return Err(crate::player::ScriptError::new(
+                "native sprite geometry inspection owner changed".to_owned(),
             ));
         }
         Ok(observation)

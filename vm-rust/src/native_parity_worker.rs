@@ -790,6 +790,44 @@ impl Worker {
                     "hovered_sprites": state.hovered_sprites.into_iter().map(sprite_json).collect::<Vec<_>>(),
                 })
             }
+            "sprite_geometry" => {
+                let geometry = player
+                    .native_sprite_geometry_quiet()
+                    .map_err(runtime_error)?;
+                json!({
+                    "session": self.session,
+                    "sprites": geometry.into_iter().map(|sprite| json!({
+                        "draw_order": sprite.draw_order,
+                        "sprite": sprite.sprite,
+                        "name": sprite.name,
+                        "member_ref": sprite.member_ref,
+                        "member_name": sprite.member_name,
+                        "member_type": sprite.member_type,
+                        "member_text": sprite.member_text,
+                        "behavior_instances": sprite.behavior_instances.into_iter().map(|behavior| json!({
+                            "instance_id": behavior.instance_id,
+                            "script_ref": behavior.script_ref,
+                            "script_name": behavior.script_name,
+                            "script_type": behavior.script_type,
+                            "begin_sprite_called": behavior.begin_sprite_called,
+                        })).collect::<Vec<_>>(),
+                        "visible": sprite.visible,
+                        "puppet": sprite.puppet,
+                        "loc": sprite.loc,
+                        "size": sprite.size,
+                        "rect": sprite.rect,
+                        "ink": sprite.ink,
+                        "blend": sprite.blend,
+                        "rotation": sprite.rotation,
+                        "skew": sprite.skew,
+                        "stretch": sprite.stretch,
+                        "entered": sprite.entered,
+                        "exited": sprite.exited,
+                        "has_size_tweened": sprite.has_size_tweened,
+                        "has_size_changed": sprite.has_size_changed,
+                    })).collect::<Vec<_>>(),
+                })
+            }
             _ if path.starts_with("globals") => {
                 let name = path.strip_prefix("globals.").ok_or_else(|| {
                     error(
