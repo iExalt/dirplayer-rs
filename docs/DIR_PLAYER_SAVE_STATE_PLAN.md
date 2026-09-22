@@ -2,15 +2,18 @@
 
 Status: **Q0 source audit and the accepted B1 source-backed design publication
 completed 2026-09-21; the full actual-profile B2 live census and matched-control
-continuation passed on 2026-09-22 with reproducibly pinned source/config, while
-fresh-Player restore remains unimplemented and unqualified. C1 and C2 remain
+continuation passed on 2026-09-22 with reproducibly pinned source/config. The
+accepted [R1 bootstrap prerequisite](checkpoints/save-state-r1-20260922/graph/R1_BOOTSTRAP_RECEIPT.md)
+now constructs a private source-free Player and resolves all 1,854 actual
+frame-371 AVM1 native builtins, while mutable fresh-Player restore remains
+unimplemented and unqualified. C1 and C2 remain
 unimplemented.** See the [Q0 qualification report](Q0_SAVE_STATE_QUALIFICATION.md),
 [B1 graph-boundary design](B1_RUFFLE_BOUNDARY_DESIGN.md), [B1 asset/AVM
 inventory](checkpoints/save-state-b1-20260921/assets/SPYBOT_ASSET_INVENTORY.md),
 and [B2 live census](checkpoints/save-state-b2-20260921/graph/B2_GRAPH_CENSUS_REPORT.md).
-The conditional fresh-Player allocate/fixup/rehydration experiment retains a
-preliminary, not measured, 2–4 active-day estimate. It is not implicitly
-approved, and it is not a full C1 estimate. Decisions were made with
+The bounded fresh-Player allocate/fixup/rehydration experiment was subsequently
+approved and is in progress one component at a time. Its preliminary, not
+measured, 2–4 active-day estimate is not a full C1 estimate. Decisions were made with
 agentic-workflow on 2026-09-21.
 The [Spybot next-screen spike](../../childhood-redux/docs/SPYBOT_NEXT_SCREEN_SPIKE_PLAN.md) is an independent
 parallel workstream; it does not wait for checkpoint support.
@@ -231,7 +234,11 @@ an untrusted-input claim. The exact gc-arena and Ruffle commits and both Cargo
 locks are reproducibly pinned. Fresh-Player restore remains unimplemented, so
 this evidence does not qualify C1. The conditional fresh-Player experiment has
 a preliminary, not measured, 2–4 active-day estimate and is not implicitly
-approved.
+approved at the time of B2 publication. The user subsequently approved the
+bounded experiment; its accepted R1 bootstrap prerequisite is recorded in the
+[R1 receipt](checkpoints/save-state-r1-20260922/graph/R1_BOOTSTRAP_RECEIPT.md).
+R1 does not restore mutable graph state or qualify continuation, a fresh worker,
+Director audio, or C1.
 
 Q0 was a bounded block, not a promise to build full save states in three hours.
 It used one component-level discovery item under subagent-pair-program.
@@ -344,9 +351,13 @@ Cross-runtime-upgrade fixture migration remains a separate deferred requirement.
   23 roots, eight Library fields, named strong/weak categories, mutable Stage DTO
   rejection, and locked dependency reproduction; this remains diagnostic evidence
   and does not qualify C1.
-- [ ] Run the conditional fresh-Player allocate/fixup/rehydration experiment;
-  preliminary, not measured, 2–4 active days, not implicitly approved and not a
-  full C1 estimate.
+- [x] Begin the approved bounded fresh-Player experiment and accept R1: an
+  isolated source-free Player plus logical resolution of all 1,854 actual
+  frame-371 AVM1 native builtins, with no mutable graph restoration.
+- [ ] Complete the approved R2 mutable AVM1 plain/script-object capture,
+  allocation, and fixup component; display/timeline/resources and continuation
+  remain subsequent components. The experiment retains a preliminary, not
+  measured, 2–4 active-day estimate and is not a full C1 estimate.
 - [ ] Implement and accept C1; commit/push accepted milestones during execution.
 - [ ] Merge accepted work back to `dev` and verify interaction with the parallel next-screen lane.
 - [ ] Reassess C2 independently of the destination port.

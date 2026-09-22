@@ -2,8 +2,9 @@
 
 Status: **B1 complete as a source-backed design investigation; the full
 actual-profile B2 census and matched-control continuation passed on 2026-09-22
-with reproducibly pinned source/config, while fresh-Player restore remains
-unimplemented and unqualified**.
+with reproducibly pinned source/config. The accepted R1 prerequisite now
+constructs a private source-free Player and resolves the actual native builtin
+set, while mutable fresh-Player restore remains unimplemented and unqualified**.
 
 This document defines the smallest source-backed boundary that could support a
 controlled C1 checkpoint. It does not implement a codec, change Ruffle, or
@@ -12,6 +13,15 @@ distinguish accepted asset facts, the observed runtime endpoint, static source
 possibilities, and facts that remain pending the first graph-slice experiment.
 
 ## B2 follow-up — 2026-09-22
+
+The later accepted [R1 bootstrap receipt](checkpoints/save-state-r1-20260922/graph/R1_BOOTSTRAP_RECEIPT.md)
+records a private no-movie Player and logical resolution of all 1,854 actual
+frame-371 AVM1 native builtins without raw pointer export or source execution.
+R1 is a prerequisite only: it does not restore mutable object properties,
+prototypes, aliases/cycles, display/timeline state, resources, or continuation.
+The user subsequently approved the bounded fresh-Player experiment one
+component at a time; that later approval does not change B1 or B2's historical
+scope.
 
 The accepted [B2 graph census report](checkpoints/save-state-b2-20260921/graph/B2_GRAPH_CENSUS_REPORT.md)
 records complete coverage for the trusted actual frame-371 profile: all 23

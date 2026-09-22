@@ -2,9 +2,11 @@
 
 Audit date: **2026-09-22**
 
-Status: **eligible and reproducibly pinned census for the actual frame-371 opening/title profile; fresh-Player restore remains unimplemented and unqualified**.
+Status: **eligible and reproducibly pinned census for the actual frame-371 opening/title profile; the later R1 bootstrap prerequisite passed, while mutable fresh-Player restore remains unimplemented and unqualified**.
 
 This B2 component completed a bounded, read-only census of the accepted Spybot AVM1 opening/title state. It does not implement a codec, allocate/fixup/rehydration, durable storage, Director audio state, or production migration. Eligibility applies only to the observed state and exact pinned build/asset identity. A nonempty variant that was empty here must still fail closed until its payload is classified.
+
+The later accepted [R1 bootstrap receipt](../../save-state-r1-20260922/graph/R1_BOOTSTRAP_RECEIPT.md) records source-free private Player construction and logical resolution of all 1,854 actual native builtins. R1 does not restore mutable graph state or retroactively expand B2's census-only result.
 
 The parent census milestone is based on `425af023646653069a7c0bcb18b8040445deebb5` on `save-state`. The published Ruffle census commit is `83c6d65f27a861e7adad3e56837a4fa481ae17fe` on `b2-graph-census`, whose pinned upstream base is `fd5d8dda1cc7b8cf91de141a48574750fa8f86b2`. Its manifest and lockfile pin `https://github.com/iExalt/gc-arena.git` at `682dc66ff12738cd8f3c3c8f268f10c203366240`. The parent `vm-rust/Cargo.lock` carries the same exact source.
 

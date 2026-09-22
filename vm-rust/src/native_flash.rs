@@ -1579,6 +1579,125 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires PARITY_OPENING_ANIM_SWF pointing to the verified opening_anim SWF"]
+    fn native_flash_checkpoint_bootstrap_resolves_actual_frame_371_bindings() {
+        let path = std::env::var_os("PARITY_OPENING_ANIM_SWF")
+            .expect("PARITY_OPENING_ANIM_SWF must point to the verified opening_anim SWF");
+        let bytes = std::fs::read(&path).expect("verified opening_anim SWF must be readable");
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&bytes)),
+            "d964a7e594109f8923004333e129f9c655fabde0533a4b4bf74dce238bf3215f",
+            "opening_anim bytes must match the recovered embedded SWF"
+        );
+
+        fn census_receipt(
+            mut census: ruffle_core::CheckpointCensus,
+            frame: Option<u16>,
+            callback_fifo: usize,
+        ) -> (String, Option<u16>, usize) {
+            census.host_fifo_depth = Some(callback_fifo);
+            (format!("{census}"), frame, callback_fifo)
+        }
+
+        let callbacks = std::sync::Arc::new(std::sync::Mutex::new(
+            super::NativeFlashCallbackBuffer::default(),
+        ));
+        let (player, baseline) = NativeFlashHost::build_player_with_callbacks_and_baseline(
+            &bytes,
+            650,
+            420,
+            0,
+            callbacks.clone(),
+            1,
+            1,
+            1,
+            1,
+        )
+        .expect("verified opening_anim SWF must load in Ruffle");
+
+        let (source_config, bindings, before_receipt) = {
+            let mut source = player.lock().expect("Ruffle player lock");
+            NativeFlashHost::apply_seek(&mut source, 371, false);
+            assert_eq!(source.current_frame(), Some(371));
+            let frame = source.current_frame();
+            let callback_fifo = callbacks
+                .lock()
+                .expect("native Flash callback buffer lock")
+                .callbacks
+                .len();
+            let census = source.checkpoint_census_with_baseline(Some(&baseline));
+            let bindings = census.checkpoint_builtin_bindings();
+            let source_config = source.checkpoint_bootstrap_config();
+            let receipt = census_receipt(census, frame, callback_fifo);
+            (source_config, bindings, receipt)
+        }; // Release the source player lock before constructing any candidate.
+
+        assert_eq!(bindings.len(), 1_854);
+        assert_eq!(
+            bindings
+                .iter()
+                .filter(|binding| binding.function_kind() == "Native")
+                .count(),
+            1_342
+        );
+        assert_eq!(
+            bindings
+                .iter()
+                .filter(|binding| binding.function_kind() == "TableNative")
+                .count(),
+            512
+        );
+        let graph_ids = bindings
+            .iter()
+            .map(ruffle_core::checkpoint_bootstrap::CheckpointBuiltinBinding::graph_id)
+            .collect::<std::collections::HashSet<_>>();
+        let paths = bindings
+            .iter()
+            .map(|binding| binding.path().to_owned())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(graph_ids.len(), bindings.len());
+        assert_eq!(paths.len(), bindings.len());
+        assert!(bindings.iter().all(|binding| {
+            matches!(binding.function_kind(), "Native" | "TableNative")
+                && binding.path().starts_with("root.")
+        }));
+
+        let mut candidate = ruffle_core::checkpoint_bootstrap::CheckpointCandidate::new(
+            source_config,
+        )
+        .expect("candidate bootstrap must be source-free");
+        assert_eq!(candidate.config(), source_config);
+        let resolution = candidate
+            .resolve_builtin_bindings(&bindings)
+            .expect("the complete frame-371 binding set must resolve atomically");
+        assert_eq!(resolution.handles().len(), bindings.len());
+        assert_eq!(resolution.exact_match_count(), bindings.len());
+        assert_eq!(resolution.alias_reuse_count(), 0);
+        assert!(candidate.state().source_free());
+        assert!(candidate.guard_receipt().is_zero());
+        assert_eq!(
+            candidate.host_configuration(),
+            ruffle_core::checkpoint_bootstrap::CheckpointHostConfiguration::default()
+        );
+        let cleanup = candidate.cleanup_token();
+        drop(candidate);
+        assert!(!cleanup.is_alive(), "candidate guard ownership must be released");
+
+        let after_receipt = {
+            let source = player.lock().expect("Ruffle player lock");
+            let frame = source.current_frame();
+            let callback_fifo = callbacks
+                .lock()
+                .expect("native Flash callback buffer lock")
+                .callbacks
+                .len();
+            let census = source.checkpoint_census_with_baseline(Some(&baseline));
+            census_receipt(census, frame, callback_fifo)
+        };
+        assert_eq!(before_receipt, after_receipt);
+    }
+
+    #[test]
     fn native_flash_callback_fifo_is_once_for_split_and_combined_advance() {
         let path = std::env::var_os("PARITY_OPENING_ANIM_SWF")
             .expect("PARITY_OPENING_ANIM_SWF must point to the verified opening_anim SWF");
