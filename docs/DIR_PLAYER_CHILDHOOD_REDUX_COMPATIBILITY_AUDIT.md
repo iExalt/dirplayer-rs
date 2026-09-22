@@ -1,5 +1,11 @@
 # DirPlayer / Ruffle / childhood-redux compatibility audit and action plan
 
+Current outcome: **S1 production headless Bevy scheduling is accepted and
+published; S3.0 ownership qualification is accepted.** S2 desktop/input is
+user-deferred. S4–S7 were reassessed against the current headless title workload
+and retain their specialized backends for the concrete reasons below. These
+retention decisions do not claim those migrations were implemented.
+
 ## Action plan: production headless Bevy scheduling
 
 Decision recorded 2026-09-21 using the agentic-workflow skill. The user selected
@@ -196,7 +202,7 @@ expand S1 into audio/render migration or relax its acceptance criteria.
 | S4 — Images/assets | Bevy manages host assets/readiness while source lookup remains faithful | After lifecycle/service boundaries settle; qualify paths/hashes, casts, palettes, exact decoded pixels, and deterministic readiness. |
 | S5 — Audio ownership | A Bevy integration expresses Director/Ruffle audio semantics | Preserve S1 audio evidence; first probe admission order, channels, looping, pan/gain/rate, and fixed-position PCM. Shared Rodio is insufficient. |
 | S6 — Rendering/compositing | Bevy owns actual source drawing operations | First select an operation-level workload for inks/alpha, ordering, masks, transforms, filters, or vectors; require exact RGBA and independent source state. Finished-image upload is not this milestone. |
-| S7 — Text/fonts | Source text metrics and glyph rendering are qualified | Establish the missing cast-font path and a metric oracle; compare embedded/fallback metrics, positions, and exact RGBA before adoption. |
+| S7 — Text/fonts | Source text metrics and glyph rendering are qualified | Select a real source text workload and metric oracle; PFR cast loading already exists. Qualify authored metadata where missing, then compare embedded/fallback metrics, positions, and exact RGBA before adoption. |
 
 These are sequencing priorities, not a requirement to implement every earlier
 subsystem before investigating a later one. Detail only the next selected item
@@ -216,9 +222,9 @@ their own outcome and acceptance decisions; S1 is not a proxy for any of them.
 - **Proven:** S1 production scheduling integration, protocol/lifecycle edges,
   source callbacks/retirement, and exact menu RGBA/PCM under the final campaign.
 - **Unproven:** later migration milestones and the explicit out-of-S1 capabilities.
-- **Next action:** reassess S4 asset/readiness ownership. The user deferred
-  desktop/input after S2 discovery; S3.0 qualified the existing service-lifetime
-  boundary without identifying a production service move.
+- **Next action:** retain the accepted headless path. Reopen a retained boundary
+  when a source-qualified workload requires it, using the explicit triggers below.
+  S2 is user-deferred; S3.0 found no service leak requiring production refactoring.
 - **Authority:** the user subsequently authorized implementation using
   `subagent-pair-program` and milestone commits/pushes. Assign component-level
   items, retain the stated acceptance criteria, and assess later milestones at
@@ -301,6 +307,53 @@ experiment found no concrete service leak requiring production refactoring;
 retain the existing admission boundary and revisit it when production in-process
 multi-session support becomes a selected outcome. S3.0 is complete; broader S3
 multi-session support is deferred, not silently certified.
+
+### Execution checkpoint: later-boundary reassessment
+
+The current headless menu outcome is delivered. Each retained boundary below is
+an explicit exception to direct Bevy adoption, supported by source inspection or
+the representative operation check; none is marked as a completed migration.
+
+| Boundary | Current decision and evidence | Trigger and next bounded check |
+| --- | --- | --- |
+| S4 assets/readiness | Retain the existing source-load transaction. The worker validates contained paths, DCR/cast hashes and exact alias sets; TestPlayer requires all casts ready before initialization and publishes the player only after successful init. There are no independent packaged host assets to hand to AssetServer. Adding a second cache/readiness layer would duplicate source policy. | A desktop host gains packaged UI assets, or measured multi-session loading cost becomes material. Compare one real load, including invalid-input rejection and exact initial source/RGBA evidence, before changing ownership. |
+| S5 audio | Retain the deterministic Director mixer. Installed Bevy audio uses a private device output and provides no offline-output injection/capture API. Its generic playback settings do not replace Director finite loops, queues, admission order, channel completion, pan/rate and sample timing. An offline integration would require a Bevy extension or duplicate its private playback implementation. | Required desktop playback or a real embedded-SWF sound. For the latter, qualify one audible SWF with the existing deterministic Ruffle AudioMixer approach, exact split/combined PCM timing, independent sound lifetime, and owner retirement. Estimated 1–2 days; not started. |
+| S6 rendering | Retain CPU Director/Ruffle rendering for this menu. Actual base/hover/down observations show a finished embedded Flash raster plus opaque source bitmap copies; the authoring Button is culled. Uploading those outputs does not establish meaningful source-operation adoption. The proposed day-long alpha/ink GPU probe was rejected before implementation. | A visible source operation requiring ink/alpha/mask/vector handling. First witness its real inputs/order, then probe one operation with exact RGBA and independent source behavior; no broad renderer replacement by default. |
+| S7 text/fonts | Retain source text/font implementations. PFR Font casts are parsed and loaded today; the audit's private unused `load_font` placeholder was misleading. The real metadata gap is non-PFR XMedia authored font/size parsing. Bevy's installed FontLoader accepts TTF/OTF, while the source PFR pipeline is different. Current visible menu has no live Director text operand. | A visible original Text/Field/Font workload with font payload/hash, family/style/size, metrics, bounds/wrapping and ink. Establish authored metadata and metric/glyph-position oracle before a PFR/Bevy font or atlas experiment. |
+
+Relevant inspected implementation boundaries:
+
+- S4: [worker source qualification and initialization](../vm-rust/src/native_parity_worker.rs),
+  [TestPlayer cast readiness](../vm-rust/src/player/testing.rs), and
+  [owner-scoped ordered load application](../vm-rust/src/player/session.rs).
+- S5: [Director audio semantics](../vm-rust/src/player/native_audio.rs),
+  [controlled sample mixing](../vm-rust/src/player/session.rs), and
+  [childhood-redux's custom headless audio path](../../childhood-redux/workspace/spybot/src/parity_worker.rs).
+  Shared Rodio primitives and S1 PCM equality do not prove Bevy device-sink parity.
+- S6: [retained title operand census](checkpoints/s6-title-operand-census-20260921.json).
+  The first base gate intentionally failed after witnessing an opaque bitmap.
+  A later sandbox GPU error was superseded by a successful elevated census of
+  all three button states. Channel 7's observed cull predicate leaves channels
+  1 and 6; no separate draw-order hook was added. Temporary observation hooks
+  were removed; the receipt retains transcribed observations and binary identity,
+  not a reproducible checked-in test. No Bevy render probe ran.
+- S7: [PFR and XMedia parsing](../vm-rust/src/player/cast_member.rs),
+  [font-cast loading](../vm-rust/src/player/cast_manager.rs), and
+  [font lookup/rasterization](../vm-rust/src/player/font/mod.rs). Embedded SWF
+  fonts remain independently implemented by [Ruffle's library](../ruffle/core/src/library.rs).
+
+**Additional capability gap:** `NativeFlashHost` constructs its embedded
+[PlayerBuilder](../vm-rust/src/native_flash.rs) without an audio backend, so
+[Ruffle defaults to NullAudioBackend](../ruffle/core/src/player.rs). The accepted
+menu PCM proves Director audio, not arbitrary audio embedded in SWFs. No claim
+is made that the qualified opening movie requires such audio. The sibling
+[native-Ruffle harness](../../childhood-redux/tools/parity/native-ruffle/src/main.rs)
+provides a concrete deterministic mixer reference when that capability is needed.
+
+No additional asset/audio/render/font dependency or production change was made
+solely to claim adoption. Browser retirement, desktop delivery, arbitrary movies,
+gameplay, physical-display fidelity, production in-process sessions, and the
+embedded-SWF audio gap remain outside the accepted headless milestone.
 
 ## Completed audit and probe record
 
@@ -474,8 +527,12 @@ decoded pixel comparison at a controlled readiness boundary.
 
 **Observed.** The current childhood-redux menu uses packaged image assets, so it
 does not qualify source text layout. DirPlayer has a custom PFR/system-font
-pipeline; its font manager explicitly reports that actual cast font loading is
-not implemented in one path ([`vm-rust/src/player/font/mod.rs:523-546`](../vm-rust/src/player/font/mod.rs#L523-L546)).
+pipeline. Follow-up S7 inspection corrected the initial inference from a private,
+unused font-loading placeholder: PFR Font casts are parsed by
+[`cast_member.rs`](../vm-rust/src/player/cast_member.rs) and loaded by
+[`CastManager::load_fonts_into_manager`](../vm-rust/src/player/cast_manager.rs).
+The narrower known gap is authored font/size metadata for non-PFR XMedia text,
+which currently uses default values pending proper Section 7 parsing.
 The embedded Ruffle core retains font descriptors and embedded-font lookup
 ([`ruffle/core/src/font.rs:20-80`](../ruffle/core/src/font.rs#L20-L80),
 [`ruffle/core/src/library.rs:278-287`](../ruffle/core/src/library.rs#L278-L287)).
@@ -486,7 +543,8 @@ it is not the embedded DirPlayer font owner.
 
 **Proposed owner/API.** Keep Director/Ruffle font metrics, fallback, shaping,
 embedded fonts, glyph placement, and line layout. A Bevy text extension is
-credible only after a metric oracle and cast-font loading path exist.
+credible only after a representative source text workload, qualified authored
+metadata, and metric oracle exist; PFR cast loading itself is already present.
 
 **Preserved semantics.** Advances, baseline and line height, wrapping, fallback,
 embedded bitmap/vector font behavior, and source field metrics.

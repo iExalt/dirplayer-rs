@@ -1,0 +1,231 @@
+{
+  "schema": "s6-title-operand-census/v1",
+  "dirplayer_head": "bb4ff3f8624c83a102f35cb60c90f93ca9337fc6",
+  "resource_root": "/Users/clliaw/Projects/childhood-redux/resources/spybot",
+  "resource_hashes": {
+    "dcr": {
+      "path": "/Users/clliaw/Projects/childhood-redux/resources/spybot/spybot-nightfall-incident.dcr",
+      "sha256": "ddf24b667a8d014856d9db42e1658cbf9714847f1cadc2c2c14d21f8e5950c77"
+    },
+    "external_sound_alias_sha256": "bd18e2325e2074a24b86db5a921b873e1f55bd38db7a7646a57eb0d929006035"
+  },
+  "accepted_receipt": {
+    "path": "/Users/clliaw/Projects/childhood-redux/docs/checkpoints/spybot-native-menu-campaign-20260921/repeated-final/concurrent-3/native.json",
+    "dirplayer_revision": "f1df5b682680c7077812695bd99a5a48db279e5e",
+    "worker_sha256": "34a799977629e2059fdb44c5320f5352caf9f4e6db8490615b4fe84e8f1037b2",
+    "base_rgba_sha256": "78f7734afd3c304d2c96daeb1d6155c374bfc01974dafd080a2477f68ac805d3",
+    "base_start_region_sha256": "7a80ce25ed4881b8e9128e599f9d9b5e5704ca2d5eccb68a32c27bfecd5be3dc",
+    "accepted_base_gate": "accepted source observation ended with a deliberate named mismatch after printing observed base fields; its exit 101 is separate from the census attempt"
+  },
+  "initial_base_observation": {
+    "command_text": "SPYBOT_RESOURCE_ROOT=/Users/clliaw/Projects/childhood-redux/resources/spybot mise exec -- cargo test --manifest-path vm-rust/Cargo.toml --lib native_parity_worker::tests::spybot_full_dcr_start_draw_operand_observation --locked --offline -- --ignored --exact --test-threads=1",
+    "exit_status": 101,
+    "exit_interpretation": "deliberate named mismatch after observation",
+    "evidence_form": "stdout captured from a temporary cfg(test) observer and transcribed here; the observer was removed after review",
+    "observation": {
+      "time_us": 2450000,
+      "frame": 6,
+      "label": "start",
+      "score_order": [1, 6, 7],
+      "channel_order_basis": "score_order; post-cull final render order was not established",
+      "channel_6": {
+        "member_ref": [2, 433],
+        "member_name": "but_start_go",
+        "member_type": "Bitmap",
+        "info": {
+          "dimensions": [126, 23],
+          "bit_depth": 8,
+          "use_alpha": false,
+          "registration": [63, 11]
+        },
+        "realized": {
+          "dimensions": [126, 23],
+          "bit_depth": 8,
+          "original_bit_depth": 8,
+          "use_alpha": false,
+          "matte_present": false
+        },
+        "source_rect": [0, 0, 126, 23],
+        "source_rect_basis": "production_bitmap_option_0",
+        "logical_destination_rect": [259, 370, 385, 393],
+        "destination_rect": [259, 370, 385, 393],
+        "ink": 0,
+        "effective_ink": 0,
+        "raw_blend": 100,
+        "effective_blend": 100,
+        "colors": {
+          "color": "rgb(0, 0, 0)",
+          "bg_color": "rgb(255, 255, 255)"
+        },
+        "transforms": {
+          "rotation": 0,
+          "skew": 0,
+          "flip_h": false,
+          "flip_v": false,
+          "stretch": 0,
+          "size_tweened": false
+        },
+        "ink9_mask_involvement": false,
+        "text_or_filmloop": false,
+        "rgba_sha256": "78f7734afd3c304d2c96daeb1d6155c374bfc01974dafd080a2477f68ac805d3"
+      }
+    }
+  },
+  "accepted_input_states": {
+    "hover": {
+      "member_ref": [2, 434],
+      "member_name": "but_start_go_up",
+      "full_frame_rgba_sha256": "68e0ce0fde1663a8f068ba7f4cbf5d57f06add1284c0929450f14e1cbbe9a2e2",
+      "start_region_sha256": "3bcf253c3ed95dac6a53984948ee3a509d13b3f1ca27c883296530989213a951",
+      "operand_params": "unobserved in the accepted campaign receipt; observed by corrected_gpu_attempt"
+    },
+    "down": {
+      "member_ref": [2, 435],
+      "member_name": "but_start_go_down",
+      "full_frame_rgba_sha256": "8bb254f6ca15ff012b459ba2dcd764e253b3e0a53f1fbc8faf4895d66d970a19",
+      "start_region_sha256": "f19cf61c9198ec94560650858cd0a5033cf9ae14c5bfb8ecbf6af5a5e0af1691",
+      "operand_params": "unobserved in the accepted campaign receipt; observed by corrected_gpu_attempt"
+    }
+  },
+  "census_attempt": {
+    "command_text": "SPYBOT_RESOURCE_ROOT=/Users/clliaw/Projects/childhood-redux/resources/spybot mise exec -- cargo test --manifest-path vm-rust/Cargo.toml --lib native_parity_worker::tests::spybot_title_operand_census --locked --offline -- --nocapture --exact --test-threads=1",
+    "exit_status": 101,
+    "status": "superseded_environment_failure",
+    "compile_reached_test": true,
+    "test_binary_sha256": "efa88ce04834a235131e99a20358a4836efda5c306d156c50727757f0440b5c6",
+    "failure_phase": "initialization before temporary census hook observation",
+    "error": "native Ruffle offscreen renderer failed: Ruffle does not support OpenGL on macOS/iOS.",
+    "bevy_gpu_probe": "not run",
+    "observations": []
+  },
+  "corrected_gpu_attempt": {
+    "route": "outside sandbox; direct execution of the already compiled test binary",
+    "command_text": "SPYBOT_RESOURCE_ROOT=/Users/clliaw/Projects/childhood-redux/resources/spybot vm-rust/target/debug/deps/vm_rust-149e480707a4b7b4 native_parity_worker::tests::spybot_title_operand_census --nocapture --exact --test-threads=1",
+    "binary_path": "/Users/clliaw/Projects/dirplayer-rs/vm-rust/target/debug/deps/vm_rust-149e480707a4b7b4",
+    "binary_sha256": "efa88ce04834a235131e99a20358a4836efda5c306d156c50727757f0440b5c6",
+    "exit_status": 0,
+    "test_result": "1 passed; 0 failed; 0 ignored; 0 measured; 765 filtered out",
+    "observed_state_count": 3,
+    "observed": {
+      "common": {
+        "frame": 6,
+        "score_order": [1, 6, 7],
+        "channel_order_basis": "score_order",
+        "channel_1": {
+          "member_type": "Flash",
+          "member_ref": [2, 3],
+          "member_name": "opening_anim",
+          "sprite": {
+            "dimensions": [650, 420],
+            "rect": [0, 0, 650, 420],
+            "ink": 0,
+            "raw_blend": 100,
+            "effective_blend": 100,
+            "rotation": 0.0,
+            "skew": 0.0,
+            "flip_h": false,
+            "flip_v": false,
+            "stretch": 0
+          },
+          "meaningful_source_operand": false
+        },
+        "channel_7": {
+          "member_type": "Button",
+          "member_ref": [2, 392],
+          "member_name": "EDIT LEVEL",
+          "sprite": {
+            "dimensions": [121, 15],
+            "rect": [522, 429, 643, 444],
+            "ink": 0,
+            "raw_blend": 100,
+            "effective_blend": 100,
+            "rotation": 0.0,
+            "skew": 0.0,
+            "flip_h": false,
+            "flip_v": false,
+            "stretch": 0
+          },
+          "button_cull": {
+            "outside_viewport": true,
+            "plain_copy_inputs": true,
+            "result": true
+          },
+          "meaningful_source_operand": false
+        }
+      },
+      "base": {
+        "channel_6": {
+          "member_ref": [2, 433],
+          "member_name": "but_start_go",
+          "bitmap_info": {
+            "dimensions": [126, 23],
+            "reg_point": [63, 11],
+            "bit_depth": 8,
+            "use_alpha": false
+          },
+          "realized_bitmap": {
+            "dimensions": [126, 23],
+            "bit_depth": 8,
+            "original_bit_depth": 8,
+            "use_alpha": false,
+            "matte_present": false
+          },
+          "sprite": {
+            "rect": [259, 370, 385, 393],
+            "ink": 0,
+            "raw_blend": 100,
+            "effective_blend": 100,
+            "rotation": 0.0,
+            "skew": 0.0,
+            "flip_h": false,
+            "flip_v": false,
+            "stretch": 0
+          },
+          "source_rect": "not exposed by the compact census",
+          "colors": "not exposed by the compact census",
+          "size_tweened": "not exposed by the compact census",
+          "meaningful_source_operand": false
+        }
+      },
+      "hover": {
+        "channel_6_member_ref": [2, 434],
+        "channel_6_member_name": "but_start_go_up",
+        "channel_6_operand_params": "same observed opaque 8-bit bitmap dimensions/registration/ink/blend/transform fields as base; source_rect/colors/size_tweened not exposed",
+        "meaningful_source_operand": false
+      },
+      "down": {
+        "channel_6_member_ref": [2, 435],
+        "channel_6_member_name": "but_start_go_down",
+        "channel_6_operand_params": "same observed opaque 8-bit bitmap dimensions/registration/ink/blend/transform fields as base; source_rect/colors/size_tweened not exposed",
+        "meaningful_source_operand": false
+      }
+    },
+    "stdout_summary": "Three JSON observations were printed for base, hover, and down; each reported frame 6, score order [1,6,7], channel 1 opening_anim, channel 6 state-specific Bitmap, and channel 7 EDIT LEVEL with button_cull.result=true."
+  },
+  "source_inference": {
+    "channel_1": {
+      "classification": "accepted Flash host sprite",
+      "production_path": "copies a finished per-sprite frame buffer",
+      "source_reference": "vm-rust/src/rendering.rs:3493-3553",
+      "vector_operand_observed": false,
+      "census_classification": "finished NativeFlashHost frame source; no vector operand is exposed by this census"
+    },
+    "channel_7": "observed Button EDIT LEVEL at [2,392], outside the 650x420 viewport with plain-copy inputs; existing cull predicate returns true, so it is culled",
+    "post_cull_final_order": "score order is [1,6,7]; channel 7 is culled by the observed predicate, leaving [1,6] as the predicate-derived rendered order; no separate draw-order hook was added",
+    "channel_6": "base/hover/down are opaque 8-bit 126x23 Bitmaps with registration [63,11], alpha false, matte absent, ink 0, blend 100, and untransformed; no meaningful alpha/matte/ink9/mask/vector operand was observed"
+  },
+  "source_references": [
+    "vm-rust/src/rendering.rs:1071-1105 native button cull predicate",
+    "vm-rust/src/rendering.rs:2337-2518 native channel draw and bitmap operand paths",
+    "vm-rust/src/rendering.rs:2748-2818 native Button compositor",
+    "vm-rust/src/rendering.rs:3493-3553 finished Flash host frame copy path",
+    "vm-rust/src/native_parity_worker.rs:750-815 wire inspection boundary",
+    "vm-rust/src/native_parity_worker.rs:922-935 capture/snapshot boundary"
+  ],
+  "conclusion": "The bounded current title-menu census found no meaningful alpha/matte/ink/mask/vector source operation across channel 1, channel 7, and channel 6 base/hover/down. Channel 1 is a finished Flash host frame, channel 7 is culled, and channel 6 is an opaque bitmap. The compact hook did not expose source_rect/colors/size_tweened fields, and no broader channel census was attempted.",
+  "limitations": [
+    "The sandbox census exit 101 was an environment failure during normal initialization, not the deliberate named mismatch from the earlier accepted base observation; the corrected outside-sandbox execution supersedes it and passed.",
+    "The temporary cfg(test) census hook was removed after the run; no production source change remains.",
+    "No Bevy GPU probe was run, and no completion claim is made beyond the qualified title-menu evidence."
+  ]
+}
