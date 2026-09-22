@@ -1,63 +1,80 @@
 {
-  "schema": "dirplayer.save-state.b2.graph-census-receipt.v1",
-  "status": "b2-display-slice-passed-full-graph-incomplete",
-  "parent_worktree": "/Users/clliaw/Projects/dirplayer-rs-save-state",
-  "parent_commit": "480430efec6242bf2aaab52e2135db11d35838b6",
-  "parent_branch": "save-state",
-  "ruffle_commit": "fd5d8dda1cc7b8cf91de141a48574750fa8f86b2",
-  "ruffle_base_commit": "fd5d8dda1cc7b8cf91de141a48574750fa8f86b2",
-  "ruffle_child_commit": "6ebf1bcf7c5d26deb83ee4a2b2b8c318b07de3de",
-  "ruffle_branch": "b2-graph-census",
-  "ruffle_trusted_destination": {
-    "url": "https://github.com/iExalt/ruffle.git",
-    "branch": "b2-graph-census",
-    "commit": "6ebf1bcf7c5d26deb83ee4a2b2b8c318b07de3de"
-  },
-  "ruffle_local_origin": "https://github.com/chameleonxxl/ruffle.git",
-  "ruffle_local_origin_preserved": true,
-  "ruffle_local_origin_used_after_review_rejection": false,
+  "schema": "dirplayer.save-state.b2.graph-census-receipt.v3",
+  "audit_date": "2026-09-22",
+  "status": "actual-frame-371-census-eligible-restore-unimplemented",
   "publication": {
-    "status_as_of": "pre-parent-publication-evidence-review",
-    "child_commit": true,
-    "child_push": true,
-    "parent_commit": false,
-    "parent_push": false
-  },
-  "cargo_features": ["deterministic", "audio", "mp3"],
-  "tool_identity": {
-    "config": "mise.toml",
-    "rust": "1.98.1",
-    "target_dir": ".cache/b2-census-target",
-    "command": "PARITY_OPENING_ANIM_SWF=/Users/clliaw/Projects/childhood-redux/.cache/spybot-recovery/embedded-probe/opening_anim.swf CARGO_TARGET_DIR=$PWD/.cache/b2-census-target mise exec -- cargo test --manifest-path vm-rust/Cargo.toml native_flash_checkpoint_census_is_read_only_before_title_continuation --locked -- --ignored --nocapture"
-  },
-  "evidence_log": {
-    "path": "docs/checkpoints/save-state-b2-20260921/graph/display-slice-test.log",
-    "sha256": "4d0dbb169e6bc792ea83e034814c17564c5955d6b9ec9f17bdb10f0fc59df5f2",
-    "raw_stdout_stderr": true,
-    "summary_markers": [
-      "checkpoint census: phase=Idle frame=Some(371) roots=23 library_fields=8 coverage_complete=false",
-      "display_avm1[0..10]",
-      "display_traversal: nodes=11 edges=10 node_budget=10000 edge_budget=50000 complete=true stop_reason=None",
-      "host_fifo_depth=Some(0)",
-      "continuation control: callbacks_equal=true rgba_equal=true",
-      "test result: ok. 1 passed; 0 failed"
+    "complete_census_committed": true,
+    "complete_census_pushed": true,
+    "prior_partial_ruffle_commit": "6ebf1bcf7c5d26deb83ee4a2b2b8c318b07de3de",
+    "checked_in_clean_checkout_reproducible": true,
+    "trusted_gc_arena_repository_exists": true,
+    "trusted_gc_arena_lookup": {
+      "repository": "iExalt/gc-arena",
+      "date": "2026-09-22",
+      "result": "public fork created and verified",
+      "parent": "kyren/gc-arena",
+      "visibility": "PUBLIC",
+      "license": "CC0-1.0 metadata; CC0 and MIT license files retained"
+    },
+    "required_order": [],
+    "gc_arena_commit": "682dc66ff12738cd8f3c3c8f268f10c203366240",
+    "ruffle_commit": "83c6d65f27a861e7adad3e56837a4fa481ae17fe",
+    "publication_order_completed": [
+      "gc-arena helper",
+      "Ruffle exact pin and census",
+      "parent gitlink and evidence"
     ]
+  },
+  "tested_worktrees": {
+    "parent": {
+      "path": "/Users/clliaw/Projects/dirplayer-rs-save-state",
+      "branch": "save-state",
+      "base_commit": "425af023646653069a7c0bcb18b8040445deebb5"
+    },
+    "ruffle": {
+      "path": "/Users/clliaw/Projects/dirplayer-rs-save-state/ruffle",
+      "branch": "b2-graph-census",
+      "base_commit": "6ebf1bcf7c5d26deb83ee4a2b2b8c318b07de3de",
+      "pinned_upstream_revision": "fd5d8dda1cc7b8cf91de141a48574750fa8f86b2",
+      "trusted_publication_destination": "https://github.com/iExalt/ruffle.git",
+      "complete_census_changes_committed": true,
+      "published_commit": "83c6d65f27a861e7adad3e56837a4fa481ae17fe",
+      "complete_census_changes_pushed": true
+    },
+    "gc_arena_helper": {
+      "path": "/Users/clliaw/Projects/gc-arena-b2-census",
+      "branch": "b2-dynamic-root-census",
+      "base_commit": "75671ae03f53718357b741ed4027560f14e90836",
+      "change": "read-only DynamicRootSet occupied slot count",
+      "committed": true,
+      "publication_dependency": true,
+      "trusted_publication_destination": "https://github.com/iExalt/gc-arena.git",
+      "trusted_repository_exists": true,
+      "checked_in_dependency_metadata_uses_helper": true,
+      "current_execution_mode": "checked-in exact URL/revision and lockfiles; --locked with no CLI patch or alternate lockfile",
+      "published_commit": "682dc66ff12738cd8f3c3c8f268f10c203366240",
+      "pushed": true,
+      "upstream_ancestry": "75671ae03f53718357b741ed4027560f14e90836",
+      "upstream_parent": "kyren/gc-arena",
+      "visibility": "PUBLIC"
+    }
   },
   "asset": {
     "inventory": "docs/checkpoints/save-state-b1-20260921/assets/SPYBOT_ASSET_INVENTORY.md",
     "dcr_sha256": "ddf24b667a8d014856d9db42e1658cbf9714847f1cadc2c2c14d21f8e5950c77",
     "swf_sha256": "d964a7e594109f8923004333e129f9c655fabde0533a4b4bf74dce238bf3215f",
     "format": "FWS5",
+    "avm": "AVM1",
     "frames": 419,
     "fps": 20.0,
-    "avm": "AVM1",
     "sound_tags": 0,
-    "asset_loaded_read_only": true
+    "read_only": true
   },
-  "boundary": {
+  "capture_boundary": {
     "flash_frame": 371,
     "phase": "Idle",
-    "source_time_frozen_during_census": true,
+    "source_time_frozen": true,
+    "host_callback_fifo_depth": 0,
     "source_executed_during_census": false,
     "update_called_during_census": false,
     "run_frame_called_during_census": false,
@@ -65,115 +82,555 @@
     "tick_called_during_census": false,
     "gc_called_during_census": false,
     "callback_fifo_drained_during_census": false,
-    "host_fifo_depth": 0,
-    "frame_unchanged_after_census": true,
-    "host_fifo_unchanged_after_census": true
+    "selection": "explicit apply_seek/goto_frame to frame 371 after normal setup and baseline capture"
   },
   "coverage": {
-    "gc_root_names": [
-      "library", "stage", "mouse_data", "drag_object", "avm1", "avm2", "action_queue", "interner", "load_manager", "avm1_shared_objects", "avm2_shared_objects", "unbound_text_fields", "timers", "current_context_menu", "external_interface", "audio_manager", "stream_manager", "sockets", "net_connections", "local_connections", "orphan_manager", "dynamic_root", "post_frame_callbacks"
-    ],
-    "library_field_names": [
-      "movie_libraries", "device_fonts", "global_fonts", "font_lookup_cache", "font_sort_cache", "default_font_names", "default_font_cache", "avm2_class_registry"
-    ],
-    "gc_root_count": 23,
-    "library_field_count": 8,
-    "library_surface": {
-      "field_count": 8,
-      "all_fields_traversal_incomplete": true,
-      "observed_occupancy": {
-        "movie_libraries": "Present",
-        "device_fonts": "Unknown",
-        "global_fonts": "Unknown",
-        "font_lookup_cache": "Unknown",
-        "font_sort_cache": "Unknown",
-        "default_font_names": "Unknown",
-        "default_font_cache": "Unknown",
-        "avm2_class_registry": "Unknown"
-      },
-      "unknown_occupancy_count": 7
-    },
-    "avm1_stack_len": 0,
-    "avm1_register_kinds": ["Undefined", "Undefined", "Undefined", "Undefined"],
-    "avm2_operand_stack_len": null,
-    "avm2_scope_stack_len": 0,
-    "avm2_call_stack_empty": true,
-    "avm2_execution": "unknown",
-    "strong_node_count": null,
-    "edge_count": null,
-    "weak_edge_count": null,
-    "budgets": {
-      "strong_nodes_max": 10000,
-      "edges_max": 50000,
-      "weak_edges_max": 10000
-    },
-    "coverage_complete": false,
-    "unsupported": [
-      "incomplete_coverage",
-      "avm2_operand_stack_not_inspected",
-      "avm2_execution_state_incomplete"
-    ],
-    "source_review_blockers": [
-      "display_object_general_graph_private",
-      "avm2_stack_pointer_private"
-    ]
-  },
-  "display_bound_avm1": {
-    "status": "eligible_for_next_graph_step",
-    "scope": "actual frame-371 Stage/display tree only",
-    "record_count": 11,
-    "traversal": {
-      "node_count": 11,
-      "edge_count": 10,
+    "complete": true,
+    "unsupported": [],
+    "limits": {
       "node_budget": 10000,
       "edge_budget": 50000,
-      "complete": true,
-      "stop_reason": null
+      "weak_budget": 10000,
+      "budget_exceeded": false,
+      "total_nodes": 9620,
+      "total_edges": 5428,
+      "total_weak_entries": 5120,
+      "aggregate_semantics": "post-traversal eligibility ledger; owner-specific limits bound materialization",
+      "global_admission_guard": false,
+      "categories": {
+        "avm1": {
+          "nodes": 2023,
+          "edges": 4199,
+          "weak_entries": 0
+        },
+        "display": {
+          "nodes": 11,
+          "edges": 10
+        },
+        "avm2": {
+          "nodes": 2591,
+          "edges": 1218
+        },
+        "library": {
+          "nodes": 47,
+          "edges": 0
+        },
+        "action_queue": {
+          "nodes": 1,
+          "edges": 1
+        },
+        "strong_atoms": {
+          "nodes": 4947
+        },
+        "interner": {
+          "weak_entries": 5120
+        },
+        "other": {
+          "weak_entries": 0
+        }
+      },
+      "negative_checks": {
+        "exact_limit_accepted": true,
+        "first_node_over_limit_rejected": true,
+        "first_edge_over_limit_rejected": true,
+        "first_weak_entry_over_limit_rejected": true,
+        "category_composition_checked": true,
+        "over_limit_effect": "structured aggregate blocker and coverage_complete=false"
+      }
     },
-    "records": [
-      {"ordinal": 0, "display_kind": "Stage", "has_avm1_object": false, "native_kind": null, "function_kind": null, "function_table_index": null, "classification": "no-avm1-object"},
-      {"ordinal": 1, "display_kind": "MovieClip", "has_avm1_object": true, "native_kind": "MovieClip", "function_kind": null, "function_table_index": null, "classification": "supported-display-native"},
-      {"ordinal": 2, "display_kind": "MovieClip", "has_avm1_object": true, "native_kind": "MovieClip", "function_kind": null, "function_table_index": null, "classification": "supported-display-native"},
-      {"ordinal": 3, "display_kind": "MovieClip", "has_avm1_object": true, "native_kind": "MovieClip", "function_kind": null, "function_table_index": null, "classification": "supported-display-native"},
-      {"ordinal": 4, "display_kind": "Graphic", "has_avm1_object": false, "native_kind": null, "function_kind": null, "function_table_index": null, "classification": "no-avm1-object"},
-      {"ordinal": 5, "display_kind": "MovieClip", "has_avm1_object": true, "native_kind": "MovieClip", "function_kind": null, "function_table_index": null, "classification": "supported-display-native"},
-      {"ordinal": 6, "display_kind": "MovieClip", "has_avm1_object": true, "native_kind": "MovieClip", "function_kind": null, "function_table_index": null, "classification": "supported-display-native"},
-      {"ordinal": 7, "display_kind": "Graphic", "has_avm1_object": false, "native_kind": null, "function_kind": null, "function_table_index": null, "classification": "no-avm1-object"},
-      {"ordinal": 8, "display_kind": "Graphic", "has_avm1_object": false, "native_kind": null, "function_kind": null, "function_table_index": null, "classification": "no-avm1-object"},
-      {"ordinal": 9, "display_kind": "Graphic", "has_avm1_object": false, "native_kind": null, "function_kind": null, "function_table_index": null, "classification": "no-avm1-object"},
-      {"ordinal": 10, "display_kind": "Graphic", "has_avm1_object": false, "native_kind": null, "function_kind": null, "function_table_index": null, "classification": "no-avm1-object"}
+    "roots": [
+      {
+        "name": "library",
+        "occupancy": "present",
+        "count": 8,
+        "classification": "all_library_fields_classified"
+      },
+      {
+        "name": "stage",
+        "occupancy": "present",
+        "count": 1,
+        "classification": "stage_children_focus_loaderinfo_avm2_stage_stage3d_classified"
+      },
+      {
+        "name": "mouse_data",
+        "occupancy": "empty",
+        "count": 0,
+        "classification": "observed_empty"
+      },
+      {
+        "name": "drag_object",
+        "occupancy": "empty",
+        "count": 0,
+        "classification": "observed_empty"
+      },
+      {
+        "name": "avm1",
+        "occupancy": "present",
+        "count": 2023,
+        "classification": "persistent_roots_objects_aliases_native_identities_strings_classified"
+      },
+      {
+        "name": "avm2",
+        "occupancy": "present",
+        "count": 522,
+        "classification": "dormant_execution_and_pinned_infrastructure_classified"
+      },
+      {
+        "name": "action_queue",
+        "occupancy": "present",
+        "count": 1,
+        "classification": "ordered_payload_classified_without_drain"
+      },
+      {
+        "name": "interner",
+        "occupancy": "present",
+        "count": 5120,
+        "classification": "all_live_weak_values_have_explicit_strong_or_common_owner"
+      },
+      {
+        "name": "load_manager",
+        "occupancy": "empty",
+        "count": 0,
+        "classification": "observed_empty"
+      },
+      {
+        "name": "avm1_shared_objects",
+        "occupancy": "empty",
+        "count": 0,
+        "classification": "observed_empty"
+      },
+      {
+        "name": "avm2_shared_objects",
+        "occupancy": "empty",
+        "count": 0,
+        "classification": "observed_empty"
+      },
+      {
+        "name": "unbound_text_fields",
+        "occupancy": "empty",
+        "count": 0,
+        "classification": "observed_empty"
+      },
+      {
+        "name": "timers",
+        "occupancy": "empty",
+        "count": 0,
+        "classification": "observed_empty"
+      },
+      {
+        "name": "current_context_menu",
+        "occupancy": "empty",
+        "count": 0,
+        "classification": "observed_empty"
+      },
+      {
+        "name": "external_interface",
+        "occupancy": "empty",
+        "count": 0,
+        "classification": "observed_empty"
+      },
+      {
+        "name": "audio_manager",
+        "occupancy": "empty",
+        "count": 0,
+        "classification": "observed_empty"
+      },
+      {
+        "name": "stream_manager",
+        "occupancy": "empty",
+        "count": 0,
+        "classification": "observed_empty"
+      },
+      {
+        "name": "sockets",
+        "occupancy": "empty",
+        "count": 0,
+        "classification": "observed_empty"
+      },
+      {
+        "name": "net_connections",
+        "occupancy": "empty",
+        "count": 0,
+        "classification": "observed_empty"
+      },
+      {
+        "name": "local_connections",
+        "occupancy": "empty",
+        "count": 0,
+        "classification": "observed_empty"
+      },
+      {
+        "name": "orphan_manager",
+        "occupancy": "empty",
+        "count": 0,
+        "classification": "observed_empty"
+      },
+      {
+        "name": "dynamic_root",
+        "occupancy": "empty",
+        "count": 0,
+        "classification": "observed_empty"
+      },
+      {
+        "name": "post_frame_callbacks",
+        "occupancy": "empty",
+        "count": 0,
+        "classification": "observed_empty"
+      }
     ],
-    "source_executed_during_slice": false,
-    "allocating_avm1_adapter_used": false,
-    "general_property_or_global_graph_traversed": false,
-    "unsupported": []
+    "library_fields": [
+      {
+        "name": "movie_libraries",
+        "occupancy": "present",
+        "count": 1,
+        "classification": "pinned_asset_resource_descriptor"
+      },
+      {
+        "name": "device_fonts",
+        "occupancy": "empty",
+        "count": 0,
+        "classification": "observed_empty"
+      },
+      {
+        "name": "global_fonts",
+        "occupancy": "empty",
+        "count": 0,
+        "classification": "observed_empty"
+      },
+      {
+        "name": "font_lookup_cache",
+        "occupancy": "empty",
+        "count": 0,
+        "classification": "observed_empty_reconstructible_cache"
+      },
+      {
+        "name": "font_sort_cache",
+        "occupancy": "empty",
+        "count": 0,
+        "classification": "observed_empty"
+      },
+      {
+        "name": "default_font_names",
+        "occupancy": "empty",
+        "count": 0,
+        "classification": "observed_empty"
+      },
+      {
+        "name": "default_font_cache",
+        "occupancy": "empty",
+        "count": 0,
+        "classification": "observed_empty"
+      },
+      {
+        "name": "avm2_class_registry",
+        "occupancy": "empty",
+        "count": 0,
+        "classification": "observed_empty"
+      }
+    ],
+    "avm1": {
+      "persistent_stack_length": 0,
+      "persistent_registers": [
+        "Undefined",
+        "Undefined",
+        "Undefined",
+        "Undefined"
+      ],
+      "graph": {
+        "nodes": 2023,
+        "edges": 4199,
+        "weak_value_observations": 0,
+        "complete": true,
+        "stop_reason": null,
+        "stop_path": null,
+        "native_identity_blockers": [],
+        "native_identity_blocker_budget_exceeded": false,
+        "identity_model": "census-local object IDs preserve aliases and cycles; addresses are not serialized"
+      },
+      "display": {
+        "nodes": 11,
+        "edges": 10,
+        "movieclip_object_ordinals": [
+          1,
+          2,
+          3,
+          5,
+          6
+        ],
+        "stage_object_present": false,
+        "graphic_ordinals_without_object": [
+          4,
+          7,
+          8,
+          9,
+          10
+        ]
+      },
+      "native_functions": {
+        "native_count": 1342,
+        "table_native_count": 512,
+        "baseline_binding_mismatches": 0,
+        "path_collisions": 0,
+        "native_representative": {
+          "path": "root.case_insensitive.broadcaster_function[0]",
+          "kind": "Native",
+          "table_index": null,
+          "constructor_present": false,
+          "inbound_alias_count": 8,
+          "has_display_derived_path": false,
+          "identity": "builtin:root.case_insensitive.broadcaster_function[0]#Native"
+        },
+        "table_native_representative": {
+          "path": "root.case_insensitive.global_scope[0].Accessibility.isActive",
+          "kind": "TableNative",
+          "table_index": 0,
+          "constructor_present": false,
+          "inbound_alias_count": 1,
+          "has_display_derived_path": false,
+          "identity": "builtin:root.case_insensitive.global_scope[0].Accessibility.isActive#TableNative#table:0"
+        },
+        "restore_contract_status": "designed_not_implemented",
+        "restore_contract": "resolve the whole builtin object from a unique case-qualified pinned bootstrap path before mutable fixups; never serialize a raw Rust function pointer",
+        "native_target_mismatch_count": 0,
+        "target_observation": "same-process raw executable and constructor targets compared with function-pointer equality; addresses are not emitted or canonicalized",
+        "rebound_policy": "fail closed as avm1_native_function_target_rebound"
+      },
+      "interner": {
+        "common_atom_count": 394,
+        "weak_slots": 5120,
+        "live_weak": 5120,
+        "dropped_weak": 0,
+        "uncovered_live_weak": 0,
+        "classification_complete": true,
+        "gc_run": false,
+        "weak_targets_promoted": false,
+        "pre_fix_uncovered_values": [
+          "_currentframe",
+          "_droptarget",
+          "_focusrect",
+          "_framesloaded",
+          "_highquality",
+          "_soundbuftime",
+          "_totalframes",
+          "_xmouse",
+          "_xscale",
+          "_ymouse",
+          "_yscale"
+        ],
+        "pre_fix_resolution": "all eleven are strongly owned DisplayPropertyMap keys"
+      }
+    },
+    "action_queue": [
+      {
+        "priority": 1,
+        "fifo_position": 0,
+        "type": "Construct",
+        "clip_display_ordinal": 5,
+        "constructor_present": false,
+        "event_slices": 0,
+        "method_object_present": false,
+        "method_arguments": 0,
+        "listener_notification_present": false
+      }
+    ],
+    "avm2": {
+      "execution": "Dormant",
+      "operand_stack_length": 0,
+      "scope_stack_length": 0,
+      "call_stack_empty": true,
+      "footprint_state": "ReconstructiblePinnedBuiltin",
+      "playerglobals_domain": {
+        "definitions": 522,
+        "classes": 848
+      },
+      "stage_domain": {
+        "definitions": 0,
+        "classes": 0
+      },
+      "native_tables": {
+        "methods": 1090,
+        "allocators": 83,
+        "handlers": 31,
+        "constructors": 9
+      },
+      "aliases": {
+        "to_class": 0,
+        "to_alias": 0,
+        "reciprocal": true
+      },
+      "live_execution_present": false
+    },
+    "stage": {
+      "loader_info_asset_identity": "url=file:///dirplayer-native-embedded.swf;data_len=39012;compressed_len=39033;frames=419;is_movie=true",
+      "loader_info_compared_fields": [
+        "stream_variant",
+        "asset_identity",
+        "root_display_presence_and_identity",
+        "is_stage",
+        "loader_presence_and_identity",
+        "init_event_fired",
+        "complete_event_fired",
+        "expose_content",
+        "errored",
+        "content_type",
+        "shared_events_presence",
+        "uncaught_error_events_presence",
+        "base_dynamic_property_keys_enumerability_and_values",
+        "base_slot_values",
+        "base_bound_method_presence_and_identity",
+        "base_prototype_class_and_vtable_identity",
+        "shared_events_base_dynamic_properties_slots_bound_methods_prototype_class_and_vtable",
+        "uncaught_events_base_dynamic_properties_slots_bound_methods_prototype_class_and_vtable"
+      ],
+      "avm2_stage": {
+        "class": "Stage",
+        "values": 0,
+        "slots": 10,
+        "bound_methods": 0,
+        "proto_present": true,
+        "display_link_present": true
+      },
+      "stage3d_count": 4,
+      "stage3d_each": {
+        "class": "Stage3D",
+        "values": 0,
+        "slots": 4,
+        "bound_methods": 0,
+        "proto_present": true,
+        "context3d_present": false,
+        "visible": true
+      },
+      "baseline_role": "diagnostic source-free pinned bootstrap comparison; equality alone is not reconstructibility proof",
+      "exact_observation": {
+        "scope": "same-process baseline equality only",
+        "public_summary_address_free": true,
+        "private_pointer_tokens_redacted_from_debug": true,
+        "canonical_serialized_identity": false,
+        "field_budget_prechecked_before_collection": true,
+        "field_budget": 10000
+      },
+      "stage3d_collection": {
+        "owner_budget": 4,
+        "bounded_before_materialization": true,
+        "full_count_retained_for_fail_closed_check": true
+      },
+      "negative_mutation": {
+        "target": "Stage3D slot 2",
+        "shape_unchanged": true,
+        "class_unchanged": true,
+        "vtable_slot_count_unchanged": true,
+        "property_count_unchanged": true,
+        "slot_value_changed": true,
+        "coverage_complete": false,
+        "blocker": "stage3d_changed"
+      }
+    }
   },
-  "continuation_oracle": {
-    "fresh_test_process": true,
-    "fresh_player_restore": false,
-    "frame_after_2400000_us": 419,
-    "callback_count": 1,
-    "callback": "lingo:introTitleReady()",
-    "census_callback_payloads": [
-      {"sprite": 1, "generation": 1, "cast_lib": 1, "cast_member": 1, "url": "lingo:introTitleReady()"}
+  "continuation_control": {
+    "matched_no_census_control": true,
+    "continued_to_frame": 419,
+    "controlled_time_seconds": 2.4,
+    "callbacks_equal": true,
+    "callback_vectors": [
+      {
+        "sprite": 1,
+        "generation": 1,
+        "cast_lib": 1,
+        "cast_member": 1,
+        "url": "lingo:introTitleReady()"
+      }
     ],
-    "control_callback_payloads": [
-      {"sprite": 1, "generation": 1, "cast_lib": 1, "cast_member": 1, "url": "lingo:introTitleReady()"}
+    "rgba_equal": true,
+    "rgba_dimensions": [
+      650,
+      420
     ],
     "rgba_bytes": 1092000,
-    "callbacks_equal_to_no_census_control": true,
-    "rgba_equal_to_no_census_control": true,
-    "census_rgba_sha256": "debf718b22be325d22487445c5a41665a9495c634be84ca9ac260da5c5b7b4e3",
-    "control_rgba_sha256": "debf718b22be325d22487445c5a41665a9495c634be84ca9ac260da5c5b7b4e3",
-    "passed": true
+    "rgba_sha256": "debf718b22be325d22487445c5a41665a9495c634be84ca9ac260da5c5b7b4e3",
+    "claim": "the census leaves this controlled continuation unchanged; this is not restore evidence"
   },
   "verification": {
-    "runtime_probe": "passed the display-bound AVM1 slice and continuation oracle; full graph census remains incomplete",
-    "asset_test_mode": "ignored opt-in; run with --ignored and verified PARITY_OPENING_ANIM_SWF",
-    "fresh_worker_restore": "not exercised",
-    "director_audio_restore": "not exercised",
-    "codec_or_rehydration": "not implemented",
-    "commit": false,
-    "push": false
+    "toolchain": {
+      "manager": "mise",
+      "rust": "1.98.1",
+      "offline": true,
+      "features": [
+        "deterministic",
+        "audio",
+        "mp3"
+      ]
+    },
+    "actual_asset_test": {
+      "name": "native_flash_checkpoint_census_is_read_only_before_title_continuation",
+      "ignored_opt_in": true,
+      "passed": 1,
+      "failed": 0,
+      "negative_equal_shape_changed_slot_rejected": true,
+      "matched_callback_and_exact_rgba_control": true
+    },
+    "checkpoint_census_tests": {
+      "filter": "checkpoint_census",
+      "passed": 4,
+      "failed": 0,
+      "coverage": [
+        "aggregate exact-limit and first-over-limit",
+        "aggregate category composition",
+        "private exact-observation Debug redaction"
+      ]
+    },
+    "dependency_reproducibility": {
+      "source_and_config_reproducible": true,
+      "checked_in_locks": true,
+      "locked": true,
+      "offline_after_trusted_fetch": true,
+      "cli_patch_used": false,
+      "temporary_alternate_lockfile_used": false,
+      "asset_fixture_in_repository": false,
+      "asset_requirement": "external read-only asset with locked SHA-256"
+    },
+    "raw_logs": {
+      "prepublication_path_patched": {
+        "path": "docs/checkpoints/save-state-b2-20260921/graph/complete-census-test.log",
+        "sha256": "a52e0eeff63aa367d1994e14fd18e3682ab230931ed71f57ef2a1b394f22b792",
+        "bytes": 529449
+      },
+      "trusted_pinned": {
+        "path": "docs/checkpoints/save-state-b2-20260921/graph/trusted-census-test.log",
+        "sha256": "d26540dfbe0caab2403c33698771a710c4c0045b4e7ab7ecc498de83b8217665",
+        "bytes": 529806
+      }
+    },
+    "helper_test": {
+      "name": "test_dynamic_root_occupied_slot_count",
+      "locked": true,
+      "offline": true,
+      "passed": 1,
+      "failed": 0
+    },
+    "dependency_fetch": {
+      "command": "mise exec -- cargo fetch --locked",
+      "passed": true,
+      "trusted_source": "https://github.com/iExalt/gc-arena.git",
+      "revision": "682dc66ff12738cd8f3c3c8f268f10c203366240"
+    }
+  },
+  "limits": [
+    "actual frame-371 profile only; present variants of observed-empty roots remain fail-closed",
+    "no codec, durable format, fresh-Player allocation, fixup, rehydration, publish, rollback, or cleanup",
+    "native builtin resolver and alias fixup are designed but not implemented",
+    "no active Director audio qualification; the observed SWF contains no sound tags",
+    "no fresh-worker or cross-process restore",
+    "persistent renderer history and derived GPU caches are not restored or compared across a fresh process",
+    "exact pinned Ruffle/playerglobals and asset identities are prerequisites",
+    "gc-arena diagnostic helper requires separate review and dependency-first publication",
+    "aggregate limits are post-traversal eligibility totals; owner-specific caps bound materialization but there is no single global admission counter",
+    "source/config dependency resolution is reproducibly pinned; the ignored runtime proof still requires the separately hash-gated read-only asset"
+  ],
+  "recommendation": {
+    "route": "go-to-separately-approved-fresh-player-experiment",
+    "preliminary_estimate": "2-4 active days",
+    "estimate_measured": false,
+    "restore_authorized_by_this_receipt": false,
+    "full_c1_estimated": false
   }
 }

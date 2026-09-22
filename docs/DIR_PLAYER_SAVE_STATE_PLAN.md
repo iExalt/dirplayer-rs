@@ -1,15 +1,17 @@
 # DirPlayer durable runtime save states
 
 Status: **Q0 source audit and the accepted B1 source-backed design publication
-completed 2026-09-21; the partial B2 display-bound census and matched-control
-continuation passed on 2026-09-22, while the full census and fresh-Player
-restore remain unimplemented. C1 and C2 remain unimplemented.** See the
-[Q0 qualification report](Q0_SAVE_STATE_QUALIFICATION.md), [B1 graph-boundary
-design](B1_RUFFLE_BOUNDARY_DESIGN.md), and [B1 asset/AVM inventory](checkpoints/save-state-b1-20260921/assets/SPYBOT_ASSET_INVENTORY.md).
-The remaining complete-census work has a preliminary, not measured, 2–4
-active-day estimate; the conditional fresh-Player experiment is a preliminary,
-not measured, additional 2–4 active days after that census. Neither is
-implicitly approved. Decisions were made with agentic-workflow on 2026-09-21.
+completed 2026-09-21; the full actual-profile B2 live census and matched-control
+continuation passed on 2026-09-22 with reproducibly pinned source/config, while
+fresh-Player restore remains unimplemented and unqualified. C1 and C2 remain
+unimplemented.** See the [Q0 qualification report](Q0_SAVE_STATE_QUALIFICATION.md),
+[B1 graph-boundary design](B1_RUFFLE_BOUNDARY_DESIGN.md), [B1 asset/AVM
+inventory](checkpoints/save-state-b1-20260921/assets/SPYBOT_ASSET_INVENTORY.md),
+and [B2 live census](checkpoints/save-state-b2-20260921/graph/B2_GRAPH_CENSUS_REPORT.md).
+The conditional fresh-Player allocate/fixup/rehydration experiment retains a
+preliminary, not measured, 2–4 active-day estimate. It is not implicitly
+approved, and it is not a full C1 estimate. Decisions were made with
+agentic-workflow on 2026-09-21.
 The [Spybot next-screen spike](../../childhood-redux/docs/SPYBOT_NEXT_SCREEN_SPIKE_PLAN.md) is an independent
 parallel workstream; it does not wait for checkpoint support.
 
@@ -218,15 +220,18 @@ source-backed design questions for the actual AVM1 title workload. B1 ran no
 graph-slice experiment, did not retroactively execute Q0's missing executable
 check, and does not qualify fresh-process restore or C1.
 
-The accepted [partial B2 census report](checkpoints/save-state-b2-20260921/graph/B2_GRAPH_CENSUS_REPORT.md)
-dated 2026-09-22 records an 11-node/10-edge display-bound AVM1 slice and a
-matched no-census continuation with identical callback vector and RGBA result.
-The full 23-root/8-Library/strong/weak census remains incomplete, and fresh-
-Player restore remains unimplemented; this diagnostic evidence does not qualify
-C1. The remaining estimates are split: preliminary, not measured, 2–4 active
-days for the complete census, then a conditional preliminary, not measured,
-additional 2–4 active days for a fresh-Player experiment. Neither estimate is
-implicitly approved.
+The accepted [B2 census report](checkpoints/save-state-b2-20260921/graph/B2_GRAPH_CENSUS_REPORT.md)
+dated 2026-09-22 records complete coverage for the trusted actual frame-371
+profile: all 23 roots, all eight Library fields, 9,620 aggregate nodes, 5,428
+aggregate edges, and 5,120 weak entries. It also records the equal-shape mutable
+Stage3D rejection and a matched no-census continuation with identical callback
+vector and exact RGBA bytes. The aggregate limits are post-traversal eligibility
+totals with bounded owner walks; they are not an early global traversal guard or
+an untrusted-input claim. The exact gc-arena and Ruffle commits and both Cargo
+locks are reproducibly pinned. Fresh-Player restore remains unimplemented, so
+this evidence does not qualify C1. The conditional fresh-Player experiment has
+a preliminary, not measured, 2–4 active-day estimate and is not implicitly
+approved.
 
 Q0 was a bounded block, not a promise to build full save states in three hours.
 It used one component-level discovery item under subagent-pair-program.
@@ -333,14 +338,15 @@ Cross-runtime-upgrade fixture migration remains a separate deferred requirement.
 - [x] Publish the accepted B1 source-backed asset/AVM inventory and Ruffle
   graph-boundary design on 2026-09-21; this is docs-only evidence and does not
   implement or qualify C1.
-- [x] Accept the partial B2 display-bound census and matched-control continuation
-  evidence on 2026-09-22; this remains diagnostic evidence and does not qualify
-  C1.
-- [ ] Complete the full 23-root/8-Library/strong/weak census; preliminary, not
-  measured, 2–4 active days, not implicitly approved.
-- [ ] Run the conditional fresh-Player experiment after census completion;
-  preliminary, not measured, additional 2–4 active days, not implicitly
-  approved.
+- [x] Accept the historical partial B2 display-bound census and matched-control
+  continuation evidence on 2026-09-22.
+- [x] Complete and publish the full trusted actual-profile B2 census covering all
+  23 roots, eight Library fields, named strong/weak categories, mutable Stage DTO
+  rejection, and locked dependency reproduction; this remains diagnostic evidence
+  and does not qualify C1.
+- [ ] Run the conditional fresh-Player allocate/fixup/rehydration experiment;
+  preliminary, not measured, 2–4 active days, not implicitly approved and not a
+  full C1 estimate.
 - [ ] Implement and accept C1; commit/push accepted milestones during execution.
 - [ ] Merge accepted work back to `dev` and verify interaction with the parallel next-screen lane.
 - [ ] Reassess C2 independently of the destination port.

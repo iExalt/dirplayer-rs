@@ -1989,7 +1989,7 @@ dependencies = [
 [[package]]
 name = "gc-arena"
 version = "0.5.3"
-source = "git+https://github.com/kyren/gc-arena.git?rev=75671ae03f53718357b741ed4027560f14e90836#75671ae03f53718357b741ed4027560f14e90836"
+source = "git+https://github.com/iExalt/gc-arena.git?rev=682dc66ff12738cd8f3c3c8f268f10c203366240#682dc66ff12738cd8f3c3c8f268f10c203366240"
 dependencies = [
  "gc-arena-derive",
  "hashbrown 0.16.1",
@@ -2001,7 +2001,7 @@ dependencies = [
 [[package]]
 name = "gc-arena-derive"
 version = "0.5.3"
-source = "git+https://github.com/kyren/gc-arena.git?rev=75671ae03f53718357b741ed4027560f14e90836#75671ae03f53718357b741ed4027560f14e90836"
+source = "git+https://github.com/iExalt/gc-arena.git?rev=682dc66ff12738cd8f3c3c8f268f10c203366240#682dc66ff12738cd8f3c3c8f268f10c203366240"
 dependencies = [
  "proc-macro2",
  "quote",

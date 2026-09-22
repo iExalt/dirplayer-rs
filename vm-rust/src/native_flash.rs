@@ -335,6 +335,63 @@ impl NativeFlashHost {
         cast_lib: i32,
         cast_member: i32,
     ) -> Result<NativeRufflePlayer, ScriptError> {
+        Self::build_player_with_callbacks_inner(
+            data,
+            width,
+            height,
+            logical_time_us,
+            callbacks,
+            sprite,
+            generation,
+            cast_lib,
+            cast_member,
+            false,
+        )
+        .map(|(player, _)| player)
+    }
+
+    fn build_player_with_callbacks_and_baseline(
+        data: &[u8],
+        width: u32,
+        height: u32,
+        logical_time_us: u64,
+        callbacks: NativeFlashCallbackBufferHandle,
+        sprite: i16,
+        generation: u64,
+        cast_lib: i32,
+        cast_member: i32,
+    ) -> Result<(NativeRufflePlayer, ruffle_core::CheckpointCensus), ScriptError> {
+        Self::build_player_with_callbacks_inner(
+            data,
+            width,
+            height,
+            logical_time_us,
+            callbacks,
+            sprite,
+            generation,
+            cast_lib,
+            cast_member,
+            true,
+        )
+        .and_then(|(player, baseline)| {
+            baseline
+                .map(|baseline| (player, baseline))
+                .ok_or_else(|| ScriptError::new("missing no-source Ruffle baseline".to_owned()))
+        })
+    }
+
+    fn build_player_with_callbacks_inner(
+        data: &[u8],
+        width: u32,
+        height: u32,
+        logical_time_us: u64,
+        callbacks: NativeFlashCallbackBufferHandle,
+        sprite: i16,
+        generation: u64,
+        cast_lib: i32,
+        cast_member: i32,
+        capture_baseline: bool,
+    ) -> Result<(NativeRufflePlayer, Option<ruffle_core::CheckpointCensus>), ScriptError> {
         let movie = SwfMovie::from_data(
             data,
             "file:///dirplayer-native-embedded.swf".to_owned(),
@@ -363,6 +420,7 @@ impl NativeFlashHost {
                 cast_member,
             ))
             .build();
+        let baseline;
         {
             let mut player_guard = player
                 .lock()
@@ -373,12 +431,13 @@ impl NativeFlashHost {
             player_guard.set_parity_time_us(logical_time_us);
             player_guard.set_parity_mode(true);
             player_guard.update(|context| context.set_root_movie(movie));
+            baseline = capture_baseline.then(|| player_guard.checkpoint_census());
             // The barrier executes the first root frame and submits a complete
             // render before the frame is exposed to Director.
             player_guard.run_frame();
             player_guard.render();
         }
-        Ok(player)
+        Ok((player, baseline))
     }
 
     fn capture_locked(player: &mut Player) -> Result<Vec<u8>, ScriptError> {
@@ -824,6 +883,7 @@ impl NativeFlashHost {
 #[cfg(test)]
 mod tests {
     use super::{NativeFlashHost, NativeFlashInstance, NativeFlashSnapshot};
+    use ruffle_core::avm2::{object::TObject, Value as Avm2Value};
     use flate2::read::ZlibDecoder;
     use ruffle_core::backend::navigator::NavigatorBackend;
     use ruffle_core::FloatDuration;
@@ -1125,22 +1185,25 @@ mod tests {
             "opening_anim bytes must match the recovered embedded SWF"
         );
 
-        let build_instance = || {
+        let build_instance = |capture_baseline: bool| {
             let callbacks = std::sync::Arc::new(std::sync::Mutex::new(
                 super::NativeFlashCallbackBuffer::default(),
             ));
-            let player = NativeFlashHost::build_player_with_callbacks(
-                &bytes,
-                650,
-                420,
-                0,
-                callbacks.clone(),
-                1,
-                1,
-                1,
-                1,
-            )
-            .expect("verified opening_anim SWF must load in Ruffle");
+            let (player, baseline) = if capture_baseline {
+                let (player, baseline) = NativeFlashHost::build_player_with_callbacks_and_baseline(
+                    &bytes, 650, 420, 0, callbacks.clone(), 1, 1, 1, 1,
+                )
+                .expect("verified opening_anim SWF must load in Ruffle");
+                (player, Some(baseline))
+            } else {
+                (
+                    NativeFlashHost::build_player_with_callbacks(
+                        &bytes, 650, 420, 0, callbacks.clone(), 1, 1, 1, 1,
+                    )
+                    .expect("verified opening_anim SWF must load in Ruffle"),
+                    None,
+                )
+            };
             (
                 NativeFlashInstance {
                     generation: 1,
@@ -1153,10 +1216,27 @@ mod tests {
                     callbacks: callbacks.clone(),
                 },
                 callbacks,
+                baseline,
             )
         };
-        let (mut census_instance, census_callbacks) = build_instance();
-        let (mut control_instance, control_callbacks) = build_instance();
+        let (mut census_instance, census_callbacks, baseline) = build_instance(true);
+        let (mut control_instance, control_callbacks, _) = build_instance(false);
+        let baseline = baseline.expect("census build must retain its pre-frame baseline");
+        assert!(
+            baseline.stage_loader_info.is_some(),
+            "baseline must contain Stage LoaderInfo"
+        );
+        println!(
+            "baseline census: phase={} frame={:?} actions={:?} stage_loader_info={:?}",
+            baseline.phase,
+            baseline.current_frame,
+            baseline
+                .action_queue
+                .iter()
+                .map(|action| action.action_type)
+                .collect::<Vec<_>>(),
+            baseline.stage_loader_info,
+        );
 
         let (before_frame, before_fifo, census) = {
             let mut player = census_instance
@@ -1171,31 +1251,271 @@ mod tests {
                 .expect("native Flash callback buffer lock")
                 .callbacks
                 .len();
-            let mut census = player.checkpoint_census();
+            let mut census = player.checkpoint_census_with_baseline(Some(&baseline));
             census.host_fifo_depth = Some(before_fifo);
             (before_frame, before_fifo, census)
         };
 
         assert_eq!(census.roots.len(), 23);
         assert_eq!(census.library_fields.len(), 8);
+        let root_field = |name: &str| {
+            census
+                .roots
+                .iter()
+                .find(|field| field.name == name)
+                .unwrap_or_else(|| panic!("missing census root {name}"))
+        };
+        assert!(root_field("library").implemented);
+        assert_eq!(root_field("library").count, Some(8));
+        assert_eq!(root_field("stage").count, Some(1));
+        assert_eq!(
+            root_field("stage").unsupported,
+            None,
+            "Stage AVM2 and Stage3D DTOs must match the source-free baseline"
+        );
+        assert!(census.stage_avm2_object_present);
+        assert_eq!(census.stage3d_count, 4);
+        println!("stage_avm2_object={:?} stage3d={:?}", census.stage_avm2_object, census.stage3d);
+        assert_eq!(root_field("mouse_data").occupancy, ruffle_core::CensusOccupancy::Empty);
+        assert_eq!(root_field("interner").count, Some(5120));
+        assert!(root_field("interner").implemented);
+        assert_eq!(root_field("interner").unsupported, None);
+        assert!(
+            census
+                .avm1_graph
+                .string_interner
+                .as_ref()
+                .is_some_and(|strings| !strings.live_string_values.is_empty()),
+            "live weak-string identity census must retain bounded contents"
+        );
+        for name in [
+            "action_queue",
+            "load_manager",
+            "external_interface",
+            "audio_manager",
+            "stream_manager",
+            "sockets",
+            "net_connections",
+            "local_connections",
+            "orphan_manager",
+            "post_frame_callbacks",
+        ] {
+            let field = root_field(name);
+            assert_ne!(field.occupancy, ruffle_core::CensusOccupancy::Unknown, "{name} must have an occupancy classification");
+            assert!(field.count.is_some(), "{name} must report a count");
+        }
+        for name in [
+            "load_manager",
+            "external_interface",
+            "audio_manager",
+            "stream_manager",
+            "sockets",
+            "net_connections",
+            "local_connections",
+            "orphan_manager",
+            "post_frame_callbacks",
+        ] {
+            let field = root_field(name);
+            assert_eq!(field.occupancy, ruffle_core::CensusOccupancy::Empty, "{name} must be empty in the qualified frame-371 slice");
+            assert_eq!(field.count, Some(0), "{name} must have zero occupancy");
+            assert!(field.implemented, "empty inspected {name} is implemented");
+        }
+        let dynamic_root = root_field("dynamic_root");
+        assert_ne!(dynamic_root.occupancy, ruffle_core::CensusOccupancy::Unknown);
+        assert!(dynamic_root.count.is_some());
+        if dynamic_root.count.unwrap() == 0 {
+            assert_eq!(dynamic_root.occupancy, ruffle_core::CensusOccupancy::Empty);
+            assert!(dynamic_root.implemented);
+        } else {
+            assert_eq!(dynamic_root.occupancy, ruffle_core::CensusOccupancy::Present);
+            assert_eq!(dynamic_root.unsupported, Some("dynamic_root_entries_unclassified"));
+            assert!(census.unsupported.contains(&"dynamic_root_entries_unclassified"));
+        }
+        assert!(census.library_fields.iter().all(|field| {
+            field.occupancy != ruffle_core::CensusOccupancy::Unknown
+                && field.count.is_some()
+        }));
+        assert_eq!(census.action_queue.len(), 1);
+        let action = &census.action_queue[0];
+        assert_eq!(action.priority, 1);
+        assert_eq!(action.fifo_position, 0);
+        assert_eq!(action.action_type, "Construct");
+        assert!(!action.is_unload);
+        assert_eq!(action.swf_start, None);
+        assert_eq!(action.swf_end, None);
+        assert_eq!(action.clip_ordinal, Some(5));
+        assert!(action.constructor.is_none());
+        assert!(action.event_slices.is_empty());
+        assert!(action.method_object.is_none());
+        assert!(action.method_name.is_none());
+        assert!(action.method_args.is_empty());
+        assert!(action.notify_listener.is_none());
+        assert!(action.notify_method.is_none());
+        assert!(action.notify_args.is_empty());
+        assert!(action.unsupported.is_none());
+        assert_eq!(census.avm2.operand_stack_len, Some(0));
+        assert_eq!(census.avm2.execution, ruffle_core::Avm2ExecutionState::Dormant);
         assert_eq!(census.phase, "Idle");
-        assert!(!census.coverage_complete, "the staged hook must fail closed while graph traversal is incomplete");
-        assert!(census.unsupported.contains(&"incomplete_coverage"));
+        assert_eq!(census.current_frame, Some(371));
+        assert!(census.coverage_complete, "the qualified frame-371 census must satisfy every B2 eligibility gate");
+        assert!(census.unsupported.is_empty(), "eligible census must have no unsupported reasons: {:?}", census.unsupported);
+        assert!(census.roots.iter().all(|field| field.implemented && field.unsupported.is_none()));
+        assert!(census.library_fields.iter().all(|field| field.implemented && field.unsupported.is_none()));
+        assert_eq!(census.strong_node_count, Some(census.budget.total_nodes));
+        assert_eq!(census.edge_count, Some(census.budget.total_edges));
+        assert_eq!(census.weak_edge_count, Some(census.budget.total_weak_entries));
+        assert_eq!(census.budget.interner_weak_entries, 5120);
+        assert_eq!(census.budget.total_weak_entries, 5120);
+        assert!(census.budget.within_budget());
         assert_eq!(census.display_avm1.len(), 11);
         assert_eq!(census.display_avm1[0].display_kind, "Stage");
         assert!(census
             .display_avm1
             .iter()
             .any(|entry| entry.classification == "supported-display-native"));
-        assert!(census
-            .display_avm1
+        assert!(census.avm1_graph.nodes.len() >= census.display_avm1.iter().filter(|entry| entry.has_avm1_object).count());
+        assert!(census.avm1_graph.nodes.len() <= 10_000);
+        assert!(census.avm1_graph.edges.len() <= 50_000);
+        assert_eq!(census.avm1_graph.nodes.len(), 2023);
+        assert_eq!(census.avm1_graph.edges.len(), 4199);
+        assert_eq!(census.avm1_graph.weak_observations, 0);
+        assert!(!census
+            .unsupported
+            .contains(&"avm1_native_function_registry_identity_unavailable"));
+        assert!(census.avm1_graph.nodes.iter().any(|node| {
+            node.native_identity
+                .as_deref()
+                .is_some_and(|identity| identity.starts_with("builtin:"))
+        }));
+        assert!(census.avm1_graph.nodes.iter().any(|node| node.path.starts_with("root.")));
+        assert_eq!(
+            census.avm1_graph.stop_reason,
+            None
+        );
+        assert_eq!(census.avm1_graph.stop_path.as_deref(), None);
+        let mut native_bindings = census
+            .avm1_graph
+            .nodes
             .iter()
-            .all(|entry| !entry.classification.starts_with("unsupported-")));
+            .filter_map(|node| match node.function_kind {
+                Some("Native") | Some("TableNative") => Some((
+                    node.function_kind.unwrap(),
+                    node.path.as_str(),
+                    node.function_table_index,
+                    node.function_constructor_present,
+                    node.inbound_alias_count,
+                    node.has_display_or_mutable_path,
+                    node.native_identity.as_deref(),
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        native_bindings.sort_unstable();
+        assert!(!native_bindings.is_empty(), "qualified AVM1 state must expose native function evidence");
+        assert!(native_bindings.iter().all(|(_, path, _, _, _, _, identity)| {
+            (path.starts_with("root.case_sensitive.") || path.starts_with("root.case_insensitive."))
+                && identity.is_some_and(|identity| identity.starts_with("builtin:"))
+        }));
+        assert!(native_bindings.windows(2).all(|pair| pair[0].1 != pair[1].1), "native canonical paths must be unique");
+        let native_count = native_bindings.iter().filter(|binding| binding.0 == "Native").count();
+        let table_native_count = native_bindings.iter().filter(|binding| binding.0 == "TableNative").count();
+        println!(
+            "native_function_summary native_count={native_count} table_native_count={table_native_count} native_representative={:?} table_native_representative={:?} native_target_mismatch_count={} native_identity_blocker_count={} collision_or_blocker_budget_exceeded={}",
+            native_bindings.iter().find(|binding| binding.0 == "Native"),
+            native_bindings.iter().find(|binding| binding.0 == "TableNative"),
+            census.avm1_graph.native_target_mismatch_count,
+            census.avm1_graph.native_identity_blockers.len(),
+            census.avm1_graph.native_identity_blocker_budget_exceeded,
+        );
+        assert_eq!(census.avm1_graph.native_target_mismatch_count, 0);
+        assert!(census.avm1_graph.native_identity_blockers.is_empty());
+        assert!(!census.avm1_graph.native_identity_blocker_budget_exceeded);
+        assert!(!census
+            .unsupported
+            .contains(&"avm1_native_array_property_edges_unclassified"));
+        assert_eq!(census.avm2_footprint.operand_stack_len, Some(0));
+        assert!(census.avm2_footprint.call_stack_empty);
+        assert!(!census.movie_libraries_budget_exceeded);
+        assert_eq!(census.movie_libraries.len(), 1);
+        let strings = census
+            .avm1_graph
+            .string_interner
+            .as_ref()
+            .expect("AVM1 graph census must include string interner evidence");
+        assert_eq!(strings.common_atom_count, 394);
+        assert_eq!(strings.weak_slot_count, 5120);
+        assert_eq!(strings.live_weak_count, 5120);
+        assert_eq!(strings.uncovered_live_weak_count, 0);
+        let pre_fix_uncovered_by_current_owner_census = vec![
+                "_currentframe",
+                "_droptarget",
+                "_focusrect",
+                "_framesloaded",
+                "_highquality",
+                "_soundbuftime",
+                "_totalframes",
+                "_xmouse",
+                "_xscale",
+                "_ymouse",
+                "_yscale",
+            ];
+        println!(
+            "pre_fix_uncovered_by_current_owner_census={pre_fix_uncovered_by_current_owner_census:?}"
+        );
+        assert!(strings.uncovered_by_current_owner_census.is_empty());
+        assert!(strings.weak_classification_complete);
+        assert!(!census.unsupported.contains(&"live_weak_string_unretained"));
+        assert!(census.avm1.root_surfaces.iter().any(|root| {
+            root.name == "case_insensitive_system_prototypes"
+                && root.count == 32
+                && root.classification == "prototype_seed_traversed"
+        }));
+        assert_eq!(census.avm1.stack_len, 0);
+        assert!(census.avm1.register_kinds.iter().all(|kind| {
+            *kind == ruffle_core::Avm1ValueKind::Undefined
+        }));
         assert_eq!(census.display_traversal.node_count, 11);
         assert!(census.display_traversal.edge_count < census.display_traversal.edge_budget);
         assert!(census.display_traversal.complete);
         assert_eq!(census.display_traversal.stop_reason, None);
         println!("{census}");
+
+        let (mut negative_instance, _, negative_baseline) = build_instance(true);
+        let negative_baseline = negative_baseline.expect("negative census baseline");
+        let negative = {
+            let mut player = negative_instance.player.lock().expect("negative Ruffle player lock");
+            NativeFlashHost::apply_seek(&mut player, 371, false);
+            let before = player.checkpoint_census_with_baseline(Some(&negative_baseline));
+            let before_stage3d = before.stage3d.first().expect("Stage3D before mutation");
+            let before_shape = before_stage3d.shape;
+            let before_class = before_stage3d.base.class_name.clone();
+            let before_vtable_slots = before_stage3d.base.vtable_slot_count;
+            let before_property_count = before_stage3d.base.properties.len();
+            let before_slot = before_stage3d.base.slots[2].clone();
+            player.mutate_with_update_context(|context| {
+                let stage3d = context
+                    .stage
+                    .stage3ds()
+                    .iter()
+                    .find_map(|object| object.as_stage_3d())
+                    .expect("qualified opening_anim has a Stage3D");
+                stage3d.set_slot_no_coerce(2, Avm2Value::Number(0.0), context.gc_context);
+            });
+            let after = player.checkpoint_census_with_baseline(Some(&negative_baseline));
+            let after_stage3d = after.stage3d.first().expect("Stage3D after mutation");
+            assert_eq!(before_shape, after_stage3d.shape);
+            assert_eq!(before_class, after_stage3d.base.class_name);
+            assert_eq!(before_vtable_slots, after_stage3d.base.vtable_slot_count);
+            assert_eq!(before_property_count, after_stage3d.base.properties.len());
+            assert_ne!(before_slot, after_stage3d.base.slots[2]);
+            after
+        };
+        assert!(!negative.coverage_complete);
+        assert!(negative.unsupported.contains(&"stage3d_changed"));
+        assert!(negative.roots.iter().any(|field| {
+            field.name == "stage" && field.unsupported == Some("stage3d_changed")
+        }));
+        println!("negative_stage3d_slot_mutation: coverage_complete=false blocker=stage3d_changed");
 
         {
             let mut player = control_instance

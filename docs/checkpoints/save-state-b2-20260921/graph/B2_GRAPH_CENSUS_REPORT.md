@@ -1,56 +1,174 @@
-# B2 Ruffle graph census
+# B2 Ruffle live graph census
 
-Status: **display-bound AVM1 slice passed; full graph remains blocked at explicit incomplete coverage**.
+Audit date: **2026-09-22**
 
-This B2 item is a diagnostic census and continuation check. It does not implement a codec, restore, fresh-player rehydration, durable format, Director audio codec, or production framework. The parent lane is `save-state` at baseline `480430efec6242bf2aaab52e2135db11d35838b6`; its lane-local Ruffle branch is `b2-graph-census` at pinned base revision `fd5d8dda1cc7b8cf91de141a48574750fa8f86b2`. The child changes were published as commit `6ebf1bcf7c5d26deb83ee4a2b2b8c318b07de3de` to the trusted fork `https://github.com/iExalt/ruffle.git` on that branch. The checkout's local origin remains `https://github.com/chameleonxxl/ruffle.git`; it was preserved and not used after auto-review rejected it. Child commit/push are complete. Parent commit/push fields in the receipt describe the pre-publication evidence-review point because the parent commit cannot embed its own eventual hash.
+Status: **eligible and reproducibly pinned census for the actual frame-371 opening/title profile; fresh-Player restore remains unimplemented and unqualified**.
 
-## Representative result
+This B2 component completed a bounded, read-only census of the accepted Spybot AVM1 opening/title state. It does not implement a codec, allocate/fixup/rehydration, durable storage, Director audio state, or production migration. Eligibility applies only to the observed state and exact pinned build/asset identity. A nonempty variant that was empty here must still fail closed until its payload is classified.
 
-The focused test loaded the accepted read-only [`opening_anim` asset inventory](../../save-state-b1-20260921/assets/SPYBOT_ASSET_INVENTORY.md) (SWF SHA-256 `d964a7e594109f8923004333e129f9c655fabde0533a4b4bf74dce238bf3215f`; DCR SHA-256 `ddf24b667a8d014856d9db42e1658cbf9714847f1cadc2c2c14d21f8e5950c77`), reached frame 371, and captured the census while the player was `FramePhase::Idle`. The census uses `Player::enter_arena` and does not call update, `run_frame`, render, tick, GC, source execution, or callback draining. The frame and callback FIFO depth were unchanged by the census.
+The parent census milestone is based on `425af023646653069a7c0bcb18b8040445deebb5` on `save-state`. The published Ruffle census commit is `83c6d65f27a861e7adad3e56837a4fa481ae17fe` on `b2-graph-census`, whose pinned upstream base is `fd5d8dda1cc7b8cf91de141a48574750fa8f86b2`. Its manifest and lockfile pin `https://github.com/iExalt/gc-arena.git` at `682dc66ff12738cd8f3c3c8f268f10c203366240`. The parent `vm-rust/Cargo.lock` carries the same exact source.
 
-The census reports all 23 `GcRootData` fields from `ruffle/core/src/player.rs:146-207`, each with `Present`, `Empty`, or `Unknown` occupancy and an explicit implemented flag. The names are: `library`, `stage`, `mouse_data`, `drag_object`, `avm1`, `avm2`, `action_queue`, `interner`, `load_manager`, `avm1_shared_objects`, `avm2_shared_objects`, `unbound_text_fields`, `timers`, `current_context_menu`, `external_interface`, `audio_manager`, `stream_manager`, `sockets`, `net_connections`, `local_connections`, `orphan_manager`, `dynamic_root`, and `post_frame_callbacks`. It reports eight named `Library` fields total from `ruffle/core/src/library.rs:429-457`: `movie_libraries`, `device_fonts`, `global_fonts`, `font_lookup_cache`, `font_sort_cache`, `default_font_names`, `default_font_cache`, and `avm2_class_registry`. All eight traversal/classification surfaces are incomplete; `movie_libraries` has observed `Present` occupancy and the remaining seven fields have `Unknown` occupancy.
+The trusted public `iExalt/gc-arena` repository is a fork of `kyren/gc-arena`, retains the upstream CC0/MIT license files and ancestry from `75671ae03f53718357b741ed4027560f14e90836`, and publishes only the narrow `DynamicRootSet::occupied_slot_count` helper plus its test on `b2-dynamic-root-census`. The dependency-first sequence was helper commit, Ruffle pin and census commit, then parent gitlink/evidence. Final focused checks used the checked-in locks with `--locked`, no CLI path patch, and no alternate lockfile. This establishes reproducible source/config dependency resolution for the pinned graph; the ignored runtime test still requires the separately hash-gated read-only Spybot asset.
 
-The observed opening/title boundary had AVM1 stack length zero and four `Undefined` persistent register values, host callback FIFO depth zero, and no reported live AVM2 execution. AVM2 operand-stack length and execution state remain `Unknown` because the pinned public read-only surface does not expose the needed status. These are explicit incomplete fields, not inferred emptiness. Strong-node, edge, and weak-edge counts are also unset. The census therefore reports `coverage_complete=false` and `incomplete_coverage`.
+## Actual asset and boundary
 
-The retained runtime `unsupported` output is exactly `incomplete_coverage`, `avm2_operand_stack_not_inspected`, and `avm2_execution_state_incomplete`. The separate source-review blockers below describe missing private inspection surfaces; they are not additional runtime observations from this test.
+The test hash-gates the accepted [`opening_anim` inventory](../../save-state-b1-20260921/assets/SPYBOT_ASSET_INVENTORY.md):
 
-The approved display-bound AVM1 slice then walked the existing Stage/display tree without allocating AVM1 objects, traversing general globals or properties, executing source, or touching a second subsystem. It observed 11 display records in render-list order: Stage with no AVM1 object; MovieClip with `MovieClip` objects at ordinals 1, 2, 3, 5, and 6; Graphic with no AVM1 object at ordinals 4, 7, 8, 9, and 10. Every encountered object was either a recognized display-native MovieClip or an absent AVM1 binding; no native function, opaque native kind, or unknown display-bound kind occurred. The bounded traversal counted 11 nodes and 10 edges against 10,000-node and 50,000-edge caps and stopped with no budget reason. The child adapter returns a stop signal on the first rejected edge, so a cap hit terminates render-list enumeration immediately while preserving render-list order and avoiding a materialized child vector. This slice is `eligible_for_next_graph_step`: that label means only that this bounded slice had no observed blocker. It is not restore eligibility and does not establish complete graph coverage.
+- source DCR SHA-256: `ddf24b667a8d014856d9db42e1658cbf9714847f1cadc2c2c14d21f8e5950c77`
+- embedded SWF SHA-256: `d964a7e594109f8923004333e129f9c655fabde0533a4b4bf74dce238bf3215f`
+- parser evidence: `FWS5`, AVM1, 419 frames, 20 fps, zero SWF sound tags
 
-The slice uses `DisplayObject::checkpoint_existing_avm1_object` and `checkpoint_for_each_child` at `ruffle/core/src/display_object.rs:2912-2927`, the exhaustive native-kind map at `ruffle/core/src/avm1/object/script_object.rs:838-876`, and function-kind inspection at `ruffle/core/src/avm1/function.rs:467-474`. The bounded traversal, display-kind classification, and nonallocating existing-object path are in `ruffle/core/src/player.rs:480-619`; the focused assertions are in `vm-rust/src/native_flash.rs:1179-1251`.
+After normal player setup and the pre-first-frame baseline, the test explicitly seeks with `apply_seek(..., 371, false)`/`goto_frame(371, false)`; the census then runs while `FramePhase::Idle` and source time is frozen. The host callback FIFO is already empty. Census code enters the arena for inspection but does not call update, `run_frame`, render, tick, GC, source code, getters, callbacks, or queue drains. The explicit seek advances normal source execution to the selected boundary; no work is drained during census to manufacture eligibility. The ignored, opt-in test is at [`native_flash.rs`](../../../../vm-rust/src/native_flash.rs#L1175), and the Ruffle entry point is [`Player::checkpoint_census_with_baseline`](../../../../ruffle/core/src/player.rs#L860).
 
-The census player and a matched no-census control were both built from the same asset, dimensions, parity configuration, and initial controlled time, then sought to frame 371. At controlled time 2.4 seconds, both reached frame 419 and emitted one identical full callback vector containing `lingo:introTitleReady()` with all payload fields equal. Their complete RGBA byte vectors were equal, each containing 1,092,000 bytes for 650x420, with SHA-256 `debf718b22be325d22487445c5a41665a9495c634be84ca9ac260da5c5b7b4e3`. The callback is drained only after each continuation, so this check does not manufacture a capture boundary by draining pending work.
+## Complete actual-profile result
 
-## Source-backed boundary and blocker
+The final census reports `coverage_complete=true` and `unsupported=[]`. The conjunction requires all 23 `GcRootData` roots, all eight `Library` fields, the display tree, AVM1 graph, action queue, weak liveness, and dormant AVM2 footprint to pass their individual classifications and budgets. The root declaration is in [`player.rs`](../../../../ruffle/core/src/player.rs#L525), the conjunction in [`player.rs`](../../../../ruffle/core/src/player.rs#L1603), and the receipt records the machine-readable result.
 
-The diagnostic entry point is `Player::checkpoint_census` in `ruffle/core/src/player.rs:480-619`; its data model is `ruffle/core/src/checkpoint_census.rs:1-192`. It enumerates the root names from `GcRootData` and delegates the basic AVM1, AVM2, and Library observations to `ruffle/core/src/avm1/runtime.rs:113-133`, `ruffle/core/src/avm2.rs:198-208`, and `ruffle/core/src/library.rs:459-473`. The test is `vm-rust/src/native_flash.rs:1114-1259`; player setup and the existing title oracle are in `vm-rust/src/native_flash.rs:327-381` and `:1051-1111`.
+The aggregate eligibility ledger reports **9,620 nodes, 5,428 edges, and 5,120 weak entries** against shared 10,000/50,000/10,000 limits. Its named contributions are:
 
-The representative result is not a full graph qualification. The display binding adapter now supports this narrow slice, but the object/native/strong/weak census still cannot advance without additional bounded read-only surfaces:
+| Category | Nodes | Edges | Weak entries |
+|---|---:|---:|---:|
+| AVM1 graph | 2,023 | 4,199 | 0 |
+| display traversal | 11 | 10 | 0 |
+| AVM2 infrastructure and Stage owners | 2,591 | 1,218 | 0 |
+| Library | 47 | 0 | 0 |
+| action queue | 1 | 1 | 0 |
+| strongly retained atoms | 4,947 | — | 0 |
+| string interner | — | — | 5,120 |
+| other weak owners | — | — | 0 |
 
-* `ruffle/core/src/avm2/stack.rs:21-29` keeps the stack pointer private and exposes no read-only length/status. A helper there is needed to distinguish dormant AVM2 infrastructure from a live operand/continuation state without executing code.
-* `ruffle/core/src/display_object.rs:2548-2565` still limits broader object/property traversal to private `object1` and `object1_or_bare`; the new `checkpoint_existing_avm1_object` adapter is intentionally limited to existing display bindings and does not expose general graph traversal.
+These totals are one post-traversal eligibility budget: any total above the shared limit appends a structured aggregate blocker and makes `coverage_complete=false`. They are not a global admission guard across disconnected owner walks. Materialization is bounded by the individual owner limits before the aggregate ledger is formed. Focused tests accept the exact aggregate limit, reject the first node/edge/weak entry beyond it, and verify category composition.
 
-Until the remaining AVM2 status adapter and broader display/object adapters exist, display/object/property/native identity, alias/cycle edges, strong and weak liveness, and the 10,000-node/50,000-edge/10,000-weak-edge budgets remain `incomplete_coverage`. Unknown or unclassified state must fail closed. This is a blocker for B2 graph qualification, not a claim that exact restore is impossible.
+| `GcRootData` root | Observed state | Actual-profile classification |
+|---|---:|---|
+| `library` | present, 8 fields | all fields classified below |
+| `stage` | present, 1 | display children, focus, LoaderInfo, AVM2 Stage, and Stage3D inspected |
+| `mouse_data` | empty | hover/button targets absent |
+| `drag_object` | empty | no active drag |
+| `avm1` | present, 2,023 nodes | persistent roots, display aliases, object edges, native identities, and strings traversed |
+| `avm2` | present, 522 playerglobals definitions | execution dormant; pinned infrastructure classified separately |
+| `action_queue` | present, 1 | ordered action payload classified without draining |
+| `interner` | present, 5,120 live weak slots | every live value has an explicit strong/common owner |
+| `load_manager` | empty | no active loader |
+| `avm1_shared_objects` | empty | no AVM1 shared object |
+| `avm2_shared_objects` | empty | no AVM2 shared object |
+| `unbound_text_fields` | empty | no unbound text field |
+| `timers` | empty | no active timer |
+| `current_context_menu` | empty | no open menu |
+| `external_interface` | empty | no provider or registered callback |
+| `audio_manager` | empty | no active Flash sound instance |
+| `stream_manager` | empty | no active stream |
+| `sockets` | empty | no socket or pending socket action |
+| `net_connections` | empty | no network connection |
+| `local_connections` | empty | no local connection or queued message |
+| `orphan_manager` | empty | no orphan entry |
+| `dynamic_root` | empty | zero occupied dynamic-root slots |
+| `post_frame_callbacks` | empty | no opaque callback |
 
-## Exact execution and verification
+The eight `Library` fields are enumerated in [`library.rs`](../../../../ruffle/core/src/library.rs#L593):
 
-The representative command was:
+| `Library` field | Observed state | Classification |
+|---|---:|---|
+| `movie_libraries` | present, 1 | immutable asset definitions/bindings/fonts/JPEG tables and AVM2 domain descriptor |
+| `device_fonts` | empty | a future present resource must be classified |
+| `global_fonts` | empty | a future present resource must be classified |
+| `font_lookup_cache` | empty | reconstructible query cache when owners are qualified |
+| `font_sort_cache` | empty | a future present strong font vector must be classified |
+| `default_font_names` | empty | reconstructible pinned configuration when present |
+| `default_font_cache` | empty | a future present strong font vector must be classified |
+| `avm2_class_registry` | empty | a future live weak binding must be checked for strong retention |
+
+Empty occupancy is an observed state, not a general serialization claim. Each diagnostic owner reports a present unsupported variant rather than silently discarding it.
+
+## AVM1 identity, aliases, native payloads, and weak liveness
+
+The AVM1 traversal assigns census-local integer IDs from object addresses, then emits edges by ID. Addresses are not serialized identities. Repeated pointers reuse the same ID, so aliases and cycles are preserved in the census without recursive duplication. Stored property data, getters, setters, interfaces, watcher callbacks/user data, prototype and native-object edges are visited read-only. This AVM1-only subgraph has 2,023 unique nodes and 4,199 edges, below its 10,000-node and 50,000-edge owner limits; these are not the full-census totals. It records zero AVM1 weak-value observations, no stop path, no native identity blocker, and no collision-budget overflow. The graph builder begins in [`player.rs`](../../../../ruffle/core/src/player.rs#L161); the exhaustive native-variant classifier begins in [`script_object.rs`](../../../../ruffle/core/src/avm1/object/script_object.rs#L882).
+
+The boundary has an empty persistent AVM1 stack and four persistent registers, all `Undefined`. These are persistent runtime roots, distinct from an active activation or execution continuation. The action queue contains one ordered `Construct` item at priority 1/FIFO position 0 for display ordinal 5, with no constructor object, event slices, method object, method arguments, or listener notification payload. The queue is inspected in place and remains pending.
+
+Concrete non-function display-native objects are five `MovieClip` objects at display ordinals 1, 2, 3, 5, and 6. Stage and five Graphics have no AVM1 binding. The display walk has 11 nodes and 10 ordered tree edges. Other native variants are accepted only if their explicit variant classifier succeeds; an observed Date/filter/host resource or opaque Action function would stop the census.
+
+The graph observes 1,342 `Native` and 512 `TableNative` function objects. They are ordinary pinned Ruffle builtins, not arbitrary opaque closures:
+
+- Representative `Native`: `root.case_insensitive.broadcaster_function[0]`, no table index, no separate constructor, inbound alias count 8, and no display-derived canonical path. Its declaration comes from [`as_broadcaster.rs`](../../../../ruffle/core/src/avm1/globals/as_broadcaster.rs#L13).
+- Representative `TableNative`: `root.case_insensitive.global_scope[0].Accessibility.isActive`, table index 0, no separate constructor, inbound alias count 1, and no display-derived canonical path. The property/index declaration is in [`accessibility.rs`](../../../../ruffle/core/src/avm1/globals/accessibility.rs#L9), and `ASnative` category 1999 dispatches to that table in [`asnative.rs`](../../../../ruffle/core/src/avm1/globals/asnative.rs#L35).
+
+Every accepted native function has exactly one matching case-qualified bootstrap path, function kind, table index, and constructor-presence tuple in a separate pre-first-frame baseline. It also compares the raw executable and optional constructor function targets to that same-process baseline with function-pointer equality, without logging an address or treating it as a canonical ID. The final run found zero target mismatches, zero missing matches, and zero path collisions; a target change fails closed as `avm1_native_function_target_rebound`. Aliases are real—the broadcaster representative has eight inbound references—but the diagnostic found no display-derived canonical path, and graph IDs retain all alias edges. Its alias flag does not independently prove that every property along a global path is immutable; the same-process raw-target comparison described below guards against a rebound executable. The proposed restore contract is to resolve the whole builtin function object from that unique path in a fresh, exact pinned Player before mutable fixups; it must never serialize or reconstruct a raw Rust function pointer. That resolver/registry and alias fixup are design work only and have not been implemented. A future path is rejected if it lacks the case-qualified bootstrap prefix, a unique baseline match, or exact same-process executable and constructor target equality. Raw target observations are never emitted as canonical or serialized IDs.
+
+The interner contains 5,120 live weak entries, zero dropped entries, and zero entries absent from the enumerated strong/common owners. No GC or weak-to-strong promotion occurs during census. An earlier run reported 11 apparently uncovered values: `_currentframe`, `_droptarget`, `_focusrect`, `_framesloaded`, `_highquality`, `_soundbuftime`, `_totalframes`, `_xmouse`, `_xscale`, `_ymouse`, and `_yscale`. Source review showed all 11 are strongly held names in AVM1 `DisplayPropertyMap`: runtime owns the map at [`runtime.rs`](../../../../ruffle/core/src/avm1/runtime.rs#L68), construction interns the static names at [`stage_object.rs`](../../../../ruffle/core/src/avm1/object/stage_object.rs#L255), and the final owner iterator begins at [`runtime.rs`](../../../../ruffle/core/src/avm1/runtime.rs#L578). Adding that bounded strong-owner enumeration reduced uncovered live weak values from 11 to zero. A genuinely live weak-only target would still reject the boundary; only an actually dead/null weak reference may serialize as dead/null.
+
+## AVM2 and Stage bootstrap state
+
+AVM2 execution is dormant: operand stack 0, scope stack 0, and call stack empty. Initialized infrastructure remains distinct from live AVM2 execution. The diagnostic records:
+
+- playerglobals domain: 522 definitions and 848 classes
+- stage domain: zero definitions and zero classes
+- native tables: 1,090 methods, 83 allocators, 31 handlers, and 9 constructors
+- class aliases: zero in each direction, with reciprocal-map consistency
+
+This footprint is classified `ReconstructiblePinnedBuiltin` only under the exact pinned Ruffle build and playerglobals identity. It is not encoded as mutable AVM2 execution. The footprint and strong-atom owners are inspected in [`avm2.rs`](../../../../ruffle/core/src/avm2.rs#L349).
+
+The source-free baseline is captured in the same fresh test process immediately after root-movie installation and before its first `run_frame`. It records every LoaderInfo scalar/resource field compared at frame 371: stream variant, asset identity, root-display presence/identity, `is_stage`, loader presence/identity, init and complete event flags, `expose_content`, error state, content type, and shared/uncaught event-object presence. For the LoaderInfo base and both event-object bases, the passive adapter enumerates every dynamic property key, enumerability flag, and value; every slot value; every bound-method occupancy and identity; and the prototype, class, and vtable identity. The asset identity is `url=file:///dirplayer-native-embedded.swf;data_len=39012;compressed_len=39033;frames=419;is_movie=true`.
+
+Stage bootstrap also creates, without source constructors, one AVM2 `Stage` object with shape `(values=0, slots=10, bound_methods=0, proto=true)` and a display link, plus four `Stage3D` objects with shape `(0,4,0,true)`, `context3d_present=false`, and `visible=true`. The same exact passive `ScriptObjectData` adapter covers the Stage base and all four Stage3D bases. Public summaries are address-free. Process-local pointer tokens are kept only for exact same-process equality and have a redacted `Debug` implementation; they are neither canonical IDs nor serialization data. Each dynamic-property, slot, and bound-method collection checks its 10,000-field owner limit before materialization. Stage3D enumeration takes at most four entries before collection and retains the full scalar count so a fifth owner fails closed.
+
+A focused actual-asset negative check captures the public Stage3D state, changes populated slot 2, and captures it again. The class, full shape, vtable slot count, and property count remain equal while the slot value differs; the resulting census reports `coverage_complete=false` with `stage3d_changed`. This establishes that equal shapes do not waive mutable content equality. The unconditional construction path is [`Stage::post_instantiation`](../../../../ruffle/core/src/display_object/stage.rs#L859), the bounded Stage3D collection is in [`stage.rs`](../../../../ruffle/core/src/display_object/stage.rs#L310), and the passive DTO adapters are in [`script_object.rs`](../../../../ruffle/core/src/avm2/object/script_object.rs#L195), [`stage_object.rs`](../../../../ruffle/core/src/avm2/object/stage_object.rs#L95), and [`stage3d_object.rs`](../../../../ruffle/core/src/avm2/object/stage3d_object.rs#L54).
+
+The comparison remains diagnostic and same-process. It is accepted for this pinned actual profile because source identifies the pre-first-frame bootstrap origin and the adapters account for the mutable fields above. It does not establish fresh-process identity rebinding or make arbitrary equality sufficient for reconstruction.
+
+## Read-only continuation evidence
+
+The census player and a matched no-census control use the same fresh setup, asset, dimensions, parity configuration, controlled time, and seek to frame 371. Both then continue normally to frame 419 at controlled time 2.4 seconds. They emit the same complete callback vector, in order:
 
 ```text
-PARITY_OPENING_ANIM_SWF=/Users/clliaw/Projects/childhood-redux/.cache/spybot-recovery/embedded-probe/opening_anim.swf CARGO_TARGET_DIR=$PWD/.cache/b2-census-target mise exec -- cargo test --manifest-path vm-rust/Cargo.toml native_flash_checkpoint_census_is_read_only_before_title_continuation --locked -- --ignored --nocapture
+{sprite:1, generation:1, cast_lib:1, cast_member:1, url:"lingo:introTitleReady()"}
 ```
 
-The final raw stdout/stderr is retained in [`display-slice-test.log`](./display-slice-test.log), SHA-256 `4d0dbb169e6bc792ea83e034814c17564c5955d6b9ec9f17bdb10f0fc59df5f2`. Its reviewable markers include the 11 `display_avm1` records, `display_traversal: nodes=11 edges=10 ... complete=true stop_reason=None`, full equal callback payloads, equal RGBA hashes, and `test result: ok. 1 passed; 0 failed`.
+Both complete RGBA buffers are byte-for-byte equal: 650×420×4 = 1,092,000 bytes, SHA-256 `debf718b22be325d22487445c5a41665a9495c634be84ca9ac260da5c5b7b4e3`. Callbacks are drained only after each continuation. This supports the claim that the census did not change this controlled continuation; it is not restore evidence and does not prove reconstructibility by itself.
 
-Because the asset is external to the repository, the focused test is explicitly ignored in normal suites and runs only with the documented `--ignored` command; an absent `PARITY_OPENING_ANIM_SWF` therefore does not cause a normal-suite panic.
+The final trusted-dependency stdout/stderr is [`trusted-census-test.log`](./trusted-census-test.log), 529,806 bytes, SHA-256 `d26540dfbe0caab2403c33698771a710c4c0045b4e7ab7ecc498de83b8217665`. The earlier [`complete-census-test.log`](./complete-census-test.log) is the accepted pre-publication run using a CLI path patch, while [`display-slice-test.log`](./display-slice-test.log) and [`baseline-census-test.log`](./baseline-census-test.log) remain historical partial evidence, including the pre-fix 11-value weak-owner gap. Preserving these separately keeps the diagnostic history without treating the path-patched command as the final recipe.
 
-The first compile attempt exposed the missing pinned `Stack::len` method in `ruffle/core/src/avm2.rs`; it was repaired by retaining an explicit unknown operand-stack length rather than editing the unapproved stack module. The resulting test passed. A semantic follow-up removed the false live-AVM2 inference: unknown AVM2 state now reports `avm2_execution_state_incomplete`, while `live_avm2_execution` is emitted only for an actually observed live state. The final run passed: one test passed, zero failed, with the census and continuation output above.
+## Commands and checks
 
-The build used the lane's `mise.toml`, Rust `1.98.1`, and the `deterministic`, `audio`, and `mp3` features through the existing `vm-rust` test configuration. The asset was read from the accepted lane artifact and hash-gated. The test process was fresh, but no fresh-worker restore was attempted. Director audio restore was not attempted; the asset has no sound tags, and this does not qualify active Director audio for C1.
+The helper itself passed from `gc-arena-b2-census` before publication:
 
-## Route and estimate
+```text
+CARGO_TARGET_DIR=$PWD/.target mise exec -- cargo test --locked --offline test_dynamic_root_occupied_slot_count -- --nocapture
+```
 
-Recommendation: **narrow** for this display-bound slice. Broad graph expansion and `gc-arena` work are deferred; the full census remains incomplete, and no next component is selected in this packet. The slice result does not authorize a restore implementation or imply full graph eligibility.
+Result: one passed, zero failed. The trusted branch is `iExalt/gc-arena:b2-dynamic-root-census` at `682dc66ff12738cd8f3c3c8f268f10c203366240`.
 
-The active effort for this display slice and its retained rerun stayed within the approved <=2-hour item. Completing the full root/Library/strong/weak census has a preliminary, not measured, 2–4 active-day estimate. A conditional fresh-Player experiment after an eligible census has a separate preliminary, not measured, additional 2–4 active-day estimate. Neither item is implicitly approved. They exclude a durable codec, full Director session state, active Director audio, and general framework work. Full exact C1 remains unestimated.
+After `mise exec -- cargo fetch --locked` resolved that published commit, the focused Ruffle tests ran from `ruffle/` with the checked-in lock:
 
-The report and receipt are design/diagnostic evidence only. At evidence-review time, no parent commit or push, codec, rehydration, or production source migration had been performed; only the lane-local Ruffle child commit had been published as recorded above.
+```text
+CARGO_TARGET_DIR=/Users/clliaw/Projects/dirplayer-rs-save-state/.cache/b2-census-target mise exec -- cargo test -p ruffle_core --locked --offline checkpoint_census -- --nocapture
+```
+
+Result: four passed, zero failed. These cover aggregate exact-limit/first-over-limit behavior, category composition, and redacted exact-observation debug evidence.
+
+The final real-asset command ran from the parent worktree with its checked-in `vm-rust/Cargo.lock`:
+
+```text
+PARITY_OPENING_ANIM_SWF=/Users/clliaw/Projects/childhood-redux/.cache/spybot-recovery/embedded-probe/opening_anim.swf CARGO_TARGET_DIR=/Users/clliaw/Projects/dirplayer-rs-save-state/.cache/b2-census-target mise exec -- cargo test --manifest-path vm-rust/Cargo.toml --locked --offline native_flash_checkpoint_census_is_read_only_before_title_continuation -- --ignored --nocapture
+```
+
+Result: the named test passed; the other test binaries ran zero filtered tests. It reproduced the eligible 9,620-node/5,428-edge/5,120-weak-entry census, the equal-shape/different-slot `stage3d_changed` rejection, and the matched callback/exact-RGBA continuation. No CLI dependency patch or alternate lockfile was used. The ignored fixture convention means a normal suite does not require the external asset. The build used the lane `mise.toml`, Rust 1.98.1, offline Cargo after the trusted fetch, and the existing `deterministic`, `audio`, and `mp3` feature configuration.
+
+The historical pre-publication commands and output remain in `complete-census-test.log`; they are evidence of the implementation review, not the final dependency recipe.
+
+## Decision and remaining uncertainty
+
+Recommendation: **go** for a separate bounded fresh-Player allocate/fixup/rehydration experiment, subject to explicit approval. The preliminary estimate from B1 remains 2–4 active days for that experiment; it is an agent estimate, not measured delivery time. Completing this actual-profile census does not authorize restore work and does not estimate full C1.
+
+Unqualified areas remain material:
+
+- no codec, stable durable format, fresh-Player allocator, fixup, publish, rollback, or cleanup exists;
+- native builtin path resolution and alias fixup are designed but not implemented;
+- present variants of the empty loader/timer/audio/network/host roots remain fail-closed;
+- active Director audio is outside this SWF census, and the SWF has no sound tags;
+- historical renderer command state and derived GPU caches were not restored or compared across a fresh process;
+- no fresh worker or process consumed a checkpoint;
+- exact pinned Ruffle/playerglobals, gc-arena helper, and asset identities remain prerequisites;
+- the aggregate 10,000/50,000/10,000 limits are post-traversal eligibility totals; owner-specific caps bound materialization, but no single shared admission counter stops all disconnected traversals at the aggregate threshold.
+
+The preserved product goal remains a fresh worker with exact Flash state and active Director audio. Replay is not an accepted substitute.

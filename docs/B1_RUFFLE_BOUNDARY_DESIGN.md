@@ -1,8 +1,9 @@
 # B1 Ruffle graph boundary design
 
-Status: **B1 complete as a source-backed design investigation; a partial B2
-display-bound census and matched-control continuation passed on 2026-09-22,
-while the full census and fresh-Player restore remain incomplete**.
+Status: **B1 complete as a source-backed design investigation; the full
+actual-profile B2 census and matched-control continuation passed on 2026-09-22
+with reproducibly pinned source/config, while fresh-Player restore remains
+unimplemented and unqualified**.
 
 This document defines the smallest source-backed boundary that could support a
 controlled C1 checkpoint. It does not implement a codec, change Ruffle, or
@@ -10,21 +11,31 @@ claim that the asset receipt enumerates the live Ruffle heap/type graph. Entries
 distinguish accepted asset facts, the observed runtime endpoint, static source
 possibilities, and facts that remain pending the first graph-slice experiment.
 
-## B2 partial follow-up — 2026-09-22
+## B2 follow-up — 2026-09-22
 
 The accepted [B2 graph census report](checkpoints/save-state-b2-20260921/graph/B2_GRAPH_CENSUS_REPORT.md)
-records a partial display-bound AVM1 census: 11 nodes and 10 edges, with a
-matched no-census continuation that produced identical callback vectors and
-identical 650x420 RGBA output. This is diagnostic evidence only. The full
-23-root/8-Library census, general object/property traversal, strong and weak
-edge census, and fresh-Player restore remain incomplete or unimplemented; no
-codec or C1 qualification follows from this result.
+records complete coverage for the trusted actual frame-371 profile: all 23
+`GcRootData` roots, all eight `Library` fields, 9,620 aggregate nodes, 5,428
+aggregate edges, and 5,120 weak entries. The AVM1 subgraph contributes 2,023
+nodes and 4,199 edges; its zero weak observations are not the full weak total.
+The matched no-census continuation produced identical callback vectors and
+exact 650x420 RGBA bytes. An equal-shape Stage3D slot mutation fails closed as
+`stage3d_changed`.
 
-The revised remaining estimates are preliminary and not measured: 2–4 active
-days to complete the root/Library/strong/weak census, followed by a conditional
-fresh-Player experiment requiring an additional 2–4 active days. Neither item
-is implicitly approved. The historical B1 statement that no experiment ran in
-B1 remains unchanged; this dated follow-up records the later partial B2 result.
+The aggregate 10,000/50,000/10,000 limits are post-traversal eligibility totals
+across named owner categories. Individual owner walks bound materialization;
+this experiment does not claim a single early global traversal guard or safety
+for untrusted inputs. The exact trusted gc-arena and Ruffle commits and both
+Cargo locks are published and pass the focused `--locked` checks without a CLI
+path patch or alternate lockfile. The opt-in runtime proof still requires the
+separately hash-gated read-only asset.
+
+This is census and continuation evidence only. No codec, allocator, fixup,
+rehydration, fresh-worker consumption, Director audio restore, or C1
+qualification follows from it. A conditional fresh-Player experiment retains a
+preliminary, not measured, 2–4 active-day estimate and is not implicitly
+approved. The historical B1 statement that no experiment ran in B1 remains
+unchanged; this dated follow-up records the later B2 result.
 
 ## Baseline and scope
 
@@ -467,45 +478,35 @@ specific unsupported capability, not a weakened pixel/replay result.
 
 ## Sequence, estimate, and decision
 
-B1 is complete as a design investigation. The next component-sized item is the
-bounded graph-slice experiment, estimated at **2–4 active days including the
-minimal private Ruffle eligibility/capture hook and checkpoint-mode
-allocate/fixup/rehydrate/publish hook** for this narrow slice. It assumes the
-accepted AVM1 asset and covers the no-source-execution live census/preflight,
-declared node/edge budget checks, a narrow in-memory schema, ordered GraphId
-allocation, fixups, fresh checkpoint-mode `Player` construction, one
-continuation oracle, and cleanup. It excludes a durable format, Director
-session/audio codecs, broad AVM coverage, arbitrary continuations, and full C1
-acceptance. If those hooks or the census expand into a general codec or
-framework, stop and classify the experiment `blocked` rather than extending
-the estimate.
+B1 remains complete as a source-backed design investigation. The later B2 item
+completed the no-source-execution census/preflight for the trusted actual
+frame-371 profile. It did not implement the checkpoint-mode
+allocate/fixup/rehydrate/publish path that B1 paired with the original broader
+2–4 day graph-slice estimate.
 
-The coarse sequence is:
+The current sequence is:
 
 1. Accepted DCR/SWF identity and AVM1 asset evidence — complete.
 2. B1 source-backed graph boundary, capability registry, and barrier/restore
-   design — complete here.
-3. No-source-execution live census/preflight followed, only on pass, by the
-   actual opening/title graph-slice round trip in a fresh checkpoint-mode
-   `Player` — next, 2–4 active days including the minimal hooks.
-4. If that oracle passes, a limited-workload Ruffle graph/resource prototype —
+   design — complete.
+3. Full actual-profile live census/preflight with bounded owner walks, aggregate
+   eligibility, mutable Stage DTO rejection, weak-liveness evidence, and locked
+   trusted dependency pins — complete in B2.
+4. Fresh checkpoint-mode `Player` allocation, fixup, rehydration, validation,
+   publication, cleanup, and one continuation oracle — next only if separately
+   approved; preliminary, not measured, **2–4 active days**. It must stop on an
+   unclassified root or if the work expands into a general codec/framework.
+5. If that oracle passes, a limited-workload Ruffle graph/resource prototype —
    preliminary **2–4+ weeks**, covering codec schema, graph allocation/fixups,
    qualified AVM1 state, callback/timer handling, and resource rebuilding. This
    remains an estimate with the assumption that the experiment finds no new
    opaque roots; it excludes Director audio and full C1.
-5. Director audio/session integration and exact C1 qualification remain
+6. Director audio/session integration and exact C1 qualification remain
    separately sequenced and **unestimated**.
 
-Recommendation: **narrow**. AVM1 and the absence of Flash sound tags make the
-first slice more bounded than an AVM2/audio case, while the actual live graph,
-continuation state, resource reachability, and fresh-player behavior remain
-unobserved. Proceed only with the bounded experiment and retain fail-closed
-classification for any uncovered capability.
-
-## Verification boundary
-
-This B1 report is source/design only. It requires link/source review and JSON
-syntax validation; it must not run Cargo, initialize tools, edit production or
-Ruffle source, or execute the proposed experiment. The receipt records the
-accepted asset hashes and runtime endpoint, while live graph coverage and
-fresh-process restore remain unexercised.
+Recommendation: **go** to the separately approved bounded fresh-Player
+experiment. The census resolves the actual-profile ownership question without
+qualifying reconstruction. Exact pinned build/assets, fail-closed present-root
+handling, no startup source execution, fresh logical identities, and the
+controlled continuation oracle remain required. No codec or restore work is
+authorized by B1 or B2 publication alone.
