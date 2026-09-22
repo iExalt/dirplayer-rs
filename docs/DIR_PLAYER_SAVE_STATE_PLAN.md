@@ -3,7 +3,8 @@
 Status: **planned; architecture unqualified; no save-state implementation or
 experiment has run under this plan.** Decisions were made with agentic-workflow
 on 2026-09-21. The next proposed work block has a three-hour qualification cap.
-The smaller Spybot destination-port implementation is paused pending that result.
+The [Spybot next-screen spike](SPYBOT_NEXT_SCREEN_SPIKE_PLAN.md) is an independent
+parallel workstream; it does not wait for checkpoint support.
 
 ## Outcome and decisions
 
@@ -24,8 +25,9 @@ The user selected:
 - **Follow-up:** arbitrary-moment snapshots, including an investigation of
   suspended execution and work in flight. Do not claim the first milestone
   satisfies that follow-up by silently moving its requested snapshot time.
-- **Priority:** qualify save-state architecture first, then select the first
-  implementation item. Keep the destination-port implementation paused.
+- **Priority:** qualify save-state architecture before selecting its first
+  implementation item. Run the bounded Spybot next-screen reference spike in
+  parallel on its own pinned baseline; neither qualification depends on the other.
 - **Initial allowance:** up to three hours for a state/barrier audit and exactly
   one narrow executable feasibility check of the hardest restore dependency;
   return a decision, blockers, and a revised implementation estimate.
@@ -35,6 +37,59 @@ cross-launch player preferences. Game save/load, browser removal, desktop input,
 world-map rendering, gameplay implementation, and broad ownership refactoring
 remain outside this work. In-memory preferences that affect source execution
 are nevertheless part of a runtime checkpoint.
+
+## Parallel branches, worktrees, and integration
+
+This supersedes the earlier decision to pause the destination workstream. At
+execution setup, create local branches and sibling worktrees as follows. Record
+the exact base commits before either experiment; do not switch the primary
+checkouts away from `dev` or `main`.
+
+| Repository | Local branch | Sibling worktree | Responsibility | Merge target |
+| --- | --- | --- | --- | --- |
+| `dirplayer-rs` | `save-state` | `/Users/clliaw/Projects/dirplayer-rs-save-state` | Q0 and subsequently selected checkpoint implementation | `dev` |
+| `dirplayer-rs` | `next-screen` | `/Users/clliaw/Projects/dirplayer-rs-next-screen` | Pinned Spybot reference worker, spike instrumentation, any separately justified reference fixes | `dev` |
+| `childhood-redux` | `next-screen` | `/Users/clliaw/Projects/childhood-redux-next-screen` | Spybot reference harness/evidence and subsequently selected port implementation | `main` |
+
+Create these at execution kickoff, not as part of this documentation-only planning
+change. If a branch or path already exists, inspect it and reuse only if it belongs
+to this work; never reset or overwrite unrelated work. Save-state work stays in
+DirPlayer unless Q0 identifies a concrete harness dependency. If childhood-redux
+changes become necessary for checkpoint testing, give them a separate local
+`save-state` branch and `childhood-redux-save-state` sibling worktree from a recorded
+`main` commit, with the same isolation and merge rules.
+
+Each lane owns its source edits, Cargo target/build directories, worker binary,
+mutable caches, session storage, ports if needed, and capture/output paths. Pin
+submodules (including embedded Ruffle) per worktree and resolve any sibling/path
+dependencies explicitly; never accidentally build against the other lane or the
+primary checkout. Original source assets may be shared read-only with recorded
+hashes. Existing untracked recovery assets are not automatically present in new
+worktrees: provision verified read-only inputs explicitly. Do not share mutable
+preferences or overwrite accepted receipts. Record worker paths, revisions,
+features, asset identities, commands and capture times in each receipt.
+
+The next-screen spike reaches its state through normal startup and START input.
+It must not depend on save/load operations, a checkpoint format, or unmerged
+`save-state` changes. Save-state qualification uses its existing opening/title
+workload and must not depend on the new destination port. Share findings through
+evidence and small reviewed dependency commits only when demonstrably necessary;
+do not merge unfinished branches merely to keep them synchronized. Coordinate
+GPU/expensive build use if concurrent runs contend; independent workstreams do
+not require concurrent GPU measurements.
+
+Commit and push accomplished milestones on their corresponding topic branches.
+Merge each completed, reviewed workstream back to its target after its acceptance
+gates pass; a useful spike report may merge without claiming product completion.
+The first ready lane may merge first. Before the second integration, reconcile
+against the updated target and rerun affected gates on the combined tree: existing
+exact title RGBA/PCM/source behavior and isolation, plus next-screen or checkpoint
+continuation checks wherever implemented. Preserve branch-specific pre-integration
+evidence; a changed runtime build requires new checkpoint fixtures or explicit
+incompatibility rejection, never silently relabeled old fixtures. Commit/push the
+validated integration. Remove worktrees only after their work is merged and any
+untracked evidence is safely retained. No merge is authorized by a merely green
+build or a plan document.
 
 ## Current evidence and decision-changing uncertainty
 
@@ -242,10 +297,11 @@ Cross-runtime-upgrade fixture migration remains a separate deferred requirement.
 - [x] Select controlled-boundary C1, real Spybot/Flash/active audio, exact continuation,
   fresh workers, and pinned-build/assets compatibility.
 - [x] Reserve arbitrary-moment C2 and reject silent safe-point substitution.
-- [x] Pause destination-port implementation and set the three-hour Q0 cap.
+- [x] Set the three-hour Q0 cap and isolate parallel `save-state` / `next-screen` worktrees.
 - [ ] Execute Q0 and choose the first implementation item from its evidence.
 - [ ] Implement and accept C1; commit/push accepted milestones during execution.
-- [ ] Reassess C2 and decide when to resume the destination port.
+- [ ] Merge accepted work back to `dev` and verify interaction with the parallel next-screen lane.
+- [ ] Reassess C2 independently of the destination port.
 
 Reconsider when the barrier cannot preserve the selected instant, embedded Flash
 needs a substantially larger VM rewrite, exact audio recovery is unavailable,
