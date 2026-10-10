@@ -52,9 +52,9 @@ checkouts away from `dev` or `main`.
 
 | Repository | Local branch | Sibling worktree | Responsibility | Merge target |
 | --- | --- | --- | --- | --- |
-| `dirplayer-rs` | `save-state` | `/Users/clliaw/Projects/dirplayer-rs-save-state` | Q0 and subsequently selected checkpoint implementation | `dev` |
-| `dirplayer-rs` | `next-screen` | `/Users/clliaw/Projects/dirplayer-rs-next-screen` | Pinned Spybot reference worker, spike instrumentation, any separately justified reference fixes | `dev` |
-| `childhood-redux` | `next-screen` | `/Users/clliaw/Projects/childhood-redux-next-screen` | Spybot reference harness/evidence and subsequently selected port implementation | `main` |
+| `dirplayer-rs` | `save-state` | `/Users/clliaw/dev/Projects/dirplayer-rs-save-state` | Q0 and subsequently selected checkpoint implementation | `dev` |
+| `dirplayer-rs` | `next-screen` | `/Users/clliaw/dev/Projects/dirplayer-rs-next-screen` | Pinned Spybot reference worker, spike instrumentation, any separately justified reference fixes | `dev` |
+| `childhood-redux` | `next-screen` | `/Users/clliaw/dev/Projects/childhood-redux-next-screen` | Spybot reference harness/evidence and subsequently selected port implementation | `main` |
 
 Create these at execution kickoff, not as part of this documentation-only planning
 change. If a branch or path already exists, inspect it and reuse only if it belongs
